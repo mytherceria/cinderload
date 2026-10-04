@@ -44,7 +44,7 @@ static void Fresh(const char *name)
         memcpy(shim_module + kRevealCode[i].rva, kRevealCode[i].bytes, (size_t)kRevealCode[i].n);
     memcpy(shim_module + WALL_LOAD_RVA, kWallLoad, sizeof kWallLoad);
     memcpy(shim_module + BG_DRAW_RVA, kBgDraw, sizeof kBgDraw);
-    g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0;
+    g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
     for (int i = 0; i < 8; i++) g_bgUV[i] = (float)((0x4F >> i) & 1);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
     g_wallPick = 0;
@@ -1117,6 +1117,27 @@ static void LiveTests(void)
     for (int i = 0; i < 500; i++) { at += 20; DriftStep(0.9f, at); }
     int early = g_viewH < hEnd * 1.06f;
     Check(holds && early, "the bar dipping at the end leaves the view on the arrival; the zoom is in by 90% of the bar");
+
+    /* his find, 4 Oct, the real one: the game freezes for a moment at the very end of a load; a second without a frame
+     * reset the view, and the next frame showed the first image again. A pause at a full bar now changes nothing */
+    g_drift = 0; g_driftAt = 0; at = 180000;
+    for (int i = 0; i < 500; i++) { at += 20; DriftStep(1, at); }
+    at += 1800; DriftStep(1, at);                                     /* the end-of-load freeze */
+    at += 20; DriftStep(1, at);
+    int freeze = fabsf(g_bgUV[0] - (0.3f - hEnd)) < 3e-3f && g_driftResets == 0;
+    /* the arrival, once known, is kept even if the game clears it at the end */
+    Poke(MAP_DEST_MAP_VA, 7);
+    at += 20; DriftStep(1, at);
+    at += 20; DriftStep(1, at);
+    freeze &= fabsf(g_bgUV[0] - (0.3f - hEnd)) < 3e-3f;
+    Poke(MAP_DEST_MAP_VA, 0);
+    /* the worker says the screen has gone: the whole world at once (no frame of the old view), and the next screen starts
+     * from it */
+    DriftScreenGone();
+    int gone = g_bgUV[0] == 0 && g_bgUV[2] == 1 && g_bgUV[5] == 0 && g_bgUV[1] == 1 && g_driftNew == 1;
+    at += 20; DriftStep(0, at);
+    gone &= g_drift < 0.01f && g_driftNew == 0 && g_viewH > 0.49f;
+    Check(freeze && gone, "a freeze at the end of a load keeps the view on the arrival, as does the game clearing it; a screen gone starts the next from the whole world");
 
     /* his call, 4 Oct: a two-second load must not fly at you. The bar leaping to full at once: the zoom goes at the
      * pace (7 s all the way in when map.txt gives none), half way after 3.5 s; a slow bar is simply followed */

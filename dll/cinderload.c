@@ -708,6 +708,7 @@ static void FireClose(void)
 
 #define BAR_SHOWN_MAX 96               /* the longest is 60: ", its fire the pack's orange, its wallpaper CinderWall64.blp" */
 static void BarShownSince(char *out, int cap);
+static void DriftScreenGone(void);
 
 /* One look at the client, every FIRE_POLL_MS. */
 static void FireStep(DWORD now)
@@ -762,6 +763,7 @@ static void FireStep(DWORD now)
         InterlockedExchange(&g_fire.gate, 0);
         g_fire.playing = 0;
         g_fire.gone = now;
+        DriftScreenGone();
         return;
     }
     if (g_fire.stream && (g_fire.quiet || now - g_fire.gone > FIRE_FADE_WAIT_MS)) FireClose();
@@ -1105,6 +1107,8 @@ static int BarFamily(const BarTable *t)
 #define MAP_BAR_TAU     0.15f      /* seconds: how closely the zoom follows the bar (a quick load is over in a second) */
 static struct { int ok; struct { int ok; float au, bu, av, bv; } m[2]; float endYards, pace; } g_map;
 static volatile LONG g_mapShown;  /* the screen showing has the world map */
+static float g_viewU = 0.5f, g_viewV = 0.5f, g_viewH = 0.5f;     /* the world map's view, eased */
+static volatile LONG g_driftResets;                             /* a fallback reset within a screen (the log says) */
 
 static int MapSpace(char c) { return c == ' ' || c == '\t'; }
 /* A hex number of up to 8 digits at text[*at], spaces before it skipped. */
@@ -1244,7 +1248,14 @@ static void BarShownSince(char *out, int cap)
         BarCat(out, cap, g_bars.family[shown - 1].name);
     } else if (g_barsOn && shown < 0)
         BarCat(out, cap, ", its fire the pack's orange");
-    if (g_barsOn && g_mapShown) BarCat(out, cap, ", the world map");
+    if (g_barsOn && g_mapShown) {
+        char z[64];
+        float h = g_viewH;
+        int x10 = h > 0.001f ? (int)(5.0f / h + 0.5f) : 0;            /* 0.5 / h, in tenths */
+        wsprintfA(z, ", the world map, ending %d.%dx in", x10 / 10, x10 % 10);
+        BarCat(out, cap, z);
+        if (g_driftResets) { wsprintfA(z, ", %ld resets mid-screen", (long)g_driftResets); BarCat(out, cap, z); }
+    }
     LONG w = g_wallPick;
     if (g_barsOn && !g_mapShown && w > 0 && w <= g_walls.count) {
         const char *n = g_walls.path[w - 1];
@@ -1584,9 +1595,19 @@ static int MapDest(float *du, float *dv, float *hEnd)
     return 1;
 }
 
-static float g_viewU = 0.5f, g_viewV = 0.5f, g_viewH = 0.5f;     /* the world map's view, eased */
 static float g_driftMax;                                        /* the bar's highest this screen */
-static unsigned g_driftMap = 0xFFFFFFFFu;                       /* the screen's map, to tell a new screen */
+static volatile LONG g_driftNew = 1;                            /* the next frame begins a new screen */
+static int g_destOk;                                            /* this screen's arrival, once known, is kept */
+static float g_destU, g_destV, g_destH;
+
+/* The fire's worker, when a screen has gone (the loading screen's layer cleared): the next screen starts from the
+ * whole world. Written between screens, when no loading screen is drawn, so no frame shows it. */
+static void DriftScreenGone(void)
+{
+    static const float whole[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
+    for (int i = 0; i < 8; i++) g_bgUV[i] = whole[i];
+    InterlockedExchange(&g_driftNew, 1);
+}
 
 /* The game's thread only. p: the bar, 0..1. A new screen (no frame for a second, or another map) starts again; within
  * a screen the bar only goes up (4 Oct 2026: it dips for a frame at the very end, and the view used to jump back out
@@ -1595,13 +1616,17 @@ static unsigned g_driftMap = 0xFFFFFFFFu;                       /* the screen's 
  * of it rests on them. Otherwise: the picture drifts in. */
 static void DriftStep(float p, DWORD now)
 {
-    unsigned map = 0xFFFFFFFFu;
-    ClientWord(BAR_MAP_VA, &map);
-    if (!g_driftAt || now - g_driftAt > 1000 || map != g_driftMap) {
+    /* A new screen: the worker says so (it watches the loading screen's layer), or, if there is no worker, the bar
+     * has started again from empty after a second without a frame. Never a pause alone: the game freezes for a
+     * moment at the very end of a load, and resetting there showed the first frame again (his find, 4 Oct). */
+    int fallback = g_driftAt && now - g_driftAt > 1000 && p < 0.1f && g_driftMax > 0.5f;
+    if (InterlockedExchange(&g_driftNew, 0) || !g_driftAt || fallback) {
+        if (fallback) InterlockedExchange(&g_driftResets, g_driftResets + 1);   /* the game thread is its only writer */
+        else InterlockedExchange(&g_driftResets, 0);
         g_drift = 0;
         g_driftMax = 0;
         g_viewU = g_viewV = g_viewH = 0.5f;
-        g_driftMap = map;
+        g_destOk = 0;
     }
     if (p > g_driftMax) g_driftMax = p;
     p = g_driftMax;
@@ -1618,7 +1643,12 @@ static void DriftStep(float p, DWORD now)
     if (zoom) {
         float du, dv, hEnd;
         h = 0.5f;
-        if (MapDest(&du, &dv, &hEnd)) {
+        if (MapDest(&du, &dv, &hEnd)) {                            /* once known, kept for the screen */
+            g_destOk = 1; g_destU = du; g_destV = dv; g_destH = hEnd;
+        } else if (g_destOk) {
+            du = g_destU; dv = g_destV; hEnd = g_destH;
+        }
+        if (g_destOk) {
             h = 0.5f * (float)FireExp((double)(e * MapLn(hEnd / 0.5f)));
             float k = (0.5f - h) / (0.5f - hEnd);                   /* how far the zoom has come */
             cu = 0.5f + (du - 0.5f) * k;
