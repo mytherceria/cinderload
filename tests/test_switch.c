@@ -56,7 +56,7 @@ static void Fresh(const char *name)
     g_wavesOn = g_wavesTried = 0; g_wavesTex = NULL; g_flowOn = g_flowTried = 0; g_flowTex = NULL; g_flowW = 0;
     g_glowOn = 0; g_glowTried = 0; g_glowTex = NULL; g_glowItems = g_glowSprites = 0; g_glowMap[0].ok = g_glowMap[1].ok = 0;
     g_glowPick = -2; g_glowFor = 0;
-    g_class = g_classFrom = g_classEntered = 0; g_classSure = 0;
+    g_class = g_classFrom = g_classEntered = 0; g_classSure = 0; g_barClassOk = 0; g_barClassUsed = 0;
     for (int i = 0; i < CLASS_CODE; i++) memcpy(shim_module + kClassCode[i].rva, kClassCode[i].bytes, (size_t)kClassCode[i].n);
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
@@ -667,6 +667,61 @@ static void FireBarTests(void)
     Start();
     Check(CallStock() && !LogSays("fire bar"), "someone else's patch-~.MPQ: the call never touched");
 
+    /* His call, 4 Oct 2026: the class's own fire. bars.txt names classes as if they were screens; a class it names burns
+     * its fire on every screen (the druid's orange: the pack's own), a class it does not name or no class known yet
+     * keeps the picture's, and none of it when the character list's code has moved. */
+    {
+        static const char bars[] = "loadscreendeadmines fel\nclassmage aqua\nclassdruid orange\nclasswarlock arcane\n"
+                                   "default arcane\n";
+        char said[BAR_SHOWN_MAX];
+        Fresh("firebar-class");
+        PackWithBars(bars);
+        Start();
+        FakeTables();
+        Check(g_barClassOk && LogSays("fire bar: each class burns its own fire where bars.txt names one (mage, warlock, druid)"),
+              "the class's fire: on, and the log names the classes bars.txt gives a fire");
+        Poke(CHAR_COUNT_VA, 0);
+        Check(!strcmp(ForMap(36), TEX "Loading-BarFill-fel"), "no class known yet: the picture's fire (the Deadmines, fel)");
+        BarShownSince(said, (int)sizeof said);
+        Check(!strcmp(said, ", its fire fel"), "and the worker's line names no class");
+        Poke(CHAR_COUNT_VA, 3); Poke(CHAR_LIST_VA, 0x8A0000); Poke(CHAR_PICKED_VA, 1);
+        shim_module[0x8A0000 - 0x400000 + 0 * 0x120 + 0x101] = 11;   /* a druid, a mage, a hunter */
+        shim_module[0x8A0000 - 0x400000 + 1 * 0x120 + 0x101] = 8;
+        shim_module[0x8A0000 - 0x400000 + 2 * 0x120 + 0x101] = 3;
+        Check(!strcmp(ForMap(36), TEX "Loading-BarFill-aqua") && !strcmp(BarPath(GameBorder()), TEX "Loading-BarBorder-aqua"),
+              "a mage at the login: the mage's aqua on the Deadmines, whose picture is fel; its border too");
+        BarShownSince(said, (int)sizeof said);
+        Check(!strcmp(said, ", its fire aqua, the mage's"), "and the worker's line says it was the mage's");
+        Check(!strcmp(ForMap(0), TEX "Loading-BarFill-aqua"), "a mage: aqua on a continent, whose picture takes the default");
+        Poke(CHAR_COUNT_VA, 0);
+        Check(!strcmp(ForMap(409), TEX "Loading-BarFill-aqua"), "the list gone once in the world: the mage's fire kept");
+        Poke(CHAR_COUNT_VA, 3); Poke(CHAR_PICKED_VA, 0);
+        Check(ForMap(36) == GameFill(), "a druid: the pack's own orange, even on the Deadmines");
+        BarShownSince(said, (int)sizeof said);
+        Check(!strcmp(said, ", its fire the pack's orange, the druid's"), "and the worker's line says it was the druid's");
+        Poke(CHAR_PICKED_VA, 2);
+        Check(!strcmp(ForMap(36), TEX "Loading-BarFill-fel") && !strcmp(ForMap(0), TEX "Loading-BarFill-arcane"),
+              "a hunter, whom bars.txt does not name: each picture's own fire");
+        BarShownSince(said, (int)sizeof said);
+        Check(!strcmp(said, ", its fire arcane"), "and no class in the worker's line");
+
+        Fresh("firebar-class-moved");
+        PackWithBars(bars);
+        shim_module[kClassCode[3].rva + 3] ^= 0x02;                    /* the class at another offset */
+        Start();
+        FakeTables();
+        Poke(CHAR_COUNT_VA, 3); Poke(CHAR_LIST_VA, 0x8A0000); Poke(CHAR_PICKED_VA, 1);
+        Check(!g_barClassOk && LogSays("bars.txt names the classes' fires, but the character list is not where") &&
+              !strcmp(ForMap(36), TEX "Loading-BarFill-fel") && g_class == 0,
+              "the character list's code moved: no class read, every bar its picture's fire, and the log says why");
+
+        Fresh("firebar-class-none");
+        PackWithBars(kBars);
+        Start();
+        Check(!g_barClassOk && !LogSays("each class burns") && !LogSays("classes' fires"),
+              "a bars.txt with no class lines: nothing said about classes, the pictures' fires as before");
+    }
+
     /* bars.txt missing, broken or with nothing the pack carries: no redirect, logged */
     Fresh("firebar-no-bars");
     PackWithBars(NULL);
@@ -740,7 +795,7 @@ static void FireBarTests(void)
     Check(t.screens == 0 && t.skipped == 1 && t.fallback == 0, "bars.txt: a NUL inside a line: that line skipped");
     static char many[40000];
     int len = 0;
-    for (int i = 0; i < 300; i++) len += snprintf(many + len, sizeof many - (size_t)len, "screen%d f%d\n", i, i % 10);
+    for (int i = 0; i < 300; i++) len += snprintf(many + len, sizeof many - (size_t)len, "screen%d f%d\n", i, i % 20);
     BarParse(&t, many, (unsigned)len);
     Check(t.families == BAR_FAMILIES && t.screens <= BAR_SCREENS && t.skipped == 300 - t.screens,
           "bars.txt: more families or screens than there is room for: the rest skipped, nothing overrun");

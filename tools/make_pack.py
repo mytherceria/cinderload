@@ -149,7 +149,7 @@ def build_one(job):
     return path, blp
 
 
-FAMILIES_MAX, SCREENS_MAX, NAME_MAX = 8, 256, 47     # what CinderLoad.dll reads of bars.txt: no more than this
+FAMILIES_MAX, SCREENS_MAX, NAME_MAX = 16, 256, 47    # what CinderLoad.dll reads of bars.txt: no more than this
 
 
 def screen_name(s):

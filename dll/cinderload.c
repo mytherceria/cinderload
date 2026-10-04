@@ -26,9 +26,9 @@
  * archives, panned after the fill's front (fire.h, and "the fire sound" below). It is played through the client's
  * own fmod.dll from a thread of ours that only reads the client's memory; nothing in the client is changed for it.
  *
- * The bar's fire takes the colour of the picture's (orange, fel green, arcane, aqua: "the fire bar" below). The game
- * loads the bar's two textures once per screen; one call there is sent through this DLL, which names the textures
- * of that screen's fire family in our pack instead. Only with our loading screens in place, and only when every place
+ * The bar's fire takes the colour of the character's class where the pack has one for it, else the picture's (orange,
+ * fel green, arcane, aqua: "the fire bar" below). The game loads the bar's two textures once per screen; one call there
+ * is sent through this DLL, which names the textures of that screen's fire family in our pack instead. Only with our loading screens in place, and only when every place
  * it relies on holds the bytes it was made for; otherwise the bar is the pack's orange one, as before.
  *
  * Built like IndoorRain.dll, with no C runtime (build.sh), and with IndoorRain's MPQ reader (mpq.c, inflate.c).
@@ -708,7 +708,7 @@ static void FireClose(void)
     g_fire.channel = -1;
 }
 
-#define BAR_SHOWN_MAX 128              /* the longest about 100: its fire, "the world map from halfway in, ending ...", resets */
+#define BAR_SHOWN_MAX 160              /* the longest about 115: its fire, the class, "the world map from halfway in ...", resets */
 static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
 static void OverlayStart(void);
@@ -852,6 +852,9 @@ static void FireStart(void)
  * Loading-BarBorder-<family>.blp for each fire family the owner's art kit found (fel, arcane, aqua, ...), and
  * CinderLoad\bars.txt: one line per screen, "<the screen file's base name> <family>", and "default <family>" for the
  * screens it does not list (make_pack.py writes it).
+ * His call, 4 Oct 2026: the fire is the CLASS's colour. bars.txt names it as if a screen: "classdruid orange", "classhunter
+ * fel", "classpaladin paladin", ... A class it names takes that fire on every screen; a class it does not name, or a
+ * screen before any class is known (the character list's code not where it was, say), keeps the picture's.
  *
  * Read from WoW.exe (1.12.1, build 5875) on 2 Oct 2026:
  * - The DWORD at VA 0x82F00C is the map the loading screen is for, stored just before a screen begins (RVA 0x67E3, and
@@ -882,7 +885,7 @@ static void FireStart(void)
 #define BAR_SCREENS_MAX_VA  0xC0DB10   /* its largest id */
 #define BAR_MAP_SCREEN      0x98       /* in a Map record: its LoadingScreenID */
 #define BAR_SCREEN_FILE     8          /* in a LoadingScreens record: its file name */
-#define BAR_FAMILIES        8          /* fire families one pack may carry */
+#define BAR_FAMILIES        16         /* fire families one pack may carry: the nine classes', the pictures' own */
 #define BAR_FAMILY_MAX      15         /* letters and digits in a family's name */
 #define BAR_SCREENS         256        /* screens bars.txt may name (the client has 45) */
 #define BAR_NAME_MAX        47         /* characters in a screen's base name */
@@ -1204,6 +1207,27 @@ static int BarFamilyOf(const BarTable *t, const char *name)
         if (BarSame(t->screen[k].name, name)) { f = t->screen[k].family; break; }
     return f >= 0 && t->family[f].ok ? f : -1;
 }
+static const char *const kClassName[12] = { "none", "warrior", "paladin", "hunter", "rogue", "priest", "?", "shaman",
+                                            "mage", "warlock", "?", "druid" };
+static int g_barClassOk;                               /* the class can be read for the bar (FireBar) */
+static volatile LONG g_barClassUsed;                   /* the class whose fire this screen's bar took, or 0 */
+static unsigned BarClassNow(void);                     /* the character's class (the badge's, below), or 0 */
+
+/* The family bars.txt names for class c ("class<name> <family>"): its index, -1 for the pack's orange (a family not in
+ * the pack, orange itself among them), or -2 when it names none, so the picture's stands. */
+static int BarClassFamily(const BarTable *t, unsigned c)
+{
+    char line[16];
+    if (c >= 12 || kClassName[c][0] == '?' || c == 0) return -2;
+    lstrcpyA(line, "class");
+    lstrcatA(line, kClassName[c]);
+    for (int k = 0; k < t->screens; k++)
+        if (BarSame(t->screen[k].name, line)) {
+            int f = t->screen[k].family;
+            return f >= 0 && t->family[f].ok ? f : -1;
+        }
+    return -2;
+}
 /* A different wallpaper from last time when there is more than one. */
 static int WallDraw(void)
 {
@@ -1246,6 +1270,10 @@ const char *WINAPI BarPath(const char *path)
             InterlockedExchange(&g_wallPick, 0);
             f = BarFamily(&g_bars);
         }
+        unsigned c = g_barClassOk ? BarClassNow() : 0;
+        int cf = BarClassFamily(&g_bars, c);           /* the class's own fire, where bars.txt names one */
+        if (cf != -2) f = cf;
+        InterlockedExchange(&g_barClassUsed, cf != -2 ? (LONG)c : 0);
         g_barFamily = f;
         InterlockedExchange(&g_barShown, f >= 0 ? f + 1 : -1);
     } else
@@ -1273,6 +1301,12 @@ static void BarShownSince(char *out, int cap)
         BarCat(out, cap, g_bars.family[shown - 1].name);
     } else if (g_barsOn && shown < 0)
         BarCat(out, cap, ", its fire the pack's orange");
+    LONG c = InterlockedExchange(&g_barClassUsed, 0);
+    if (g_barsOn && shown && c > 0 && c < 12) {
+        BarCat(out, cap, ", the ");
+        BarCat(out, cap, kClassName[c]);
+        BarCat(out, cap, "'s");
+    }
     if (g_barsOn && g_mapShown) {
         char z[64];
         float h = g_viewH;
@@ -1393,10 +1427,12 @@ static int WallCall(unsigned char *base)
 
 /* At start, after our screens and the switch are in place: reads bars.txt and the families out of Data\patch-~.MPQ,
  * then sends the one call to BarStub. 1 when the bar's fire follows the screens. */
+static int ClassCodeHolds(const unsigned char *base);
+
 static int FireBar(void)
 {
     unsigned char *base = (unsigned char *)GetModuleHandleA(NULL);
-    char m[400];
+    char m[600];
     for (int i = 0; i < BAR_CODE_COUNT; i++) {
         if (BarPlaceHolds(base, i)) continue;
         int len = wsprintfA(m, "fire bar off: other bytes at RVA 0x%lX (%s) than in the client it was made for, so "
@@ -1481,6 +1517,21 @@ static int FireBar(void)
                   g_walls.count);
         Log(m);
     }
+
+    /* The class's own fire: which classes bars.txt names, and whether the class can be read in this client. */
+    char cls[12 * 9] = "";
+    for (unsigned c = 1; c < 12; c++)
+        if (BarClassFamily(&g_bars, c) != -2) {
+            if (cls[0]) lstrcatA(cls, ", ");
+            lstrcatA(cls, kClassName[c]);
+        }
+    g_barClassOk = cls[0] && ClassCodeHolds(base);
+    if (g_barClassOk) {
+        wsprintfA(m, "fire bar: each class burns its own fire where bars.txt names one (%s); the rest, the picture's", cls);
+        Log(m);
+    } else if (cls[0])
+        Log("fire bar: bars.txt names the classes' fires, but the character list is not where it is in the client this "
+            "was made for, so every bar takes its picture's fire");
 
     /* Everything BarPath reads is in place before the call can reach it. */
     g_barLoader = at + 5 + (int)Rd32(at + 1);          /* where the game's call went: the loader, VA 0x449D90 */
@@ -2452,13 +2503,21 @@ static unsigned EntryClass(unsigned entry)
 static void ClassStep(void)
 {
     unsigned count, list, picked, entered, c = 0;
-    if (!g_classSure) return;
+    if (!g_classSure && !g_barClassOk) return;
     if (ClientWord(CHAR_COUNT_VA, &count) && ClientWord(CHAR_LIST_VA, &list) && ClientWord(CHAR_PICKED_VA, &picked) &&
         list && count > 0 && count <= 64 && picked < count)
         c = EntryClass(list + picked * CHAR_SIZE);
     if (c) { InterlockedExchange(&g_class, (LONG)c); InterlockedExchange(&g_classFrom, 1); }
     else if (g_class) InterlockedExchange(&g_classFrom, 2);
     InterlockedExchange(&g_classEntered, ClientWord(CHAR_ENTERED_VA, &entered) ? (LONG)EntryClass(entered) : 0);
+}
+
+/* The game's thread, as a screen's bar is chosen (BarPath): the class, read now if the list is there, else the one kept. */
+static unsigned BarClassNow(void)
+{
+    ClassStep();
+    LONG c = g_class;
+    return c > 0 && c < 12 ? (unsigned)c : 0;
 }
 
 /* The worker, as a map screen ends: where its class came from (m: 220 bytes of room). */
