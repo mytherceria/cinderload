@@ -2043,6 +2043,55 @@ static void LabelsBuild(void)
     g_lblQuads = q;
 }
 
+/* ---- the RavenCraft logo (4 Oct 2026, his ask: "so that people know that it's Ravencraft") ----
+ * CinderLogo.blp (DXT5) and CinderLoad\logo.txt: `logo <sheet w> <sheet h> <x0> <y0> <x1> <y1>`, the logo's rectangle
+ * on its sheet. His picks: the old wide raven over RAVENCRAFT, without its 1.18.1 plaque, fixed at the top centre of
+ * the map's screens at a steady size the whole load, over everything else. LOGO_H of the screen's height, narrowed to
+ * at most LOGO_W of its width (on a narrow screen it would reach the continents' titles), LOGO_TOP down from the top. */
+#define LOGO_PATH "Interface\\Glues\\LoadingScreens\\CinderLogo.blp"
+#define LOGO_H    0.12f
+#define LOGO_W    0.13f
+#define LOGO_TOP  0.02f
+static struct { int ok; float tu0, tv0, tu1, tv1, aspect; } g_logo;   /* aspect: the logo's width over height, in pixels */
+static int g_logoOn, g_logoTried;
+static void *g_logoTex;
+__attribute__((used)) float g_logoPos[4 * 3];
+__attribute__((used)) float g_logoUV[4 * 2];
+__attribute__((used)) unsigned g_logoCol[4];
+
+static void LogoParse(const char *s, unsigned len)
+{
+    g_logo.ok = 0;
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && s[end] != '\n') end++;
+        const char *l = s + at;
+        int n = (int)(end - at), i = 4, v[6], k = 0;
+        if (n > 5 && l[0] == 'l' && l[1] == 'o' && l[2] == 'g' && l[3] == 'o' && MapSpace(l[4]))
+            while (k < 6 && LblInt(l, n, &i, &v[k])) k++;
+        if (k == 6 && v[0] > 0 && v[1] > 0 && v[0] <= 4096 && v[1] <= 4096 && v[2] >= 0 && v[3] >= 0 && v[4] > v[2] &&
+            v[5] > v[3] && v[4] <= v[0] && v[5] <= v[1]) {
+            g_logo.tu0 = (float)v[2] / v[0]; g_logo.tu1 = (float)v[4] / v[0];
+            g_logo.tv0 = (float)v[3] / v[1]; g_logo.tv1 = (float)v[5] / v[1];
+            g_logo.aspect = (float)(v[4] - v[2]) / (float)(v[5] - v[3]);
+            g_logo.ok = 1;
+            return;
+        }
+        at = end + 1;
+    }
+}
+
+/* The logo's one quad for this screen: top centre, LOGO_H tall unless that would make it wider than LOGO_W. */
+static void LogoBuild(void)
+{
+    float h = LOGO_H, w = h * g_logo.aspect * (float)g_scrH / (float)g_scrW;
+    if (w > LOGO_W) { h *= LOGO_W / w; w = LOGO_W; }
+    float top = 1 - LOGO_TOP, x[4] = { 0.5f - w / 2, 0.5f + w / 2, 0.5f - w / 2, 0.5f + w / 2 };
+    float y[4] = { top - h, top - h, top, top }, tu[4] = { g_logo.tu0, g_logo.tu1, g_logo.tu0, g_logo.tu1 };
+    float tv[4] = { g_logo.tv1, g_logo.tv1, g_logo.tv0, g_logo.tv0 };
+    QuadPut(g_logoPos, g_logoUV, g_logoCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
+}
+
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -2104,13 +2153,18 @@ void WINAPI OverlayDraw(void)
         LabelsBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_lblTex, 1, 0), g_lblPos, g_lblUV, g_lblCol, g_lblQuads);
     }
+    if (g_logoOn && !g_logoTex && !g_logoTried) { g_logoTried = 1; g_logoTex = OverlayLoad(LOGO_PATH); }
+    if (g_logoTex) {                                               /* over everything else */
+        LogoBuild();
+        OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_logoTex, 1, 0), g_logoPos, g_logoUV, g_logoCol, 1);
+    }
 }
 #endif
 
 /* At start, with the world map on: the overlay, when its calls are where they should be and its picture is in the pack. */
 static void OverlayStart(void)
 {
-    g_ovOn = g_seaOn = g_lblOn = 0;
+    g_ovOn = g_seaOn = g_lblOn = g_logoOn = 0;
     if (!g_map.ok || !g_barLoader) return;
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSea")) {
         unsigned char *data = NULL;
@@ -2127,17 +2181,27 @@ static void OverlayStart(void)
         if (text) HeapFree(GetProcessHeap(), 0, text);
         g_lblOn = g_lblItems > 0;
     }
-    if (!g_seaOn && !g_lblOn) return;
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderLogo")) {
+        unsigned char *text = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\logo.txt", &text, &len) == MPQ_OK && text)
+            LogoParse((const char *)text, len);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        g_logoOn = g_logo.ok;
+    }
+    if (!g_seaOn && !g_lblOn && !g_logoOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
-        g_seaOn = g_lblOn = 0;
+        g_seaOn = g_lblOn = g_logoOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
     for (int i = 0; i < LBL_BATCH * 6; i++) g_lblIndex[i] = (unsigned short)i;
     g_ovOn = 1;
-    char m[160];
-    wsprintfA(m, "overlay on:%s%s, drawn over the world map and under the bar (in memory only)",
-              g_seaOn ? " swells and glints on the open sea" : "", g_lblOn ? (g_seaOn ? ", names and icons" : " names and icons") : "");
+    char m[220];
+    wsprintfA(m, "overlay on:%s%s%s%s%s, drawn over the world map and under the bar (in memory only)",
+              g_seaOn ? " swells and glints on the open sea" : "", g_seaOn && g_lblOn ? "," : "",
+              g_lblOn ? " names and icons" : "", (g_seaOn || g_lblOn) && g_logoOn ? "," : "",
+              g_logoOn ? " the RavenCraft logo at the top" : "");
     Log(m);
 }
 

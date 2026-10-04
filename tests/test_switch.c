@@ -51,6 +51,7 @@ static void Fresh(const char *name)
         memcpy(shim_module + kOverlayCalls[i].rva + 1, &rel, 4);
     }
     g_ovOn = 0; g_seaOn = 0; g_seaTried = 0; g_seaTex = NULL; g_seaW = g_seaH = 0;
+    g_logoOn = 0; g_logoTried = 0; g_logoTex = NULL; g_logo.ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
     g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
@@ -888,6 +889,10 @@ static void PackLive(int reveal, int walls)
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderSea.blp"; data[n++] = "BLP2sea";
         names[n] = "CinderLoad\\sea.bin"; data[n] = (const char *)kSeaBin; lens[n++] = sizeof kSeaBin - ((reveal & 16) ? 1 : 0);
     }
+    if (reveal & 32) {                                   /* the logo: its sheet and its table */
+        names[n] = "Interface\\Glues\\LoadingScreens\\CinderLogo.blp"; data[n++] = "BLP2logo";
+        names[n] = "CinderLoad\\logo.txt"; data[n++] = "# logo\r\nlogo 1024 512 4 4 1020 484\r\n";
+    }
     if (reveal & 4) {                                    /* the world map: Eastern Kingdoms only, u = 0.5 - 2e-5 y */
         static char mapTxt[200];
         snprintf(mapTxt, sizeof mapTxt, "# test\r\nmap 0 %08x %08x %08x %08x\r\nmap 2 0 0 0 0\r\nend 3000\r\n",
@@ -1283,6 +1288,38 @@ static void LiveTests(void)
     Start();
     ov &= !g_ovOn && LogSays("overlay off: the calls it draws with");
     Check(ov, "the overlay: off without the sea's sheet or with a sea.bin a byte short, on with them, off (and saying so) when one of its calls has moved");
+
+    /* the logo: on with its sheet and table, said in the log; top centre, steady, the logo's own shape; narrowed on a
+     * narrow screen; a table it cannot use leaves it off */
+    {
+        Fresh("overlay-logo");
+        PackLive(1 | 2 | 4 | 32, 0);
+        Start();
+        int lg = g_ovOn && g_logoOn && !g_seaOn && LogSays("overlay on: the RavenCraft logo at the top");
+        Fresh("overlay-all");
+        PackLive(1 | 2 | 4 | 8 | 32, 0);
+        Start();
+        lg &= g_ovOn && g_logoOn && g_seaOn && LogSays("overlay on: swells and glints on the open sea, the RavenCraft logo at the top");
+        float asp = 1016.0f / 480.0f;
+        g_scrW = 5120; g_scrH = 2160;                                 /* his 21:9: LOGO_H tall, its own shape */
+        LogoBuild();
+        float w = g_logoPos[3] - g_logoPos[0], h = g_logoPos[7] - g_logoPos[1];
+        lg &= fabsf(h - LOGO_H) < 1e-5f && fabsf(w * 5120 / (h * 2160) - asp) < 1e-3f &&
+              fabsf((g_logoPos[0] + g_logoPos[3]) / 2 - 0.5f) < 1e-6f && fabsf(g_logoPos[7] - (1 - LOGO_TOP)) < 1e-6f &&
+              g_logoUV[0] == 4.0f / 1024 && g_logoUV[2] == 1020.0f / 1024 && g_logoUV[1] == 484.0f / 512 &&
+              g_logoUV[5] == 4.0f / 512 && g_logoCol[0] == 0xFFFFFFFFu;
+        g_scrW = 2560; g_scrH = 1600;                                 /* 16:10: narrowed to LOGO_W, still its own shape */
+        LogoBuild();
+        w = g_logoPos[3] - g_logoPos[0]; h = g_logoPos[7] - g_logoPos[1];
+        lg &= fabsf(w - LOGO_W) < 1e-5f && h < LOGO_H && fabsf(w * 2560 / (h * 1600) - asp) < 1e-3f;
+        { const char *t = "logo 1024 512 4 4 1030 484\n"; LogoParse(t, (unsigned)strlen(t)); }   /* past the sheet */
+        lg &= !g_logo.ok;
+        { const char *t = "logo 1024 512 4 4 1020\n"; LogoParse(t, (unsigned)strlen(t)); }        /* a number short */
+        lg &= !g_logo.ok;
+        { const char *t = "# x\nlogos 1 1 0 0 1 1\nlogo 1024 512 4 4 1020 484\n"; LogoParse(t, (unsigned)strlen(t)); }
+        lg &= g_logo.ok;
+        Check(lg, "the logo: on with its sheet and table, in the log; top centre, LOGO_H tall in its own shape, narrowed on 16:10; a bad table leaves it off");
+    }
 
     /* sea.bin: anything but a whole table is left out; between the cells' middles, how open the sea is */
     {
