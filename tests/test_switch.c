@@ -1,6 +1,6 @@
 /* Runs CinderLoad.dll's own code (dll/cinderload.c) against fake game folders, on POSIX through tests/shim:
- *   gcc -std=c99 -Wall -Wno-unused-function -Itests/shim -I../IndoorRain/dll -o /tmp/test_switch tests/test_switch.c \
- *       ../IndoorRain/dll/mpq.c ../IndoorRain/dll/inflate.c && /tmp/test_switch <scratch dir> [<client folder>]
+ *   gcc -std=c99 -Wall -Wno-unused-function -Itests/shim -Ishared -o /tmp/test_switch tests/test_switch.c \
+ *       shared/mpq.c shared/inflate.c -lm && /tmp/test_switch <scratch dir> [<client folder>]
  * Each case is a fresh folder under <scratch dir>; nothing outside it is touched. With a client folder (one holding
  * Data/patch.MPQ and Data/sound.MPQ, opened for reading only), the fire sound is also built from that client's own
  * files and played through the mock's timeline into <scratch dir>/fire-timeline.wav, for listening to, and the places
