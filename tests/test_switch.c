@@ -10,6 +10,7 @@
 #define ClientAt(va) ((unsigned)(va) - 0x400000u <= SHIM_MODULE_SIZE - 4u ? shim_module + ((unsigned)(va) - 0x400000u) \
                                                                        : (const unsigned char *)0)
 #include "../dll/cinderload.c"
+static const float kWholeUV[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };   /* the whole picture: corners 0,0 1,0 0,1 1,1 */
 #include <stdio.h>
 #include <sys/stat.h>
 
@@ -51,7 +52,7 @@ static void Fresh(const char *name)
     }
     g_ovOn = 0; g_wavesTried = 0; g_wavesTex = NULL;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
-    for (int i = 0; i < 8; i++) g_bgUV[i] = (float)((0x4F >> i) & 1);  /* 0,1 1,1 0,0 1,0, as at start */
+    memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
     g_wallPick = 0;
     g_barsOn = 0;
@@ -1172,7 +1173,7 @@ static void LiveTests(void)
     ov &= !g_ovOn && LogSays("overlay off: the calls it draws with");
     Check(ov, "the overlay: off without its picture, on with it, off (and saying so) when one of its calls has moved");
     /* the waves follow the view, sway a little of its width, and the two copies fade in turn */
-    for (int i = 0; i < 8; i++) g_bgUV[i] = (float)((0x4F >> i) & 1);
+    memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
     g_bgUV[0] = g_bgUV[4] = 0.2f; g_bgUV[2] = g_bgUV[6] = 0.4f;        /* a view 0.2 wide */
     float maxSway = 0, minA = 1, maxA = 0;
     for (DWORD ms = 0; ms < 20000; ms += 50) {
@@ -1185,6 +1186,41 @@ static void LiveTests(void)
     int waves = maxSway > 0.0015f && maxSway <= WAVES_SWAY * 0.2f + 1e-5f && minA < 0.2f && maxA > 0.9f &&
                 fabsf(g_ovUV[0][2] - g_ovUV[0][0] - 0.2f) < 1e-5f;
     Check(waves, "the waves: the view's own window, swaying at most 1.2% of its width, the two copies fading in turn");
+
+    /* the names and icons: the table, the zoom bands and their fades, a steady size on screen, the strips' joins */
+    {
+        char tb[600];
+        snprintf(tb, sizeof tb, "# t\ns 0 0 0 100 50\ns 1 100 0 200 40\ns 7 0 0 1 1\ni 0 %08x %08x 500 0 0\n"
+                 "i 1 %08x %08x 320 30 0\ni 9 %08x %08x 500 0 0\ni 1 %08x %08x 100 200 0\n",
+                 FBits(0.5f), FBits(0.5f), FBits(0.3f), FBits(0.6f), FBits(0.1f), FBits(0.1f), FBits(0.1f), FBits(0.1f));
+        LabelsParse(tb, (unsigned)strlen(tb));
+    }
+    int lbl = g_lblSprites == 2 && g_lblItems == 2;                   /* an out-of-order sprite, a bad item, a band upside down */
+    g_scrW = 3840; g_scrH = 2160;
+    memcpy(g_bgUV, kWholeUV, sizeof kWholeUV); /* the whole world: h = 0.5 */
+    LabelsBuild();
+    lbl &= g_lblQuads == 1 && fabsf((g_lblPos[0] + g_lblPos[3]) / 2 - 0.5f) < 1e-5f &&
+           fabsf((g_lblPos[3] - g_lblPos[0]) - 100.0f / 3840) < 1e-6f && (g_lblCol[0] >> 24) == 255;
+    g_bgUV[0] = g_bgUV[4] = 0.2f; g_bgUV[2] = g_bgUV[6] = 0.4f;        /* a view 0.2 across around (0.3, 0.6): h = 0.1 */
+    g_bgUV[5] = g_bgUV[7] = 0.5f; g_bgUV[1] = g_bgUV[3] = 0.7f;
+    LabelsBuild();
+    lbl &= g_lblQuads == 1 && fabsf((g_lblPos[0] + g_lblPos[3]) / 2 - 0.5f) < 1e-4f &&
+           fabsf((g_lblPos[1] + g_lblPos[7]) / 2 - 0.5f) < 1e-4f && (g_lblCol[0] >> 24) == 255;   /* the other one is off screen */
+    g_bgUV[0] = g_bgUV[4] = 0.0f; g_bgUV[2] = g_bgUV[6] = 0.6f;        /* h = 0.3: inside the top fifth of 30..320 */
+    LabelsBuild();
+    int fadeA = 0;
+    for (int q = 0; q < g_lblQuads; q++) { int slot = q ? q * 6 - 1 : 0;   /* a later quad: after its 2 joining corners */ if ((g_lblCol[slot] >> 24) < 255) fadeA = g_lblCol[slot] >> 24; }
+    lbl &= fadeA > 70 && fadeA < 110;                                   /* (320 - 300) / 58: about 0.34 */
+    Check(lbl, "labels.txt read (bad lines left out); an item only in its band, fading at its edge, off screen left out, a steady size");
+    /* 130 items in view: two strips, the first quad of each with 4 corners, every later one joined by 2 repeats */
+    g_lblSprites = 1; g_lblItems = 130;
+    for (int i = 0; i < 130; i++) { g_lblItem[i].u = 0.1f + i * 0.005f; g_lblItem[i].v = 0.5f; g_lblItem[i].spr = 0;
+                                    g_lblItem[i].hmax = 500; g_lblItem[i].hmin = 0; g_lblItem[i].dy = 0; }
+    memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+    LabelsBuild();
+    int strips = g_lblQuads == 130 && g_lblPos[4 * 3] == g_lblPos[3 * 3] && g_lblPos[5 * 3] == g_lblPos[6 * 3] &&
+                 g_lblPos[718 * 3] != g_lblPos[717 * 3] && fabsf(g_lblPos[718 * 3] - (0.1f + 120 * 0.005f - 50.0f / 3840)) < 1e-4f;
+    Check(strips, "the strips: 120 quads to one, joined by repeated corners; the 121st starts the next strip afresh");
 
     /* his call, 4 Oct: a two-second load must not fly at you. The bar leaping to full at once: the zoom goes at the
      * pace (7 s all the way in when map.txt gives none), half way after 3.5 s; a slow bar is simply followed */

@@ -5,7 +5,7 @@ seams; the continents' two screens can be the test pattern instead (--test-conti
 
 Usage: STORMLIB=/path/to/libstorm.so python3 make_pack.py <client Data dir> <out dir> <shape> <screen w> <screen h>
        [--test-continents] [--art <map file>] [--bar <dir>] [--fire-bars <dir> --bar-map <file>] [--reveal]
-       [--wallpapers <file>] [--drift] [--map <world png> <map.txt>] [--waves <waves png>]
+       [--wallpapers <file>] [--drift] [--map <world png> <map.txt>] [--waves <waves png>] [--labels <sheet png> <labels.txt>]
    e.g. ... make_pack.py ~/Games/RavenCraft-fogtest/Data out 21x9 5120 2160 --test-continents
 
 The loading bar's fire for each screen (CinderLoad.dll picks the bar by the screen's picture; both options or neither):
@@ -299,6 +299,15 @@ if __name__ == '__main__':
         write_blp(world, blp, 4096, 4096)
         files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderMap.blp'))
         files.append((table, 'CinderLoad\\map.txt'))
+    if '--labels' in sys.argv:                          # the overlay's names and icons: their sheet and where each goes
+        i = sys.argv.index('--labels')
+        sheet, table = os.path.expanduser(sys.argv[i + 1]), os.path.expanduser(sys.argv[i + 2])
+        if not (os.path.isfile(sheet) and os.path.isfile(table)):
+            raise SystemExit('--labels: the sheet and its labels.txt (kit/zoom/labels.py makes both)')
+        blp = os.path.join(blps, 'CinderLabels.blp')
+        write_blp(sheet, blp, 4096, 2048, alpha=True)
+        files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderLabels.blp'))
+        files.append((table, 'CinderLoad\\labels.txt'))
     if '--waves' in sys.argv:                           # the overlay's waves, over the world map's open sea (DXT5)
         waves = os.path.expanduser(sys.argv[sys.argv.index('--waves') + 1])
         if not os.path.isfile(waves):

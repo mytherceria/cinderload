@@ -197,6 +197,7 @@ static void TakeOut(const char *dst, const char *marker, const char *oldMarker)
 
 /* Puts the loading screens for this screen's shape in place as Data\patch-~.MPQ. 1 when ours are in place, so the
  * switch can go on. */
+static int g_scrW = 1920, g_scrH = 1080;        /* the screen, as Config.wtf (or the monitor) says */
 static int ChooseScreens(void)
 {
     char dst[MAX_PATH], marker[MAX_PATH], oldMarker[MAX_PATH], cfg[MAX_PATH], src[MAX_PATH], tmp[MAX_PATH], m[320];
@@ -221,6 +222,7 @@ static int ChooseScreens(void)
         from = "the monitor";
     }
     if (text) HeapFree(GetProcessHeap(), 0, text);
+    if (w > 0 && h > 0) { g_scrW = w; g_scrH = h; }
     int pick = any ? ChooseShape(w, h, avail) : -1;
     int client = ClientIsOurs();
     if (!client) pick = -1;              /* never put widened screens in place where the switch cannot go on */
@@ -1687,7 +1689,8 @@ static const struct { DWORD rva; unsigned target; const char *what; } kOverlayCa
     { 0x006DF7, 0x589E80, "binding it" }, { 0x006E08, 0x58A2E0, "the strip's draw" },
     { 0x006E0D, 0x58A340, "after a draw" }, { 0x006EA8, 0x58A980, "a texture's flags" } };
 #define OVERLAY_CALLS ((int)(sizeof kOverlayCalls / sizeof kOverlayCalls[0]))
-static int g_ovOn, g_wavesTried;
+static int g_ovOn, g_wavesOn, g_wavesTried;
+#define LABELS_PATH "Interface\\Glues\\LoadingScreens\\CinderLabels.blp"
 static void *g_wavesTex;
 __attribute__((used)) float g_ovPos[12] = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0 };   /* the screen's corners */
 __attribute__((used)) float g_ovUV[2][8];
@@ -1725,6 +1728,115 @@ static void OverlayBuild(DWORD now)
     }
 }
 
+/* ---- the names and icons (4 Oct 2026): CinderLabels.blp (DXT5, one sheet of every sprite) and CinderLoad\labels.txt:
+ *   s <id> <x0> <y0> <x1> <y1>              a sprite's rectangle on the sheet (4096 x 2048)
+ *   i <sprite> <u> <v> <hmax> <hmin> <dy>    an item at picture u, v (float bits in hex), shown while the view's half
+ *                                           height h is between hmin and hmax thousandths, dy pixels below its place
+ * Sprites are sized for a 2160-tall screen; each frame the items the view's h allows are drawn at a steady size,
+ * fading in over the top fifth of their range and out over the bottom fifth, batched into strips. */
+#define LBL_SHEET_W 4096.0f
+#define LBL_SHEET_H 2048.0f
+#define LBL_SPRITES 1024
+#define LBL_ITEMS   2048
+#define LBL_BATCH   120                        /* quads to a strip: 6 corners each less 2, so 718 */
+#define LBL_FRAME   480                        /* quads a frame at most */
+static struct { unsigned short x0, y0, x1, y1; } g_lblSpr[LBL_SPRITES];
+static struct { float u, v; unsigned short spr, hmax, hmin; short dy; } g_lblItem[LBL_ITEMS];
+static int g_lblSprites, g_lblItems, g_lblOn, g_lblTried, g_lblQuads;
+static void *g_lblTex;
+__attribute__((used)) float g_lblPos[LBL_FRAME * 6 * 3];
+__attribute__((used)) float g_lblUV[LBL_FRAME * 6 * 2];
+__attribute__((used)) unsigned g_lblCol[LBL_FRAME * 6];
+__attribute__((used)) unsigned short g_lblIndex[LBL_BATCH * 6];
+
+static int LblInt(const char *s, int n, int *at, int *out)
+{
+    while (*at < n && MapSpace(s[*at])) (*at)++;
+    int neg = *at < n && s[*at] == '-';
+    if (neg) (*at)++;
+    int v = 0, d = 0;
+    for (; *at < n && s[*at] >= '0' && s[*at] <= '9' && d < 7; (*at)++, d++) v = v * 10 + (s[*at] - '0');
+    if (!d) return 0;
+    *out = neg ? -v : v;
+    return 1;
+}
+static void LabelsParse(const char *s, unsigned len)
+{
+    g_lblSprites = g_lblItems = 0;
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && s[end] != '\n') end++;
+        const char *l = s + at;
+        int n = (int)(end - at), i = 2, a, b, c, d, e;
+        unsigned hu, hv;
+        if (n > 2 && l[0] == 's' && MapSpace(l[1]) && LblInt(l, n, &i, &a) && LblInt(l, n, &i, &b) &&
+            LblInt(l, n, &i, &c) && LblInt(l, n, &i, &d) && LblInt(l, n, &i, &e) && a == g_lblSprites &&
+            a < LBL_SPRITES && b >= 0 && c >= 0 && d > b && e > c && d <= 4096 && e <= 2048) {
+            g_lblSpr[a].x0 = (unsigned short)b; g_lblSpr[a].y0 = (unsigned short)c;
+            g_lblSpr[a].x1 = (unsigned short)d; g_lblSpr[a].y1 = (unsigned short)e;
+            g_lblSprites++;
+        } else if (n > 2 && l[0] == 'i' && MapSpace(l[1]) && g_lblItems < LBL_ITEMS && LblInt(l, n, &i, &a) &&
+                   MapHex(l, n, &i, &hu) && MapHex(l, n, &i, &hv) && LblInt(l, n, &i, &b) && LblInt(l, n, &i, &c) &&
+                   LblInt(l, n, &i, &d) && a >= 0 && a < g_lblSprites && b > c && c >= 0 && b <= 1000) {
+            float u = MapBits(hu), v = MapBits(hv);
+            if (MapFinite(u) && MapFinite(v)) {
+                g_lblItem[g_lblItems].u = u; g_lblItem[g_lblItems].v = v;
+                g_lblItem[g_lblItems].spr = (unsigned short)a;
+                g_lblItem[g_lblItems].hmax = (unsigned short)b; g_lblItem[g_lblItems].hmin = (unsigned short)c;
+                g_lblItem[g_lblItems].dy = (short)d;
+                g_lblItems++;
+            }
+        }
+        at = end + 1;
+    }
+}
+
+/* This frame's quads, from the view (g_bgUV): into g_lblPos / g_lblUV / g_lblCol as strips of LBL_BATCH quads, each
+ * after the first joined by two repeated corners (degenerate triangles). g_lblQuads: how many. */
+static void LabelsBuild(void)
+{
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
+    float hk = (u1 - u0) * 500.0f, k = (float)g_scrH / 2160.0f;
+    int q = 0;
+    for (int it = 0; it < g_lblItems && q < LBL_FRAME; it++) {
+        float hi = g_lblItem[it].hmax, lo = g_lblItem[it].hmin;
+        if (!(hk <= hi && hk >= lo)) continue;
+        float a = 1, span = hi - lo;
+        if (hi < 500 && hk > hi - span * 0.2f) a = (hi - hk) / (span * 0.2f);    /* fading in, coming closer */
+        if (lo > 0 && hk < lo + span * 0.2f) { float b = (hk - lo) / (span * 0.2f); if (b < a) a = b; }
+        if (a <= 0.01f) continue;
+        float sx = (g_lblItem[it].u - u0) / (u1 - u0), sy = 1 - (g_lblItem[it].v - vt) / (vb - vt);
+        int s = g_lblItem[it].spr;
+        float sw = (g_lblSpr[s].x1 - g_lblSpr[s].x0) * k / (float)g_scrW, sh = (g_lblSpr[s].y1 - g_lblSpr[s].y0) * k / (float)g_scrH;
+        sy -= g_lblItem[it].dy * k / (float)g_scrH;
+        if (sx + sw / 2 < 0 || sx - sw / 2 > 1 || sy + sh / 2 < 0 || sy - sh / 2 > 1) continue;
+        float x[4] = { sx - sw / 2, sx + sw / 2, sx - sw / 2, sx + sw / 2 }, y[4] = { sy - sh / 2, sy - sh / 2, sy + sh / 2, sy + sh / 2 };
+        float tu0 = g_lblSpr[s].x0 / LBL_SHEET_W, tu1 = g_lblSpr[s].x1 / LBL_SHEET_W;
+        float tv0 = g_lblSpr[s].y0 / LBL_SHEET_H, tv1 = g_lblSpr[s].y1 / LBL_SHEET_H;
+        float tu[4] = { tu0, tu1, tu0, tu1 }, tv[4] = { tv1, tv1, tv0, tv0 };
+        unsigned col = (unsigned)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
+        /* corner slots: a batch's first quad has 4, every later one 6 (its first corner twice, after the last's) */
+        int inBatch = q % LBL_BATCH, base = (q / LBL_BATCH) * (LBL_BATCH * 6 - 2), at = base + (inBatch ? inBatch * 6 - 2 : 0);
+        int order[6], m = 0;
+        if (inBatch) { order[m++] = -1; order[m++] = 0; }    /* the last corner again, then this quad's first again */
+        for (int c = 0; c < 4; c++) order[m++] = c;
+        for (int j = 0; j < m; j++) {
+            int c = order[j], slot = at + j;
+            if (c < 0) {                                      /* repeat the previous quad's last corner */
+                for (int e = 0; e < 3; e++) g_lblPos[slot * 3 + e] = g_lblPos[(slot - 1) * 3 + e];
+                g_lblUV[slot * 2] = g_lblUV[(slot - 1) * 2]; g_lblUV[slot * 2 + 1] = g_lblUV[(slot - 1) * 2 + 1];
+                g_lblCol[slot] = g_lblCol[slot - 1];
+                continue;
+            }
+            g_lblPos[slot * 3] = x[c]; g_lblPos[slot * 3 + 1] = y[c]; g_lblPos[slot * 3 + 2] = 0;
+            g_lblUV[slot * 2] = tu[c]; g_lblUV[slot * 2 + 1] = tv[c];
+            g_lblCol[slot] = col;
+        }
+        q++;
+    }
+    g_lblQuads = q;
+}
+
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -1736,27 +1848,44 @@ typedef void *(__attribute__((fastcall)) *OvFlags)(void *, int, int, int, int, i
 typedef void *(__attribute__((fastcall)) *OvLoad)(const char *, void *, unsigned, int, int);
 #define OV_FN(type, va) ((type)(void *)((ULONG_PTR)GetModuleHandleA(NULL) + ((va) - 0x400000u)))
 
+/* A picture of the overlay's, loaded once the way the screen's picture is (0x58A980 flags, then the loader). */
+static void *OverlayLoad(const char *path)
+{
+    unsigned slot[4] = { 0 }, status[8] = { 0 };
+    void *f = OV_FN(OvFlags, 0x58A980)(slot, 0, 1, 0, 0, 0, 0, 0, 1, 0);
+    unsigned flags = f ? *(unsigned *)f : 0;
+    return ((OvLoad)g_barLoader)(path, status, flags, 0, 0);
+}
+
 /* From RevealStub, on the game's thread, before the fill's own setup: the overlay's quads. */
 void WINAPI OverlayDraw(void) __attribute__((used));
 void WINAPI OverlayDraw(void)
 {
     if (!g_ovOn || !g_mapShown) return;
-    if (!g_wavesTex) {
-        if (g_wavesTried) return;
-        g_wavesTried = 1;
-        unsigned slot[4] = { 0 }, status[8] = { 0 };
-        void *f = OV_FN(OvFlags, 0x58A980)(slot, 0, 1, 0, 0, 0, 0, 0, 1, 0);
-        unsigned flags = f ? *(unsigned *)f : 0;
-        g_wavesTex = ((OvLoad)g_barLoader)(WAVES_PATH, status, flags, 0, 0);
-        if (!g_wavesTex) return;
+    if (g_wavesOn && !g_wavesTex && !g_wavesTried) { g_wavesTried = 1; g_wavesTex = OverlayLoad(WAVES_PATH); }
+    if (g_wavesTex) {
+        OverlayBuild(GetTickCount());
+        void *dev = OV_FN(OvDevice, 0x44ACF0)(g_wavesTex, 1, 0);
+        for (int k = 0; k < 2; k++) {
+            OV_FN(OvSetup, 0x58A2A0)(4, g_ovPos, 12, 0, 0, g_ovCol[k], 4, 0, 0, g_ovUV[k], 8, 0, 0);
+            OV_FN(OvBind, 0x589E80)(0x17, dev);
+            OV_FN(OvDraw, 0x58A2E0)(4, 4, (const void *)((ULONG_PTR)GetModuleHandleA(NULL) + (0x82F010 - 0x400000u)));
+            OV_FN(OvAfter, 0x58A340)();
+        }
     }
-    OverlayBuild(GetTickCount());
-    void *dev = OV_FN(OvDevice, 0x44ACF0)(g_wavesTex, 1, 0);
-    for (int k = 0; k < 2; k++) {
-        OV_FN(OvSetup, 0x58A2A0)(4, g_ovPos, 12, 0, 0, g_ovCol[k], 4, 0, 0, g_ovUV[k], 8, 0, 0);
-        OV_FN(OvBind, 0x589E80)(0x17, dev);
-        OV_FN(OvDraw, 0x58A2E0)(4, 4, (const void *)((ULONG_PTR)GetModuleHandleA(NULL) + (0x82F010 - 0x400000u)));
-        OV_FN(OvAfter, 0x58A340)();
+    if (g_lblOn && !g_lblTex && !g_lblTried) { g_lblTried = 1; g_lblTex = OverlayLoad(LABELS_PATH); }
+    if (g_lblTex) {
+        LabelsBuild();
+        void *dev = OV_FN(OvDevice, 0x44ACF0)(g_lblTex, 1, 0);
+        for (int q = 0; q < g_lblQuads; q += LBL_BATCH) {
+            int n = g_lblQuads - q < LBL_BATCH ? g_lblQuads - q : LBL_BATCH, first = (q / LBL_BATCH) * (LBL_BATCH * 6 - 2);
+            int corners = n * 6 - 2;
+            OV_FN(OvSetup, 0x58A2A0)(corners, g_lblPos + first * 3, 12, 0, 0, g_lblCol + first, 4, 0, 0, g_lblUV + first * 2,
+                                     8, 0, 0);
+            OV_FN(OvBind, 0x589E80)(0x17, dev);
+            OV_FN(OvDraw, 0x58A2E0)(4, corners, g_lblIndex);
+            OV_FN(OvAfter, 0x58A340)();
+        }
     }
 }
 #endif
@@ -1764,15 +1893,29 @@ void WINAPI OverlayDraw(void)
 /* At start, with the world map on: the overlay, when its calls are where they should be and its picture is in the pack. */
 static void OverlayStart(void)
 {
-    g_ovOn = 0;
+    g_ovOn = g_wavesOn = g_lblOn = 0;
     if (!g_map.ok || !g_barLoader) return;
-    if (!BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderWaves")) return;
+    g_wavesOn = BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderWaves");
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderLabels")) {
+        unsigned char *text = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\labels.txt", &text, &len) == MPQ_OK && text)
+            LabelsParse((const char *)text, len);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        g_lblOn = g_lblItems > 0;
+    }
+    if (!g_wavesOn && !g_lblOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
+        g_wavesOn = g_lblOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
+    for (int i = 0; i < LBL_BATCH * 6; i++) g_lblIndex[i] = (unsigned short)i;
     g_ovOn = 1;
-    Log("overlay on: waves over the open sea, drawn over the world map and under the bar (in memory only)");
+    char m[160];
+    wsprintfA(m, "overlay on:%s%s, drawn over the world map and under the bar (in memory only)",
+              g_wavesOn ? " waves over the open sea" : "", g_lblOn ? (g_wavesOn ? ", names and icons" : " names and icons") : "");
+    Log(m);
 }
 
 static float FillHeat(float d, float t, int k)
