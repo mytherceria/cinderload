@@ -1087,6 +1087,70 @@ static int BarFamily(const BarTable *t)
  * begins (RVA 0x6891), and its picture a moment later, on the screen's first frame (RVA 0x6EBA, the same loader): so
  * the draw happens at the fill, the bar takes the wallpaper's fire, and the picture's load is then handed that same
  * wallpaper. Both calls reach BarPath through BarStub. */
+/* ---- the world map zoom (3 Oct 2026, his design) ----
+ * Loading into Eastern Kingdoms or Kalimdor, the picture is the pack's world map (CinderMap.blp: both continents in the
+ * Great Sea, drawn for this screen's shape), and the view glides from the whole world down onto where the player
+ * arrives as the bar fills (DriftStep). CinderLoad\map.txt says where each continent lies on the picture:
+ *   map <0|1> <au> <bu> <av> <bv>   u = au + bu * y, v = av + bv * x, for a world position x, y in yards; the four
+ *                                   as the hex of their float bits (no C runtime here to read decimals)
+ *   end <yards>                     how tall a stretch of the world the view ends on
+ * Only when both the picture and the table are in the pack, and the picture can move (drift.txt, the reveal). */
+#define MAP_PATH        "Interface\\Glues\\LoadingScreens\\CinderMap.blp"
+#define MAP_DEST_MAP_VA 0x88262C   /* int: the map SMSG_NEW_WORLD / LOGIN_VERIFY_WORLD put the player on (VA 0x401B00) */
+#define MAP_DEST_X_VA   0x88268C   /* float: x there, in yards */
+#define MAP_DEST_Y_VA   0x882690   /* float: y there */
+#define MAP_TAU         0.35f      /* seconds: how smoothly the view follows, so a late position glides in */
+static struct { int ok; struct { int ok; float au, bu, av, bv; } m[2]; float endYards; } g_map;
+static volatile LONG g_mapShown;  /* the screen showing has the world map */
+
+static int MapSpace(char c) { return c == ' ' || c == '\t'; }
+/* A hex number of up to 8 digits at text[*at], spaces before it skipped. */
+static int MapHex(const char *s, int n, int *at, unsigned *out)
+{
+    while (*at < n && MapSpace(s[*at])) (*at)++;
+    unsigned v = 0;
+    int d = 0;
+    for (; *at < n && d < 9; (*at)++, d++) {
+        char c = s[*at];
+        unsigned x = c >= '0' && c <= '9' ? (unsigned)(c - '0') : c >= 'a' && c <= 'f' ? (unsigned)(c - 'a' + 10)
+                   : c >= 'A' && c <= 'F' ? (unsigned)(c - 'A' + 10) : 16u;
+        if (x == 16u) break;
+        v = v << 4 | x;
+    }
+    if (d < 1 || d > 8) return 0;
+    *out = v;
+    return 1;
+}
+static float MapBits(unsigned u) { union { unsigned u; float f; } c; c.u = u; return c.f; }
+static int MapFinite(float f) { return f > -1e30f && f < 1e30f; }
+static void MapParse(const char *s, unsigned len)
+{
+    unsigned char *z = (unsigned char *)&g_map;
+    for (unsigned i = 0; i < sizeof g_map; i++) z[i] = 0;
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && s[end] != '\n') end++;
+        const char *l = s + at;
+        int n = (int)(end - at), i = 4;
+        unsigned v[4], id;
+        if (n > 4 && l[0] == 'm' && l[1] == 'a' && l[2] == 'p' && MapSpace(l[3]) && MapHex(l, n, &i, &id) && id <= 1 &&
+            MapHex(l, n, &i, &v[0]) && MapHex(l, n, &i, &v[1]) && MapHex(l, n, &i, &v[2]) && MapHex(l, n, &i, &v[3])) {
+            float au = MapBits(v[0]), bu = MapBits(v[1]), av = MapBits(v[2]), bv = MapBits(v[3]);
+            if (MapFinite(au) && MapFinite(bu) && MapFinite(av) && MapFinite(bv) && bu != 0 && bv != 0) {
+                g_map.m[id].au = au; g_map.m[id].bu = bu; g_map.m[id].av = av; g_map.m[id].bv = bv;
+                g_map.m[id].ok = 1;
+            }
+        } else if (n > 4 && l[0] == 'e' && l[1] == 'n' && l[2] == 'd' && MapSpace(l[3])) {
+            int y = 0, d = 0;
+            while (i < n && MapSpace(l[i])) i++;
+            for (; i < n && l[i] >= '0' && l[i] <= '9' && d < 6; i++, d++) y = y * 10 + (l[i] - '0');
+            if (d) g_map.endYards = (float)y;
+        }
+        at = end + 1;
+    }
+    g_map.ok = (g_map.m[0].ok || g_map.m[1].ok) && g_map.endYards >= 100;
+}
+
 #define WALL_MAX 64
 static struct { int count; int family[WALL_MAX]; char path[WALL_MAX][56]; } g_walls;
 static volatile LONG g_wallPick;                       /* the wallpaper drawn for the screen now showing, + 1; 0 none */
@@ -1121,21 +1185,28 @@ const char *WINAPI BarPath(const char *path)
 {
     if (!g_barsOn || !path) return path;
     int border = BarSamePath(path, kBarBorderPath), fill = !border && BarSamePath(path, kBarFillPath);
-    if (!border && !fill) {                            /* the screen's picture: a continent's gets the drawn wallpaper */
-        LONG w = g_wallPick;
+    if (!border && !fill) {                            /* the screen's picture: a continent's gets the map or a wallpaper */
+        LONG w = g_wallPick, m = g_mapShown;
         char name[BAR_NAME_MAX + 1];
-        if (w > 0 && w <= g_walls.count && BarBaseName(path, lstrlenA(path), name) && BarIsOverworld(name))
-            return g_walls.path[w - 1];
+        if ((m || (w > 0 && w <= g_walls.count)) && BarBaseName(path, lstrlenA(path), name) && BarIsOverworld(name))
+            return m ? MAP_PATH : g_walls.path[w - 1];
         return path;
     }
     int f;
     if (fill) {                                        /* the fill comes first: the screen's choices are made here */
         char name[BAR_NAME_MAX + 1];
-        if (g_walls.count && BarScreen(name) && BarIsOverworld(name)) {
+        int over = (g_map.ok || g_walls.count) && BarScreen(name) && BarIsOverworld(name);
+        if (over && g_map.ok) {                        /* the world map, its fire from bars.txt's "cindermap" line */
+            InterlockedExchange(&g_wallPick, 0);
+            InterlockedExchange(&g_mapShown, 1);
+            f = BarFamilyOf(&g_bars, "cindermap");
+        } else if (over) {
             int r = WallDraw();
+            InterlockedExchange(&g_mapShown, 0);
             InterlockedExchange(&g_wallPick, r + 1);
             f = g_walls.family[r];
         } else {
+            InterlockedExchange(&g_mapShown, 0);
             InterlockedExchange(&g_wallPick, 0);
             f = BarFamily(&g_bars);
         }
@@ -1166,8 +1237,9 @@ static void BarShownSince(char *out, int cap)
         BarCat(out, cap, g_bars.family[shown - 1].name);
     } else if (g_barsOn && shown < 0)
         BarCat(out, cap, ", its fire the pack's orange");
+    if (g_barsOn && g_mapShown) BarCat(out, cap, ", the world map");
     LONG w = g_wallPick;
-    if (g_barsOn && w > 0 && w <= g_walls.count) {
+    if (g_barsOn && !g_mapShown && w > 0 && w <= g_walls.count) {
         const char *n = g_walls.path[w - 1];
         for (const char *q = n; *q; q++)
             if (*q == '\\') n = q + 1;
@@ -1211,6 +1283,29 @@ static int BarHasTexture(const char *path)
 /* bars.txt is ours, but a file in the player's folder all the same: nothing bigger is even read in. */
 static void *IoAllocSmall(void *ctx, unsigned size) { return size > 4 * BAR_TEXT_MAX ? NULL : IoAlloc(ctx, size); }
 static const mpq_io kIoSmall = { IoAllocSmall, IoRelease, IoOpen, IoReadAt, IoSize, IoClose, NULL };
+
+/* The world map's table and picture, out of Data\patch-~.MPQ. */
+static void MapLoad(void)
+{
+    unsigned char *text = NULL;
+    unsigned len = 0;
+    g_map.ok = 0;
+    int r = mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\map.txt", &text, &len);
+    if (r != MPQ_OK || !text) {
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        return;
+    }
+    MapParse((const char *)text, len);
+    HeapFree(GetProcessHeap(), 0, text);
+    if (!g_map.ok) { Log("zoom off: CinderLoad\\map.txt names no continent it can use, or no end"); return; }
+    if (!BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderMap")) {
+        g_map.ok = 0;
+        Log("zoom off: the pack has map.txt but no CinderMap.blp");
+        return;
+    }
+    Log("zoom: the world map is in the pack; on Eastern Kingdoms and Kalimdor screens the view glides down onto where "
+        "you arrive");
+}
 
 /* The screen's picture is loaded by the same loader as the bar's textures (RVA 0x6EBA, ecx = the picture's path from
  * its LoadingScreens record): that call goes to BarStub too, once the fire bar is on and there are wallpapers. */
@@ -1364,7 +1459,11 @@ static int FireBar(void)
         return 0;
     }
     Log("fire bar on: each loading screen's bar burns in its picture's fire (one call at RVA 0x6891, in memory only)");
-    if (g_walls.count) WallCall(base);
+    MapLoad();
+    if ((g_walls.count || g_map.ok) && !WallCall(base)) {   /* the picture cannot be swapped: show neither */
+        g_walls.count = 0;
+        g_map.ok = 0;
+    }
     return 1;
 }
 
@@ -1450,19 +1549,74 @@ static volatile LONG g_driftOn;
 static float g_drift;
 static DWORD g_driftAt;
 
-/* The game's thread only. p: the bar, 0..1. A new screen (the bar back near 0, or no frame for a second) starts again. */
+/* ln x for x > 0, near enough for a view (no C runtime): x = m * 2^k, ln m by its series in (m - 1) / (m + 1). */
+static float MapLn(float x)
+{
+    union { float f; unsigned u; } c;
+    c.f = x;
+    int k = (int)((c.u >> 23) & 0xFF) - 127;
+    c.u = (c.u & 0x007FFFFFu) | 0x3F800000u;                        /* m in [1, 2) */
+    float t = (c.f - 1) / (c.f + 1), t2 = t * t;
+    return (float)k * 0.69314718f + 2 * t * (1 + t2 * (1.0f / 3 + t2 * (1.0f / 5 + t2 * (1.0f / 7 + t2 / 9))));
+}
+
+/* Where the player arrives, on the world map: 1 with its u, v and the view's half size there; 0 while the position
+ * is not this screen's yet (a teleport's lands a moment after its screen begins) or is off the map. */
+static int MapDest(float *du, float *dv, float *hEnd)
+{
+    unsigned id, dm, xb, yb;
+    if (!ClientWord(BAR_MAP_VA, &id) || id > 1 || !g_map.m[id].ok) return 0;
+    if (!ClientWord(MAP_DEST_MAP_VA, &dm) || dm != id) return 0;           /* still the last map's position */
+    if (!ClientWord(MAP_DEST_X_VA, &xb) || !ClientWord(MAP_DEST_Y_VA, &yb)) return 0;
+    float x = MapBits(xb), y = MapBits(yb);
+    if (!(x > -20000 && x < 20000 && y > -20000 && y < 20000)) return 0;
+    float u = g_map.m[id].au + g_map.m[id].bu * y, v = g_map.m[id].av + g_map.m[id].bv * x;
+    float bv = g_map.m[id].bv < 0 ? -g_map.m[id].bv : g_map.m[id].bv, h = 0.5f * g_map.endYards * bv;
+    if (!(u > 0 && u < 1 && v > 0 && v < 1 && h > 0.001f && h < 0.45f)) return 0;
+    *du = u; *dv = v; *hEnd = h;
+    return 1;
+}
+
+static float g_viewU = 0.5f, g_viewV = 0.5f, g_viewH = 0.5f;     /* the world map's view, eased */
+
+/* The game's thread only. p: the bar, 0..1. A new screen (the bar back near 0, or no frame for a second) starts again.
+ * With the world map: from the whole world, the view zooms evenly (in steps of the same ratio) onto where the player
+ * arrives, its middle following the zoom, so the end of the bar lands on them. Otherwise: the picture drifts in. */
 static void DriftStep(float p, DWORD now)
 {
-    if (!g_driftAt || now - g_driftAt > 1000 || p < g_drift - 0.25f) g_drift = 0;
+    if (!g_driftAt || now - g_driftAt > 1000 || p < g_drift - 0.25f) {
+        g_drift = 0;
+        g_viewU = g_viewV = g_viewH = 0.5f;
+    }
     float dt = g_driftAt ? (float)(now - g_driftAt) / 1000.0f : 0;
     g_driftAt = now;
     if (dt > 0.1f) dt = 0.1f;
     g_drift += (p - g_drift) * (float)(1.0 - FireExp(-(double)dt / DRIFT_TAU));
     float e = g_drift * g_drift * (3 - 2 * g_drift);                /* eased in and out */
-    float h = 0.5f / (1.0f + DRIFT_ZOOM * e);
-    float lo = 0.5f - h, hi = 0.5f + h;
-    g_bgUV[0] = lo; g_bgUV[1] = hi; g_bgUV[2] = hi; g_bgUV[3] = hi;
-    g_bgUV[4] = lo; g_bgUV[5] = lo; g_bgUV[6] = hi; g_bgUV[7] = lo;
+    float cu = 0.5f, cv = 0.5f, h;
+    if (g_mapShown && g_map.ok) {
+        float du, dv, hEnd;
+        h = 0.5f;
+        if (MapDest(&du, &dv, &hEnd)) {
+            h = 0.5f * (float)FireExp((double)(e * MapLn(hEnd / 0.5f)));
+            float k = (0.5f - h) / (0.5f - hEnd);                   /* how far the zoom has come */
+            cu = 0.5f + (du - 0.5f) * k;
+            cv = 0.5f + (dv - 0.5f) * k;
+        }
+        float a = (float)(1.0 - FireExp(-(double)dt / MAP_TAU));
+        g_viewU += (cu - g_viewU) * a;
+        g_viewV += (cv - g_viewV) * a;
+        g_viewH += (h - g_viewH) * a;
+        cu = g_viewU; cv = g_viewV; h = g_viewH;
+        if (cu < h) cu = h;
+        if (cu > 1 - h) cu = 1 - h;
+        if (cv < h) cv = h;
+        if (cv > 1 - h) cv = 1 - h;
+    } else
+        h = 0.5f / (1.0f + DRIFT_ZOOM * e);
+    float u0 = cu - h, u1 = cu + h, vt = cv - h, vb = cv + h;       /* v grows downward on the picture */
+    g_bgUV[0] = u0; g_bgUV[1] = vb; g_bgUV[2] = u1; g_bgUV[3] = vb;
+    g_bgUV[4] = u0; g_bgUV[5] = vt; g_bgUV[6] = u1; g_bgUV[7] = vt;
 }
 
 static float FillHeat(float d, float t, int k)

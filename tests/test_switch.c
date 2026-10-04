@@ -44,7 +44,7 @@ static void Fresh(const char *name)
         memcpy(shim_module + kRevealCode[i].rva, kRevealCode[i].bytes, (size_t)kRevealCode[i].n);
     memcpy(shim_module + WALL_LOAD_RVA, kWallLoad, sizeof kWallLoad);
     memcpy(shim_module + BG_DRAW_RVA, kBgDraw, sizeof kBgDraw);
-    g_driftOn = 0; g_drift = 0; g_driftAt = 0;
+    g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0;
     for (int i = 0; i < 8; i++) g_bgUV[i] = (float)((0x4F >> i) & 1);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
     g_wallPick = 0;
@@ -842,6 +842,7 @@ static void FireRealClient(const char *client)
 
 /* ---- tonight's three: the fire revealed with a soft, live front, and the continents' wallpapers ---- */
 static void PutFloat(unsigned va, float f) { memcpy(shim_module + va - 0x400000u, &f, 4); }
+static unsigned FBits(float f) { unsigned u; memcpy(&u, &f, 4); return u; }
 static void PackLive(int reveal, int walls)
 {
     const char *names[16], *data[16];
@@ -859,6 +860,13 @@ static void PackLive(int reveal, int walls)
     }
     if (reveal) { names[n] = "CinderLoad\\reveal.txt"; data[n++] = "revealed"; }
     if (reveal & 2) { names[n] = "CinderLoad\\drift.txt"; data[n++] = "drifts"; }
+    if (reveal & 4) {                                    /* the world map: Eastern Kingdoms only, u = 0.5 - 2e-5 y */
+        static char mapTxt[200];
+        snprintf(mapTxt, sizeof mapTxt, "# test\r\nmap 0 %08x %08x %08x %08x\r\nmap 2 0 0 0 0\r\nend 3000\r\n",
+                 FBits(0.5f), FBits(-2e-5f), FBits(0.5f), FBits(-2e-5f));
+        names[n] = "CinderLoad\\map.txt"; data[n++] = mapTxt;
+        names[n] = "Interface\\Glues\\LoadingScreens\\CinderMap.blp"; data[n++] = "BLP2map";
+    }
     if (walls) {
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall01.blp"; data[n++] = "BLP2wall1";
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall02.blp"; data[n++] = "BLP2wall2";
@@ -1042,6 +1050,67 @@ static void LiveTests(void)
     framed &= g_drift == 0;                                           /* and only while the drift is on */
     Check(ident && full && reset && gentle && framed,
           "the drift: the whole picture at 0, 12% closer at a full bar, eased (no jump on a leap), starting again on a new screen");
+
+    /* the world map zoom */
+    Fresh("map-on");
+    PackLive(1 | 2 | 4, 0);
+    Start();
+    Check(LogSays("zoom: the world map is in the pack") && LogSays("wallpapers on") && g_map.ok && g_map.m[0].ok &&
+          !g_map.m[1].ok && g_map.endYards == 3000 && LogSays("picture drift on"),
+          "map.txt and CinderMap.blp in the pack: the zoom on (Eastern Kingdoms only, as the table says), the picture's load ours");
+    FakeTables();
+    const char *ek = "Interface\\Glues\\LoadingScreens\\LoadScreenEasternKingdom.blp";
+    const char *dm = "Interface\\Glues\\LoadingScreens\\LoadScreenDeadmines.blp";
+    ForMap(0);
+    int shown = g_mapShown == 1 && !strcmp(BarPath(ek), MAP_PATH) && g_wallPick == 0;
+    char line[BAR_SHOWN_MAX];
+    InterlockedExchange(&g_barShown, -1);
+    BarShownSince(line, (int)sizeof line);
+    shown &= strstr(line, ", the world map") != NULL && strstr(line, "wallpaper") == NULL;
+    ForMap(36);
+    shown &= g_mapShown == 0 && BarPath(dm) == dm;
+    Check(shown, "the Eastern Kingdoms screen gets the world map (and says so in its line); the Deadmines keeps its own");
+
+    /* the glide: the whole world at the start, onto the arrival at a full bar */
+    float hEnd = 0.5f * 3000 * 2e-5f;
+    ForMap(0);
+    Poke(MAP_DEST_MAP_VA, 0);
+    PutFloat(MAP_DEST_X_VA, -5000.0f);                                /* v = 0.5 + 2e-5 * 5000 = 0.6 */
+    PutFloat(MAP_DEST_Y_VA, 10000.0f);                                /* u = 0.5 - 2e-5 * 10000 = 0.3 */
+    g_drift = 0; g_driftAt = 0;
+    DWORD at = 20000;
+    DriftStep(0, at);
+    int whole = g_bgUV[0] == 0 && g_bgUV[1] == 1 && g_bgUV[2] == 1 && g_bgUV[5] == 0;
+    for (int i = 0; i < 500; i++) { at += 20; DriftStep(1, at); }
+    int lands = fabsf(g_bgUV[0] - (0.3f - hEnd)) < 2e-3f && fabsf(g_bgUV[2] - (0.3f + hEnd)) < 2e-3f &&
+                fabsf(g_bgUV[5] - (0.6f - hEnd)) < 2e-3f && fabsf(g_bgUV[1] - (0.6f + hEnd)) < 2e-3f;
+    Check(whole && lands, "the zoom: the whole world as the screen begins, the arrival in the middle of a 3000-yard view at a full bar");
+
+    Poke(MAP_DEST_MAP_VA, 1);                                         /* the position is still the last map's */
+    g_drift = 0; g_driftAt = 0; at = 40000;
+    for (int i = 0; i < 500; i++) { at += 20; DriftStep(1, at); }
+    int stays = g_bgUV[0] == 0 && g_bgUV[2] == 1;
+    g_drift = 0; g_driftAt = 0; at = 60000;
+    for (int i = 0; i < 100; i++) { at += 20; DriftStep(0.5f, at); }
+    Poke(MAP_DEST_MAP_VA, 0);                                         /* and now it lands */
+    at += 20; DriftStep(0.5f, at);
+    int glides = g_viewU < 0.5f && g_viewU > 0.45f;                   /* one frame: on its way, not there */
+    /* half way: the middle of the view has come as far as the zoom has, not all the way to the arrival */
+    g_drift = 0; g_driftAt = 0; at = 80000;
+    for (int i = 0; i < 500; i++) { at += 20; DriftStep(0.5f, at); }
+    float e5 = g_drift * g_drift * (3 - 2 * g_drift), h5 = 0.5f * powf(hEnd / 0.5f, e5);
+    float want = 0.5f + (0.3f - 0.5f) * (0.5f - h5) / (0.5f - hEnd);
+    glides &= fabsf(g_viewU - want) < 3e-3f && fabsf(g_viewH - h5) < 3e-3f;
+    Check(stays && glides, "a position from the last map is not used (the whole world held); when the new one lands, the view glides to it");
+
+    /* the table: lines it cannot use are left out */
+    { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 50\n"; MapParse(mt, (unsigned)strlen(mt)); }
+    int lowEnd = !g_map.ok;
+    { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+    int short4 = !g_map.ok;
+    { const char *mt = "map 1 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+    int one = g_map.ok && g_map.m[1].ok && !g_map.m[0].ok;
+    Check(lowEnd && short4 && one, "map.txt: an end under 100 yards or a line short of its four numbers is not used; a good line is");
 }
 
 int main(int argc, char **argv)

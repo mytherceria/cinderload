@@ -5,7 +5,7 @@ seams; the continents' two screens can be the test pattern instead (--test-conti
 
 Usage: STORMLIB=/path/to/libstorm.so python3 make_pack.py <client Data dir> <out dir> <shape> <screen w> <screen h>
        [--test-continents] [--art <map file>] [--bar <dir>] [--fire-bars <dir> --bar-map <file>] [--reveal]
-       [--wallpapers <file>] [--drift]
+       [--wallpapers <file>] [--drift] [--map <world png> <map.txt>]
    e.g. ... make_pack.py ~/Games/RavenCraft-fogtest/Data out 21x9 5120 2160 --test-continents
 
 The loading bar's fire for each screen (CinderLoad.dll picks the bar by the screen's picture; both options or neither):
@@ -290,7 +290,16 @@ if __name__ == '__main__':
         with open(note, 'w') as f:
             f.write('The bar textures in this pack are made to be revealed, not stretched (CinderLoad 0.1.5 and later).\n')
         files.append((note, 'CinderLoad\\reveal.txt'))
-    if '--drift' in sys.argv:                           # CinderLoad.dll eases each picture in as the bar fills (with the reveal)
+    if '--map' in sys.argv:                             # the world map CinderLoad zooms over on the continents' screens
+        i = sys.argv.index('--map')
+        world, table = os.path.expanduser(sys.argv[i + 1]), os.path.expanduser(sys.argv[i + 2])
+        if not (os.path.isfile(world) and os.path.isfile(table)):
+            raise SystemExit('--map: the world picture and its map.txt (kit/zoom/world_texture.py makes both)')
+        blp = os.path.join(blps, 'CinderMap.blp')
+        write_blp(world, blp, 4096, 4096)
+        files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderMap.blp'))
+        files.append((table, 'CinderLoad\\map.txt'))
+    if '--drift' in sys.argv or '--map' in sys.argv:    # CinderLoad.dll moves each picture as the bar fills (with the reveal)
         note = os.path.join(blps, 'drift.txt')
         with open(note, 'w') as f:
             f.write('Each loading screen\'s picture eases in as the bar fills (CinderLoad, with the reveal).\n')
