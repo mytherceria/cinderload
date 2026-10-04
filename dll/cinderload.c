@@ -712,6 +712,9 @@ static void FireClose(void)
 static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
 static void OverlayStart(void);
+static volatile LONG g_screenWatch;      /* 1 once the fire's worker watches for screens ending */
+static volatile LONG g_dispNew = 1;      /* the bar as shown: the next frame begins a new screen */
+static volatile LONG g_frmCount, g_frmGap, g_frmGapFrom, g_frmGapTo, g_frmDips, g_frmShown;   /* this screen's, for the log */
 
 /* One look at the client, every FIRE_POLL_MS. */
 static void FireStep(DWORD now)
@@ -721,6 +724,7 @@ static void FireStep(DWORD now)
     float read = *(volatile const float *)(base + FIRE_PROGRESS_RVA);
     int up = *(volatile const unsigned char *)(base + FIRE_SOUNDUP_RVA) != 0;
     char m[220];
+    if (!g_screenWatch) InterlockedExchange(&g_screenWatch, 1);   /* screens ending are watched for from now on */
 
     if (!up) {                                   /* the engine is closed: it took our stream with it, so no call */
         if (g_fire.stream) Log("fire sound: the game closed its sound engine; the stream went with it");
@@ -762,6 +766,14 @@ static void FireStep(DWORD now)
             wsprintfA(m, "loading screen: the fire burned for %lu.%lu s, the bar reached %d%% in %d steps%s", ms / 1000,
                       ms % 1000 / 100, (int)(g_fire.reached * 100 + 0.5f), g_fire.steps, bar);
             Log(m);
+            if (g_frmCount > 0) {
+                LONG gap = g_frmGap;
+                wsprintfA(m, "  its frames: %ld drawn, the longest pause %ld.%ld s (the bar at %ld%%, then %ld%%), %ld "
+                          "dips, the bar as shown last at %ld%%", (long)g_frmCount, (long)(gap / 1000),
+                          (long)(gap % 1000 / 100), (long)g_frmGapFrom, (long)g_frmGapTo, (long)g_frmDips,
+                          (long)g_frmShown);
+                Log(m);
+            }
         }
         InterlockedExchange(&g_fire.gate, 0);
         g_fire.playing = 0;
@@ -1601,6 +1613,59 @@ static int MapDest(float *du, float *dv, float *hEnd)
 
 static float g_driftMax;                                        /* the bar's highest this screen */
 static volatile LONG g_driftNew = 1;                            /* the next frame begins a new screen */
+
+/* ---- the bar as shown (4 Oct 2026, his ask: "moves forward at a steady rate") ----
+ * The game moves its progress in lumps: a 3.5 s load from the Hinterlands to Stormwind made 18 steps, ran to about
+ * two thirds, stopped drawing for a second or more while it loaded, then leapt. The fill and the zoom now follow the
+ * bar as shown instead: it runs at the game's own pace of late (its progress a second, averaged over DISP_RATE_TAU),
+ * closes any gap within about DISP_CATCH, changes speed only gently (DISP_EASE), never covers more than DISP_FASTEST
+ * of the bar in a second, may coast DISP_LEAD past the game through a stall, and never goes back within a screen (the
+ * game's dip to nothing at the very end is not shown). A second in which the game draws nothing still shows nothing,
+ * but no jump follows it: a frame's step counts at most a tenth of a second.
+ * Also kept, for the log: how many frames, the longest pause between two, the bar either side of it, and dips. */
+#define DISP_RATE_TAU 1.0f
+#define DISP_CATCH    0.5f
+#define DISP_EASE     0.2f
+#define DISP_FASTEST  1.5f
+#define DISP_LEAD     0.04f
+static float g_disp, g_dispV, g_dispRate, g_dispMax, g_fillFull;
+static DWORD g_dispAt;
+
+/* The game's thread only: the bar as shown for the game's p (0..1) at now. */
+static float DisplayStep(float p, DWORD now)
+{
+    DWORD gap = g_dispAt ? now - g_dispAt : 0;
+    int fallback = !g_screenWatch && g_dispAt && gap > 1000 && p < 0.1f && g_dispMax > 0.5f;
+    if (InterlockedExchange(&g_dispNew, 0) || !g_dispAt || fallback) {
+        g_disp = g_dispMax = p;
+        g_dispV = g_dispRate = 0;
+        InterlockedExchange(&g_frmCount, 0); InterlockedExchange(&g_frmGap, 0); InterlockedExchange(&g_frmDips, 0);
+        gap = 0;
+    }
+    InterlockedExchange(&g_frmCount, g_frmCount + 1);                 /* the game thread is these counts' only writer */
+    if (gap > (DWORD)g_frmGap) {
+        InterlockedExchange(&g_frmGap, (LONG)gap);
+        InterlockedExchange(&g_frmGapFrom, (LONG)(g_dispMax * 100 + 0.5f));
+        InterlockedExchange(&g_frmGapTo, (LONG)(p * 100 + 0.5f));
+    }
+    if (p < g_dispMax - 0.2f) InterlockedExchange(&g_frmDips, g_frmDips + 1);
+    g_dispAt = now;
+    float dt = (float)gap / 1000.0f;
+    if (dt > 0.1f) dt = 0.1f;
+    float rise = p > g_dispMax ? p - g_dispMax : 0;
+    if (p > g_dispMax) g_dispMax = p;
+    if (dt <= 0) return g_disp;
+    float k = (float)(1.0 - FireExp(-(double)dt / DISP_RATE_TAU));
+    g_dispRate += (rise / dt - g_dispRate) * k;                       /* the game's pace of late */
+    float want = g_dispRate + (g_dispMax - g_disp) / DISP_CATCH;
+    want = FireClamp(want, 0, DISP_FASTEST);
+    g_dispV += (want - g_dispV) * (float)(1.0 - FireExp(-(double)dt / DISP_EASE));
+    float d = g_disp + g_dispV * dt, cap = g_dispMax + DISP_LEAD < 1 ? g_dispMax + DISP_LEAD : 1;
+    if (d > cap) { d = cap; if (g_dispV > 0 && g_disp >= cap) g_dispV = 0; }
+    if (d > g_disp) g_disp = d;
+    InterlockedExchange(&g_frmShown, (LONG)(g_disp * 100 + 0.5f));
+    return g_disp;
+}
 static int g_destOk;                                            /* this screen's arrival, once known, is kept */
 static float g_destU, g_destV, g_destH;
 
@@ -1611,6 +1676,7 @@ static void DriftScreenGone(void)
     static const float whole[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
     for (int i = 0; i < 8; i++) g_bgUV[i] = whole[i];
     InterlockedExchange(&g_driftNew, 1);
+    InterlockedExchange(&g_dispNew, 1);
 }
 
 /* The game's thread only. p: the bar, 0..1. A new screen (no frame for a second, or another map) starts again; within
@@ -1620,10 +1686,12 @@ static void DriftScreenGone(void)
  * of it rests on them. Otherwise: the picture drifts in. */
 static void DriftStep(float p, DWORD now)
 {
-    /* A new screen: the worker says so (it watches the loading screen's layer), or, if there is no worker, the bar
-     * has started again from empty after a second without a frame. Never a pause alone: the game freezes for a
-     * moment at the very end of a load, and resetting there showed the first frame again (his find, 4 Oct). */
-    int fallback = g_driftAt && now - g_driftAt > 1000 && p < 0.1f && g_driftMax > 0.5f;
+    /* A new screen: the worker says so (it watches the loading screen's layer), or, only if there is no worker, the
+     * bar has started again from empty after a second without a frame. Never a pause alone: the game freezes for a
+     * moment at the very end of a load, and resetting there showed the first frame again (his find, 4 Oct); and
+     * never with a worker (4 Oct, later: a load to Stormwind paused and dipped mid-screen, and the view went back
+     * out to the whole world). */
+    int fallback = !g_screenWatch && g_driftAt && now - g_driftAt > 1000 && p < 0.1f && g_driftMax > 0.5f;
     if (InterlockedExchange(&g_driftNew, 0) || !g_driftAt || fallback) {
         if (fallback) InterlockedExchange(&g_driftResets, g_driftResets + 1);   /* the game thread is its only writer */
         else InterlockedExchange(&g_driftResets, 0);
@@ -2082,7 +2150,8 @@ static float FillHeat(float d, float t, int k)
     float w = FireSin((float)((t * 2.3f + k * 1.7f) - (int)((t * 2.3f + k * 1.7f) / 6.2831853f) * 6.2831853f) * 0.25f);
     return FireClamp(b * (0.94f + 0.06f * w), 0, 1);
 }
-/* v: the game's four corners for the fill, x y z each: left bottom, front bottom, left top, front top. */
+/* v: the game's four corners for the fill, x y z each: left bottom, front bottom, left top, front top. The front
+ * drawn is the bar as shown (DisplayStep), not the game's. */
 void WINAPI RevealFill(const float *v)
 {
     unsigned bits = 0;
@@ -2090,9 +2159,12 @@ void WINAPI RevealFill(const float *v)
     if (ClientWord(0x882BE4, &bits)) { union { unsigned u; float f; } c; c.u = bits; p = c.f; }
     if (!(p >= 0)) p = 0;
     if (p > 1) p = 1;
-    if (g_driftOn) DriftStep(p, GetTickCount());
-    float L = v[0], B = v[1], z = v[2], R = v[3], T = v[7];
-    float full = p > 0.001f ? (R - L) / p : 1.0f;                   /* the bar's whole width, in the same units */
+    DWORD now = GetTickCount();
+    float shown = DisplayStep(p, now);
+    if (g_driftOn) DriftStep(shown, now);
+    float L = v[0], B = v[1], z = v[2], T = v[7];
+    if (p > 0.02f && v[3] > L) g_fillFull = (v[3] - L) / p;         /* the bar's whole width, in the same units */
+    float full = g_fillFull > 0 ? g_fillFull : 1.0f, R = L + shown * full;   /* the front: the bar as shown */
     float t = (float)(GetTickCount() % 3600000u) / 1000.0f;
     float flow = t * FILL_FLOW;
     flow -= (int)(flow / 0.5f) * 0.5f;                               /* the lava repeats every half of its texture */

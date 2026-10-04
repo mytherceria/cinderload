@@ -52,6 +52,7 @@ static void Fresh(const char *name)
     }
     g_ovOn = 0; g_seaOn = 0; g_seaTried = 0; g_seaTex = NULL; g_seaW = g_seaH = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
+    g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
     g_wallPick = 0;
@@ -340,8 +341,10 @@ static void FireTests(void)
     g_fire.built = 1;
     shim_ticks = 1000;
     Client(0x1234, 0.1f, 0);
+    int unwatched = !g_screenWatch;
     FireStep(shim_ticks);
     Check(!g_calls[0] && !g_fire.stream, "sound engine down (sound off in the game): a loading screen gets no FMOD call");
+    Check(unwatched && g_screenWatch, "the worker's first look: from then on screens ending are watched for (no fallback resets)");
     Client(0, 0, 1);
     FireStep(shim_ticks);
     Check(!g_calls[0], "no loading screen: no FMOD call");
@@ -978,8 +981,104 @@ static void LiveTests(void)
     Check(g_fillCount >= 2 && g_fillCount <= 2 * FILL_COLUMNS, "an empty bar: a strip of nothing, never past its arrays");
     PutFloat(0x882BE4, 2.0f);
     float v1[12] = { 0.0f, 0.0f, 0.5f,  1.0f, 0.0f, 0.5f,  0.0f, 0.09f, 0.5f,  1.0f, 0.09f, 0.5f };
+    g_dispNew = 1;                                                    /* a fresh screen: the bar as shown starts at the game's */
     RevealFill(v1);
     Check(g_fillCount <= 2 * FILL_COLUMNS && g_fillVerts[6 * (g_fillCount / 2 - 1)] == 1.0f, "a progress past 1 is taken as 1");
+
+    /* his ask, 4 Oct: the bar ran to two thirds, stopped while the game drew nothing, then leapt; it should move at a steady
+     * rate. The bar as shown: the game's progress in lumps (5% every 0.2 s, frames every 20 ms) is followed at an even pace,
+     * a frame's step never more than DISP_FASTEST allows, and close behind */
+    {
+        g_dispNew = 1; g_screenWatch = 1;
+        DWORD t = 300000;
+        float p = 0, worst = 0, lag = 0, last = 0, speed = 0, jerk = 0;
+        DisplayStep(0, t);
+        for (int f = 1; f <= 120; f++) {                              /* 2.4 s */
+            t += 20;
+            if (f % 10 == 0) p += 0.05f;                              /* the game's lumps */
+            float d = DisplayStep(p, t), v = (d - last) / 0.02f;
+            if (d - last > worst) worst = d - last;
+            if (f > 40 && p - d > lag) lag = p - d;
+            if (f > 40 && fabsf(v - speed) > jerk) jerk = fabsf(v - speed);   /* its speed, frame to frame */
+            last = d; speed = v;
+        }
+        int steady = worst <= DISP_FASTEST * 0.02f + 1e-5f && worst < 0.05f * 0.5f && lag < 0.11f &&   /* a lump, + 6% */
+                     jerk < 0.05f;                                    /* changing speed gently, never at a stroke */
+        /* a stall with frames still coming: it eases to a stop just past the game, never back */
+        float atStall = last, moved = 0;
+        for (int f = 0; f < 50; f++) { t += 20; float d = DisplayStep(p, t); if (f == 4) moved = d - atStall; last = d; }
+        steady &= moved > 0 && last <= p + DISP_LEAD + 1e-5f && last >= atStall;
+        /* the game draws nothing for 1.2 s, then the bar has leapt from 60% to 91%: no jump, a glide, there in under a second */
+        p = 0.91f; t += 1200;
+        float before = last, first = DisplayStep(p, t), reached = 0;
+        for (int f = 1; f <= 60 && !reached; f++) { t += 20; if (DisplayStep(p, t) > 0.9f) reached = f * 0.02f; }
+        steady &= first - before <= DISP_FASTEST * 0.1f + 1e-5f && reached > 0.1f && reached < 1.0f;
+        /* the game's dip to nothing at the very end is not shown; a full bar is reached */
+        float held = DisplayStep(0, t + 20);
+        steady &= held >= 0.9f;
+        t += 20;
+        for (int f = 0; f < 50; f++) { t += 20; last = DisplayStep(1, t); }
+        steady &= last > 0.999f && g_frmGap == 1200 && g_frmGapFrom == 60 && g_frmGapTo == 91 && g_frmDips == 1 &&
+                  g_frmShown == 100;
+        Check(steady, "the bar as shown: lumps followed at an even pace, a stall eased into, a leap after a pause glided, no dip, full at the end; its pause logged");
+    }
+    /* with the worker watching, a pause and a dip mid-screen are never taken for a new screen (the Stormwind load, 4 Oct:
+     * "1 resets mid-screen" and the view went back out to the whole world); without one, the old rule stands */
+    {
+        g_dispNew = 1; g_screenWatch = 1;
+        DWORD t = 400000;
+        for (int f = 0; f < 100; f++) { t += 20; DisplayStep(0.7f, t); }
+        t += 1500;
+        float d = DisplayStep(0.05f, t);
+        int watched = d >= 0.7f;
+        g_screenWatch = 0;
+        for (int f = 0; f < 10; f++) { t += 20; DisplayStep(0.7f, t); }
+        t += 1500;
+        d = DisplayStep(0.05f, t);
+        watched &= d < 0.1f;
+        /* and the drift the same */
+        g_screenWatch = 1; g_drift = 0; g_driftAt = 0; g_driftNew = 1;
+        t = 500000;
+        for (int f = 0; f < 100; f++) { t += 20; DriftStep(0.7f, t); }
+        t += 1500; DriftStep(0.05f, t);
+        watched &= g_driftResets == 0 && g_driftMax >= 0.7f;
+        g_screenWatch = 0;
+        Check(watched, "with the worker watching, a pause then a dip mid-screen starts nothing over (bar or zoom); without it, it does");
+    }
+    /* the worker's word that a screen has gone starts the bar as shown afresh; a leap from nothing to full is crossed no
+     * quicker than DISP_FASTEST allows */
+    {
+        g_dispNew = 1; g_screenWatch = 1;
+        DWORD t = 700000;
+        for (int f = 0; f < 100; f++) { t += 20; DisplayStep(0.8f, t); }
+        DriftScreenGone();
+        t += 20;
+        int fresh = DisplayStep(0.05f, t) < 0.06f;
+        float last = DisplayStep(0.05f, t += 20), fastest = 0;
+        for (int f = 0; f < 100; f++) { t += 20; float d = DisplayStep(1, t); if (d - last > fastest) fastest = d - last; last = d; }
+        fresh &= fastest <= DISP_FASTEST * 0.02f + 1e-5f && fastest > DISP_FASTEST * 0.02f * 0.8f && last > 0.999f;
+        g_screenWatch = 0;
+        Check(fresh, "a screen gone starts the bar as shown afresh; a leap from nothing to full is crossed at DISP_FASTEST, no quicker");
+    }
+    /* the fill is drawn to the bar as shown: a frame after the game leaps from 20% to 90%, the front has only begun to move */
+    {
+        float vf[12] = { 0.0f, 0.0f, 0.5f,  0.2f, 0.0f, 0.5f,  0.0f, 0.09f, 0.5f,  0.2f, 0.09f, 0.5f };
+        g_dispNew = 1; g_fillFull = 0; shim_ticks = 600000;
+        g_driftOn = 1; g_driftNew = 1; g_driftAt = 0; g_mapShown = 0;
+        PutFloat(0x882BE4, 0.2f);
+        RevealFill(vf);
+        float at20 = g_fillVerts[6 * (g_fillCount / 2 - 1)];
+        PutFloat(0x882BE4, 0.9f);
+        vf[3] = vf[9] = 0.9f;
+        shim_ticks += 20;
+        RevealFill(vf);
+        float next = g_fillVerts[6 * (g_fillCount / 2 - 1)];
+        g_driftOn = 0;
+        /* and the zoom is fed the bar as shown too, not the game's leap */
+        int zoomShown = g_driftMax < 0.3f;
+        Check(fabsf(at20 - 0.2f) < 1e-5f && next > 0.2f && next < 0.25f && fabsf(g_fillFull - 1.0f) < 1e-5f && zoomShown,
+              "the fill's front is the bar as shown: a leap from 20% to 90% has only begun a frame later, the zoom's too");
+    }
 
     /* the wallpapers */
     Fresh("walls-on");
