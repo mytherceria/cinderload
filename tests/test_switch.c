@@ -59,8 +59,8 @@ static void Fresh(const char *name)
     g_class = g_classFrom = g_classEntered = 0; g_classSure = 0;
     for (int i = 0; i < CLASS_CODE; i++) memcpy(shim_module + kClassCode[i].rva, kClassCode[i].bytes, (size_t)kClassCode[i].n);
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
-    g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
-    g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0;
+    g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
+    g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
     g_wallPick = 0;
@@ -1111,7 +1111,7 @@ static void LiveTests(void)
     {
         g_mapShown = 1;
         { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
-        g_drift = 0; g_driftAt = 0; g_driftNew = 1;
+        g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_driftNew = 1;
         DWORD at = 1200000;
         DriftStep(0, at);
         for (int i = 0; i < 50; i++) { at += 20; DriftStep(1, at); }
@@ -1137,7 +1137,7 @@ static void LiveTests(void)
         d = DisplayStep(0.05f, t);
         watched &= d < 0.1f;
         /* and the drift the same */
-        g_screenWatch = 1; g_drift = 0; g_driftAt = 0; g_driftNew = 1;
+        g_screenWatch = 1; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_driftNew = 1;
         t = 500000;
         for (int f = 0; f < 100; f++) { t += 20; DriftStep(0.7f, t); }
         t += 1500; DriftStep(0.05f, t);
@@ -1291,7 +1291,7 @@ static void LiveTests(void)
           "no reveal (its stub runs the drift): no drift either");
 
     /* the drift itself */
-    g_drift = 0; g_driftAt = 0;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0;
     DriftStep(0, 1000);
     int ident = g_bgUV[0] == 0.5f - 0.5f && g_bgUV[1] == 1 && g_bgUV[6] == 1 && g_bgUV[7] == 0;
     DWORD now = 1000;
@@ -1304,15 +1304,15 @@ static void LiveTests(void)
     int held = g_drift > 0.95f && fabsf(g_bgUV[0] - (0.5f - h)) < 1e-3f;
     now += 2000; DriftStep(0.0f, now);                                /* the next screen, after a gap: starts again */
     int reset = held && g_drift < 0.05f && mid > 0.95f;
-    g_drift = 0; g_driftAt = 0; now = 5000; DriftStep(0, now);
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; now = 5000; DriftStep(0, now);
     now += 20; DriftStep(1, now);
     int gentle = g_drift > 0 && g_drift < 0.1f;                       /* one frame after a leap: a small step, not a jump */
     float vv[12] = { 0.0f, 0.0f, 0.5f,  0.5f, 0.0f, 0.5f,  0.0f, 0.09f, 0.5f,  0.5f, 0.09f, 0.5f };
-    g_driftOn = 1; g_drift = 0; g_driftAt = 0; shim_ticks = 9000;
+    g_driftOn = 1; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; shim_ticks = 9000;
     PutFloat(0x882BE4, 1.0f);
     RevealFill(vv); shim_ticks += 50; RevealFill(vv);
     int framed = g_drift > 0 && g_bgUV[0] > 0;                        /* the stub's frame moved the picture */
-    g_driftOn = 0; g_drift = 0; g_driftAt = 0; shim_ticks += 50; RevealFill(vv);
+    g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; shim_ticks += 50; RevealFill(vv);
     framed &= g_drift == 0;                                           /* and only while the drift is on */
     Check(ident && full && reset && gentle && framed,
           "the drift: the whole picture at 0, 12% closer at a full bar, eased (no jump on a leap), starting again on a new screen");
@@ -1343,7 +1343,7 @@ static void LiveTests(void)
     Poke(MAP_DEST_MAP_VA, 0);
     PutFloat(MAP_DEST_X_VA, -5000.0f);                                /* v = 0.5 + 2e-5 * 5000 = 0.6 */
     PutFloat(MAP_DEST_Y_VA, 10000.0f);                                /* u = 0.5 - 2e-5 * 10000 = 0.3 */
-    g_drift = 0; g_driftAt = 0;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0;
     DWORD at = 20000;
     DriftStep(0, at);
     int whole = g_bgUV[0] == 0 && g_bgUV[1] == 1 && g_bgUV[2] == 1 && g_bgUV[5] == 0;
@@ -1353,16 +1353,16 @@ static void LiveTests(void)
     Check(whole && lands, "the zoom: the whole world as the screen begins, the arrival in the middle of a 3000-yard view at a full bar");
 
     Poke(MAP_DEST_MAP_VA, 1);                                         /* the position is still the last map's */
-    g_drift = 0; g_driftAt = 0; at = 40000;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; at = 40000;
     for (int i = 0; i < 500; i++) { at += 20; DriftStep(1, at); }
     int stays = g_bgUV[0] == 0 && g_bgUV[2] == 1;
-    g_drift = 0; g_driftAt = 0; at = 60000;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; at = 60000;
     for (int i = 0; i < 100; i++) { at += 20; DriftStep(0.5f, at); }
     Poke(MAP_DEST_MAP_VA, 0);                                         /* and now it lands */
     at += 20; DriftStep(0.5f, at);
     int glides = g_viewU < 0.5f && g_viewU > 0.45f;                   /* one frame: on its way, not there */
     /* half way: the middle of the view has come as far as the zoom has, not all the way to the arrival */
-    g_drift = 0; g_driftAt = 0; at = 80000;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; at = 80000;
     for (int i = 0; i < 500; i++) { at += 20; DriftStep(0.5f, at); }
     float e5 = 1 - (1 - g_drift) * (1 - g_drift), h5 = 0.5f * powf(hEnd / 0.5f, e5);
     float want = 0.5f + (0.3f - 0.5f) * (0.5f - h5) / (0.5f - hEnd);
@@ -1371,20 +1371,20 @@ static void LiveTests(void)
 
     /* his find, 4 Oct: the bar dips to 0 for a frame at the very end, and the view jumped back out to the whole world */
     Poke(MAP_DEST_MAP_VA, 0);
-    g_drift = 0; g_driftAt = 0; at = 100000;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; at = 100000;
     for (int i = 0; i < 500; i++) { at += 20; DriftStep(1, at); }
     at += 20; DriftStep(0, at);
     at += 20; DriftStep(0, at);
     int holds = fabsf(g_bgUV[0] - (0.3f - hEnd)) < 3e-3f && fabsf(g_bgUV[5] - (0.6f - hEnd)) < 3e-3f;
     /* and the approach is done by 90% of the bar, so its end rests on the arrival */
-    g_drift = 0; g_driftAt = 0; at = 120000;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; at = 120000;
     for (int i = 0; i < 500; i++) { at += 20; DriftStep(0.9f, at); }
     int early = g_viewH < hEnd * 1.06f;
     Check(holds && early, "the bar dipping at the end leaves the view on the arrival; the zoom is in by 90% of the bar");
 
     /* his find, 4 Oct, the real one: the game freezes for a moment at the very end of a load; a second without a frame
      * reset the view, and the next frame showed the first image again. A pause at a full bar now changes nothing */
-    g_drift = 0; g_driftAt = 0; at = 180000;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; at = 180000;
     for (int i = 0; i < 500; i++) { at += 20; DriftStep(1, at); }
     at += 1800; DriftStep(1, at);                                     /* the end-of-load freeze */
     at += 20; DriftStep(1, at);
@@ -1627,7 +1627,7 @@ static void LiveTests(void)
         unsigned e = 0x8B0000 + 0x120;                                  /* the list's own layout, read from its parser */
         Poke(e + 0x38, 0); PutFloat(e + 0x44, -5000); PutFloat(e + 0x48, 10000);
         int ar = g_classSure;
-        g_drift = 0; g_driftAt = 0; g_driftNew = 1;
+        g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_driftNew = 1;
         DWORD at = 900000;
         DriftStep(0, at);
         ar &= g_destOk && fabsf(g_destU - 0.3f) < 1e-4f && fabsf(g_destV - 0.6f) < 1e-4f && g_destMap == 0 &&
@@ -1831,7 +1831,7 @@ static void LiveTests(void)
         FlowBuild(0, 0.02f);
         int live = 0, nearEq = 0;
         for (int i = 0; i < FLOW_DROPS; i++) if (g_drop[i].live) { live++; if (fabsf(FlowLat(g_drop[i].v)) < 12) nearEq++; }
-        fl &= live > 400 && (float)nearEq / live > 0.35f;                /* the band is 0.32 of the picture; more are born in it */
+        fl &= live > 1000 && (float)nearEq / live > 0.26f && (float)nearEq / live < 0.38f;   /* evenly: the band is 0.32 of it */
         int pick = -1;
         for (int i = 0; i < FLOW_DROPS && pick < 0; i++) if (g_drop[i].live && g_drop[i].u > 0.2f && g_drop[i].u < 0.7f) pick = i;
         float u0 = g_drop[pick].u;
@@ -1872,6 +1872,48 @@ static void LiveTests(void)
         fl &= (!g_drop[1].live || g_drop[1].u > 0.3f) && (!g_drop[2].live || g_drop[2].age < 0.5f);   /* gone (or reborn elsewhere) */
         g_mael.ok = 0; g_flowW = 0;
         Check(fl, "the currents: flow.bin whole; drops born on open sea, more near the equator; carried at FLOW_SPEED; warm to cold by latitude; sinking in the north; gone at coasts and in the Maelstrom's eye; drawn along their way");
+    }
+    /* every drop moves at least FLOW_SLOWEST of the usual pace on screen (a still gyre's middle shows), at most FLOW_FASTEST */
+    {
+        static const unsigned char allSea3[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+                                                       255, 255, 255, 255, 255, 255, 255, 255 };
+        SeaParse(allSea3, sizeof allSea3);
+        FlowBinMake(0.6f, 100, 0); FlowParse(kFlowBin, sizeof kFlowBin);       /* the usual: 1.0 */
+        FlowBinMake(0.6f, 10, 0);                                                /* a tenth of it everywhere... */
+        memcpy(g_flowCell, kFlowBin + 16, 32);                                   /* ...keeping the usual as it was */
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        g_scrW = 3840; g_scrH = 2160;
+        memset(g_drop, 0, sizeof g_drop);
+        g_drop[0].u = 0.3f; g_drop[0].v = 0.5f; g_drop[0].age = 1; g_drop[0].life = 100; g_drop[0].live = 1;
+        for (int f = 0; f < 50; f++) FlowBuild(0, 0.02f);
+        int sl = fabsf((g_drop[0].u - 0.3f) - FLOW_SPEED * FLOW_SLOWEST / 1.778f) < 0.001f;
+        for (int i = 0; i < 32; i += 2) g_flowCell[i] = 127;                     /* 1.27 times the usual everywhere: as it is */
+        g_drop[0].u = 0.3f;
+        for (int f = 0; f < 50; f++) FlowBuild(0, 0.02f);
+        sl &= fabsf((g_drop[0].u - 0.3f) - FLOW_SPEED * 1.27f / 1.778f) < 0.001f;
+        g_flowW = 0;
+        Check(sl, "a slow current's drops still move at FLOW_SLOWEST of the usual pace on screen; a usual one's at its own");
+    }
+    /* his ask, 4 Oct: the first load after a cold boot is long, the rest a fraction of it: the session's first map screen
+     * zooms from the whole world, every later one from halfway in */
+    {
+        g_mapShown = 1;
+        { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+        Poke(BAR_MAP_VA, 0);
+        Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, -5000.0f); PutFloat(MAP_DEST_Y_VA, 10000.0f);
+        g_classSure = 0;
+        g_zoomScreens = 0; g_driftNew = 1; g_drift = 0; g_driftAt = 0;
+        DWORD at = 1300000;
+        for (int i = 0; i < 60; i++) { at += 20; DriftStep(0.0f, at); }   /* the first: the arrival known (from half the bar... */
+        for (int i = 0; i < 30; i++) { at += 20; DriftStep(0.6f, at); }   /* ...so it lands now) and the view starts whole */
+        float hFirst = g_viewH;
+        g_driftNew = 1;
+        for (int i = 0; i < 60; i++) { at += 20; DriftStep(0.0f, at); }
+        for (int i = 0; i < 30; i++) { at += 20; DriftStep(0.6f, at); }
+        float hEnd = 0.5f * 3000 * 2e-5f, half = 0.5f * (float)sqrt(hEnd / 0.5f);
+        int hw = g_zoomHalf && g_viewH < hFirst && g_viewH <= half * 1.02f;
+        g_mapShown = 0; g_zoomScreens = 0; g_zoomHalf = 0;
+        Check(hw, "the session's first map screen zooms from the whole world; a later one from halfway in");
     }
     /* the overlay with the waves and the currents in the pack */
     {
@@ -1966,13 +2008,13 @@ static void LiveTests(void)
     g_mapShown = 1;                                                   /* its own setting, whatever ran before */
     { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
     int paced = g_map.pace == 7 && g_map.ok;
-    g_drift = 0; g_driftAt = 0; at = 140000;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; at = 140000;
     DriftStep(0, at);
     for (int i = 0; i < 175; i++) { at += 20; DriftStep(1, at); }    /* 3.5 s */
     paced &= g_drift > 0.47f && g_drift < 0.51f;
     for (int i = 0; i < 200; i++) { at += 20; DriftStep(1, at); }    /* 7.5 s in all */
     paced &= g_drift > 0.99f;
-    g_drift = 0; g_driftAt = 0; at = 160000;
+    g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; at = 160000;
     float lag = 0;
     for (int i = 0; i <= 500; i++) {                                  /* a bar filling over 10 s */
         at += 20; DriftStep(i / 500.0f, at);

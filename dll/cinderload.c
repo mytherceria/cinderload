@@ -708,7 +708,7 @@ static void FireClose(void)
     g_fire.channel = -1;
 }
 
-#define BAR_SHOWN_MAX 96               /* the longest is 60: ", its fire the pack's orange, its wallpaper CinderWall64.blp" */
+#define BAR_SHOWN_MAX 128              /* the longest about 100: its fire, "the world map from halfway in, ending ...", resets */
 static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
 static void OverlayStart(void);
@@ -1131,6 +1131,9 @@ static struct { int ok; struct { int ok; float au, bu, av, bv; } m[2]; float end
 static volatile LONG g_mapShown;  /* the screen showing has the world map */
 static float g_viewU = 0.5f, g_viewV = 0.5f, g_viewH = 0.5f;     /* the world map's view, eased */
 static volatile LONG g_driftResets;                             /* a fallback reset within a screen (the log says) */
+static int g_zoomScreens;                                       /* the world map's screens begun this session */
+static volatile LONG g_zoomHalf;                                /* this one starts halfway in (his ask, 4 Oct: the first
+                                                                 * load after a cold boot is long, the rest a fraction) */
 
 static int MapSpace(char c) { return c == ' ' || c == '\t'; }
 /* A hex number of up to 8 digits at text[*at], spaces before it skipped. */
@@ -1274,7 +1277,7 @@ static void BarShownSince(char *out, int cap)
         char z[64];
         float h = g_viewH;
         int x10 = h > 0.001f ? (int)(5.0f / h + 0.5f) : 0;            /* 0.5 / h, in tenths */
-        wsprintfA(z, ", the world map, ending %d.%dx in", x10 / 10, x10 % 10);
+        wsprintfA(z, ", the world map%s, ending %d.%dx in", g_zoomHalf ? " from halfway in" : "", x10 / 10, x10 % 10);
         BarCat(out, cap, z);
         if (g_driftResets) { wsprintfA(z, ", %ld resets mid-screen", (long)g_driftResets); BarCat(out, cap, z); }
     }
@@ -1818,6 +1821,8 @@ static void DriftStep(float p, DWORD now)
         g_destOk = 0;
         g_destMap = -1;
         ArrivalSnap();
+        InterlockedExchange(&g_zoomHalf, g_zoomScreens > 0);
+        if (g_mapShown && g_map.ok) g_zoomScreens++;
     }
     if (p > g_driftMax) g_driftMax = p;
     p = g_driftMax;
@@ -1841,6 +1846,7 @@ static void DriftStep(float p, DWORD now)
             du = g_destU; dv = g_destV; hEnd = g_destH;
         }
         if (g_destOk) {
+            if (g_zoomHalf) e = 0.5f + 0.5f * e;                    /* after the first: from halfway in */
             h = 0.5f * (float)FireExp((double)(e * MapLn(hEnd / 0.5f)));
             float k = (0.5f - h) / (0.5f - hEnd);                   /* how far the zoom has come */
             cu = 0.5f + (du - 0.5f) * k;
@@ -2277,11 +2283,14 @@ static void WaveBuild(float t)
  * in the cold north (the water sinking) or at a coast, in the Maelstrom's eye, or when its life is done; reborn in view. */
 #define FLOW_PATH    "Interface\\Glues\\LoadingScreens\\CinderFlow.blp"
 #define FLOW_MAX     256
-#define FLOW_DROPS   900
+#define FLOW_DROPS   2400          /* (900 read sparse, his zoom.earth look is dense: 4 Oct) */
 #define FLOW_DEGREES 76.0f         /* the picture's height in degrees of latitude (as flow.py) */
 #define FLOW_SPEED   0.035f        /* heights of the screen a second, at the field's usual speed */
-#define FLOW_ALPHA   0.7f
-#define FLOW_PX      3.5f          /* a streak's half width on a 2160-tall screen */
+#define FLOW_SLOWEST 0.5f          /* every drop moves at least this much of that, and at most FLOW_FASTEST times it, so the */
+#define FLOW_FASTEST 2.0f          /* still middles of the gyres show and the coasts' fast currents do not swamp them (his */
+                                   /* find, 4 Oct: they bunched up near Balor, the fast current's streaks the only long ones) */
+#define FLOW_ALPHA   0.8f
+#define FLOW_PX      2.5f          /* a streak's half width on a 2160-tall screen */
 #define FLOW_DROP_Q  (FLOW_DROPS * 2)
 static signed char g_flowCell[FLOW_MAX * FLOW_MAX * 2];
 static int g_flowW, g_flowH, g_flowOn, g_flowTried, g_flQuads;
@@ -2333,13 +2342,13 @@ static float FlowLat(float v) { return (g_flowEq - v) * FLOW_DEGREES; }
 static float FlowWarmAt(float lat) { float a = lat < 0 ? -lat : lat; return FireClamp(1 - a / 40.0f, 0, 1); }
 static float DropRand(void) { g_dropSeed = SeaHash(g_dropSeed + 0x9E3779B9u); return (float)(g_dropSeed >> 8) / 16777216.0f; }
 
-/* A drop reborn in view, on open sea, most likely near the equator: 1 when placed. */
+/* A drop reborn in view, anywhere on the open sea, evenly (his ask, 4 Oct: "spread out evenly around the oceans"): 1 when
+ * placed. Its warmth is the latitude's it is born at. */
 static int DropBirth(int i, float u0, float u1, float vt, float vb)
 {
     for (int tries = 0; tries < 4; tries++) {
         float u = u0 + (u1 - u0) * DropRand(), v = vt + (vb - vt) * DropRand(), lat = FlowLat(v);
-        float rise = (float)FireExp(-(double)(lat * lat) / (12.0 * 12.0));
-        if (SeaAt(u, v) < 0.5f || DropRand() > 0.35f + 0.65f * rise) continue;
+        if (SeaAt(u, v) < 0.5f) continue;
         g_drop[i].u = u; g_drop[i].v = v; g_drop[i].du = g_drop[i].dv = 0; g_drop[i].age = 0;
         g_drop[i].life = 4 + 5 * DropRand(); g_drop[i].warm = FlowWarmAt(lat); g_drop[i].live = 1;
         return 1;
@@ -2363,7 +2372,8 @@ static void FlowBuild(float t, float dt)
         if (!g_drop[i].live && !DropBirth(i, u0, u1, vt, vb)) continue;
         float cx, cv;
         FlowAt(g_drop[i].u, g_drop[i].v, &cx, &cv);
-        float step = FLOW_SPEED * vh * dt / g_flowUsual;
+        float sp = (float)FireExp(0.5 * MapLn(cx * cx + cv * cv + 1e-20f)), rel = sp / g_flowUsual;
+        float want = FireClamp(rel, FLOW_SLOWEST, FLOW_FASTEST), step = sp > 1e-12f ? FLOW_SPEED * vh * dt * want / sp : 0;
         g_drop[i].du = cx * step / asp; g_drop[i].dv = cv * step;
         g_drop[i].u += g_drop[i].du; g_drop[i].v += g_drop[i].dv;
         float lat = FlowLat(g_drop[i].v);
@@ -2381,7 +2391,7 @@ static void FlowBuild(float t, float dt)
         float sx = g_drop[i].du / (u1 - u0) / k, sy = -g_drop[i].dv / vh;   /* its step, in screen heights */
         float len = (float)FireExp(0.5 * MapLn(sx * sx + sy * sy + 1e-12f));
         if (len < 1e-7f) continue;
-        float dx = sx / len, dy = sy / len, L = FireClamp(len / dt * 0.5f, 14.0f / 2160, 56.0f / 2160);
+        float dx = sx / len, dy = sy / len, L = FireClamp(len / dt * 0.5f, 22.0f / 2160, 60.0f / 2160);
         float tx = hx - dx * L * k, ty = hy - dy * L, nx = -dy * hs * k, ny = dx * hs;
         float env = FireClamp(g_drop[i].age / 0.6f, 0, 1) * FireClamp((g_drop[i].life - g_drop[i].age) / 1.0f, 0, 1);
         float a = env * FLOW_ALPHA * SeaAt(g_drop[i].u, g_drop[i].v);
