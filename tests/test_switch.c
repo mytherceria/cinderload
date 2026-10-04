@@ -1825,6 +1825,13 @@ static void LiveTests(void)
         Check(gl, "the glints: on open sea only, on the swells' crests, at most 40, each held where it appeared, a steady size on screen, none close in");
     }
 
+    /* the log's black on the map's screens: the whole width, the log's height from the bottom, the sheet's black square */
+    BarBlackBuild();
+    Check(g_blackPos[0] == 0 && g_blackPos[1] == 0 && g_blackPos[3] == 1 && fabsf(g_blackPos[7] - (0.09f + 2.0f / 2160)) < 1e-6f &&
+          g_blackPos[10] == fabsf(g_blackPos[7]) && g_blackUV[0] == SEA_SQUARE_U && g_blackUV[1] == SEA_DEEP_V &&
+          g_blackCol[0] == 0xFFFFFFFFu && g_blackCol[3] == 0xFFFFFFFFu,
+          "the log's black: the whole width, the log's height from the bottom, solid, from the sheet's black square");
+
     /* the names and icons: the table, the zoom bands and their fades, a steady size on screen, the strips' joins */
     {
         char tb[600];

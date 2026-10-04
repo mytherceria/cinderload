@@ -1933,9 +1933,10 @@ static int LblInt(const char *s, int n, int *at, int *out);       /* the labels'
 #define SWELL_COLS  176        /* at most: the screen's shape sets how many */
 #define SWELL_LIGHT 0.07f      /* the most a crest lightens the sea */
 #define SWELL_DARK  0.16f      /* and a trough darkens it */
-#define SEA_SQUARE_U 0.75f     /* the middle of the sheet's two squares: white above, the deep sea's below */
+#define SEA_SQUARE_U 0.75f     /* the middle of the sheet's two squares: white above, black below */
 #define SEA_WHITE_V  0.25f
 #define SEA_DEEP_V   0.75f
+#define BAR_BLACK_H  (0.09f + 2.0f / 2160)  /* the log's own height, as make_pack.py blacks it in on every other screen */
 #define GLINTS      40
 #define GLINT_PX    36.0f      /* a glint at its brightest, on a 2160-tall screen */
 #define GLINT_LIFE  1.1f       /* seconds a glint shows */
@@ -2421,6 +2422,21 @@ static void GlowBuild(DWORD now)
     }
 }
 
+/* ---- the log's black (4 Oct 2026, his find: "a log that's being lit on fire should be solid black not transparent"):
+ * every other screen's picture is painted black where the log lies (make_pack.py --reveal), so the log's open cracks
+ * show black ahead of the fire; the world map is one picture that zooms, so it cannot be, and the map showed through.
+ * On the map's screens the overlay ends with that same black band, over everything it drew and under the bar. */
+__attribute__((used)) float g_blackPos[4 * 3];
+__attribute__((used)) float g_blackUV[4 * 2];
+__attribute__((used)) unsigned g_blackCol[4];
+static void BarBlackBuild(void)
+{
+    static const float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, BAR_BLACK_H, BAR_BLACK_H };
+    static const float tu[4] = { SEA_SQUARE_U, SEA_SQUARE_U, SEA_SQUARE_U, SEA_SQUARE_U };
+    static const float tv[4] = { SEA_DEEP_V, SEA_DEEP_V, SEA_DEEP_V, SEA_DEEP_V };
+    QuadPut(g_blackPos, g_blackUV, g_blackCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
+}
+
 /* ---- the names and icons (4 Oct 2026): CinderLabels.blp (DXT5, one sheet of every sprite) and CinderLoad\labels.txt:
  *   s <id> <x0> <y0> <x1> <y1>              a sprite's rectangle on the sheet (4096 x 2048)
  *   i <sprite> <u> <v> <hmax> <hmin> <dy>    an item at picture u, v (float bits in hex), shown while the view's half
@@ -2649,6 +2665,10 @@ void WINAPI OverlayDraw(void)
     if (g_logoTex) {                                               /* over everything else */
         LogoBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_logoTex, 1, 0), g_logoPos, g_logoUV, g_logoCol, 1);
+    }
+    if (g_seaTex) {                                                /* last: the log's black, under the bar */
+        BarBlackBuild();
+        OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_blackPos, g_blackUV, g_blackCol, 1);
     }
 }
 #endif
