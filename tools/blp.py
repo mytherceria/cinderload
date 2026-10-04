@@ -9,7 +9,7 @@ import os, struct, subprocess, tempfile
 
 
 def write_blp(src, dst, width, height, alpha=False):
-    """alpha: DXT5 with the picture's own alpha (the overlay's waves); otherwise DXT1, no alpha, as the loading screens."""
+    """alpha: DXT5 with the picture's own alpha (the overlay's sheets); otherwise DXT1, no alpha, as the loading screens."""
     fmt = b'DXT5' if alpha else b'DXT1'
     with tempfile.TemporaryDirectory() as tmp:
         dds = os.path.join(tmp, 'tex.dds')

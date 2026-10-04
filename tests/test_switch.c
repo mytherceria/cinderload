@@ -50,7 +50,7 @@ static void Fresh(const char *name)
         shim_module[kOverlayCalls[i].rva] = 0xE8;
         memcpy(shim_module + kOverlayCalls[i].rva + 1, &rel, 4);
     }
-    g_ovOn = 0; g_wavesTried = 0; g_wavesTex = NULL;
+    g_ovOn = 0; g_seaOn = 0; g_seaTried = 0; g_seaTex = NULL; g_seaW = g_seaH = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
@@ -860,9 +860,13 @@ static void FireRealClient(const char *client)
 /* ---- tonight's three: the fire revealed with a soft, live front, and the continents' wallpapers ---- */
 static void PutFloat(unsigned va, float f) { memcpy(shim_module + va - 0x400000u, &f, 4); }
 static unsigned FBits(float f) { unsigned u; memcpy(&u, &f, 4); return u; }
+/* sea.bin for the tests: 4 x 4, the left half land, the right half open sea */
+static const unsigned char kSeaBin[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+                                               0, 0, 255, 255 };
 static void PackLive(int reveal, int walls)
 {
     const char *names[16], *data[16];
+    unsigned lens[16] = { 0 };
     int n = 0;
     names[n] = "Interface\\Glues\\LoadingScreens\\LoadScreenDeadmines.blp"; data[n++] = "BLP2screen";
     names[n] = "CinderLoad\\bars.txt";
@@ -877,7 +881,10 @@ static void PackLive(int reveal, int walls)
     }
     if (reveal) { names[n] = "CinderLoad\\reveal.txt"; data[n++] = "revealed"; }
     if (reveal & 2) { names[n] = "CinderLoad\\drift.txt"; data[n++] = "drifts"; }
-    if (reveal & 8) { names[n] = "Interface\\Glues\\LoadingScreens\\CinderWaves.blp"; data[n++] = "BLP2waves"; }
+    if (reveal & 8) {                                    /* the sea: its sheet, and its table (16: one a byte short) */
+        names[n] = "Interface\\Glues\\LoadingScreens\\CinderSea.blp"; data[n++] = "BLP2sea";
+        names[n] = "CinderLoad\\sea.bin"; data[n] = (const char *)kSeaBin; lens[n++] = sizeof kSeaBin - ((reveal & 16) ? 1 : 0);
+    }
     if (reveal & 4) {                                    /* the world map: Eastern Kingdoms only, u = 0.5 - 2e-5 y */
         static char mapTxt[200];
         snprintf(mapTxt, sizeof mapTxt, "# test\r\nmap 0 %08x %08x %08x %08x\r\nmap 2 0 0 0 0\r\nend 3000\r\n",
@@ -889,7 +896,8 @@ static void PackLive(int reveal, int walls)
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall01.blp"; data[n++] = "BLP2wall1";
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall02.blp"; data[n++] = "BLP2wall2";
     }
-    MakeMpq(UW, n, names, data, NULL);
+    for (int i = 0; i < n; i++) if (!lens[i]) lens[i] = (unsigned)strlen(data[i]);
+    MakeMpq(UW, n, names, data, lens);
     Put("WTF/Config.wtf", RES("5120x2160"));
 }
 static int SetupCall(void) { return Rd32(shim_module + 0x725E + 1); }
@@ -1157,35 +1165,130 @@ static void LiveTests(void)
     gone &= g_drift < 0.01f && g_driftNew == 0 && g_viewH > 0.49f;
     Check(freeze && gone, "a freeze at the end of a load keeps the view on the arrival, as does the game clearing it; a screen gone starts the next from the whole world");
 
-    /* the overlay: on only with the world map, the waves' picture and its six calls where they are */
-    Fresh("overlay-no-waves");
+    /* the overlay: on only with the world map, the sea's sheet and table, and its six calls where they are */
+    Fresh("overlay-no-sea");
     PackLive(1 | 2 | 4, 0);
     Start();
     int ov = !g_ovOn && !LogSays("overlay on");
+    Fresh("overlay-sea-short");
+    PackLive(1 | 2 | 4 | 8 | 16, 0);
+    Start();
+    ov &= !g_ovOn && !g_seaOn && g_seaW == 0;
     Fresh("overlay-on");
     PackLive(1 | 2 | 4 | 8, 0);
     Start();
-    ov &= g_ovOn && LogSays("overlay on: waves over the open sea");
+    ov &= g_ovOn && g_seaOn && g_seaW == 4 && LogSays("overlay on: swells and glints on the open sea");
     Fresh("overlay-moved");
     PackLive(1 | 2 | 4 | 8, 0);
     shim_module[0x6E0D + 2] ^= 0x10;                                  /* "after a draw" calls somewhere else */
     Start();
     ov &= !g_ovOn && LogSays("overlay off: the calls it draws with");
-    Check(ov, "the overlay: off without its picture, on with it, off (and saying so) when one of its calls has moved");
-    /* the waves follow the view, sway a little of its width, and the two copies fade in turn */
-    memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-    g_bgUV[0] = g_bgUV[4] = 0.2f; g_bgUV[2] = g_bgUV[6] = 0.4f;        /* a view 0.2 wide */
-    float maxSway = 0, minA = 1, maxA = 0;
-    for (DWORD ms = 0; ms < 20000; ms += 50) {
-        OverlayBuild(ms);
-        for (int k = 0; k < 2; k++) {
-            float s = fabsf(g_ovUV[k][0] - 0.2f); if (s > maxSway) maxSway = s;
-            float a = (g_ovCol[k][0] >> 24) / 255.0f; if (a < minA) minA = a; if (a > maxA) maxA = a;
-        }
+    Check(ov, "the overlay: off without the sea's sheet or with a sea.bin a byte short, on with them, off (and saying so) when one of its calls has moved");
+
+    /* sea.bin: anything but a whole table is left out; between the cells' middles, how open the sea is */
+    {
+        unsigned char bad[8 + 16];
+        memcpy(bad, kSeaBin, sizeof bad);
+        int sea = SeaParse(bad, sizeof bad) && g_seaW == 4 && g_seaH == 4;
+        bad[0] = 'X';
+        sea &= !SeaParse(bad, sizeof bad) && g_seaW == 0;
+        memcpy(bad, kSeaBin, sizeof bad);
+        bad[5] = 1;                                                   /* 260 wide */
+        sea &= !SeaParse(bad, sizeof bad);
+        sea &= !SeaParse(kSeaBin, sizeof kSeaBin - 1);
+        unsigned char longer[8 + 17];
+        memcpy(longer, kSeaBin, sizeof kSeaBin); longer[sizeof kSeaBin] = 0;
+        sea &= !SeaParse(longer, sizeof longer);                      /* a byte too many */
+        sea &= SeaParse(kSeaBin, sizeof kSeaBin);
+        sea &= SeaAt(0.125f, 0.5f) == 0 && SeaAt(0.875f, 0.5f) == 1 && fabsf(SeaAt(0.5f, 0.5f) - 0.5f) < 1e-5f &&
+               SeaAt(-0.1f, 0.5f) == 0 && SeaAt(1.1f, 0.5f) == 0 && SeaAt(0.99f, 0.01f) == 1;
+        sea &= SeaFade(0.5f) == 1 && SeaFade(0.30f) == 1 && fabsf(SeaFade(0.22f) - 0.5f) < 1e-5f && SeaFade(0.14f) == 0 &&
+               SeaFade(0.06f) == 0;
+        float worst = 0;
+        for (float x = -60; x < 60; x += 0.0137f) { float d = fabsf(SeaSin(x) - sinf(x)); if (d > worst) worst = d; }
+        sea &= worst < 2e-5f;
+        Check(sea, "sea.bin read only whole; how open the sea is, between cells, 0 off the picture; full far out, gone close in; a sine for any angle");
     }
-    int waves = maxSway > 0.0015f && maxSway <= WAVES_SWAY * 0.2f + 1e-5f && minA < 0.2f && maxA > 0.9f &&
-                fabsf(g_ovUV[0][2] - g_ovUV[0][0] - 0.2f) < 1e-5f;
-    Check(waves, "the waves: the view's own window, swaying at most 1.2% of its width, the two copies fading in turn");
+
+    /* the swells: a grid over the screen in the screen's shape, nothing on land, both crests and troughs on the sea, rolling */
+    {
+        SeaParse(kSeaBin, sizeof kSeaBin);
+        g_scrW = 3840; g_scrH = 2160;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);                    /* the whole world: h = 0.5 */
+        int sw = SwellBuild(10.0f) && g_swCols == 85;
+        int row = g_swCols + 1, land = 0, light = 0, dark = 0, maxA = 0;
+        for (int j = 0; j <= SWELL_ROWS; j++)
+            for (int i = 0; i <= g_swCols; i++) {
+                unsigned cl = g_swCol[0][j * row + i], cd = g_swCol[1][j * row + i], al = cl >> 24, ad = cd >> 24;
+                float x = g_swPos[(j * row + i) * 3];
+                if (x < 0.3f && (al || ad)) land++;
+                if (x > 0.9f && al) light++;
+                if (x > 0.9f && ad) dark++;
+                if (al && ad) land++;                                 /* a corner is a crest or a trough, never both */
+                if ((cl & 0xFFFFFFu) != 0xFFFFFFu || (cd & 0xFFFFFFu) != 0xFFFFFFu) land++;   /* colour is the sheet's */
+                if ((int)al > maxA) maxA = (int)al;
+                if ((int)ad > maxA) maxA = (int)ad;
+            }
+        sw &= !land && light > 20 && dark > 20 && maxA <= (int)(SWELL_DARK * 255 + 1) &&
+              g_swUV[0][1] == SEA_WHITE_V && g_swUV[1][1] == SEA_DEEP_V && g_swUV[0][0] == SEA_SQUARE_U;
+        sw &= g_swPos[0] == 0 && g_swPos[1] == 0 && g_swPos[(row * (SWELL_ROWS + 1) - 1) * 3] == 1 &&
+              g_swPos[(row * (SWELL_ROWS + 1) - 1) * 3 + 1] == 1;
+        sw &= g_swIndex[0] == row && g_swIndex[1] == 0 && g_swIndex[2 * g_swCols + 1] == g_swCols &&
+              g_swPos[g_swIndex[0] * 3 + 1] > g_swPos[g_swIndex[1] * 3 + 1];   /* above, then below: the background's winding */
+        unsigned beforeL = g_swCol[0][20 * row + 80], beforeD = g_swCol[1][20 * row + 80];
+        SwellBuild(13.0f);
+        sw &= g_swCol[0][20 * row + 80] != beforeL || g_swCol[1][20 * row + 80] != beforeD;   /* three seconds on, the sea has moved */
+        /* in the world's own place: the view moved by exactly two of its cells, a corner shows what its neighbour did */
+        float du = (g_bgUV[2] - g_bgUV[0]) * 2 / g_swCols;
+        SwellBuild(13.0f);
+        int thereL = (int)(g_swCol[0][20 * row + 82] >> 24), thereD = (int)(g_swCol[1][20 * row + 82] >> 24);
+        g_bgUV[0] += du; g_bgUV[2] += du; g_bgUV[4] += du; g_bgUV[6] += du;
+        SwellBuild(13.0f);
+        int movedL = (int)(g_swCol[0][20 * row + 80] >> 24), movedD = (int)(g_swCol[1][20 * row + 80] >> 24);
+        sw &= thereL + thereD > 3 && thereL - movedL <= 1 && movedL - thereL <= 1 && thereD - movedD <= 1 && movedD - thereD <= 1;
+        g_bgUV[0] = g_bgUV[4] = 0.2f; g_bgUV[2] = g_bgUV[6] = 0.4f;    /* h = 0.1: too close in */
+        sw &= !SwellBuild(13.0f);
+        g_seaW = 0;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        sw &= !SwellBuild(13.0f);                                     /* no sea.bin, no swells */
+        Check(sw, "the swells: a grid in the screen's shape, none on land, crests and troughs on the sea, rolling, in the world's place, gone close in");
+    }
+
+    /* the glints: only where the sea is open, never more than there are, held where they appeared, a steady size, none close in */
+    {
+        SeaParse(kSeaBin, sizeof kSeaBin);
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        memset(g_glint, 0, sizeof g_glint);
+        int gl = 1, most = 0, seen = 0, held = 1, crest = 0;
+        float minX = 1, maxW = 0;
+        for (int f = 0; f < 400; f++) {
+            float t = 100.0f + f * 0.05f, z = 0.5f - f * 0.0002f;    /* the view closing in a little, as in a zoom */
+            g_bgUV[0] = g_bgUV[4] = 0.5f - z; g_bgUV[2] = g_bgUV[6] = 0.5f + z;
+            g_bgUV[5] = g_bgUV[7] = 0.5f - z; g_bgUV[1] = g_bgUV[3] = 0.5f + z;
+            float wasU[GLINTS]; int wasCycle[GLINTS];
+            for (int g = 0; g < GLINTS; g++) { wasU[g] = g_glint[g].u; wasCycle[g] = g_glint[g].cycle; }
+            GlintsBuild(t);
+            for (int g = 0; g < GLINTS; g++)
+                if (f && g_glint[g].cycle == wasCycle[g] && g_glint[g].u != wasU[g]) held = 0;
+            if (g_glQuads > most) most = g_glQuads;
+            for (int q = 0; q < g_glQuads; q++) {
+                int slot = q ? q * 6 - 2 + 2 : 0;                     /* a later quad's own first corner, after the joins */
+                float x0 = g_glPos[slot * 3], x1 = g_glPos[(slot + 1) * 3];
+                if ((x0 + x1) / 2 < minX) minX = (x0 + x1) / 2;
+                if (x1 - x0 > maxW) maxW = x1 - x0;
+                float cu = g_bgUV[0] + (x0 + x1) / 2 * (g_bgUV[2] - g_bgUV[0]);
+                float cv = g_bgUV[5] + (1 - (g_glPos[slot * 3 + 1] + g_glPos[(slot + 2) * 3 + 1]) / 2) * (g_bgUV[1] - g_bgUV[5]);
+                if (SwellAt(cu * 3840.0f / 2160.0f, cv, t) > 0) crest++;
+                seen++;
+            }
+        }
+        gl &= seen > 150 && crest > seen * 0.85f && most >= 3 && most <= GLINTS && minX > 0.52f && held &&
+              maxW <= GLINT_PX * (2160.0f / 2160.0f) / 3840.0f + 1e-6f && maxW > GLINT_PX * 0.8f / 3840.0f;
+        g_bgUV[0] = g_bgUV[4] = 0.6f; g_bgUV[2] = g_bgUV[6] = 0.8f;    /* h = 0.1: too close in */
+        GlintsBuild(150.0f);
+        gl &= g_glQuads == 0;
+        Check(gl, "the glints: on open sea only, on the swells' crests, at most 40, each held where it appeared, a steady size on screen, none close in");
+    }
 
     /* the names and icons: the table, the zoom bands and their fades, a steady size on screen, the strips' joins */
     {

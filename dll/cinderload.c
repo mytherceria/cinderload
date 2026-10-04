@@ -1679,22 +1679,15 @@ static void DriftStep(float p, DWORD now)
  * 0x71AC). RevealStub already runs at the bar's fill entry, before the fill's own vertex setup; there the overlay draws
  * its own quads with the game's own calls, all __fastcall (the callee cleans): 0x58A2A0 vertex setup, 0x44ACF0 and
  * 0x589E80 bind a texture, 0x58A2E0 draw a strip, 0x58A340 after a draw. Its picture is loaded once, the way the
- * screen's picture is: 0x58A980 for the flags, then the loader the fire bar already found (VA 0x449D90).
- * First: the waves (CinderWaves.blp, DXT5, in the world map's layout, crests over open sea only), drawn twice with
- * small offsets that sway against each other while the two fade in and out: the sea moves. With the world map only. */
-#define WAVES_PATH "Interface\\Glues\\LoadingScreens\\CinderWaves.blp"
-#define WAVES_SWAY 0.012f     /* each copy sways this much of the view's width */
+ * screen's picture is: 0x58A980 for the flags, then the loader the fire bar already found (VA 0x449D90). With the
+ * world map only: first the sea, then the names and icons over it. */
 static const struct { DWORD rva; unsigned target; const char *what; } kOverlayCalls[] = {
     { 0x006DD9, 0x58A2A0, "the vertex setup" }, { 0x006DEB, 0x44ACF0, "a texture's device copy" },
     { 0x006DF7, 0x589E80, "binding it" }, { 0x006E08, 0x58A2E0, "the strip's draw" },
     { 0x006E0D, 0x58A340, "after a draw" }, { 0x006EA8, 0x58A980, "a texture's flags" } };
 #define OVERLAY_CALLS ((int)(sizeof kOverlayCalls / sizeof kOverlayCalls[0]))
-static int g_ovOn, g_wavesOn, g_wavesTried;
+static int g_ovOn;
 #define LABELS_PATH "Interface\\Glues\\LoadingScreens\\CinderLabels.blp"
-static void *g_wavesTex;
-__attribute__((used)) float g_ovPos[12] = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0 };   /* the screen's corners */
-__attribute__((used)) float g_ovUV[2][8];
-__attribute__((used)) unsigned g_ovCol[2][4];
 
 /* Every call the overlay makes, where WoW.exe calls it: 1 when all six are there. */
 static int OverlayCallsHold(const unsigned char *base)
@@ -1708,23 +1701,187 @@ static int OverlayCallsHold(const unsigned char *base)
     return 1;
 }
 
-/* The two copies of the waves for this frame, from the view (g_bgUV) and the clock. */
-static void OverlayBuild(DWORD now)
+/* Quad q of a set of strips LBL_BATCH quads long: its corners (bottom left, bottom right, top left, top right) into
+ * pos / uv / col. A strip's first quad has 4 corner slots, every later one 6: the last corner of the quad before and
+ * its own first again, two empty triangles joining them. */
+#define LBL_BATCH   120                        /* quads to a strip: 6 corners each less 2, so 718 */
+static void QuadPut(float *pos, float *uv, unsigned *col, int q, const float *x, const float *y, const float *tu,
+                    const float *tv, unsigned c)
 {
-    float t = (float)(now % 3600000u) / 1000.0f;
-    float w = g_bgUV[2] - g_bgUV[0];                                  /* the view's width on the picture */
-    for (int k = 0; k < 2; k++) {
-        float ph = t * 0.35f + k * 3.14159265f;
-        float du = WAVES_SWAY * w * FireSin(ph - (int)(ph / 6.2831853f) * 6.2831853f);
-        float dv = WAVES_SWAY * w * 0.5f * FireSin(ph * 0.7f + 1.3f - (int)((ph * 0.7f + 1.3f) / 6.2831853f) * 6.2831853f);
-        for (int c = 0; c < 4; c++) {
-            g_ovUV[k][2 * c] = g_bgUV[2 * c] + du;
-            g_ovUV[k][2 * c + 1] = g_bgUV[2 * c + 1] + dv;
+    int inBatch = q % LBL_BATCH, base = (q / LBL_BATCH) * (LBL_BATCH * 6 - 2), at = base + (inBatch ? inBatch * 6 - 2 : 0);
+    int order[6], m = 0;
+    if (inBatch) { order[m++] = -1; order[m++] = 0; }    /* the last corner again, then this quad's first again */
+    for (int k = 0; k < 4; k++) order[m++] = k;
+    for (int j = 0; j < m; j++) {
+        int k = order[j], slot = at + j;
+        if (k < 0) {                                      /* repeat the previous quad's last corner */
+            for (int e = 0; e < 3; e++) pos[slot * 3 + e] = pos[(slot - 1) * 3 + e];
+            uv[slot * 2] = uv[(slot - 1) * 2]; uv[slot * 2 + 1] = uv[(slot - 1) * 2 + 1];
+            col[slot] = col[slot - 1];
+            continue;
         }
-        float fp = t * 0.5f + k * 3.14159265f;
-        float a = 0.55f + 0.45f * FireSin(fp - (int)(fp / 6.2831853f) * 6.2831853f);   /* the two fade in turn */
-        unsigned al = (unsigned)(FireClamp(a, 0, 1) * 255.0f + 0.5f);
-        for (int c = 0; c < 4; c++) g_ovCol[k][c] = al << 24 | 0xFFFFFFu;
+        pos[slot * 3] = x[k]; pos[slot * 3 + 1] = y[k]; pos[slot * 3 + 2] = 0;
+        uv[slot * 2] = tu[k]; uv[slot * 2 + 1] = tv[k];
+        col[slot] = c;
+    }
+}
+
+/* ---- the sea (4 Oct 2026, his pick: glints, swells and depth; the depth is painted into the world map itself) ----
+ * CinderSea.blp (DXT5, 256 x 128): a glint on its left half; on its right a white square over a deep-sea one, so the
+ * colours are the sheet's own (the corners only ever say how much, never what colour). CinderLoad\sea.bin: where the
+ * open sea is, kept back from every coast: 'CSEA', its width and height (16 bits each, at most 256), then a byte a
+ * cell, 0 land to 255 open sea, over the picture's u, v. Both only while the view is far out: they fade as it closes in.
+ *   the swells: a grid over the screen drawn twice, white where two broad slow waves crest and deep blue where they
+ *               fall, in the world's own place, so the bands roll across the sea and stay put on it as the view moves
+ *   the glints: sparkles that come and go on the swells' crests, each at a fresh place every time it comes back */
+#define SEA_PATH    "Interface\\Glues\\LoadingScreens\\CinderSea.blp"
+#define SEA_MAX     256
+#define SEA_FAR     0.30f      /* the view's half height: the sea at its fullest from here out */
+#define SEA_NEAR    0.14f      /* and gone by here */
+#define SWELL_ROWS  48
+#define SWELL_COLS  176        /* at most: the screen's shape sets how many */
+#define SWELL_LIGHT 0.07f      /* the most a crest lightens the sea */
+#define SWELL_DARK  0.16f      /* and a trough darkens it */
+#define SEA_SQUARE_U 0.75f     /* the middle of the sheet's two squares: white above, the deep sea's below */
+#define SEA_WHITE_V  0.25f
+#define SEA_DEEP_V   0.75f
+#define GLINTS      40
+#define GLINT_PX    36.0f      /* a glint at its brightest, on a 2160-tall screen */
+#define GLINT_LIFE  1.1f       /* seconds a glint shows */
+#define GLINT_CREST 0.25f      /* a glint only sparks where the swell is at least this high: on the crests */
+static unsigned char g_seaMask[SEA_MAX * SEA_MAX];
+static int g_seaW, g_seaH, g_seaOn, g_seaTried, g_swCols, g_glQuads;
+static void *g_seaTex;
+static struct { float u, v; int cycle, set, on; } g_glint[GLINTS];
+__attribute__((used)) float g_swPos[(SWELL_ROWS + 1) * (SWELL_COLS + 1) * 3];
+__attribute__((used)) float g_swUV[2][(SWELL_ROWS + 1) * (SWELL_COLS + 1) * 2];        /* the crests', the troughs' */
+__attribute__((used)) unsigned g_swCol[2][(SWELL_ROWS + 1) * (SWELL_COLS + 1)];
+__attribute__((used)) unsigned short g_swIndex[(SWELL_COLS + 1) * 2];
+__attribute__((used)) float g_glPos[GLINTS * 6 * 3];
+__attribute__((used)) float g_glUV[GLINTS * 6 * 2];
+__attribute__((used)) unsigned g_glCol[GLINTS * 6];
+
+/* sea.bin, checked whole: 1 when it is used. */
+static int SeaParse(const unsigned char *d, unsigned len)
+{
+    g_seaW = g_seaH = 0;
+    if (len < 8 || d[0] != 'C' || d[1] != 'S' || d[2] != 'E' || d[3] != 'A') return 0;
+    int w = d[4] | d[5] << 8, h = d[6] | d[7] << 8;
+    if (w < 2 || h < 2 || w > SEA_MAX || h > SEA_MAX || len != 8u + (unsigned)(w * h)) return 0;
+    for (int i = 0; i < w * h; i++) g_seaMask[i] = d[8 + i];
+    g_seaW = w; g_seaH = h;
+    return 1;
+}
+
+/* How open the sea is at picture u, v: 0..1, between the cells' middles; 0 off the picture. */
+static float SeaAt(float u, float v)
+{
+    if (!g_seaW || !(u >= 0 && u <= 1 && v >= 0 && v <= 1)) return 0;
+    float x = FireClamp(u * g_seaW - 0.5f, 0, (float)(g_seaW - 1)), y = FireClamp(v * g_seaH - 0.5f, 0, (float)(g_seaH - 1));
+    int x0 = (int)x, y0 = (int)y, x1 = x0 + 1 < g_seaW ? x0 + 1 : x0, y1 = y0 + 1 < g_seaH ? y0 + 1 : y0;
+    float fx = x - x0, fy = y - y0;
+    const unsigned char *a = g_seaMask + y0 * g_seaW, *b = g_seaMask + y1 * g_seaW;
+    float top = a[x0] + (a[x1] - a[x0]) * fx, bot = b[x0] + (b[x1] - b[x0]) * fx;
+    return (top + (bot - top) * fy) / 255.0f;
+}
+
+/* The sea's strength for a view h high (half height): full far out, gone close in, eased between. */
+static float SeaFade(float h)
+{
+    float k = FireClamp((h - SEA_NEAR) / (SEA_FAR - SEA_NEAR), 0, 1);
+    return k * k * (3 - 2 * k);
+}
+
+/* sin for any x (FireSin is good only to pi/2). */
+static float SeaSin(float x)
+{
+    const float pi = 3.14159265f;
+    x -= 2 * pi * (float)(int)(x / (2 * pi));
+    if (x < 0) x += 2 * pi;
+    float s = 1;
+    if (x > pi) { x -= pi; s = -1; }
+    if (x > pi / 2) x = pi - x;
+    return s * FireSin(x);
+}
+
+/* The swell, -1..1, at x across and v down the picture, both in heights of the world (x = u times the screen's shape),
+ * t seconds: two broad waves running nearly the same way (about a sixth and an eighth of the world apart), rolling
+ * slowly down the world, both bent by the same slow wander, so the sea shows long soft bands, never a grid. */
+static float SwellAt(float x, float v, float t)
+{
+    float wv = 2.2f * SeaSin(x * 4.5f + v * 2.0f + t * 0.05f) + 1.1f * SeaSin(-x * 7.0f + v * 5.0f + 0.7f);
+    float a = SeaSin(x * 9.0f + v * 40.0f - t * 0.45f + wv);
+    float b = SeaSin(-x * 5.0f + v * 53.0f - t * 0.6f + 0.8f * wv + 0.9f);
+    return 0.6f * a + 0.4f * b;
+}
+
+/* This frame's swells, from the view (g_bgUV): rows of corners bottom to top into g_swPos, each corner's alpha for the
+ * crests' pass (the sheet's white) and the troughs' (its deep blue) into g_swCol[0] and [1] with their g_swUV, and the
+ * strip that joins two rows into g_swIndex (each row's corner above, then below, for the background's own winding).
+ * 0 when there is nothing to draw (no sea, or the view too close in). */
+static int SwellBuild(float t)
+{
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
+    float fade = SeaFade((u1 - u0) * 0.5f), asp = (float)g_scrW / (float)g_scrH;
+    if (!g_seaW || fade <= 0.01f) return 0;
+    int cols = (int)(SWELL_ROWS * asp + 0.5f);
+    if (cols < 8) cols = 8;
+    if (cols > SWELL_COLS) cols = SWELL_COLS;
+    g_swCols = cols;
+    for (int j = 0; j <= SWELL_ROWS; j++) {
+        float y = (float)j / SWELL_ROWS, v = vb + (vt - vb) * y;
+        for (int i = 0; i <= cols; i++) {
+            float x = (float)i / cols, u = u0 + (u1 - u0) * x;
+            int at = j * (cols + 1) + i;
+            g_swPos[at * 3] = x; g_swPos[at * 3 + 1] = y; g_swPos[at * 3 + 2] = 0;
+            g_swUV[0][at * 2] = g_swUV[1][at * 2] = SEA_SQUARE_U;
+            g_swUV[0][at * 2 + 1] = SEA_WHITE_V; g_swUV[1][at * 2 + 1] = SEA_DEEP_V;
+            float m = SeaAt(u, v) * fade, s = m > 0.004f ? SwellAt(u * asp, v, t) : 0;
+            g_swCol[0][at] = (unsigned)((s > 0 ? s : 0) * m * SWELL_LIGHT * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
+            g_swCol[1][at] = (unsigned)((s < 0 ? -s : 0) * m * SWELL_DARK * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
+        }
+    }
+    for (int i = 0; i <= cols; i++) { g_swIndex[2 * i] = (unsigned short)(cols + 1 + i); g_swIndex[2 * i + 1] = (unsigned short)i; }
+    return 1;
+}
+
+static unsigned SeaHash(unsigned x)
+{
+    x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+    return x;
+}
+static float SeaRand(unsigned a, unsigned b) { return (float)(SeaHash(a * 0x9E3779B9u ^ SeaHash(b + 0x632BE5ABu)) >> 8) / 16777216.0f; }
+
+/* This frame's glints, from the view and the clock, into g_glPos / g_glUV / g_glCol as one strip (g_glQuads). Each of
+ * GLINTS comes back every 2.4 to 4 s; each time, at a fresh place in view, kept only on open sea on a swell's crest,
+ * and held there (in the world) for the GLINT_LIFE it shows, swelling and fading, at a steady size on screen. */
+static void GlintsBuild(float t)
+{
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
+    float fade = SeaFade((u1 - u0) * 0.5f), k = (float)g_scrH / 2160.0f;
+    g_glQuads = 0;
+    if (!g_seaW || fade <= 0.01f) return;
+    for (int g = 0; g < GLINTS; g++) {
+        float period = 2.4f + 1.6f * SeaRand((unsigned)g, 1), tt = t + period * SeaRand((unsigned)g, 2);
+        int n = (int)(tt / period);
+        float age = tt - n * period;
+        if (!g_glint[g].set || g_glint[g].cycle != n) {
+            unsigned id = (unsigned)g * 7919u + (unsigned)n;
+            float u = u0 + (u1 - u0) * SeaRand(id, 3), v = vt + (vb - vt) * SeaRand(id, 4);
+            g_glint[g].u = u; g_glint[g].v = v; g_glint[g].cycle = n; g_glint[g].set = 1;
+            g_glint[g].on = SeaAt(u, v) > 0.6f && SwellAt(u * (float)g_scrW / (float)g_scrH, v, t) > GLINT_CREST;
+        }
+        if (!g_glint[g].on || age >= GLINT_LIFE) continue;
+        float e = SeaSin(3.14159265f * age / GLINT_LIFE);
+        e *= e;
+        float a = e * fade * 0.9f;
+        if (a < 0.01f) continue;
+        float sx = (g_glint[g].u - u0) / (u1 - u0), sy = 1 - (g_glint[g].v - vt) / (vb - vt);
+        float px = GLINT_PX * k * (0.55f + 0.45f * e), sw = px / (float)g_scrW, sh = px / (float)g_scrH;
+        if (sx + sw / 2 < 0 || sx - sw / 2 > 1 || sy + sh / 2 < 0 || sy - sh / 2 > 1) continue;
+        float x[4] = { sx - sw / 2, sx + sw / 2, sx - sw / 2, sx + sw / 2 }, y[4] = { sy - sh / 2, sy - sh / 2, sy + sh / 2, sy + sh / 2 };
+        static const float tu[4] = { 0, 0.5f, 0, 0.5f }, tv[4] = { 1, 1, 0, 0 };
+        QuadPut(g_glPos, g_glUV, g_glCol, g_glQuads++, x, y, tu, tv, (unsigned)(a * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
     }
 }
 
@@ -1738,7 +1895,6 @@ static void OverlayBuild(DWORD now)
 #define LBL_SHEET_H 2048.0f
 #define LBL_SPRITES 1024
 #define LBL_ITEMS   2048
-#define LBL_BATCH   120                        /* quads to a strip: 6 corners each less 2, so 718 */
 #define LBL_FRAME   480                        /* quads a frame at most */
 static struct { unsigned short x0, y0, x1, y1; } g_lblSpr[LBL_SPRITES];
 static struct { float u, v; unsigned short spr, hmax, hmin; short dy; } g_lblItem[LBL_ITEMS];
@@ -1814,25 +1970,7 @@ static void LabelsBuild(void)
         float tu0 = g_lblSpr[s].x0 / LBL_SHEET_W, tu1 = g_lblSpr[s].x1 / LBL_SHEET_W;
         float tv0 = g_lblSpr[s].y0 / LBL_SHEET_H, tv1 = g_lblSpr[s].y1 / LBL_SHEET_H;
         float tu[4] = { tu0, tu1, tu0, tu1 }, tv[4] = { tv1, tv1, tv0, tv0 };
-        unsigned col = (unsigned)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
-        /* corner slots: a batch's first quad has 4, every later one 6 (its first corner twice, after the last's) */
-        int inBatch = q % LBL_BATCH, base = (q / LBL_BATCH) * (LBL_BATCH * 6 - 2), at = base + (inBatch ? inBatch * 6 - 2 : 0);
-        int order[6], m = 0;
-        if (inBatch) { order[m++] = -1; order[m++] = 0; }    /* the last corner again, then this quad's first again */
-        for (int c = 0; c < 4; c++) order[m++] = c;
-        for (int j = 0; j < m; j++) {
-            int c = order[j], slot = at + j;
-            if (c < 0) {                                      /* repeat the previous quad's last corner */
-                for (int e = 0; e < 3; e++) g_lblPos[slot * 3 + e] = g_lblPos[(slot - 1) * 3 + e];
-                g_lblUV[slot * 2] = g_lblUV[(slot - 1) * 2]; g_lblUV[slot * 2 + 1] = g_lblUV[(slot - 1) * 2 + 1];
-                g_lblCol[slot] = g_lblCol[slot - 1];
-                continue;
-            }
-            g_lblPos[slot * 3] = x[c]; g_lblPos[slot * 3 + 1] = y[c]; g_lblPos[slot * 3 + 2] = 0;
-            g_lblUV[slot * 2] = tu[c]; g_lblUV[slot * 2 + 1] = tv[c];
-            g_lblCol[slot] = col;
-        }
-        q++;
+        QuadPut(g_lblPos, g_lblUV, g_lblCol, q++, x, y, tu, tv, (unsigned)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
     }
     g_lblQuads = q;
 }
@@ -1857,35 +1995,46 @@ static void *OverlayLoad(const char *path)
     return ((OvLoad)g_barLoader)(path, status, flags, 0, 0);
 }
 
-/* From RevealStub, on the game's thread, before the fill's own setup: the overlay's quads. */
+/* Quads put by QuadPut, drawn as strips of LBL_BATCH with the picture dev. */
+static void OverlayStrips(void *dev, const float *pos, const float *uv, const unsigned *col, int quads)
+{
+    for (int q = 0; q < quads; q += LBL_BATCH) {
+        int n = quads - q < LBL_BATCH ? quads - q : LBL_BATCH, first = (q / LBL_BATCH) * (LBL_BATCH * 6 - 2);
+        int corners = n * 6 - 2;
+        OV_FN(OvSetup, 0x58A2A0)(corners, pos + first * 3, 12, 0, 0, col + first, 4, 0, 0, uv + first * 2, 8, 0, 0);
+        OV_FN(OvBind, 0x589E80)(0x17, dev);
+        OV_FN(OvDraw, 0x58A2E0)(4, corners, g_lblIndex);
+        OV_FN(OvAfter, 0x58A340)();
+    }
+}
+
+/* From RevealStub, on the game's thread, before the fill's own setup: the overlay's quads, the sea under the names. */
 void WINAPI OverlayDraw(void) __attribute__((used));
 void WINAPI OverlayDraw(void)
 {
     if (!g_ovOn || !g_mapShown) return;
-    if (g_wavesOn && !g_wavesTex && !g_wavesTried) { g_wavesTried = 1; g_wavesTex = OverlayLoad(WAVES_PATH); }
-    if (g_wavesTex) {
-        OverlayBuild(GetTickCount());
-        void *dev = OV_FN(OvDevice, 0x44ACF0)(g_wavesTex, 1, 0);
-        for (int k = 0; k < 2; k++) {
-            OV_FN(OvSetup, 0x58A2A0)(4, g_ovPos, 12, 0, 0, g_ovCol[k], 4, 0, 0, g_ovUV[k], 8, 0, 0);
-            OV_FN(OvBind, 0x589E80)(0x17, dev);
-            OV_FN(OvDraw, 0x58A2E0)(4, 4, (const void *)((ULONG_PTR)GetModuleHandleA(NULL) + (0x82F010 - 0x400000u)));
-            OV_FN(OvAfter, 0x58A340)();
+    if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
+    if (g_seaTex) {
+        float t = (float)(GetTickCount() % 3600000u) / 1000.0f;
+        if (SwellBuild(t)) {
+            void *dev = OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0);
+            int row = g_swCols + 1;
+            for (int k = 0; k < 2; k++)                            /* the crests, then the troughs */
+                for (int j = 0; j < SWELL_ROWS; j++) {             /* a strip from each row up to the next */
+                    OV_FN(OvSetup, 0x58A2A0)(row * 2, g_swPos + j * row * 3, 12, 0, 0, g_swCol[k] + j * row, 4, 0, 0,
+                                             g_swUV[k] + j * row * 2, 8, 0, 0);
+                    OV_FN(OvBind, 0x589E80)(0x17, dev);
+                    OV_FN(OvDraw, 0x58A2E0)(4, row * 2, g_swIndex);
+                    OV_FN(OvAfter, 0x58A340)();
+                }
         }
+        GlintsBuild(t);
+        if (g_glQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_glPos, g_glUV, g_glCol, g_glQuads);
     }
     if (g_lblOn && !g_lblTex && !g_lblTried) { g_lblTried = 1; g_lblTex = OverlayLoad(LABELS_PATH); }
     if (g_lblTex) {
         LabelsBuild();
-        void *dev = OV_FN(OvDevice, 0x44ACF0)(g_lblTex, 1, 0);
-        for (int q = 0; q < g_lblQuads; q += LBL_BATCH) {
-            int n = g_lblQuads - q < LBL_BATCH ? g_lblQuads - q : LBL_BATCH, first = (q / LBL_BATCH) * (LBL_BATCH * 6 - 2);
-            int corners = n * 6 - 2;
-            OV_FN(OvSetup, 0x58A2A0)(corners, g_lblPos + first * 3, 12, 0, 0, g_lblCol + first, 4, 0, 0, g_lblUV + first * 2,
-                                     8, 0, 0);
-            OV_FN(OvBind, 0x589E80)(0x17, dev);
-            OV_FN(OvDraw, 0x58A2E0)(4, corners, g_lblIndex);
-            OV_FN(OvAfter, 0x58A340)();
-        }
+        OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_lblTex, 1, 0), g_lblPos, g_lblUV, g_lblCol, g_lblQuads);
     }
 }
 #endif
@@ -1893,9 +2042,15 @@ void WINAPI OverlayDraw(void)
 /* At start, with the world map on: the overlay, when its calls are where they should be and its picture is in the pack. */
 static void OverlayStart(void)
 {
-    g_ovOn = g_wavesOn = g_lblOn = 0;
+    g_ovOn = g_seaOn = g_lblOn = 0;
     if (!g_map.ok || !g_barLoader) return;
-    g_wavesOn = BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderWaves");
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSea")) {
+        unsigned char *data = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\sea.bin", &data, &len) == MPQ_OK && data)
+            g_seaOn = SeaParse(data, len);
+        if (data) HeapFree(GetProcessHeap(), 0, data);
+    }
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderLabels")) {
         unsigned char *text = NULL;
         unsigned len = 0;
@@ -1904,9 +2059,9 @@ static void OverlayStart(void)
         if (text) HeapFree(GetProcessHeap(), 0, text);
         g_lblOn = g_lblItems > 0;
     }
-    if (!g_wavesOn && !g_lblOn) return;
+    if (!g_seaOn && !g_lblOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
-        g_wavesOn = g_lblOn = 0;
+        g_seaOn = g_lblOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
@@ -1914,7 +2069,7 @@ static void OverlayStart(void)
     g_ovOn = 1;
     char m[160];
     wsprintfA(m, "overlay on:%s%s, drawn over the world map and under the bar (in memory only)",
-              g_wavesOn ? " waves over the open sea" : "", g_lblOn ? (g_wavesOn ? ", names and icons" : " names and icons") : "");
+              g_seaOn ? " swells and glints on the open sea" : "", g_lblOn ? (g_seaOn ? ", names and icons" : " names and icons") : "");
     Log(m);
 }
 

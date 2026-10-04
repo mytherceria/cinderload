@@ -5,7 +5,7 @@ seams; the continents' two screens can be the test pattern instead (--test-conti
 
 Usage: STORMLIB=/path/to/libstorm.so python3 make_pack.py <client Data dir> <out dir> <shape> <screen w> <screen h>
        [--test-continents] [--art <map file>] [--bar <dir>] [--fire-bars <dir> --bar-map <file>] [--reveal]
-       [--wallpapers <file>] [--drift] [--map <world png> <map.txt>] [--waves <waves png>] [--labels <sheet png> <labels.txt>]
+       [--wallpapers <file>] [--drift] [--map <world png> <map.txt>] [--sea <sheet png> <sea.bin>] [--labels <sheet png> <labels.txt>]
    e.g. ... make_pack.py ~/Games/RavenCraft-fogtest/Data out 21x9 5120 2160 --test-continents
 
 The loading bar's fire for each screen (CinderLoad.dll picks the bar by the screen's picture; both options or neither):
@@ -308,13 +308,15 @@ if __name__ == '__main__':
         write_blp(sheet, blp, 4096, 2048, alpha=True)
         files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderLabels.blp'))
         files.append((table, 'CinderLoad\\labels.txt'))
-    if '--waves' in sys.argv:                           # the overlay's waves, over the world map's open sea (DXT5)
-        waves = os.path.expanduser(sys.argv[sys.argv.index('--waves') + 1])
-        if not os.path.isfile(waves):
-            raise SystemExit('--waves: the waves picture (kit/zoom/world_texture.py makes it)')
-        blp = os.path.join(blps, 'CinderWaves.blp')
-        write_blp(waves, blp, 2048, 2048, alpha=True)
-        files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderWaves.blp'))
+    if '--sea' in sys.argv:                             # the overlay's swells and glints, over the world map's open sea
+        i = sys.argv.index('--sea')
+        sheet, table = os.path.expanduser(sys.argv[i + 1]), os.path.expanduser(sys.argv[i + 2])
+        if not (os.path.isfile(sheet) and os.path.isfile(table)):
+            raise SystemExit('--sea: the sea sheet and its sea.bin (kit/zoom/world_texture.py makes both)')
+        blp = os.path.join(blps, 'CinderSea.blp')
+        write_blp(sheet, blp, 256, 128, alpha=True)
+        files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderSea.blp'))
+        files.append((table, 'CinderLoad\\sea.bin'))
     if '--drift' in sys.argv or '--map' in sys.argv:    # CinderLoad.dll moves each picture as the bar fills (with the reveal)
         note = os.path.join(blps, 'drift.txt')
         with open(note, 'w') as f:
