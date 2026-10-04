@@ -2328,32 +2328,83 @@ static void WaveBuild(float t)
  * CinderLoad\flow.bin (the art kit's flow.py): 'CFLW', its width and height (16 bits each), the equator's v and the speed
  * scale (floats), then two signed bytes a cell, the current across and down the picture: the trades and the westerlies,
  * turned along every coast into gyres, the Great Sea one great clockwise gyre with the Maelstrom at its heart, the
- * Maelstrom a drain. CinderFlow.blp (DXT5, 256 x 64): a warm gold streak above a cold blue one.
- * FLOW_DROPS drops ride it, drawn as streaks from where they were to where they are: most are born near the equator
- * (the warm water rising), each warm as the latitude it is born at, cooling toward the latitude it is in, fading out
- * in the cold north (the water sinking) or at a coast, in the Maelstrom's eye, or when its life is done; reborn in view. */
+ * Maelstrom a drain. CinderFlow.blp (DXT5, 256 x 64): eight rows of 8 pixels, a soft line in each of his blues.
+ * FLOW_DROPS drops ride it, born evenly on the open sea in view. Each leaves a TRAIL (his ask, 4 Oct: the streaks
+ * "nowhere near long enough"; his zoom.earth and windy.com looks): the last FLOW_TRAIL_S x FLOW_TRAIL seconds of its way,
+ * bright and wide at its head, fading and narrowing to its tail, every stretch of it in the shade of how fast the water
+ * ran there: his blues, slowest to fastest, dark blue, sea green, aquamarine, turquoise, cerulean, light blue, each as
+ * much of the moving sea as the next. Water crowds where it gathers (a gyre, a cape) but never into a clump: a crowded
+ * patch ages its drops faster. A drop dies by fading: at a coast or in the Maelstrom's eye it stops and fades quickly, in
+ * the cold north it ages sooner (the water sinking); reborn in view. */
 #define FLOW_PATH    "Interface\\Glues\\LoadingScreens\\CinderFlow.blp"
 #define FLOW_MAX     256
-#define FLOW_DROPS   2400          /* (900 read sparse, his zoom.earth look is dense: 4 Oct) */
+#define FLOW_DROPS   1000          /* each a trail now, so fewer than the 2400 dots of the morning of 4 Oct */
+#define FLOW_TRAIL   12            /* the points a drop remembers behind it */
+#define FLOW_TRAIL_S 0.2f          /* seconds between them: its trail is the last 2.4 s of its way */
 #define FLOW_DEGREES 76.0f         /* the picture's height in degrees of latitude (as flow.py) */
 #define FLOW_SPEED   0.035f        /* heights of the screen a second, at the field's usual speed */
-#define FLOW_SLOWEST 0.5f          /* every drop moves at least this much of that, and at most FLOW_FASTEST times it, so the */
-#define FLOW_FASTEST 2.0f          /* still middles of the gyres show and the coasts' fast currents do not swamp them (his */
-                                   /* find, 4 Oct: they bunched up near Balor, the fast current's streaks the only long ones) */
-#define FLOW_ALPHA   0.8f
-#define FLOW_PX      2.5f          /* a streak's half width on a 2160-tall screen */
-#define FLOW_DROP_Q  (FLOW_DROPS * 2)
+#define FLOW_SLOWEST 0.6f          /* every drop moves at least this much of that, and at most FLOW_FASTEST times it: the */
+#define FLOW_FASTEST 2.2f          /* still middles of the gyres show, and the fast currents run long without swamping */
+#define FLOW_ALPHA   0.85f
+#define FLOW_PX      2.5f          /* a trail's half width at its head on a 2160-tall screen; 0.4 of it at its tail */
+#define FLOW_SHADES  6             /* his blues, slowest to fastest: rows 0..5 of the sheet */
+#define FLOW_ROWS    8             /* rows of 8 pixels in the 64-tall sheet */
+#define FLOW_GRID_X  24            /* the view in cells, to find a crowd */
+#define FLOW_GRID_Y  12
+#define FLOW_CROWD   4.0f          /* a cell holding this many times its share ages its drops three times as fast */
+#define FLOW_DROP_Q  (FLOW_DROPS * FLOW_TRAIL)
 static signed char g_flowCell[FLOW_MAX * FLOW_MAX * 2];
 static int g_flowW, g_flowH, g_flowOn, g_flowTried, g_flQuads;
 static float g_flowEq, g_flowScale, g_flowUsual;
+static float g_flowCut[FLOW_SHADES - 1];   /* the speeds (against the usual) where one shade gives way to the next */
 static void *g_flowTex;
-static struct { float u, v, du, dv, age, life, warm; int live; } g_drop[FLOW_DROPS];
+static struct {
+    float u, v, du, dv, age, life, since;
+    int live, dying, n;                    /* dying: stopped at a coast or the eye, fading; n: points on its trail */
+    float tu[FLOW_TRAIL], tv[FLOW_TRAIL];  /* its trail, newest first */
+    unsigned char shade, ts[FLOW_TRAIL];   /* the shade where it is, and where each point was */
+} g_drop[FLOW_DROPS];
 static unsigned g_dropSeed;
+static unsigned short g_flowCrowd[FLOW_GRID_X * FLOW_GRID_Y];
 __attribute__((used)) float g_flPos[FLOW_DROP_Q * 6 * 3];
 __attribute__((used)) float g_flUV[FLOW_DROP_Q * 6 * 2];
 __attribute__((used)) unsigned g_flCol[FLOW_DROP_Q * 6];
 
 static float GlowF(const unsigned char *p);          /* the glow's (below): a float from four bytes, low first */
+
+/* The cuts between his blues: each shade as much of the moving sea as the next, from the field's own speeds (a
+ * histogram in 1/32 steps of log2 of the speed against the usual, from 1/16 to 16 times it). */
+static void FlowCuts(void)
+{
+    static unsigned hist[256];
+    unsigned moving = 0;
+    for (int b = 0; b < 256; b++) hist[b] = 0;
+    for (int c = 0; c < g_flowW * g_flowH; c++) {
+        float a = g_flowCell[c * 2], b = g_flowCell[c * 2 + 1], s2 = a * a + b * b;
+        if (!(s2 > 0)) continue;
+        float rel = (float)FireExp(0.5 * MapLn(s2)) * g_flowScale / g_flowUsual;
+        int bin = (int)((MapLn(rel) / 0.69314718f + 4) * 32);
+        hist[bin < 0 ? 0 : (bin > 255 ? 255 : bin)]++;
+        moving++;
+    }
+    static const float kEven[FLOW_SHADES - 1] = { 0.6f, 0.85f, 1.1f, 1.4f, 1.9f };
+    for (int k = 0; k < FLOW_SHADES - 1; k++) g_flowCut[k] = kEven[k];
+    if (!moving) return;
+    unsigned sum = 0;
+    int k = 0;
+    for (int b = 0; b < 256 && k < FLOW_SHADES - 1; b++) {
+        sum += hist[b];
+        while (k < FLOW_SHADES - 1 && (unsigned long long)sum * FLOW_SHADES >= (unsigned long long)moving * (unsigned)(k + 1))
+            g_flowCut[k++] = (float)FireExp(((b + 1) / 32.0 - 4) * 0.69314718);
+    }
+}
+/* The shade of water running at rel times the usual speed: 0 the slowest, FLOW_SHADES - 1 the fastest. */
+static int FlowShade(float rel)
+{
+    int s = 0;
+    while (s < FLOW_SHADES - 1 && rel >= g_flowCut[s]) s++;
+    return s;
+}
 
 /* flow.bin, checked whole: 1 when it is used. */
 static int FlowParse(const unsigned char *d, unsigned len)
@@ -2370,6 +2421,7 @@ static int FlowParse(const unsigned char *d, unsigned len)
     g_flowW = w; g_flowH = h; g_flowEq = eq; g_flowScale = scale;
     g_flowUsual = (float)sum / (float)(w * h * 2) * scale * 2.0f;     /* about the usual speed at sea (land counts 0) */
     if (!(g_flowUsual > 0)) g_flowW = g_flowH = 0;
+    if (g_flowW) FlowCuts();
     return g_flowW > 0;
 }
 
@@ -2390,25 +2442,49 @@ static void FlowAt(float u, float v, float *cx, float *cv)
 }
 
 static float FlowLat(float v) { return (g_flowEq - v) * FLOW_DEGREES; }
-static float FlowWarmAt(float lat) { float a = lat < 0 ? -lat : lat; return FireClamp(1 - a / 40.0f, 0, 1); }
 static float DropRand(void) { g_dropSeed = SeaHash(g_dropSeed + 0x9E3779B9u); return (float)(g_dropSeed >> 8) / 16777216.0f; }
 
 /* A drop reborn in view, anywhere on the open sea, evenly (his ask, 4 Oct: "spread out evenly around the oceans"): 1 when
- * placed. Its warmth is the latitude's it is born at. */
+ * placed, its trail empty. */
 static int DropBirth(int i, float u0, float u1, float vt, float vb)
 {
     for (int tries = 0; tries < 4; tries++) {
-        float u = u0 + (u1 - u0) * DropRand(), v = vt + (vb - vt) * DropRand(), lat = FlowLat(v);
+        float u = u0 + (u1 - u0) * DropRand(), v = vt + (vb - vt) * DropRand();
         if (SeaAt(u, v) < 0.5f) continue;
-        g_drop[i].u = u; g_drop[i].v = v; g_drop[i].du = g_drop[i].dv = 0; g_drop[i].age = 0;
-        g_drop[i].life = 4 + 5 * DropRand(); g_drop[i].warm = FlowWarmAt(lat); g_drop[i].live = 1;
+        g_drop[i].u = u; g_drop[i].v = v; g_drop[i].du = g_drop[i].dv = 0; g_drop[i].age = 0; g_drop[i].since = 0;
+        g_drop[i].life = 6 + 6 * DropRand(); g_drop[i].live = 1; g_drop[i].dying = 0; g_drop[i].n = 0;
         return 1;
     }
     return 0;
 }
 
+/* One drop's trail as quads: from its head back along the points it passed, each stretch in the shade the water ran
+ * there, the alpha and width falling from the head to nothing at FLOW_TRAIL x FLOW_TRAIL_S seconds back. */
+static void DropDraw(int i, float u0, float u1, float vt, float vh, float k, float a0)
+{
+    float total = FLOW_TRAIL * FLOW_TRAIL_S, hs = FLOW_PX / 2160.0f;
+    float pu = g_drop[i].u, pv = g_drop[i].v, pt = 0;
+    for (int j = 0; j < g_drop[i].n && g_flQuads < FLOW_DROP_Q; j++) {
+        float qu = g_drop[i].tu[j], qv = g_drop[i].tv[j], qt = g_drop[i].since + j * FLOW_TRAIL_S;
+        float hx = (pu - u0) / (u1 - u0), hy = 1 - (pv - vt) / vh, tx = (qu - u0) / (u1 - u0), ty = 1 - (qv - vt) / vh;
+        float sx = (hx - tx) / k, sy = hy - ty, len = (float)FireExp(0.5 * MapLn(sx * sx + sy * sy + 1e-14f));
+        float fh = FireClamp(1 - pt / total, 0, 1), ft = FireClamp(1 - qt / total, 0, 1);
+        pu = qu; pv = qv; pt = qt;
+        if (len < 1e-6f || fh <= 0) continue;
+        float dx = sx / len, dy = sy / len, wh = hs * (0.4f + 0.6f * fh), wt = hs * (0.4f + 0.6f * ft);
+        float x[4] = { tx + dy * wt * k, hx + dy * wh * k, tx - dy * wt * k, hx - dy * wh * k };
+        float y[4] = { ty - dx * wt, hy - dx * wh, ty + dx * wt, hy + dx * wh };
+        int row = j ? g_drop[i].ts[j - 1] : g_drop[i].shade;
+        float v0 = (row * 8 + 0.5f) / 64.0f, v1 = (row * 8 + 7.5f) / 64.0f;
+        float tu4[4] = { 0, 1, 0, 1 }, tv4[4] = { v1, v1, v0, v0 };
+        unsigned ah = (unsigned)(a0 * fh * 255.0f + 0.5f), at = (unsigned)(a0 * ft * 255.0f + 0.5f);
+        unsigned c4[4] = { at << 24 | 0xFFFFFFu, ah << 24 | 0xFFFFFFu, at << 24 | 0xFFFFFFu, ah << 24 | 0xFFFFFFu };
+        QuadPut4(g_flPos, g_flUV, g_flCol, g_flQuads++, x, y, tu4, tv4, c4);
+    }
+}
+
 /* This frame's drops: each moved along the current (at FLOW_SPEED of the screen's height a second for the field's usual
- * speed, the same on screen at any zoom), cooled, aged, and drawn as two streaks (gold, blue) shared by how warm it is. */
+ * speed, the same on screen at any zoom), its trail kept, aged (faster in a crowd and in the cold north), and drawn. */
 static void FlowBuild(float t, float dt)
 {
     g_flQuads = 0;
@@ -2418,42 +2494,58 @@ static void FlowBuild(float t, float dt)
     (void)t;
     if (dt > 0.25f) dt = 0.25f;
     float mx = g_mael.u, mv = g_mael.v, mr2 = g_mael.ok ? (0.3f * g_mael.r) * (0.3f * g_mael.r) : -1;
-    float hs = FLOW_PX / 2160.0f, k = (float)g_scrH / (float)g_scrW;
+    float k = (float)g_scrH / (float)g_scrW;
+    for (int c = 0; c < FLOW_GRID_X * FLOW_GRID_Y; c++) g_flowCrowd[c] = 0;
+    int alive = 0;
     for (int i = 0; i < FLOW_DROPS; i++) {
         if (!g_drop[i].live && !DropBirth(i, u0, u1, vt, vb)) continue;
-        float cx, cv;
-        FlowAt(g_drop[i].u, g_drop[i].v, &cx, &cv);
-        float sp = (float)FireExp(0.5 * MapLn(cx * cx + cv * cv + 1e-20f)), rel = sp / g_flowUsual;
-        float want = FireClamp(rel, FLOW_SLOWEST, FLOW_FASTEST), step = sp > 1e-12f ? FLOW_SPEED * vh * dt * want / sp : 0;
-        g_drop[i].du = cx * step / asp; g_drop[i].dv = cv * step;
-        g_drop[i].u += g_drop[i].du; g_drop[i].v += g_drop[i].dv;
+        if (!g_drop[i].dying) {
+            float cx, cv;
+            FlowAt(g_drop[i].u, g_drop[i].v, &cx, &cv);
+            float sp = (float)FireExp(0.5 * MapLn(cx * cx + cv * cv + 1e-20f)), rel = sp / g_flowUsual;
+            float want = FireClamp(rel, FLOW_SLOWEST, FLOW_FASTEST), step = sp > 1e-12f ? FLOW_SPEED * vh * dt * want / sp : 0;
+            g_drop[i].du = cx * step / asp; g_drop[i].dv = cv * step;
+            g_drop[i].u += g_drop[i].du; g_drop[i].v += g_drop[i].dv;
+            g_drop[i].shade = (unsigned char)FlowShade(rel);
+        }
+        g_drop[i].since += dt;
+        if (g_drop[i].since >= FLOW_TRAIL_S) {                      /* a new point on its trail, the oldest let go */
+            for (int j = FLOW_TRAIL - 1; j > 0; j--) {
+                g_drop[i].tu[j] = g_drop[i].tu[j - 1]; g_drop[i].tv[j] = g_drop[i].tv[j - 1]; g_drop[i].ts[j] = g_drop[i].ts[j - 1];
+            }
+            g_drop[i].tu[0] = g_drop[i].u; g_drop[i].tv[0] = g_drop[i].v; g_drop[i].ts[0] = g_drop[i].shade;
+            if (g_drop[i].n < FLOW_TRAIL) g_drop[i].n++;
+            g_drop[i].since -= FLOW_TRAIL_S;
+            if (g_drop[i].since >= FLOW_TRAIL_S) g_drop[i].since = 0;
+        }
         float lat = FlowLat(g_drop[i].v);
-        g_drop[i].warm += (FlowWarmAt(lat) - g_drop[i].warm) * (float)(1.0 - FireExp(-(double)dt / 4.0));
         g_drop[i].age += dt * (lat > 50 ? 1 + (lat - 50) / 5 : 1);      /* the cold north: it sinks sooner */
-        float ex = (g_drop[i].u - mx) * asp, ev = g_drop[i].v - mv;
-        if (g_drop[i].age > g_drop[i].life || SeaAt(g_drop[i].u, g_drop[i].v) < 0.15f || ex * ex + ev * ev < mr2 ||
-            g_drop[i].u < u0 - 0.05f * (u1 - u0) || g_drop[i].u > u1 + 0.05f * (u1 - u0) || g_drop[i].v < vt - 0.05f * vh ||
+        if (g_drop[i].u < u0 - 0.05f * (u1 - u0) || g_drop[i].u > u1 + 0.05f * (u1 - u0) || g_drop[i].v < vt - 0.05f * vh ||
             g_drop[i].v > vb + 0.05f * vh) {
-            g_drop[i].live = 0;
+            g_drop[i].live = 0;                                         /* out of view: gone at once */
             continue;
         }
-        /* the streak: from a little behind it to where it is, along its way on screen */
-        float hx = (g_drop[i].u - u0) / (u1 - u0), hy = 1 - (g_drop[i].v - vt) / vh;
-        float sx = g_drop[i].du / (u1 - u0) / k, sy = -g_drop[i].dv / vh;   /* its step, in screen heights */
-        float len = (float)FireExp(0.5 * MapLn(sx * sx + sy * sy + 1e-12f));
-        if (len < 1e-7f) continue;
-        float dx = sx / len, dy = sy / len, L = FireClamp(len / dt * 0.5f, 22.0f / 2160, 60.0f / 2160);
-        float tx = hx - dx * L * k, ty = hy - dy * L, nx = -dy * hs * k, ny = dx * hs;
-        float env = FireClamp(g_drop[i].age / 0.6f, 0, 1) * FireClamp((g_drop[i].life - g_drop[i].age) / 1.0f, 0, 1);
-        float a = env * FLOW_ALPHA * SeaAt(g_drop[i].u, g_drop[i].v);
-        if (a < 0.01f || g_flQuads + 2 > FLOW_DROP_Q) continue;
-        float x[4] = { tx - nx, hx - nx, tx + nx, hx + nx }, y[4] = { ty - ny, hy - ny, ty + ny, hy + ny };
-        for (int kind = 0; kind < 2; kind++) {                          /* gold, then blue */
-            float share = kind ? 1 - g_drop[i].warm : g_drop[i].warm, v0 = kind ? 0.5f : 0, v1 = kind ? 1 : 0.5f;
-            float tu[4] = { 0, 1, 0, 1 }, tv[4] = { v1, v1, v0, v0 };
-            if (a * share > 0.01f)
-                QuadPut(g_flPos, g_flUV, g_flCol, g_flQuads++, x, y, tu, tv, (unsigned)(a * share * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
+        float ex = (g_drop[i].u - mx) * asp, ev = g_drop[i].v - mv;
+        if (!g_drop[i].dying && (SeaAt(g_drop[i].u, g_drop[i].v) < 0.15f || ex * ex + ev * ev < mr2)) {
+            g_drop[i].dying = 1;                                        /* a coast or the eye: it stops and fades */
+            if (g_drop[i].life > g_drop[i].age + 0.6f) g_drop[i].life = g_drop[i].age + 0.6f;
         }
+        if (g_drop[i].age > g_drop[i].life) { g_drop[i].live = 0; continue; }
+        int gx = (int)((g_drop[i].u - u0) / (u1 - u0) * FLOW_GRID_X), gy = (int)((g_drop[i].v - vt) / vh * FLOW_GRID_Y);
+        gx = gx < 0 ? 0 : (gx >= FLOW_GRID_X ? FLOW_GRID_X - 1 : gx); gy = gy < 0 ? 0 : (gy >= FLOW_GRID_Y ? FLOW_GRID_Y - 1 : gy);
+        g_flowCrowd[gy * FLOW_GRID_X + gx]++;
+        alive++;
+    }
+    float share = (float)alive / (FLOW_GRID_X * FLOW_GRID_Y), cap = FLOW_CROWD * (share > 1 ? share : 1);
+    for (int i = 0; i < FLOW_DROPS; i++) {
+        if (!g_drop[i].live) continue;
+        int gx = (int)((g_drop[i].u - u0) / (u1 - u0) * FLOW_GRID_X), gy = (int)((g_drop[i].v - vt) / vh * FLOW_GRID_Y);
+        gx = gx < 0 ? 0 : (gx >= FLOW_GRID_X ? FLOW_GRID_X - 1 : gx); gy = gy < 0 ? 0 : (gy >= FLOW_GRID_Y ? FLOW_GRID_Y - 1 : gy);
+        if (g_flowCrowd[gy * FLOW_GRID_X + gx] > cap) g_drop[i].age += 2 * dt;     /* a crowd thins: three times the age */
+        float fade = g_drop[i].dying ? 0.6f : 1.0f;
+        float env = FireClamp(g_drop[i].age / 0.6f, 0, 1) * FireClamp((g_drop[i].life - g_drop[i].age) / fade, 0, 1);
+        float a = env * FLOW_ALPHA * FireClamp(SeaAt(g_drop[i].u, g_drop[i].v) * 1.5f, g_drop[i].dying ? 0.4f : 0, 1);
+        if (a >= 0.01f) DropDraw(i, u0, u1, vt, vh, k, a);
     }
 }
 

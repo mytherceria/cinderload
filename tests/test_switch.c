@@ -1876,7 +1876,6 @@ static void LiveTests(void)
         float cx, cv;
         FlowAt(0.37f, 0.81f, &cx, &cv);
         fl &= fabsf(cx - 1.0f) < 1e-5f && cv == 0;
-        fl &= FlowWarmAt(0) == 1 && FlowWarmAt(40) == 0 && fabsf(FlowWarmAt(-20) - 0.5f) < 1e-6f;
         SeaParse(allSea2, sizeof allSea2);
         g_scrW = 3840; g_scrH = 2160;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
@@ -1886,7 +1885,7 @@ static void LiveTests(void)
         FlowBuild(0, 0.02f);
         int live = 0, nearEq = 0;
         for (int i = 0; i < FLOW_DROPS; i++) if (g_drop[i].live) { live++; if (fabsf(FlowLat(g_drop[i].v)) < 12) nearEq++; }
-        fl &= live > 1000 && (float)nearEq / live > 0.26f && (float)nearEq / live < 0.38f;   /* evenly: the band is 0.32 of it */
+        fl &= live > FLOW_DROPS * 9 / 10 && (float)nearEq / live > 0.26f && (float)nearEq / live < 0.38f;   /* evenly: the band is 0.32 of it */
         int pick = -1;
         for (int i = 0; i < FLOW_DROPS && pick < 0; i++) if (g_drop[i].live && g_drop[i].u > 0.2f && g_drop[i].u < 0.7f) pick = i;
         float u0 = g_drop[pick].u;
@@ -1896,13 +1895,14 @@ static void LiveTests(void)
         g_bgUV[0] = g_bgUV[4] = 0.25f; g_bgUV[2] = g_bgUV[6] = 0.75f;
         g_bgUV[5] = g_bgUV[7] = 0.25f; g_bgUV[1] = g_bgUV[3] = 0.75f;
         g_drop[pick].u = 0.4f; g_drop[pick].v = 0.5f; g_drop[pick].age = 1; g_drop[pick].life = 100; g_drop[pick].live = 1;
-        g_drop[pick].warm = 1;
+        g_drop[pick].n = 0; g_drop[pick].since = 0; g_drop[pick].dying = 0;
         for (int f = 0; f < 50; f++) FlowBuild(0, 0.02f);
         fl &= fabsf((g_drop[pick].u - 0.4f) - FLOW_SPEED * 0.5f / 1.778f) < 0.001f;
-        /* carried north of the equator it cools toward the water there: from warm 1 at 1.3 degrees, a second on, a little */
-        fl &= g_drop[pick].warm < 1 && g_drop[pick].warm > 0.75f;
+        /* its trail: a point every FLOW_TRAIL_S, newest first, behind it (west of it, the current running east) */
+        fl &= abs(g_drop[pick].n - (int)(1.0f / FLOW_TRAIL_S + 0.5f)) <= 1 && g_drop[pick].tu[0] < g_drop[pick].u &&
+              g_drop[pick].tu[1] < g_drop[pick].tu[0];
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-        /* its streaks: along its way (eastward: the head right of the tail), gold and blue shared by its warmth */
+        /* its trail drawn along its way (eastward: the head right of the tail) */
         int drew = g_flQuads > 0, eastward = g_flPos[3] > g_flPos[0];
         fl &= drew && eastward;
         /* born only on open sea: with the left half land, every newborn drop on the right */
@@ -1915,18 +1915,22 @@ static void LiveTests(void)
         SeaParse(allSea2, sizeof allSea2);
         /* the far north: sinking sooner; a coast and the Maelstrom's eye: gone */
         FlowBinMake(0.9f, 100, 0); FlowParse(kFlowBin, sizeof kFlowBin);
-        g_drop[0].u = 0.5f; g_drop[0].v = 0.11f; g_drop[0].age = 0; g_drop[0].life = 100; g_drop[0].live = 1; g_drop[0].warm = 0;
+        g_drop[0].u = 0.5f; g_drop[0].v = 0.11f; g_drop[0].age = 0; g_drop[0].life = 100; g_drop[0].live = 1; g_drop[0].dying = 0;
         for (int f = 0; f < 50; f++) FlowBuild(0, 0.02f);
         fl &= g_drop[0].age > 2.9f;                                      /* sixty north: three times as fast */
         SeaParse(kSeaBin, sizeof kSeaBin);
-        g_drop[1].u = 0.1f; g_drop[1].v = 0.5f; g_drop[1].age = 1; g_drop[1].life = 100; g_drop[1].live = 1;
+        g_drop[1].u = 0.1f; g_drop[1].v = 0.5f; g_drop[1].age = 1; g_drop[1].life = 100; g_drop[1].live = 1; g_drop[1].dying = 0;
         g_mael.u = 0.8f; g_mael.v = 0.5f; g_mael.r = 0.1f; g_mael.ok = 1;
-        g_drop[2].u = 0.8f; g_drop[2].v = 0.5f; g_drop[2].age = 1; g_drop[2].life = 100; g_drop[2].live = 1;
+        g_drop[2].u = 0.8f; g_drop[2].v = 0.5f; g_drop[2].age = 1; g_drop[2].life = 100; g_drop[2].live = 1; g_drop[2].dying = 0;
         g_dropSeed = 99;
         FlowBuild(0, 0.02f);
-        fl &= (!g_drop[1].live || g_drop[1].u > 0.3f) && (!g_drop[2].live || g_drop[2].age < 0.5f);   /* gone (or reborn elsewhere) */
+        /* on land and in the eye: stopped, fading within 0.6 s (or already reborn elsewhere) */
+        fl &= (g_drop[1].dying && g_drop[1].u < 0.101f && g_drop[1].life <= g_drop[1].age + 0.6f + 1e-4f) &&
+              (g_drop[2].dying && g_drop[2].life <= g_drop[2].age + 0.6f + 1e-4f);
+        for (int f = 0; f < 40; f++) FlowBuild(0, 0.02f);
+        fl &= (!g_drop[1].live || !g_drop[1].dying || g_drop[1].u > 0.3f) && (!g_drop[2].live || g_drop[2].age < 0.8f);
         g_mael.ok = 0; g_flowW = 0;
-        Check(fl, "the currents: flow.bin whole; drops born on open sea, more near the equator; carried at FLOW_SPEED; warm to cold by latitude; sinking in the north; gone at coasts and in the Maelstrom's eye; drawn along their way");
+        Check(fl, "the currents: flow.bin whole; drops born on open sea, more near the equator; carried at FLOW_SPEED, a trail behind; sinking in the north; stopped and faded at coasts and in the Maelstrom's eye; drawn along their way");
     }
     /* every drop moves at least FLOW_SLOWEST of the usual pace on screen (a still gyre's middle shows), at most FLOW_FASTEST */
     {
@@ -1948,6 +1952,68 @@ static void LiveTests(void)
         sl &= fabsf((g_drop[0].u - 0.3f) - FLOW_SPEED * 1.27f / 1.778f) < 0.001f;
         g_flowW = 0;
         Check(sl, "a slow current's drops still move at FLOW_SLOWEST of the usual pace on screen; a usual one's at its own");
+    }
+    /* his blues by speed (4 Oct): the cuts from the field's own speeds, each shade as much of the moving sea as the next;
+     * a trail's stretches each in the shade the water ran there, bright and wide at its head, faint and thin at its tail;
+     * a crowd thinned (a cell over FLOW_CROWD times its share ages three times as fast) */
+    {
+        static const unsigned char allSea4[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+                                                       255, 255, 255, 255, 255, 255, 255, 255 };
+        SeaParse(allSea4, sizeof allSea4);
+        FlowBinMake(0.6f, 100, 0);
+        for (int c = 0; c < 16; c++) { kFlowBin[16 + 2 * c] = (unsigned char)(signed char)(8 * (c + 1)); kFlowBin[17 + 2 * c] = 0; }
+        int sh = FlowParse(kFlowBin, sizeof kFlowBin);
+        for (int c = 1; c < FLOW_SHADES - 1; c++) sh &= g_flowCut[c] > g_flowCut[c - 1];
+        float slowest = 8 * 0.01f / g_flowUsual, fastest = 128 * 0.01f / g_flowUsual;
+        sh &= FlowShade(slowest) == 0 && FlowShade(fastest) == FLOW_SHADES - 1;
+        int bins[FLOW_SHADES] = { 0 };
+        for (int c = 0; c < 16; c++) bins[FlowShade(8 * (c + 1) * 0.01f / g_flowUsual)]++;
+        for (int b = 0; b < FLOW_SHADES; b++) sh &= bins[b] >= 2 && bins[b] <= 4;              /* 16 cells, about even */
+        for (int x = 1; x < 100; x++) sh &= FlowShade(x * 0.03f) >= FlowShade((x - 1) * 0.03f);   /* never darker when faster */
+        Check(sh, "his blues by speed: cuts from the field, each shade about as much of the sea, faster never darker");
+        /* a drop come from slow water into fast: its head's stretch in the fast shade, the stretches behind in the slow one */
+        {
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            g_scrW = 3840; g_scrH = 2160; g_mael.ok = 0;
+            memset(g_drop, 0, sizeof g_drop);
+            for (int i = 1; i < FLOW_DROPS; i++) g_drop[i].live = 0;
+            g_drop[0].u = 0.875f; g_drop[0].v = 0.875f; g_drop[0].age = 1; g_drop[0].life = 100; g_drop[0].live = 1;
+            g_drop[0].n = 3;
+            for (int j = 0; j < 3; j++) { g_drop[0].tu[j] = 0.85f - 0.02f * j; g_drop[0].tv[j] = 0.875f; g_drop[0].ts[j] = 0; }
+            g_dropSeed = 3;
+            FlowBuild(0, 0.001f);
+            float head = g_flUV[0 * 2 + 1], behind = g_flUV[6 * 2 + 1];   /* quad 0's first corner; quad 1's (after the join) */
+            int rows = g_drop[0].shade == FLOW_SHADES - 1 && fabsf(head - (5 * 8 + 7.5f) / 64) < 1e-4f && fabsf(behind - 7.5f / 64) < 1e-4f;
+            Check(rows, "a trail keeps the shade of the water it passed: its head fast, the stretches behind slow");
+        }
+
+        FlowBinMake(0.6f, 100, 0); FlowParse(kFlowBin, sizeof kFlowBin);
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        g_scrW = 3840; g_scrH = 2160; g_mael.ok = 0;
+        memset(g_drop, 0, sizeof g_drop);
+        for (int i = 1; i < FLOW_DROPS; i++) { g_drop[i].u = 0.95f; g_drop[i].v = 0.95f; g_drop[i].live = 1; g_drop[i].dying = 1;
+                                               g_drop[i].age = 0; g_drop[i].life = 1000; }    /* parked out of the way */
+        g_drop[0].u = 0.3f; g_drop[0].v = 0.5f; g_drop[0].age = 1; g_drop[0].life = 100; g_drop[0].live = 1;
+        for (int f = 0; f < 150; f++) FlowBuild(0, 0.02f);                       /* three seconds: a full trail */
+        int tr = g_drop[0].n == FLOW_TRAIL;
+        /* drop 0's quads are the first ones: as many as its trail's points, the head's corners the brightest */
+        int q0 = 0;
+        for (int i = 0; i < 1; i++) q0 = g_drop[0].n;
+        unsigned headA = g_flCol[1] >> 24, tailA = g_flCol[(q0 - 1) * 6 - 2 + 0] >> 24;
+        tr &= headA > 150 && tailA < headA / 3;
+        /* the head's half width wider than the tail's */
+        float headW = fabsf(g_flPos[1 * 3 + 1] - g_flPos[3 * 3 + 1]), tailW = fabsf(g_flPos[((q0 - 1) * 6 - 2) * 3 + 1] - g_flPos[((q0 - 1) * 6) * 3 + 1]);
+        tr &= headW > tailW * 1.5f;
+        Check(tr, "a trail: a full one after its time, its head bright and wide, its tail faint and thin");
+
+        /* a crowd: 900 drops in one cell age three times as fast as one alone */
+        memset(g_drop, 0, sizeof g_drop);
+        for (int i = 0; i < FLOW_DROPS; i++) { g_drop[i].u = i < 900 ? 0.31f : 0.05f + 0.9f * (i - 900) / 100.0f; g_drop[i].v = i < 900 ? 0.51f : 0.2f;
+                                               g_drop[i].age = 1; g_drop[i].life = 1000; g_drop[i].live = 1; }
+        FlowBuild(0, 0.1f);
+        int cr = fabsf(g_drop[0].age - 1.3f) < 1e-3f && fabsf(g_drop[950].age - 1.1f) < 1e-3f;
+        g_flowW = 0;
+        Check(cr, "a crowd thins: drops in a cell over FLOW_CROWD times its share age three times as fast, the rest as ever");
     }
     /* his ask, 4 Oct: the first load after a cold boot is long, the rest a fraction of it: the session's first map screen
      * zooms from the whole world, every later one from halfway in */
