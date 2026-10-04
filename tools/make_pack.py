@@ -6,7 +6,7 @@ seams; the continents' two screens can be the test pattern instead (--test-conti
 Usage: STORMLIB=/path/to/libstorm.so python3 make_pack.py <client Data dir> <out dir> <shape> <screen w> <screen h>
        [--test-continents] [--art <map file>] [--bar <dir>] [--fire-bars <dir> --bar-map <file>] [--reveal]
        [--wallpapers <file>] [--drift] [--map <world png> <map.txt>] [--sea <sheet png> <sea.bin>] [--labels <sheet png> <labels.txt>]
-       [--logo <logo png> <logo.txt>]
+       [--logo <logo png> <logo.txt>] [--marks <marks png> <marks.txt>]
    e.g. ... make_pack.py ~/Games/RavenCraft-fogtest/Data out 21x9 5120 2160 --test-continents
 
 The loading bar's fire for each screen (CinderLoad.dll picks the bar by the screen's picture; both options or neither):
@@ -327,6 +327,15 @@ if __name__ == '__main__':
         write_blp(sheet, blp, 1024, 512, alpha=True)
         files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderLogo.blp'))
         files.append((table, 'CinderLoad\\logo.txt'))
+    if '--marks' in sys.argv:                           # the Maelstrom, and the ripple, badge and glow where you arrive
+        i = sys.argv.index('--marks')
+        sheet, table = os.path.expanduser(sys.argv[i + 1]), os.path.expanduser(sys.argv[i + 2])
+        if not (os.path.isfile(sheet) and os.path.isfile(table)):
+            raise SystemExit('--marks: the marks sheet and its marks.txt (kit/zoom/marks.py makes both)')
+        blp = os.path.join(blps, 'CinderMarks.blp')
+        write_blp(sheet, blp, 512, 512, alpha=True)
+        files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderMarks.blp'))
+        files.append((table, 'CinderLoad\\marks.txt'))
     if '--drift' in sys.argv or '--map' in sys.argv:    # CinderLoad.dll moves each picture as the bar fills (with the reveal)
         note = os.path.join(blps, 'drift.txt')
         with open(note, 'w') as f:

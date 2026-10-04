@@ -52,6 +52,8 @@ static void Fresh(const char *name)
     }
     g_ovOn = 0; g_seaOn = 0; g_seaTried = 0; g_seaTex = NULL; g_seaW = g_seaH = 0;
     g_logoOn = 0; g_logoTried = 0; g_logoTex = NULL; g_logo.ok = 0;
+    g_marksOn = 0; g_marksTried = 0; g_marksTex = NULL; g_mael.ok = 0;
+    for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
     g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
@@ -889,6 +891,13 @@ static void PackLive(int reveal, int walls)
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderSea.blp"; data[n++] = "BLP2sea";
         names[n] = "CinderLoad\\sea.bin"; data[n] = (const char *)kSeaBin; lens[n++] = sizeof kSeaBin - ((reveal & 16) ? 1 : 0);
     }
+    if (reveal & 64) {                                   /* the marks: their sheet and table, the Maelstrom at 0.5, 0.44 */
+        static char mk[200];
+        snprintf(mk, sizeof mk, "# m\ns 0 0 0 256 256\ns 1 256 0 512 256\nmaelstrom %08x %08x %08x\n", FBits(0.5f),
+                 FBits(0.44f), FBits(0.068f));
+        names[n] = "Interface\\Glues\\LoadingScreens\\CinderMarks.blp"; data[n++] = "BLP2marks";
+        names[n] = "CinderLoad\\marks.txt"; data[n++] = mk;
+    }
     if (reveal & 32) {                                   /* the logo: its sheet and its table */
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderLogo.blp"; data[n++] = "BLP2logo";
         names[n] = "CinderLoad\\logo.txt"; data[n++] = "# logo\r\nlogo 1024 512 4 4 1020 484\r\n";
@@ -1319,6 +1328,95 @@ static void LiveTests(void)
         { const char *t = "# x\nlogos 1 1 0 0 1 1\nlogo 1024 512 4 4 1020 484\n"; LogoParse(t, (unsigned)strlen(t)); }
         lg &= g_logo.ok;
         Check(lg, "the logo: on with its sheet and table, in the log; top centre, LOGO_H tall in its own shape, narrowed on 16:10; a bad table leaves it off");
+    }
+
+    /* the marks: marks.txt read (bad lines left out); on with their sheet, said in the log */
+    {
+        char mt[300];
+        snprintf(mt, sizeof mt, "# t\ns 0 0 0 256 256\ns 1 256 0 512 256\ns 40 0 0 8 8\ns 2 0 256 600 384\n"
+                 "maelstrom %08x %08x %08x\nmaelstrom %08x %08x %08x\n", FBits(0.5f), FBits(0.44f), FBits(0.068f),
+                 FBits(0.5f), FBits(0.44f), FBits(0.5f));
+        MarksParse(mt, (unsigned)strlen(mt));
+        int mk = g_mark[0].ok && g_mark[1].ok && !g_mark[2].ok && g_mael.ok && fabsf(g_mael.r - 0.068f) < 1e-6f &&
+                 g_mark[1].x0 == 256 && g_mark[1].y1 == 256;
+        Fresh("overlay-marks");
+        PackLive(1 | 2 | 4 | 8 | 64, 0);
+        Start();
+        mk &= g_marksOn && LogSays("overlay on: swells and glints on the open sea, the Maelstrom and the ripple");
+        Check(mk, "marks.txt read (an id past 31, a rectangle past the sheet, a radius of half the world left out); the marks on, in the log");
+
+        /* the Maelstrom: in the world's place and size, square on screen, turning anticlockwise, gone close in */
+        g_scrW = 5120; g_scrH = 2160;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        MaelstromBuild(0);
+        float k = 2160.0f / 5120, hs = 0.068f;                         /* the whole world: a picture height is the screen's */
+        int ml = g_mkQuads == 1 && fabsf(g_mkPos[0] - (0.5f - hs * k)) < 1e-4f && fabsf(g_mkPos[1] - (0.56f - hs)) < 1e-4f &&
+                 fabsf(g_mkPos[9] - (0.5f + hs * k)) < 1e-4f && fabsf(g_mkPos[10] - (0.56f + hs)) < 1e-4f &&
+                 (g_mkCol[0] >> 24) == 255 && g_mkUV[0] == 0.5f && g_mkUV[2] == 1.0f && g_mkUV[1] == 0.5f;
+        MaelstromBuild(MAEL_TURN / 4);                                  /* a quarter turn: the first corner where the second was */
+        ml &= fabsf(g_mkPos[0] - (0.5f + hs * k)) < 1e-3f && fabsf(g_mkPos[1] - (0.56f - hs)) < 1e-3f;
+        g_bgUV[0] = g_bgUV[4] = 0.25f; g_bgUV[2] = g_bgUV[6] = 0.75f;  /* half way in, h = 0.25: twice the size, fading */
+        g_bgUV[5] = g_bgUV[7] = 0.19f; g_bgUV[1] = g_bgUV[3] = 0.69f;
+        MaelstromBuild(0);
+        ml &= g_mkQuads == 1 && fabsf(g_mkPos[7] - g_mkPos[1] - 4 * hs) < 1e-4f && (g_mkCol[0] >> 24) < 255 &&
+              (g_mkCol[0] >> 24) > 100;
+        g_bgUV[0] = g_bgUV[4] = 0.4f; g_bgUV[2] = g_bgUV[6] = 0.6f;    /* zoomed in, h = 0.1 */
+        g_bgUV[5] = g_bgUV[7] = 0.34f; g_bgUV[1] = g_bgUV[3] = 0.54f;
+        MaelstromBuild(0);
+        ml &= g_mkQuads == 0;
+        Check(ml, "the Maelstrom: the world's place and size, square on screen, a quarter turn anticlockwise in a quarter of MAEL_TURN, gone close in");
+
+        /* the swells bend round it, the more the nearer, and not at all beyond its reach */
+        static const unsigned char allSea[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+                                                      255, 255, 255, 255, 255, 255, 255, 255 };
+        SeaParse(allSea, sizeof allSea);
+        g_scrW = 3840; g_scrH = 2160;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        g_mael.u = 0.5f; g_mael.v = 0.5f; g_mael.r = 0.08f; g_mael.ok = 1;
+        SwellBuild(20.0f);
+        int row = g_swCols + 1, mid = (SWELL_ROWS / 2) * row + g_swCols / 2 + 2, far = 2 * row + 3;
+        unsigned midOn[2] = { g_swCol[0][mid], g_swCol[1][mid] }, farOn[2] = { g_swCol[0][far], g_swCol[1][far] };
+        g_mael.ok = 0;
+        SwellBuild(20.0f);
+        int sw = (midOn[0] != g_swCol[0][mid] || midOn[1] != g_swCol[1][mid]) && farOn[0] == g_swCol[0][far] &&
+                 farOn[1] == g_swCol[1][far];
+        float x = 0.5f * 1.778f + 0.05f, v = 0.5f, x0 = x, v0 = v;
+        g_mael.ok = 1;
+        SwirlAt(&x, &v, 1.778f);                                         /* east of it: turned clockwise on screen, so v grows less... */
+        float dx = x - 0.5f * 1.778f, dv = v - 0.5f;
+        sw &= fabsf(dx * dx + dv * dv - 0.0025f) < 1e-5f && dv < 0 && (x0 != x || v0 != v);   /* ...it moves up: v falls */
+        Check(sw, "the swells bend round the Maelstrom near it (keeping their distance from its middle, clockwise inward), and not far off");
+
+        /* the ripple: nothing until the arrival is known; then rings at it, square, opening and fading, appearing over RIPPLE_IN */
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        g_destOk = 0;
+        RippleBuild(1.0f, 50000);
+        int rp = g_mkQuads == 0;
+        g_destOk = 1; g_destU = 0.3f; g_destV = 0.6f; g_destSince = 50000 - 2000;
+        RippleBuild(1.3f, 50000);                                       /* (at 1.0 s the third ring is just being born, unseen) */
+        rp &= g_mkQuads == RIPPLE_RINGS;
+        float lastR = 0, lastA = 2;
+        int ordered = 1;
+        for (int q = 0; q < g_mkQuads; q++) {
+            int slot = q ? q * 6 : 0;
+            float cx = (g_mkPos[slot * 3] + g_mkPos[(slot + 1) * 3]) / 2, r = (g_mkPos[(slot + 2) * 3 + 1] - g_mkPos[slot * 3 + 1]) / 2;
+            float a = (g_mkCol[slot] >> 24) / 255.0f;
+            rp &= fabsf(cx - 0.3f) < 1e-4f && fabsf(g_mkPos[slot * 3 + 1] + r - 0.4f) < 1e-4f && r <= RIPPLE_PX / 2160 + 1e-5f &&
+                  r >= RIPPLE_PX * 0.12f / 2160 - 1e-5f && fabsf((g_mkPos[(slot + 1) * 3] - g_mkPos[slot * 3]) * 3840 / 2160 - 2 * r) < 1e-4f;
+            if (q && (r > lastR) == (a > lastA)) ordered = 0;          /* the wider a ring, the fainter */
+            lastR = r; lastA = a;
+        }
+        rp &= ordered;
+        g_destSince = 50000 - 100;                                       /* known a tenth of a second ago: faint yet */
+        RippleBuild(1.3f, 50000);
+        int faint = 1;
+        for (int q = 0; q < g_mkQuads; q++) faint &= (g_mkCol[q ? q * 6 : 0] >> 24) < 60;
+        rp &= faint;
+        g_bgUV[0] = g_bgUV[4] = 0.2f; g_bgUV[2] = g_bgUV[6] = 0.4f;
+        RippleBuild(1.3f, 50000);
+        rp &= g_mkQuads == 0;
+        g_destOk = 0; g_mael.ok = 0; g_seaW = 0;
+        Check(rp, "the ripple: none before the arrival is known; then rings at it, square, the wider the fainter, faint at first, none close in");
     }
 
     /* sea.bin: anything but a whole table is left out; between the cells' middles, how open the sea is */

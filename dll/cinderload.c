@@ -1667,6 +1667,7 @@ static float DisplayStep(float p, DWORD now)
     return g_disp;
 }
 static int g_destOk;                                            /* this screen's arrival, once known, is kept */
+static DWORD g_destSince;                                       /* when it became known (the ripple fades in from it) */
 static float g_destU, g_destV, g_destH;
 
 /* The fire's worker, when a screen has gone (the loading screen's layer cleared): the next screen starts from the
@@ -1716,6 +1717,7 @@ static void DriftStep(float p, DWORD now)
         float du, dv, hEnd;
         h = 0.5f;
         if (MapDest(&du, &dv, &hEnd)) {                            /* once known, kept for the screen */
+            if (!g_destOk) g_destSince = now;
             g_destOk = 1; g_destU = du; g_destV = dv; g_destH = hEnd;
         } else if (g_destOk) {
             du = g_destU; dv = g_destV; hEnd = g_destH;
@@ -1793,6 +1795,9 @@ static void QuadPut(float *pos, float *uv, unsigned *col, int q, const float *x,
         col[slot] = c;
     }
 }
+
+static void SwirlAt(float *x, float *v, float asp);             /* the marks' (below): the swells bend round the Maelstrom */
+static int LblInt(const char *s, int n, int *at, int *out);       /* the labels' (below): a decimal from a table line */
 
 /* ---- the sea (4 Oct 2026, his pick: glints, swells and depth; the depth is painted into the world map itself) ----
  * CinderSea.blp (DXT5, 256 x 128): a glint on its left half; on its right a white square over a deep-sea one, so the
@@ -1904,7 +1909,9 @@ static int SwellBuild(float t)
             g_swPos[at * 3] = x; g_swPos[at * 3 + 1] = y; g_swPos[at * 3 + 2] = 0;
             g_swUV[0][at * 2] = g_swUV[1][at * 2] = SEA_SQUARE_U;
             g_swUV[0][at * 2 + 1] = SEA_WHITE_V; g_swUV[1][at * 2 + 1] = SEA_DEEP_V;
-            float m = SeaAt(u, v) * fade, s = m > 0.004f ? SwellAt(u * asp, v, t) : 0;
+            float m = SeaAt(u, v) * fade, sx = u * asp, sv = v;
+            SwirlAt(&sx, &sv, asp);
+            float s = m > 0.004f ? SwellAt(sx, sv, t) : 0;
             g_swCol[0][at] = (unsigned)((s > 0 ? s : 0) * m * SWELL_LIGHT * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
             g_swCol[1][at] = (unsigned)((s < 0 ? -s : 0) * m * SWELL_DARK * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
         }
@@ -1950,6 +1957,138 @@ static void GlintsBuild(float t)
         float x[4] = { sx - sw / 2, sx + sw / 2, sx - sw / 2, sx + sw / 2 }, y[4] = { sy - sh / 2, sy - sh / 2, sy + sh / 2, sy + sh / 2 };
         static const float tu[4] = { 0, 0.5f, 0, 0.5f }, tv[4] = { 1, 1, 0, 0 };
         QuadPut(g_glPos, g_glUV, g_glCol, g_glQuads++, x, y, tu, tv, (unsigned)(a * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
+    }
+}
+
+/* ---- the marks (4 Oct 2026, his yeses): the Maelstrom, and the ripple where you arrive ----
+ * CinderMarks.blp (DXT5, MARKS_SHEET square) and CinderLoad\\marks.txt: `s <id> <x0> <y0> <x1> <y1>`, the sprites'
+ * rectangles (ids: 0 the ripple's ring, 1 the Maelstrom, 2 the badge's ring, 3 the arrival's glow, 4 the badge's
+ * shadow, 16 + class id the class icons), and `maelstrom <u> <v> <r>` (float bits in hex: its middle on the picture, its
+ * radius in heights of the world). Colours are the sheet's own; a mark's corners only say how much of it shows.
+ *   the Maelstrom: a whirlpool in the middle of the Great Sea, in the world's own place and size, turning once in
+ *                  MAEL_TURN s the way that draws the eye inward, the swells within SWIRL_REACH of its radius bent
+ *                  into its swirl; far out only, fading with the sea
+ *   the ripple: RIPPLE_RINGS rings opening slowly from where you arrive, each over RIPPLE_S, at a steady size on screen,
+ *               appearing over RIPPLE_IN once the arrival is known; far out only, fading with the sea */
+#define MARKS_PATH    "Interface\\Glues\\LoadingScreens\\CinderMarks.blp"
+#define MARKS_SHEET   512.0f
+#define MARKS_SPRITES 32
+#define MARKS_FRAME   16       /* marks a pass at most */
+#define MAEL_TURN     36.0f
+#define SWIRL_REACH   2.6f
+#define SWIRL_TWIST   2.2f     /* radians, at its middle */
+#define RIPPLE_RINGS  3
+#define RIPPLE_S      3.0f
+#define RIPPLE_PX     110.0f   /* a ring at its widest, its radius on a 2160-tall screen */
+#define RIPPLE_IN     0.5f
+static struct { unsigned short x0, y0, x1, y1; unsigned char ok; } g_mark[MARKS_SPRITES];
+static struct { int ok; float u, v, r; } g_mael;
+static int g_marksOn, g_marksTried, g_mkQuads;
+static void *g_marksTex;
+__attribute__((used)) float g_mkPos[MARKS_FRAME * 6 * 3];
+__attribute__((used)) float g_mkUV[MARKS_FRAME * 6 * 2];
+__attribute__((used)) unsigned g_mkCol[MARKS_FRAME * 6];
+
+static void MarksParse(const char *s, unsigned len)
+{
+    for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
+    g_mael.ok = 0;
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && s[end] != '\n') end++;
+        const char *l = s + at;
+        int n = (int)(end - at), i = 2, v[5], k = 0;
+        unsigned b[3];
+        if (n > 2 && l[0] == 's' && MapSpace(l[1])) {
+            while (k < 5 && LblInt(l, n, &i, &v[k])) k++;
+            if (k == 5 && v[0] >= 0 && v[0] < MARKS_SPRITES && v[1] >= 0 && v[2] >= 0 && v[3] > v[1] && v[4] > v[2] &&
+                v[3] <= (int)MARKS_SHEET && v[4] <= (int)MARKS_SHEET) {
+                g_mark[v[0]].x0 = (unsigned short)v[1]; g_mark[v[0]].y0 = (unsigned short)v[2];
+                g_mark[v[0]].x1 = (unsigned short)v[3]; g_mark[v[0]].y1 = (unsigned short)v[4];
+                g_mark[v[0]].ok = 1;
+            }
+        } else if (n > 10 && l[0] == 'm' && l[1] == 'a' && l[2] == 'e' && l[3] == 'l' && l[4] == 's' && l[5] == 't' &&
+                   l[6] == 'r' && l[7] == 'o' && l[8] == 'm' && MapSpace(l[9])) {
+            i = 9;
+            if (MapHex(l, n, &i, &b[0]) && MapHex(l, n, &i, &b[1]) && MapHex(l, n, &i, &b[2])) {
+                float u = MapBits(b[0]), vv = MapBits(b[1]), r = MapBits(b[2]);
+                if (u > 0 && u < 1 && vv > 0 && vv < 1 && r > 0.001f && r < 0.3f) {
+                    g_mael.u = u; g_mael.v = vv; g_mael.r = r; g_mael.ok = 1;
+                }
+            }
+        }
+        at = end + 1;
+    }
+}
+
+static float SeaCos(float x) { return SeaSin(x + 1.5707963f); }
+
+/* Mark id as a quad into g_mk*: its middle at screen sx, sy, half as tall as hs (in screen heights; square on screen),
+ * turned ang radians (anticlockwise on screen), alpha shown. Left out off screen, when faint, or when the pass is full. */
+static void MarkPut(int id, float sx, float sy, float hs, float ang, float alpha)
+{
+    if (id < 0 || id >= MARKS_SPRITES || !g_mark[id].ok || alpha <= 0.004f || g_mkQuads >= MARKS_FRAME) return;
+    float k = (float)g_scrH / (float)g_scrW, c = SeaCos(ang), sn = SeaSin(ang), reach = hs * 1.42f;
+    if (sx + reach * k < 0 || sx - reach * k > 1 || sy + reach < 0 || sy - reach > 1) return;
+    static const float cx[4] = { -1, 1, -1, 1 }, cy[4] = { -1, -1, 1, 1 };
+    float x[4], y[4];
+    for (int i = 0; i < 4; i++) {
+        x[i] = sx + (cx[i] * c - cy[i] * sn) * hs * k;
+        y[i] = sy + (cx[i] * sn + cy[i] * c) * hs;
+    }
+    float tu0 = g_mark[id].x0 / MARKS_SHEET, tu1 = g_mark[id].x1 / MARKS_SHEET;
+    float tv0 = g_mark[id].y0 / MARKS_SHEET, tv1 = g_mark[id].y1 / MARKS_SHEET;
+    float tu[4] = { tu0, tu1, tu0, tu1 }, tv[4] = { tv1, tv1, tv0, tv0 };
+    QuadPut(g_mkPos, g_mkUV, g_mkCol, g_mkQuads++, x, y, tu, tv, (unsigned)(FireClamp(alpha, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
+}
+
+/* Where picture u, v shows on screen, for the view this frame. */
+static void ViewToScreen(float u, float v, float *sx, float *sy)
+{
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
+    *sx = (u - u0) / (u1 - u0);
+    *sy = 1 - (v - vt) / (vb - vt);
+}
+
+/* This frame's Maelstrom: one turned quad in g_mk* (g_mkQuads 0 or 1). */
+static void MaelstromBuild(float t)
+{
+    g_mkQuads = 0;
+    float fade = SeaFade((g_bgUV[2] - g_bgUV[0]) * 0.5f);
+    if (!g_mael.ok || fade <= 0.01f) return;
+    float sx, sy, turns = t / MAEL_TURN;
+    ViewToScreen(g_mael.u, g_mael.v, &sx, &sy);
+    turns -= (float)(int)turns;
+    MarkPut(1, sx, sy, g_mael.r / (g_bgUV[1] - g_bgUV[5]), 6.2831853f * turns, fade);
+}
+
+/* The swells near the Maelstrom are drawn from a place turned about its middle, the more the nearer: x across and v
+ * down the picture in heights of the world, as SwellAt takes them. */
+static void SwirlAt(float *x, float *v, float asp)
+{
+    if (!g_mael.ok) return;
+    float cx = g_mael.u * asp, cv = g_mael.v, dx = *x - cx, dv = *v - cv, reach = g_mael.r * SWIRL_REACH;
+    float d2 = (dx * dx + dv * dv) / (reach * reach);
+    if (d2 >= 1) return;
+    float w = (1 - d2) * (1 - d2), a = -SWIRL_TWIST * w, c = SeaCos(a), s = SeaSin(a);   /* with its arms: clockwise inward */
+    *x = cx + dx * c - dv * s;
+    *v = cv + dx * s + dv * c;
+}
+
+/* This frame's ripple: up to RIPPLE_RINGS rings in g_mk*, opening from the arrival once it is known. */
+static void RippleBuild(float t, DWORD now)
+{
+    g_mkQuads = 0;
+    float fade = SeaFade((g_bgUV[2] - g_bgUV[0]) * 0.5f);
+    if (!g_destOk || fade <= 0.01f) return;
+    float sx, sy, appear = FireClamp((float)(now - g_destSince) / (RIPPLE_IN * 1000.0f), 0, 1);
+    ViewToScreen(g_destU, g_destV, &sx, &sy);
+    for (int k = 0; k < RIPPLE_RINGS; k++) {
+        float ph = t / RIPPLE_S + (float)k / RIPPLE_RINGS;
+        ph -= (float)(int)ph;
+        float px = RIPPLE_PX * (0.12f + 0.88f * ph), a = (1 - ph) * (float)FireExp(0.6 * MapLn(1 - ph + 1e-6f));
+        a *= FireClamp(ph / 0.08f, 0, 1) * fade * appear;
+        MarkPut(0, sx, sy, px / 2160.0f, 0, a);                       /* the ring's size steady on any screen height */
     }
 }
 
@@ -2130,9 +2269,11 @@ void WINAPI OverlayDraw(void) __attribute__((used));
 void WINAPI OverlayDraw(void)
 {
     if (!g_ovOn || !g_mapShown) return;
+    DWORD now = GetTickCount();
+    float t = (float)(now % 3600000u) / 1000.0f;
     if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
+    if (g_marksOn && !g_marksTex && !g_marksTried) { g_marksTried = 1; g_marksTex = OverlayLoad(MARKS_PATH); }
     if (g_seaTex) {
-        float t = (float)(GetTickCount() % 3600000u) / 1000.0f;
         if (SwellBuild(t)) {
             void *dev = OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0);
             int row = g_swCols + 1;
@@ -2145,8 +2286,18 @@ void WINAPI OverlayDraw(void)
                     OV_FN(OvAfter, 0x58A340)();
                 }
         }
+    }
+    if (g_marksTex) {                                              /* the Maelstrom, on the sea and under its glints */
+        MaelstromBuild(t);
+        if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
+    }
+    if (g_seaTex) {
         GlintsBuild(t);
         if (g_glQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_glPos, g_glUV, g_glCol, g_glQuads);
+    }
+    if (g_marksTex) {                                              /* the ripple, under the names */
+        RippleBuild(t, now);
+        if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
     }
     if (g_lblOn && !g_lblTex && !g_lblTried) { g_lblTried = 1; g_lblTex = OverlayLoad(LABELS_PATH); }
     if (g_lblTex) {
@@ -2164,7 +2315,7 @@ void WINAPI OverlayDraw(void)
 /* At start, with the world map on: the overlay, when its calls are where they should be and its picture is in the pack. */
 static void OverlayStart(void)
 {
-    g_ovOn = g_seaOn = g_lblOn = g_logoOn = 0;
+    g_ovOn = g_seaOn = g_lblOn = g_logoOn = g_marksOn = 0;
     if (!g_map.ok || !g_barLoader) return;
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSea")) {
         unsigned char *data = NULL;
@@ -2189,19 +2340,28 @@ static void OverlayStart(void)
         if (text) HeapFree(GetProcessHeap(), 0, text);
         g_logoOn = g_logo.ok;
     }
-    if (!g_seaOn && !g_lblOn && !g_logoOn) return;
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderMarks")) {
+        unsigned char *text = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\marks.txt", &text, &len) == MPQ_OK && text)
+            MarksParse((const char *)text, len);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        g_marksOn = g_mark[0].ok || (g_mark[1].ok && g_mael.ok);
+    }
+    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
-        g_seaOn = g_lblOn = g_logoOn = 0;
+        g_seaOn = g_lblOn = g_logoOn = g_marksOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
     for (int i = 0; i < LBL_BATCH * 6; i++) g_lblIndex[i] = (unsigned short)i;
     g_ovOn = 1;
-    char m[220];
-    wsprintfA(m, "overlay on:%s%s%s%s%s, drawn over the world map and under the bar (in memory only)",
-              g_seaOn ? " swells and glints on the open sea" : "", g_seaOn && g_lblOn ? "," : "",
-              g_lblOn ? " names and icons" : "", (g_seaOn || g_lblOn) && g_logoOn ? "," : "",
-              g_logoOn ? " the RavenCraft logo at the top" : "");
+    char m[260];
+    wsprintfA(m, "overlay on:%s%s%s%s%s%s%s, drawn over the world map and under the bar (in memory only)",
+              g_seaOn ? " swells and glints on the open sea" : "", g_seaOn && g_marksOn ? "," : "",
+              g_marksOn ? (g_mael.ok && g_mark[1].ok ? " the Maelstrom and the ripple" : " the ripple") : "",
+              (g_seaOn || g_marksOn) && g_lblOn ? "," : "", g_lblOn ? " names and icons" : "",
+              (g_seaOn || g_marksOn || g_lblOn) && g_logoOn ? "," : "", g_logoOn ? " the RavenCraft logo at the top" : "");
     Log(m);
 }
 
