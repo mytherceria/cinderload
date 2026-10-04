@@ -2180,6 +2180,138 @@ static void BadgeBuild(DWORD now)
     MarkPut(2, sx, sy, hs, 0, a);
 }
 
+/* ---- the arrival's glow (his yes, 4 Oct 2026: the subzone you arrive in lights up at the landing) ----
+ * From the world map's own explored-area overlays (the pieces of a zone's map that light up as you explore it), made by
+ * the art kit's glow.py: CinderGlow.blp (DXT5, GLOW_SHEET square), CinderLoad\\glow.txt (`s <id> <x0> <y0> <x1> <y1>`,
+ * a glow's rectangle on the sheet; `g <sprite> <u0> <v0> <u1> <v1>`, a subzone's glow and where it lies on the picture)
+ * and CinderLoad\\glow.bin ('CGLW', the number of maps, then each: map id, cell yards, the grid's corner x0, y0 in world
+ * yards, its columns along y and rows along x, then a 16-bit cell each: 0 none, else the subzone's g line + 1). Once the
+ * arrival is known, its subzone glows, coming up as the view closes in (from GLOW_FROM to GLOW_FULL); where no subzone
+ * is (a city's middle, open ground), the marks' round glow, GLOW_YARDS across, in its place. */
+#define GLOW_PATH     "Interface\\Glues\\LoadingScreens\\CinderGlow.blp"
+#define GLOW_SHEET    2048.0f
+#define GLOW_SPRITES  1024
+#define GLOW_CELLS    65536
+#define GLOW_FROM     0.16f
+#define GLOW_FULL     0.08f
+#define GLOW_YARDS    450.0f
+static struct { unsigned short x0, y0, x1, y1; } g_glowSpr[GLOW_SPRITES];
+static struct { float u0, v0, u1, v1; unsigned short spr; } g_glowItem[GLOW_SPRITES];
+static struct { int ok, cols, rows; float cell, x0, y0; unsigned at; } g_glowMap[2];
+static unsigned short g_glowCells[GLOW_CELLS];
+static int g_glowSprites, g_glowItems, g_glowOn, g_glowTried, g_glowPick = -1, g_glowQuads;
+static DWORD g_glowFor;                                         /* the arrival the pick was made for (g_destSince) */
+static void *g_glowTex;
+__attribute__((used)) float g_glowPos[4 * 3];
+__attribute__((used)) float g_glowUV[4 * 2];
+__attribute__((used)) unsigned g_glowCol[4];
+
+static void GlowParse(const char *s, unsigned len)
+{
+    g_glowSprites = g_glowItems = 0;
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && s[end] != '\n') end++;
+        const char *l = s + at;
+        int n = (int)(end - at), i = 2, v[5], k = 0;
+        unsigned b[4];
+        if (n > 2 && l[0] == 's' && MapSpace(l[1])) {
+            while (k < 5 && LblInt(l, n, &i, &v[k])) k++;
+            if (k == 5 && v[0] == g_glowSprites && v[0] < GLOW_SPRITES && v[1] >= 0 && v[2] >= 0 && v[3] > v[1] &&
+                v[4] > v[2] && v[3] <= (int)GLOW_SHEET && v[4] <= (int)GLOW_SHEET) {
+                g_glowSpr[v[0]].x0 = (unsigned short)v[1]; g_glowSpr[v[0]].y0 = (unsigned short)v[2];
+                g_glowSpr[v[0]].x1 = (unsigned short)v[3]; g_glowSpr[v[0]].y1 = (unsigned short)v[4];
+                g_glowSprites++;
+            }
+        } else if (n > 2 && l[0] == 'g' && MapSpace(l[1]) && g_glowItems < GLOW_SPRITES && LblInt(l, n, &i, &v[0]) &&
+                   MapHex(l, n, &i, &b[0]) && MapHex(l, n, &i, &b[1]) && MapHex(l, n, &i, &b[2]) && MapHex(l, n, &i, &b[3])) {
+            float u0 = MapBits(b[0]), v0 = MapBits(b[1]), u1 = MapBits(b[2]), v1 = MapBits(b[3]);
+            if (v[0] >= 0 && v[0] < g_glowSprites && MapFinite(u0) && MapFinite(v0) && MapFinite(u1) && MapFinite(v1) &&
+                u1 > u0 && v1 > v0 && u0 > -1 && u1 < 2 && v0 > -1 && v1 < 2) {
+                g_glowItem[g_glowItems].u0 = u0; g_glowItem[g_glowItems].v0 = v0;
+                g_glowItem[g_glowItems].u1 = u1; g_glowItem[g_glowItems].v1 = v1;
+                g_glowItem[g_glowItems].spr = (unsigned short)v[0];
+                g_glowItems++;
+            } else
+                g_glowItems = GLOW_SPRITES + 1;                     /* a bad g line: its numbering is lost, so none */
+        }
+        at = end + 1;
+    }
+    if (g_glowItems > GLOW_SPRITES) g_glowItems = 0;
+}
+
+static float GlowF(const unsigned char *p) { union { unsigned u; float f; } c; c.u = (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24; return c.f; }
+
+/* glow.bin, checked whole: 1 when its grids are used. */
+static int GlowGridParse(const unsigned char *d, unsigned len)
+{
+    g_glowMap[0].ok = g_glowMap[1].ok = 0;
+    if (len < 6 || d[0] != 'C' || d[1] != 'G' || d[2] != 'L' || d[3] != 'W') return 0;
+    unsigned maps = d[4] | d[5] << 8, at = 6, cells = 0;
+    for (unsigned k = 0; k < maps; k++) {
+        if (len - at < 18) return g_glowMap[0].ok = g_glowMap[1].ok = 0;
+        unsigned m = d[at] | d[at + 1] << 8, cols = d[at + 14] | d[at + 15] << 8, rows = d[at + 16] | d[at + 17] << 8;
+        float cell = GlowF(d + at + 2), x0 = GlowF(d + at + 6), y0 = GlowF(d + at + 10);
+        at += 18;
+        if (m > 1 || !cols || !rows || !(cell > 1 && cell < 10000) || !MapFinite(x0) || !MapFinite(y0) ||
+            cols * rows > GLOW_CELLS - cells || len - at < cols * rows * 2)
+            return g_glowMap[0].ok = g_glowMap[1].ok = 0;
+        g_glowMap[m].cols = (int)cols; g_glowMap[m].rows = (int)rows; g_glowMap[m].cell = cell;
+        g_glowMap[m].x0 = x0; g_glowMap[m].y0 = y0; g_glowMap[m].at = cells; g_glowMap[m].ok = 1;
+        for (unsigned i = 0; i < cols * rows; i++) g_glowCells[cells + i] = (unsigned short)(d[at + 2 * i] | d[at + 2 * i + 1] << 8);
+        cells += cols * rows;
+        at += cols * rows * 2;
+    }
+    return at == len && (g_glowMap[0].ok || g_glowMap[1].ok);
+}
+
+/* The subzone at world x, y on map m: its g line's index, or -1. */
+static int GlowFind(int m, float x, float y)
+{
+    if (m < 0 || m > 1 || !g_glowMap[m].ok) return -1;
+    float fi = (y - g_glowMap[m].y0) / g_glowMap[m].cell, fj = (x - g_glowMap[m].x0) / g_glowMap[m].cell;
+    if (!(fi >= 0 && fj >= 0 && fi < g_glowMap[m].cols && fj < g_glowMap[m].rows)) return -1;
+    unsigned c = g_glowCells[g_glowMap[m].at + (unsigned)(int)fj * (unsigned)g_glowMap[m].cols + (unsigned)(int)fi];
+    return c && (int)c <= g_glowItems ? (int)c - 1 : -1;
+}
+
+/* This frame's glow: the arrival's subzone (one quad in g_glow*, g_glowQuads 1) or the round glow in its place (into the
+ * marks' g_mk*, drawn with their sheet); how strongly, for how close the view has come. */
+static void GlowBuild(DWORD now)
+{
+    g_glowQuads = 0;
+    g_mkQuads = 0;
+    if (!g_destOk) return;
+    if (g_glowFor != g_destSince || g_glowPick < -1) {             /* this screen's arrival: which subzone, once */
+        unsigned mb, xb, yb;
+        g_glowFor = g_destSince;
+        g_glowPick = ClientWord(MAP_DEST_MAP_VA, &mb) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb)
+                         ? GlowFind((int)mb, MapBits(xb), MapBits(yb)) : -1;
+    }
+    float h = (g_bgUV[2] - g_bgUV[0]) * 0.5f, k = FireClamp((GLOW_FROM - h) / (GLOW_FROM - GLOW_FULL), 0, 1);
+    float a = k * k * (3 - 2 * k) * FireClamp((float)(now - g_destSince) / (RIPPLE_IN * 1000.0f), 0, 1);
+    if (a <= 0.004f) return;
+    if (g_glowPick >= 0) {
+        float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
+        int it = g_glowPick, sp = g_glowItem[it].spr;
+        float x0 = (g_glowItem[it].u0 - u0) / (u1 - u0), x1 = (g_glowItem[it].u1 - u0) / (u1 - u0);
+        float yt = 1 - (g_glowItem[it].v0 - vt) / (vb - vt), yb2 = 1 - (g_glowItem[it].v1 - vt) / (vb - vt);
+        float x[4] = { x0, x1, x0, x1 }, y[4] = { yb2, yb2, yt, yt };
+        float tu0 = g_glowSpr[sp].x0 / GLOW_SHEET, tu1 = g_glowSpr[sp].x1 / GLOW_SHEET;
+        float tv0 = g_glowSpr[sp].y0 / GLOW_SHEET, tv1 = g_glowSpr[sp].y1 / GLOW_SHEET;
+        float tu[4] = { tu0, tu1, tu0, tu1 }, tv[4] = { tv1, tv1, tv0, tv0 };
+        QuadPut(g_glowPos, g_glowUV, g_glowCol, 0, x, y, tu, tv, (unsigned)(a * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
+        g_glowQuads = 1;
+    } else if (g_mark[3].ok) {
+        unsigned mb;
+        float sx, sy, bv = ClientWord(MAP_DEST_MAP_VA, &mb) && mb <= 1 && g_map.m[mb].ok ? g_map.m[mb].bv : 0;
+        if (bv < 0) bv = -bv;
+        if (bv <= 0) return;
+        ViewToScreen(g_destU, g_destV, &sx, &sy);
+        MarkPut(3, sx, sy, GLOW_YARDS * 0.5f * bv / (g_bgUV[1] - g_bgUV[5]), 0, a);
+    }
+}
+
 /* ---- the names and icons (4 Oct 2026): CinderLabels.blp (DXT5, one sheet of every sprite) and CinderLoad\labels.txt:
  *   s <id> <x0> <y0> <x1> <y1>              a sprite's rectangle on the sheet (4096 x 2048)
  *   i <sprite> <u> <v> <hmax> <hmin> <dy>    an item at picture u, v (float bits in hex), shown while the view's half
@@ -2387,6 +2519,13 @@ void WINAPI OverlayDraw(void)
         RippleBuild(t, now);
         if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
     }
+    if (g_glowOn && !g_glowTex && !g_glowTried) { g_glowTried = 1; g_glowTex = OverlayLoad(GLOW_PATH); }
+    if (g_glowTex) {                                               /* the arrival's subzone lights up, under the names */
+        GlowBuild(now);
+        if (g_glowQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_glowTex, 1, 0), g_glowPos, g_glowUV, g_glowCol, 1);
+        if (g_mkQuads && g_marksTex)
+            OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
+    }
     if (g_lblOn && !g_lblTex && !g_lblTried) { g_lblTried = 1; g_lblTex = OverlayLoad(LABELS_PATH); }
     if (g_lblTex) {
         LabelsBuild();
@@ -2408,7 +2547,7 @@ void WINAPI OverlayDraw(void)
 /* At start, with the world map on: the overlay, when its calls are where they should be and its picture is in the pack. */
 static void OverlayStart(void)
 {
-    g_ovOn = g_seaOn = g_lblOn = g_logoOn = g_marksOn = 0;
+    g_ovOn = g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = 0;
     if (!g_map.ok || !g_barLoader) return;
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSea")) {
         unsigned char *data = NULL;
@@ -2444,20 +2583,33 @@ static void OverlayStart(void)
         if (g_marksOn && g_mark[2].ok && !g_classSure)
             Log("badge: the character list is not where it is in the client this was made for, so the badge is its ring alone");
     }
-    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn) return;
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderGlow")) {
+        unsigned char *text = NULL, *grid = NULL;
+        unsigned len = 0, glen = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\glow.txt", &text, &len) == MPQ_OK && text)
+            GlowParse((const char *)text, len);
+        int gridOk = mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\glow.bin", &grid, &glen) == MPQ_OK && grid &&
+                     GlowGridParse(grid, glen);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        if (grid) HeapFree(GetProcessHeap(), 0, grid);
+        g_glowOn = g_glowItems > 0 && gridOk;
+        g_glowPick = -2;                                           /* nothing picked yet */
+    }
+    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn && !g_glowOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
-        g_seaOn = g_lblOn = g_logoOn = g_marksOn = 0;
+        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
     for (int i = 0; i < LBL_BATCH * 6; i++) g_lblIndex[i] = (unsigned short)i;
     g_ovOn = 1;
-    char m[260];
-    wsprintfA(m, "overlay on:%s%s%s%s%s%s%s, drawn over the world map and under the bar (in memory only)",
+    char m[300];
+    wsprintfA(m, "overlay on:%s%s%s%s%s%s%s%s%s, drawn over the world map and under the bar (in memory only)",
               g_seaOn ? " swells and glints on the open sea" : "", g_seaOn && g_marksOn ? "," : "",
-              g_marksOn ? (g_mael.ok && g_mark[1].ok ? " the Maelstrom and the ripple" : " the ripple") : "",
-              (g_seaOn || g_marksOn) && g_lblOn ? "," : "", g_lblOn ? " names and icons" : "",
-              (g_seaOn || g_marksOn || g_lblOn) && g_logoOn ? "," : "", g_logoOn ? " the RavenCraft logo at the top" : "");
+              g_marksOn ? (g_mael.ok && g_mark[1].ok ? " the Maelstrom, the ripple and the badge" : " the ripple and the badge") : "",
+              (g_seaOn || g_marksOn) && g_glowOn ? "," : "", g_glowOn ? " the arrival's glow" : "",
+              (g_seaOn || g_marksOn || g_glowOn) && g_lblOn ? "," : "", g_lblOn ? " names and icons" : "",
+              (g_seaOn || g_marksOn || g_glowOn || g_lblOn) && g_logoOn ? "," : "", g_logoOn ? " the RavenCraft logo at the top" : "");
     Log(m);
 }
 

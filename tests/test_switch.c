@@ -53,6 +53,8 @@ static void Fresh(const char *name)
     g_ovOn = 0; g_seaOn = 0; g_seaTried = 0; g_seaTex = NULL; g_seaW = g_seaH = 0;
     g_logoOn = 0; g_logoTried = 0; g_logoTex = NULL; g_logo.ok = 0;
     g_marksOn = 0; g_marksTried = 0; g_marksTex = NULL; g_mael.ok = 0;
+    g_glowOn = 0; g_glowTried = 0; g_glowTex = NULL; g_glowItems = g_glowSprites = 0; g_glowMap[0].ok = g_glowMap[1].ok = 0;
+    g_glowPick = -2; g_glowFor = 0;
     g_class = g_classFrom = g_classEntered = 0; g_classSure = 0;
     for (int i = 0; i < CLASS_CODE; i++) memcpy(shim_module + kClassCode[i].rva, kClassCode[i].bytes, (size_t)kClassCode[i].n);
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
@@ -448,10 +450,11 @@ static void Encrypt(unsigned *d, unsigned n, unsigned key)
         seed = plain + seed + (seed << 5) + 3u;
     }
 }
-#define MPQ_FILES 16
+#define MPQ_FILES 32                                     /* (16 until the glow's pack needed more, 4 Oct 2026) */
 static void MakeMpq(const char *rel, int n, const char *const *names, const char *const *data, const unsigned *lens)
 {
     static unsigned char out[1 << 20];
+    if (n > MPQ_FILES) { printf("FAIL: a test archive of %d files, more than MPQ_FILES\n", n); exit(1); }
     unsigned hash[64 * 4], block[MPQ_FILES * 4], at = 32;
     memset(hash, 0xFF, sizeof hash);
     for (int i = 0; i < n; i++) {
@@ -875,13 +878,25 @@ static void FireRealClient(const char *client)
 /* ---- tonight's three: the fire revealed with a soft, live front, and the continents' wallpapers ---- */
 static void PutFloat(unsigned va, float f) { memcpy(shim_module + va - 0x400000u, &f, 4); }
 static unsigned FBits(float f) { unsigned u; memcpy(&u, &f, 4); return u; }
+/* glow.bin for the tests: map 0, 100-yard cells from x 1000, y 2000, 4 columns along y by 3 rows along x; the middle
+ * two cells of the middle row are the first subzone, the cell after them the second */
+static unsigned char kGlowBin[6 + 18 + 24];
+static void GlowBinMake(void)
+{
+    unsigned char *d = kGlowBin;
+    float cell = 100, x0 = 1000, y0 = 2000;
+    memcpy(d, "CGLW", 4); d[4] = 1; d[5] = 0;
+    d[6] = 0; d[7] = 0; memcpy(d + 8, &cell, 4); memcpy(d + 12, &x0, 4); memcpy(d + 16, &y0, 4); d[20] = 4; d[21] = 0; d[22] = 3; d[23] = 0;
+    unsigned short cells[12] = { 0, 0, 0, 0, 0, 1, 1, 2, 0, 0, 0, 0 };
+    memcpy(d + 24, cells, sizeof cells);
+}
 /* sea.bin for the tests: 4 x 4, the left half land, the right half open sea */
 static const unsigned char kSeaBin[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
                                                0, 0, 255, 255 };
 static void PackLive(int reveal, int walls)
 {
-    const char *names[16], *data[16];
-    unsigned lens[16] = { 0 };
+    const char *names[32], *data[32];
+    unsigned lens[32] = { 0 };
     int n = 0;
     names[n] = "Interface\\Glues\\LoadingScreens\\LoadScreenDeadmines.blp"; data[n++] = "BLP2screen";
     names[n] = "CinderLoad\\bars.txt";
@@ -899,6 +914,15 @@ static void PackLive(int reveal, int walls)
     if (reveal & 8) {                                    /* the sea: its sheet, and its table (16: one a byte short) */
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderSea.blp"; data[n++] = "BLP2sea";
         names[n] = "CinderLoad\\sea.bin"; data[n] = (const char *)kSeaBin; lens[n++] = sizeof kSeaBin - ((reveal & 16) ? 1 : 0);
+    }
+    if (reveal & 128) {                                  /* the glow: its sheet, table and grid */
+        GlowBinMake();
+        static char gt[200];
+        snprintf(gt, sizeof gt, "# g\ns 0 0 0 64 32\ns 1 64 0 128 64\ng 0 %08x %08x %08x %08x\ng 1 %08x %08x %08x %08x\n",
+                 FBits(0.40f), FBits(0.50f), FBits(0.46f), FBits(0.53f), FBits(0.46f), FBits(0.50f), FBits(0.48f), FBits(0.52f));
+        names[n] = "Interface\\Glues\\LoadingScreens\\CinderGlow.blp"; data[n++] = "BLP2glow";
+        names[n] = "CinderLoad\\glow.txt"; data[n++] = gt;
+        names[n] = "CinderLoad\\glow.bin"; data[n] = (const char *)kGlowBin; lens[n++] = sizeof kGlowBin - ((reveal & 256) ? 1 : 0);
     }
     if (reveal & 64) {                                   /* the marks: their sheet and table, the Maelstrom at 0.5, 0.44 */
         static char mk[200];
@@ -1351,7 +1375,7 @@ static void LiveTests(void)
         Fresh("overlay-marks");
         PackLive(1 | 2 | 4 | 8 | 64, 0);
         Start();
-        mk &= g_marksOn && LogSays("overlay on: swells and glints on the open sea, the Maelstrom and the ripple");
+        mk &= g_marksOn && LogSays("overlay on: swells and glints on the open sea, the Maelstrom, the ripple and the badge");
         Check(mk, "marks.txt read (an id past 31, a rectangle past the sheet, a radius of half the world left out); the marks on, in the log");
 
         /* the Maelstrom: in the world's place and size, square on screen, turning anticlockwise, gone close in */
@@ -1497,6 +1521,58 @@ static void LiveTests(void)
         bd &= at[0] == CHAR_COUNT_VA && at[1] == CHAR_LIST_VA && at[2] == CHAR_PICKED_VA && at[3] == CHAR_ENTERED_VA &&
               (kClassCode[3].bytes[3] | kClassCode[3].bytes[4] << 8) == CHAR_CLASS && 9 * (1 << kClassCode[2].bytes[5]) == CHAR_SIZE;
         Check(bd, "the badge: the class from the list (a bad byte never taken, kept when the list goes); shadow, icon, ring at the arrival; the ring alone without; off when the code moved");
+    }
+
+    /* the arrival's glow: on with its sheet, table and grid (a grid a byte short: off); its subzone found from the arrival's
+     * world place; lit as the view closes in; the round glow where no subzone is */
+    {
+        Fresh("glow-short");
+        PackLive(1 | 2 | 4 | 64 | 128 | 256, 0);
+        Start();
+        int gw = !g_glowOn;
+        Fresh("glow");
+        PackLive(1 | 2 | 4 | 64 | 128, 0);
+        Start();
+        gw &= g_glowOn && g_glowItems == 2 && g_glowSprites == 2 &&
+              LogSays("overlay on: the Maelstrom, the ripple and the badge, the arrival's glow, drawn over");
+        gw &= GlowFind(0, 1150, 2150) == 0 && GlowFind(0, 1150, 2250) == 0 && GlowFind(0, 1150, 2350) == 1 &&
+              GlowFind(0, 1050, 2150) == -1 && GlowFind(0, 1150, 1999) == -1 && GlowFind(0, 1301, 2150) == -1 &&
+              GlowFind(1, 1150, 2150) == -1 && GlowFind(0, 1050, 2550) == -1;   /* past the last column: never the next row's */
+        {
+            unsigned char longer[sizeof kGlowBin + 1];
+            memcpy(longer, kGlowBin, sizeof kGlowBin); longer[sizeof kGlowBin] = 0;
+            gw &= !GlowGridParse(longer, sizeof longer) && GlowGridParse(kGlowBin, sizeof kGlowBin);   /* a byte too many: off */
+        }
+        { const char *t = "s 0 0 0 64 32\ns 2 0 0 8 8\ng 0 3f000000 3f000000 3f100000 3f100000\ng 5 0 0 0 0\n";   /* a bad g line: none */
+          GlowParse(t, (unsigned)strlen(t)); }
+        gw &= g_glowSprites == 1 && g_glowItems == 0;
+        { const char *t = "s 0 0 0 64 32\ns 1 64 0 128 64\ng 0 3ecccccd 3f000000 3eeb851f 3f07ae14\ng 1 3eeb851f 3f000000 3ef5c28f 3f051eb8\n";
+          GlowParse(t, (unsigned)strlen(t)); }
+        gw &= g_glowItems == 2;
+        /* the arrival in the first subzone: x 1150, y 2250 */
+        Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, 1150); PutFloat(MAP_DEST_Y_VA, 2250);
+        g_destOk = 1; g_destU = 0.43f; g_destV = 0.515f; g_destSince = 200000; g_glowFor = 0; g_glowPick = -2;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);                    /* far out: not lit yet */
+        GlowBuild(201000);
+        gw &= g_glowPick == 0 && g_glowQuads == 0;
+        g_bgUV[0] = g_bgUV[4] = 0.37f; g_bgUV[2] = g_bgUV[6] = 0.49f;  /* close in, h = 0.06: lit, over its own rectangle */
+        g_bgUV[5] = g_bgUV[7] = 0.455f; g_bgUV[1] = g_bgUV[3] = 0.575f;
+        GlowBuild(201000);
+        gw &= g_glowQuads == 1 && (g_glowCol[0] >> 24) == 255 && fabsf(g_glowPos[0] - (0.40f - 0.37f) / 0.12f) < 1e-4f &&
+              fabsf(g_glowPos[3] - (0.46f - 0.37f) / 0.12f) < 1e-4f && fabsf(g_glowPos[7] - (1 - (0.50f - 0.455f) / 0.12f)) < 1e-4f &&
+              fabsf(g_glowPos[1] - (1 - (0.53f - 0.455f) / 0.12f)) < 1e-4f && g_glowUV[0] == 0 && g_glowUV[2] == 64.0f / 2048;
+        GlowBuild(200100);                                               /* known a tenth of a second ago: faint yet */
+        gw &= g_glowQuads == 1 && (g_glowCol[0] >> 24) < 60;
+        /* nowhere a subzone is: the round glow, from the marks, its size in the world's */
+        PutFloat(MAP_DEST_X_VA, 1050); g_destSince = 300000;
+        GlowBuild(301000);
+        gw &= g_glowPick == -1 && g_glowQuads == 0 && g_mkQuads == 0;    /* no subzone, and no round glow in this pack: nothing */
+        g_mark[3].ok = 1; g_mark[3].x0 = 128; g_mark[3].y0 = 256; g_mark[3].x1 = 256; g_mark[3].y1 = 384;
+        g_map.ok = 1; g_map.m[0].ok = 1; g_map.m[0].bv = -2e-5f;
+        GlowBuild(301000);
+        gw &= g_glowQuads == 0 && g_mkQuads == 1 && fabsf((g_mkPos[7] - g_mkPos[1]) - GLOW_YARDS * 2e-5f / 0.12f) < 1e-4f;
+        g_destOk = 0;
+        Check(gw, "the glow: on with its files (a short grid: off); the arrival's subzone from its world place; lit closing in, faint at first; the round glow elsewhere");
     }
 
     /* sea.bin: anything but a whole table is left out; between the cells' middles, how open the sea is */
