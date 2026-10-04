@@ -1036,8 +1036,10 @@ static void LiveTests(void)
     int full = fabsf(g_bgUV[0] - (0.5f - h)) < 1e-4f && fabsf(g_bgUV[1] - (0.5f + h)) < 1e-4f &&
                fabsf(g_bgUV[6] - (0.5f + h)) < 1e-4f && fabsf(g_bgUV[7] - (0.5f - h)) < 1e-4f;
     float mid = g_drift;
-    now += 20; DriftStep(0.0f, now);                                  /* the next screen's bar starts again */
-    int reset = g_drift < 0.05f && mid > 0.95f;
+    now += 20; DriftStep(0.0f, now);                                  /* the bar dips for a frame (4 Oct): held */
+    int held = g_drift > 0.95f && fabsf(g_bgUV[0] - (0.5f - h)) < 1e-3f;
+    now += 2000; DriftStep(0.0f, now);                                /* the next screen, after a gap: starts again */
+    int reset = held && g_drift < 0.05f && mid > 0.95f;
     g_drift = 0; g_driftAt = 0; now = 5000; DriftStep(0, now);
     now += 20; DriftStep(1, now);
     int gentle = g_drift > 0 && g_drift < 0.1f;                       /* one frame after a leap: a small step, not a jump */
@@ -1098,10 +1100,45 @@ static void LiveTests(void)
     /* half way: the middle of the view has come as far as the zoom has, not all the way to the arrival */
     g_drift = 0; g_driftAt = 0; at = 80000;
     for (int i = 0; i < 500; i++) { at += 20; DriftStep(0.5f, at); }
-    float e5 = g_drift * g_drift * (3 - 2 * g_drift), h5 = 0.5f * powf(hEnd / 0.5f, e5);
+    float e5 = 1 - (1 - g_drift) * (1 - g_drift), h5 = 0.5f * powf(hEnd / 0.5f, e5);
     float want = 0.5f + (0.3f - 0.5f) * (0.5f - h5) / (0.5f - hEnd);
     glides &= fabsf(g_viewU - want) < 3e-3f && fabsf(g_viewH - h5) < 3e-3f;
     Check(stays && glides, "a position from the last map is not used (the whole world held); when the new one lands, the view glides to it");
+
+    /* his find, 4 Oct: the bar dips to 0 for a frame at the very end, and the view jumped back out to the whole world */
+    Poke(MAP_DEST_MAP_VA, 0);
+    g_drift = 0; g_driftAt = 0; at = 100000;
+    for (int i = 0; i < 500; i++) { at += 20; DriftStep(1, at); }
+    at += 20; DriftStep(0, at);
+    at += 20; DriftStep(0, at);
+    int holds = fabsf(g_bgUV[0] - (0.3f - hEnd)) < 3e-3f && fabsf(g_bgUV[5] - (0.6f - hEnd)) < 3e-3f;
+    /* and the approach is done by 90% of the bar, so its end rests on the arrival */
+    g_drift = 0; g_driftAt = 0; at = 120000;
+    for (int i = 0; i < 500; i++) { at += 20; DriftStep(0.9f, at); }
+    int early = g_viewH < hEnd * 1.06f;
+    Check(holds && early, "the bar dipping at the end leaves the view on the arrival; the zoom is in by 90% of the bar");
+
+    /* his call, 4 Oct: a two-second load must not fly at you. The bar leaping to full at once: the zoom goes at the
+     * pace (7 s all the way in when map.txt gives none), half way after 3.5 s; a slow bar is simply followed */
+    int paced = g_map.pace == 7;
+    g_drift = 0; g_driftAt = 0; at = 140000;
+    DriftStep(0, at);
+    for (int i = 0; i < 175; i++) { at += 20; DriftStep(1, at); }    /* 3.5 s */
+    paced &= g_drift > 0.47f && g_drift < 0.51f;
+    for (int i = 0; i < 200; i++) { at += 20; DriftStep(1, at); }    /* 7.5 s in all */
+    paced &= g_drift > 0.99f;
+    g_drift = 0; g_driftAt = 0; at = 160000;
+    float lag = 0;
+    for (int i = 0; i <= 500; i++) {                                  /* a bar filling over 10 s */
+        at += 20; DriftStep(i / 500.0f, at);
+        float d = i / 500.0f - g_drift; if (d > lag) lag = d;
+    }
+    paced &= lag < 0.03f;
+    { const char *mt = "map 1 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\npace 10\n"; MapParse(mt, (unsigned)strlen(mt)); }
+    paced &= g_map.ok && g_map.pace == 10;
+    { const char *mt = "map 1 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\npace 0\n"; MapParse(mt, (unsigned)strlen(mt)); }
+    paced &= g_map.pace == 7;
+    Check(paced, "the speed limit: a bar leaping to full is zoomed at the pace (half way at 3.5 s); a slow bar is followed; pace from map.txt");
 
     /* the table: lines it cannot use are left out */
     { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 50\n"; MapParse(mt, (unsigned)strlen(mt)); }

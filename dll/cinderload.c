@@ -1094,13 +1094,16 @@ static int BarFamily(const BarTable *t)
  *   map <0|1> <au> <bu> <av> <bv>   u = au + bu * y, v = av + bv * x, for a world position x, y in yards; the four
  *                                   as the hex of their float bits (no C runtime here to read decimals)
  *   end <yards>                     how tall a stretch of the world the view ends on
+ *   pace <seconds>                  the zoom is never quicker than this, all the way in (his call, 4 Oct: a
+ *                                   two-second hearth flew at him); 7 when not given
  * Only when both the picture and the table are in the pack, and the picture can move (drift.txt, the reveal). */
 #define MAP_PATH        "Interface\\Glues\\LoadingScreens\\CinderMap.blp"
 #define MAP_DEST_MAP_VA 0x88262C   /* int: the map SMSG_NEW_WORLD / LOGIN_VERIFY_WORLD put the player on (VA 0x401B00) */
 #define MAP_DEST_X_VA   0x88268C   /* float: x there, in yards */
 #define MAP_DEST_Y_VA   0x882690   /* float: y there */
-#define MAP_TAU         0.35f      /* seconds: how smoothly the view follows, so a late position glides in */
-static struct { int ok; struct { int ok; float au, bu, av, bv; } m[2]; float endYards; } g_map;
+#define MAP_TAU         0.15f      /* seconds: how smoothly the view follows, so a late position glides in */
+#define MAP_BAR_TAU     0.15f      /* seconds: how closely the zoom follows the bar (a quick load is over in a second) */
+static struct { int ok; struct { int ok; float au, bu, av, bv; } m[2]; float endYards, pace; } g_map;
 static volatile LONG g_mapShown;  /* the screen showing has the world map */
 
 static int MapSpace(char c) { return c == ' ' || c == '\t'; }
@@ -1140,14 +1143,18 @@ static void MapParse(const char *s, unsigned len)
                 g_map.m[id].au = au; g_map.m[id].bu = bu; g_map.m[id].av = av; g_map.m[id].bv = bv;
                 g_map.m[id].ok = 1;
             }
-        } else if (n > 4 && l[0] == 'e' && l[1] == 'n' && l[2] == 'd' && MapSpace(l[3])) {
-            int y = 0, d = 0;
+        } else if (n > 4 && ((l[0] == 'e' && l[1] == 'n' && l[2] == 'd' && MapSpace(l[3])) ||
+                             (n > 5 && l[0] == 'p' && l[1] == 'a' && l[2] == 'c' && l[3] == 'e' && MapSpace(l[4])))) {
+            int y = 0, d = 0, pace = l[0] == 'p';
+            i = pace ? 5 : 4;
             while (i < n && MapSpace(l[i])) i++;
             for (; i < n && l[i] >= '0' && l[i] <= '9' && d < 6; i++, d++) y = y * 10 + (l[i] - '0');
-            if (d) g_map.endYards = (float)y;
+            if (d && pace) g_map.pace = (float)y;
+            else if (d) g_map.endYards = (float)y;
         }
         at = end + 1;
     }
+    if (!(g_map.pace >= 1 && g_map.pace <= 60)) g_map.pace = 7;
     g_map.ok = (g_map.m[0].ok || g_map.m[1].ok) && g_map.endYards >= 100;
 }
 
@@ -1578,23 +1585,37 @@ static int MapDest(float *du, float *dv, float *hEnd)
 }
 
 static float g_viewU = 0.5f, g_viewV = 0.5f, g_viewH = 0.5f;     /* the world map's view, eased */
+static float g_driftMax;                                        /* the bar's highest this screen */
+static unsigned g_driftMap = 0xFFFFFFFFu;                       /* the screen's map, to tell a new screen */
 
-/* The game's thread only. p: the bar, 0..1. A new screen (the bar back near 0, or no frame for a second) starts again.
- * With the world map: from the whole world, the view zooms evenly (in steps of the same ratio) onto where the player
- * arrives, its middle following the zoom, so the end of the bar lands on them. Otherwise: the picture drifts in. */
+/* The game's thread only. p: the bar, 0..1. A new screen (no frame for a second, or another map) starts again; within
+ * a screen the bar only goes up (4 Oct 2026: it dips for a frame at the very end, and the view used to jump back out
+ * to the whole world). With the world map: from the whole world, the view zooms evenly (in steps of the same ratio)
+ * onto where the player arrives, its middle following the zoom, the approach done by about 90% of the bar so the end
+ * of it rests on them. Otherwise: the picture drifts in. */
 static void DriftStep(float p, DWORD now)
 {
-    if (!g_driftAt || now - g_driftAt > 1000 || p < g_drift - 0.25f) {
+    unsigned map = 0xFFFFFFFFu;
+    ClientWord(BAR_MAP_VA, &map);
+    if (!g_driftAt || now - g_driftAt > 1000 || map != g_driftMap) {
         g_drift = 0;
+        g_driftMax = 0;
         g_viewU = g_viewV = g_viewH = 0.5f;
+        g_driftMap = map;
     }
+    if (p > g_driftMax) g_driftMax = p;
+    p = g_driftMax;
     float dt = g_driftAt ? (float)(now - g_driftAt) / 1000.0f : 0;
     g_driftAt = now;
     if (dt > 0.1f) dt = 0.1f;
-    g_drift += (p - g_drift) * (float)(1.0 - FireExp(-(double)dt / DRIFT_TAU));
-    float e = g_drift * g_drift * (3 - 2 * g_drift);                /* eased in and out */
+    int zoom = g_mapShown && g_map.ok;
+    float step = (p - g_drift) * (float)(1.0 - FireExp(-(double)dt / (zoom ? MAP_BAR_TAU : DRIFT_TAU)));
+    if (zoom && step > dt / g_map.pace) step = dt / g_map.pace;     /* the speed limit: never quicker than pace */
+    g_drift += step;
+    float e = zoom ? 1 - (1 - g_drift) * (1 - g_drift)              /* the zoom: done early, then resting on them */
+                   : g_drift * g_drift * (3 - 2 * g_drift);         /* the drift: eased in and out */
     float cu = 0.5f, cv = 0.5f, h;
-    if (g_mapShown && g_map.ok) {
+    if (zoom) {
         float du, dv, hEnd;
         h = 0.5f;
         if (MapDest(&du, &dv, &hEnd)) {
