@@ -53,6 +53,8 @@ static void Fresh(const char *name)
     g_ovOn = 0; g_seaOn = 0; g_seaTried = 0; g_seaTex = NULL; g_seaW = g_seaH = 0;
     g_logoOn = 0; g_logoTried = 0; g_logoTex = NULL; g_logo.ok = 0;
     g_marksOn = 0; g_marksTried = 0; g_marksTex = NULL; g_mael.ok = 0;
+    g_class = g_classFrom = g_classEntered = 0; g_classSure = 0;
+    for (int i = 0; i < CLASS_CODE; i++) memcpy(shim_module + kClassCode[i].rva, kClassCode[i].bytes, (size_t)kClassCode[i].n);
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
     g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0;
@@ -803,6 +805,13 @@ static void FireBarRealClient(const char *client)
         if (!match) printf("FAIL: RVA 0x%lX (%s) does not call 0x%X in %s\n", (unsigned long)kOverlayCalls[i].rva,
                            kOverlayCalls[i].what, kOverlayCalls[i].target, exe);
     }
+    for (int i = 0; x && match && i < CLASS_CODE; i++) {             /* the badge's class: where its addresses come from */
+        unsigned char got[8];
+        long off = ExeOffset(x, kClassCode[i].rva);
+        match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, (size_t)kClassCode[i].n, x) == (size_t)kClassCode[i].n &&
+                 !memcmp(got, kClassCode[i].bytes, (size_t)kClassCode[i].n);
+        if (!match) printf("FAIL: RVA 0x%lX (%s) differs in %s\n", (unsigned long)kClassCode[i].rva, kClassCode[i].what, exe);
+    }
     if (x) fclose(x);
     Check(match, "a real client: all eight places hold the bytes the fire bar and the drift expect, in its WoW.exe");
 }
@@ -893,8 +902,8 @@ static void PackLive(int reveal, int walls)
     }
     if (reveal & 64) {                                   /* the marks: their sheet and table, the Maelstrom at 0.5, 0.44 */
         static char mk[200];
-        snprintf(mk, sizeof mk, "# m\ns 0 0 0 256 256\ns 1 256 0 512 256\nmaelstrom %08x %08x %08x\n", FBits(0.5f),
-                 FBits(0.44f), FBits(0.068f));
+        snprintf(mk, sizeof mk, "# m\ns 0 0 0 256 256\ns 1 256 0 512 256\ns 2 0 256 128 384\ns 4 0 384 128 512\n"
+                 "s 24 384 320 448 384\nmaelstrom %08x %08x %08x\n", FBits(0.5f), FBits(0.44f), FBits(0.068f));
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderMarks.blp"; data[n++] = "BLP2marks";
         names[n] = "CinderLoad\\marks.txt"; data[n++] = mk;
     }
@@ -1417,6 +1426,77 @@ static void LiveTests(void)
         rp &= g_mkQuads == 0;
         g_destOk = 0; g_mael.ok = 0; g_seaW = 0;
         Check(rp, "the ripple: none before the arrival is known; then rings at it, square, the wider the fainter, faint at first, none close in");
+    }
+
+    /* the badge: the class read from the character list (a mage, the second of three), kept when the list goes, a bad
+     * byte never taken; drawn shadow, icon, ring at the arrival, a steady size; the ring alone with no class; and none of
+     * it read when the code the addresses came from has changed */
+    {
+        Fresh("badge");
+        PackLive(1 | 2 | 4 | 8 | 64, 0);
+        Start();
+        int bd = g_marksOn && g_classSure && !LogSays("badge: the character list is not where");
+        Poke(CHAR_COUNT_VA, 3); Poke(CHAR_LIST_VA, 0x8A0000); Poke(CHAR_PICKED_VA, 1); Poke(CHAR_ENTERED_VA, 0x8A0000 + CHAR_SIZE);
+        shim_module[0x8A0000 - 0x400000 + 0 * 0x120 + 0x101] = 1;     /* the layout read from GetCharacterInfo */
+        shim_module[0x8A0000 - 0x400000 + 1 * 0x120 + 0x101] = 8;
+        shim_module[0x8A0000 - 0x400000 + 2 * 0x120 + 0x101] = 6;     /* no class 6 in 1.12 */
+        shim_module[0x8A0000 - 0x400000 + 3 * 0x120 + 0x101] = 4;     /* past the list's end: never read */
+        ClassStep();
+        bd &= g_class == 8 && g_classFrom == 1 && g_classEntered == 8;
+        Poke(CHAR_PICKED_VA, 3);
+        ClassStep();
+        bd &= g_class == 8 && g_classFrom == 2;                          /* a pick past the end: not read */
+        Poke(CHAR_PICKED_VA, 1);
+        Poke(CHAR_PICKED_VA, 2);
+        ClassStep();
+        bd &= g_class == 8 && g_classFrom == 2;                          /* a bad byte: the mage kept */
+        Poke(CHAR_PICKED_VA, 1); Poke(CHAR_COUNT_VA, 0);                /* the list gone: kept, and said so */
+        ClassStep();
+        bd &= g_class == 8 && g_classFrom == 2;
+        g_scrW = 3840; g_scrH = 2160;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        g_destOk = 0;
+        BadgeBuild(90000);
+        bd &= g_mkQuads == 0;
+        g_destOk = 1; g_destU = 0.3f; g_destV = 0.6f; g_destSince = 80000;
+        BadgeBuild(90000);
+        float hs = BADGE_PX / 2160.0f;
+        bd &= g_mkQuads == 3 && g_mkUV[0] == 0.0f && g_mkUV[1] == 1.0f &&                    /* first the shadow (0,384..128,512) */
+              fabsf(g_mkUV[(6 + 0) * 2] - 384.0f / 512) < 1e-6f &&                          /* then the mage's icon */
+              fabsf(g_mkUV[(12 + 0) * 2 + 1] - 384.0f / 512) < 1e-6f &&                     /* then the ring (its bottom at 384) */
+              fabsf((g_mkPos[12 * 3] + g_mkPos[13 * 3]) / 2 - 0.3f) < 1e-5f &&            /* centred on the arrival */
+              fabsf(g_mkPos[14 * 3 + 1] - g_mkPos[12 * 3 + 1] - 2 * hs) < 1e-5f && (g_mkCol[12] >> 24) == 255;
+        {
+            char lm[220];
+            g_mapShown = 1; g_classFrom = 1; g_classEntered = 8;
+            BadgeLog(lm);
+            g_classFrom = 2; g_classEntered = 0;
+            BadgeLog(lm);
+            g_mapShown = 0;
+            bd &= LogSays("its badge: mage, from the character list; the entered character's own entry says mage") &&
+                  LogSays("its badge: mage, kept from an earlier screen (the list is not there now); the entered character's own entry says none");
+        }
+        g_class = 0;
+        BadgeBuild(90000);
+        bd &= g_mkQuads == 2;                                            /* no class: the shadow and the ring */
+        /* the code moved: nothing read, said so */
+        Fresh("badge-moved");
+        PackLive(1 | 2 | 4 | 8 | 64, 0);
+        shim_module[kClassCode[3].rva + 3] ^= 0x02;                       /* the class at another offset */
+        Start();
+        bd &= !g_classSure && LogSays("badge: the character list is not where it is in the client this was made for");
+        Poke(CHAR_COUNT_VA, 3); Poke(CHAR_LIST_VA, 0x8A0000); Poke(CHAR_PICKED_VA, 1);
+        shim_module[0x8A0000 - 0x400000 + 1 * 0x120 + 0x101] = 8;
+        ClassStep();
+        bd &= g_class == 0;
+        g_destOk = 0;
+        /* the addresses and layout the DLL uses are the ones in the bytes checked against the real client */
+        unsigned at[4];
+        memcpy(&at[0], kClassCode[0].bytes + 2, 4); memcpy(&at[1], kClassCode[1].bytes + 2, 4);
+        memcpy(&at[2], kClassCode[4].bytes + 1, 4); memcpy(&at[3], kClassCode[5].bytes + 1, 4);
+        bd &= at[0] == CHAR_COUNT_VA && at[1] == CHAR_LIST_VA && at[2] == CHAR_PICKED_VA && at[3] == CHAR_ENTERED_VA &&
+              (kClassCode[3].bytes[3] | kClassCode[3].bytes[4] << 8) == CHAR_CLASS && 9 * (1 << kClassCode[2].bytes[5]) == CHAR_SIZE;
+        Check(bd, "the badge: the class from the list (a bad byte never taken, kept when the list goes); shadow, icon, ring at the arrival; the ring alone without; off when the code moved");
     }
 
     /* sea.bin: anything but a whole table is left out; between the cells' middles, how open the sea is */

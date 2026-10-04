@@ -712,6 +712,7 @@ static void FireClose(void)
 static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
 static void OverlayStart(void);
+static void BadgeLog(char *m);           /* the marks' (below): where a map screen's class came from, into the log */
 static volatile LONG g_screenWatch;      /* 1 once the fire's worker watches for screens ending */
 static volatile LONG g_dispNew = 1;      /* the bar as shown: the next frame begins a new screen */
 static volatile LONG g_frmCount, g_frmGap, g_frmGapFrom, g_frmGapTo, g_frmDips, g_frmShown;   /* this screen's, for the log */
@@ -766,6 +767,7 @@ static void FireStep(DWORD now)
             wsprintfA(m, "loading screen: the fire burned for %lu.%lu s, the bar reached %d%% in %d steps%s", ms / 1000,
                       ms % 1000 / 100, (int)(g_fire.reached * 100 + 0.5f), g_fire.steps, bar);
             Log(m);
+            BadgeLog(m);
             if (g_frmCount > 0) {
                 LONG gap = g_frmGap;
                 wsprintfA(m, "  its frames: %ld drawn, the longest pause %ld.%ld s (the bar at %ld%%, then %ld%%), %ld "
@@ -2092,6 +2094,92 @@ static void RippleBuild(float t, DWORD now)
     }
 }
 
+/* ---- the badge: your class where you arrive (his yes, 4 Oct 2026: a class icon in a gold ring, a dark outline, a drop
+ * shadow, no blinking) ----
+ * The class, read from WoW.exe 1.12.1 (4 Oct 2026): the character select screen's list is a count at VA 0xB42140 and an
+ * array at [0xB42144], 0x120 bytes a character (GetCharacterInfo, VA 0x4732A0: name +0x08, race +0x100, class +0x101,
+ * level +0x108); the one picked is [0x83856C] (SelectCharacter, VA 0x472740 stores it); entering the world (VA 0x46B500)
+ * keeps that character's entry at [0xB41DF4]. The list is read whenever it is there and the class kept for the session,
+ * so a screen after the list has gone (if the game clears it in the world) still shows the last one read; the log says
+ * where each screen's came from, and what the entered character's own entry says, to learn which holds. */
+#define CHAR_COUNT_VA   0xB42140
+#define CHAR_LIST_VA    0xB42144
+#define CHAR_PICKED_VA  0x83856C
+#define CHAR_ENTERED_VA 0xB41DF4
+#define CHAR_SIZE       0x120
+#define CHAR_CLASS      0x101
+#define BADGE_PX        36.0f   /* the gold ring's half size on a 2160-tall screen (bigger reads better) */
+static volatile LONG g_class, g_classFrom, g_classEntered;   /* the class (0 none); 1 the list, 2 kept; the entry's own */
+static int g_classSure;                                      /* the code those addresses came from is all there */
+static const struct { DWORD rva; int n; unsigned char bytes[8]; const char *what; } kClassCode[] = {
+    { 0x0732E2, 6, { 0x3B, 0x05, 0x40, 0x21, 0xB4, 0x00 }, "GetCharacterInfo's count" },
+    { 0x0732EE, 6, { 0x8B, 0x15, 0x44, 0x21, 0xB4, 0x00 }, "GetCharacterInfo's list" },
+    { 0x0732F6, 6, { 0x8D, 0x3C, 0xC0, 0xC1, 0xE7, 0x05 }, "GetCharacterInfo's 0x120 a character" },
+    { 0x073342, 7, { 0x0F, 0xB6, 0x87, 0x01, 0x01, 0x00, 0x00 }, "GetCharacterInfo's class at +0x101" },
+    { 0x072754, 5, { 0xA3, 0x6C, 0x85, 0x83, 0x00 }, "SelectCharacter's pick" },
+    { 0x06B539, 5, { 0xA3, 0xF4, 0x1D, 0xB4, 0x00 }, "entering the world's character" } };
+#define CLASS_CODE ((int)(sizeof kClassCode / sizeof kClassCode[0]))
+
+/* 1 when every place the class's addresses were read from holds the bytes it did in the client this was made for. */
+static int ClassCodeHolds(const unsigned char *base)
+{
+    for (int i = 0; i < CLASS_CODE; i++)
+        if (!Readable(base + kClassCode[i].rva, kClassCode[i].n) || !Same(base + kClassCode[i].rva, kClassCode[i].bytes, kClassCode[i].n))
+            return 0;
+    return 1;
+}
+
+static int ClassOk(unsigned c) { return c == 1 || c == 2 || c == 3 || c == 4 || c == 5 || c == 7 || c == 8 || c == 9 || c == 11; }
+
+/* The class byte of a character list entry at client address entry, or 0. */
+static unsigned EntryClass(unsigned entry)
+{
+    const unsigned char *p = ClientAt(entry + CHAR_CLASS);
+    if (!entry || !p || !Readable(p, 1)) return 0;
+    unsigned c = *(volatile const unsigned char *)p;
+    return ClassOk(c) ? c : 0;
+}
+
+/* The game's thread, each frame of a map screen: the class as the list says, else the one kept. */
+static void ClassStep(void)
+{
+    unsigned count, list, picked, entered, c = 0;
+    if (!g_classSure) return;
+    if (ClientWord(CHAR_COUNT_VA, &count) && ClientWord(CHAR_LIST_VA, &list) && ClientWord(CHAR_PICKED_VA, &picked) &&
+        list && count > 0 && count <= 64 && picked < count)
+        c = EntryClass(list + picked * CHAR_SIZE);
+    if (c) { InterlockedExchange(&g_class, (LONG)c); InterlockedExchange(&g_classFrom, 1); }
+    else if (g_class) InterlockedExchange(&g_classFrom, 2);
+    InterlockedExchange(&g_classEntered, ClientWord(CHAR_ENTERED_VA, &entered) ? (LONG)EntryClass(entered) : 0);
+}
+
+/* The worker, as a map screen ends: where its class came from (m: 220 bytes of room). */
+static void BadgeLog(char *m)
+{
+    static const char *const kClass[12] = { "none", "warrior", "paladin", "hunter", "rogue", "priest", "?", "shaman", "mage",
+                                            "warlock", "?", "druid" };
+    if (!g_marksOn || !g_mapShown) return;
+    LONG c = g_class, e = g_classEntered;
+    wsprintfA(m, "  its badge: %s%s; the entered character's own entry says %s", kClass[c >= 0 && c < 12 ? c : 0],
+              !c ? " (no class read yet)" : (g_classFrom == 1 ? ", from the character list" :
+                                             ", kept from an earlier screen (the list is not there now)"),
+              kClass[e >= 0 && e < 12 ? e : 0]);
+    Log(m);
+}
+
+/* This frame's badge at the arrival, once known: its shadow, the class's icon, the gold ring; a steady size on screen,
+ * appearing over RIPPLE_IN. Without a class, the ring alone. */
+static void BadgeBuild(DWORD now)
+{
+    g_mkQuads = 0;
+    if (!g_destOk || !g_mark[2].ok) return;
+    float sx, sy, hs = BADGE_PX / 2160.0f, a = FireClamp((float)(now - g_destSince) / (RIPPLE_IN * 1000.0f), 0, 1);
+    ViewToScreen(g_destU, g_destV, &sx, &sy);
+    MarkPut(4, sx, sy, hs * 1.15f, 0, a);
+    if (g_class) MarkPut(16 + (int)g_class, sx, sy, hs * 0.81f, 0, a);
+    MarkPut(2, sx, sy, hs, 0, a);
+}
+
 /* ---- the names and icons (4 Oct 2026): CinderLabels.blp (DXT5, one sheet of every sprite) and CinderLoad\labels.txt:
  *   s <id> <x0> <y0> <x1> <y1>              a sprite's rectangle on the sheet (4096 x 2048)
  *   i <sprite> <u> <v> <hmax> <hmin> <dy>    an item at picture u, v (float bits in hex), shown while the view's half
@@ -2304,6 +2392,11 @@ void WINAPI OverlayDraw(void)
         LabelsBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_lblTex, 1, 0), g_lblPos, g_lblUV, g_lblCol, g_lblQuads);
     }
+    if (g_marksTex) {                                              /* the badge: over the names, never hidden by one */
+        ClassStep();
+        BadgeBuild(now);
+        if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
+    }
     if (g_logoOn && !g_logoTex && !g_logoTried) { g_logoTried = 1; g_logoTex = OverlayLoad(LOGO_PATH); }
     if (g_logoTex) {                                               /* over everything else */
         LogoBuild();
@@ -2347,6 +2440,9 @@ static void OverlayStart(void)
             MarksParse((const char *)text, len);
         if (text) HeapFree(GetProcessHeap(), 0, text);
         g_marksOn = g_mark[0].ok || (g_mark[1].ok && g_mael.ok);
+        g_classSure = g_marksOn && g_mark[2].ok && ClassCodeHolds((const unsigned char *)GetModuleHandleA(NULL));
+        if (g_marksOn && g_mark[2].ok && !g_classSure)
+            Log("badge: the character list is not where it is in the client this was made for, so the badge is its ring alone");
     }
     if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
