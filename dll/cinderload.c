@@ -716,6 +716,10 @@ static void BadgeLog(char *m);           /* the marks' (below): where a map scre
 static volatile LONG g_screenWatch;      /* 1 once the fire's worker watches for screens ending */
 static volatile LONG g_dispNew = 1;      /* the bar as shown: the next frame begins a new screen */
 static volatile LONG g_frmCount, g_frmGap, g_frmGapFrom, g_frmGapTo, g_frmDips, g_frmShown;   /* this screen's, for the log */
+#define HITCH_KEEP 6
+static volatile LONG g_hitchN, g_hitchMs[HITCH_KEEP], g_hitchPct[HITCH_KEEP];   /* gaps between frames over HITCH_MS */
+static volatile LONG g_stallN, g_stallMs[HITCH_KEEP], g_stallPct[HITCH_KEEP];   /* the bar still over STALL_MS, frames on */
+static void HitchLog(char *m);           /* the bar as shown's (below): this screen's hitches and stalls, into the log */
 
 /* One look at the client, every FIRE_POLL_MS. */
 static void FireStep(DWORD now)
@@ -775,6 +779,7 @@ static void FireStep(DWORD now)
                           (long)(gap % 1000 / 100), (long)g_frmGapFrom, (long)g_frmGapTo, (long)g_frmDips,
                           (long)g_frmShown);
                 Log(m);
+                HitchLog(m);
             }
         }
         InterlockedExchange(&g_fire.gate, 0);
@@ -1596,21 +1601,75 @@ static float MapLn(float x)
     return (float)k * 0.69314718f + 2 * t * (1 + t2 * (1.0f / 3 + t2 * (1.0f / 5 + t2 * (1.0f / 7 + t2 / 9))));
 }
 
-/* Where the player arrives, on the world map: 1 with its u, v and the view's half size there; 0 while the position
- * is not this screen's yet (a teleport's lands a moment after its screen begins) or is off the map. */
-static int MapDest(float *du, float *dv, float *hEnd)
+/* Where the player arrives (4 Oct 2026, his find: a hunter in Westfall, a paladin in Karazhan and a druid in Stormwind
+ * all showed at Alterac, the Eastern Kingdoms' 0, 0: at a login the game has not written the arrival yet, and its
+ * nothing was taken for a place). Each frame, the first of:
+ *   the arrival the game writes (NEW_WORLD, LOGIN_VERIFY_WORLD), once it has changed since this screen began; before
+ *     that it is the last screen's, or nothing;
+ *   at a login, the character list's own place for the one picked (its map +0x38, x +0x44, y +0x48, filled by the
+ *     character list's parser, VA 0x5B4389..), while the list is there (the game clears it during the load);
+ *   from half the bar on, the game's arrival as it stands (a teleport to where you already were writes the same place)
+ * and never 0, 0. Its world place is kept too, for the glow. */
+#define CHAR_COUNT_VA   0xB42140
+#define CHAR_LIST_VA    0xB42144
+#define CHAR_PICKED_VA  0x83856C
+#define CHAR_ENTERED_VA 0xB41DF4
+#define CHAR_SIZE       0x120
+#define CHAR_CLASS      0x101
+#define CHAR_MAP        0x38
+#define CHAR_X          0x44
+#define CHAR_Y          0x48
+static unsigned g_destSnap[3];                                  /* the game's arrival as this screen began */
+static int g_destMap = -1;
+static float g_destWX, g_destWY;                                /* the arrival in world yards, once known */
+static int g_classSure;                                         /* the character list's code is all there (below) */
+
+/* The game's arrival as it stands, into g_destSnap: called as a screen begins. */
+static void ArrivalSnap(void)
 {
-    unsigned id, dm, xb, yb;
-    if (!ClientWord(BAR_MAP_VA, &id) || id > 1 || !g_map.m[id].ok) return 0;
-    if (!ClientWord(MAP_DEST_MAP_VA, &dm) || dm != id) return 0;           /* still the last map's position */
-    if (!ClientWord(MAP_DEST_X_VA, &xb) || !ClientWord(MAP_DEST_Y_VA, &yb)) return 0;
-    float x = MapBits(xb), y = MapBits(yb);
-    if (!(x > -20000 && x < 20000 && y > -20000 && y < 20000)) return 0;
+    if (!ClientWord(MAP_DEST_MAP_VA, &g_destSnap[0]) || !ClientWord(MAP_DEST_X_VA, &g_destSnap[1]) ||
+        !ClientWord(MAP_DEST_Y_VA, &g_destSnap[2]))
+        g_destSnap[0] = g_destSnap[1] = g_destSnap[2] = 0;
+}
+
+/* World x, y on screen map id, on the picture: 1 with its u, v and the view's half size there. */
+static int MapPlace(unsigned id, float x, float y, float *du, float *dv, float *hEnd)
+{
+    if (!(x > -20000 && x < 20000 && y > -20000 && y < 20000) || (x == 0 && y == 0)) return 0;
     float u = g_map.m[id].au + g_map.m[id].bu * y, v = g_map.m[id].av + g_map.m[id].bv * x;
     float bv = g_map.m[id].bv < 0 ? -g_map.m[id].bv : g_map.m[id].bv, h = 0.5f * g_map.endYards * bv;
     if (!(u > 0 && u < 1 && v > 0 && v < 1 && h > 0.001f && h < 0.45f)) return 0;
     *du = u; *dv = v; *hEnd = h;
+    g_destMap = (int)id; g_destWX = x; g_destWY = y;
     return 1;
+}
+
+/* The picked character's list entry (a client address), or 0 while there is no list. */
+static unsigned CharEntry(void)
+{
+    unsigned count, list, picked;
+    if (!g_classSure || !ClientWord(CHAR_COUNT_VA, &count) || !ClientWord(CHAR_LIST_VA, &list) ||
+        !ClientWord(CHAR_PICKED_VA, &picked) || !list || !count || count > 64 || picked >= count)
+        return 0;
+    return list + picked * CHAR_SIZE;
+}
+
+/* Where the player arrives, on the world map: 1 with its u, v and the view's half size there; 0 while it is not
+ * known (see above). p: the bar so far. */
+static int MapDest(float *du, float *dv, float *hEnd, float p)
+{
+    unsigned id, dm, xb, yb, e;
+    if (!ClientWord(BAR_MAP_VA, &id) || id > 1 || !g_map.m[id].ok) return 0;
+    int game = ClientWord(MAP_DEST_MAP_VA, &dm) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb);
+    int fresh = game && (dm != g_destSnap[0] || xb != g_destSnap[1] || yb != g_destSnap[2]);
+    if (fresh && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd)) return 1;
+    if ((e = CharEntry()) != 0) {                                    /* a login: the list's own place */
+        const unsigned char *m = ClientAt(e + CHAR_MAP), *x = ClientAt(e + CHAR_X), *y = ClientAt(e + CHAR_Y);
+        if (m && x && y && Readable(m, 4) && Readable(x, 4) && Readable(y, 4) && *(volatile const unsigned *)m == id &&
+            MapPlace(id, MapBits(*(volatile const unsigned *)x), MapBits(*(volatile const unsigned *)y), du, dv, hEnd))
+            return 1;
+    }
+    return game && p >= 0.5f && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd);
 }
 
 static float g_driftMax;                                        /* the bar's highest this screen */
@@ -1631,7 +1690,19 @@ static volatile LONG g_driftNew = 1;                            /* the next fram
 #define DISP_FASTEST  1.5f
 #define DISP_LEAD     0.04f
 static float g_disp, g_dispV, g_dispRate, g_dispMax, g_fillFull;
-static DWORD g_dispAt;
+static DWORD g_dispAt, g_dispStill;                            /* ms of frames on, the game's bar unmoved, so far */
+#define HITCH_MS 120              /* a gap between frames this long or more is a hitch (4 Oct: he saw stutters at 20, 30,
+                                   * 50, 55, 60, 75 and 80%; the log said only where the longest pause was) */
+#define STALL_MS 300              /* the game's bar unmoved this long while frames still come is a stall */
+
+/* Keeps the HITCH_KEEP longest of a screen's hitches or stalls: ms long, at the bar's pct. */
+static void HitchKeep(volatile LONG *n, volatile LONG *ms, volatile LONG *pct, LONG len, LONG at)
+{
+    int least = 0;
+    for (int i = 1; i < HITCH_KEEP; i++) if (ms[i] < ms[least]) least = i;
+    InterlockedExchange(n, *n + 1);
+    if (len > ms[least]) { InterlockedExchange(&ms[least], len); InterlockedExchange(&pct[least], at); }
+}
 
 /* The game's thread only: the bar as shown for the game's p (0..1) at now. */
 static float DisplayStep(float p, DWORD now)
@@ -1642,6 +1713,11 @@ static float DisplayStep(float p, DWORD now)
         g_disp = g_dispMax = p;
         g_dispV = g_dispRate = 0;
         InterlockedExchange(&g_frmCount, 0); InterlockedExchange(&g_frmGap, 0); InterlockedExchange(&g_frmDips, 0);
+        InterlockedExchange(&g_hitchN, 0); InterlockedExchange(&g_stallN, 0);
+        for (int i = 0; i < HITCH_KEEP; i++) {
+            InterlockedExchange(&g_hitchMs[i], 0); InterlockedExchange(&g_stallMs[i], 0);
+        }
+        g_dispStill = 0;
         gap = 0;
     }
     InterlockedExchange(&g_frmCount, g_frmCount + 1);                 /* the game thread is these counts' only writer */
@@ -1651,6 +1727,13 @@ static float DisplayStep(float p, DWORD now)
         InterlockedExchange(&g_frmGapTo, (LONG)(p * 100 + 0.5f));
     }
     if (p < g_dispMax - 0.2f) InterlockedExchange(&g_frmDips, g_frmDips + 1);
+    if (gap >= HITCH_MS) HitchKeep(&g_hitchN, g_hitchMs, g_hitchPct, (LONG)gap, (LONG)(g_dispMax * 100 + 0.5f));
+    if (gap < HITCH_MS) g_dispStill += gap;                           /* a hitch is not a stall: only drawn time counts */
+    if (p > g_dispMax) {                                              /* the game's bar moves: was it still a while? */
+        if (g_dispStill >= STALL_MS)
+            HitchKeep(&g_stallN, g_stallMs, g_stallPct, (LONG)g_dispStill, (LONG)(g_dispMax * 100 + 0.5f));
+        g_dispStill = 0;
+    }
     g_dispAt = now;
     float dt = (float)gap / 1000.0f;
     if (dt > 0.1f) dt = 0.1f;
@@ -1667,6 +1750,26 @@ static float DisplayStep(float p, DWORD now)
     if (d > g_disp) g_disp = d;
     InterlockedExchange(&g_frmShown, (LONG)(g_disp * 100 + 0.5f));
     return g_disp;
+}
+
+/* The worker, as a screen ends: its hitches and stalls, longest kept, in the bar's order (m: 220 bytes of room). */
+static void HitchLog(char *m)
+{
+    static const char *const kind[2] = { "hitches (the game drew nothing)", "stalls (frames on, its bar still)" };
+    for (int k = 0; k < 2; k++) {
+        volatile LONG *ms = k ? g_stallMs : g_hitchMs, *pct = k ? g_stallPct : g_hitchPct;
+        LONG n = k ? g_stallN : g_hitchN;
+        if (!n) continue;
+        int idx[HITCH_KEEP], c = 0;
+        for (int i = 0; i < HITCH_KEEP; i++) if (ms[i] > 0) idx[c++] = i;
+        for (int i = 1; i < c; i++)                                       /* in the bar's order */
+            for (int j = i; j > 0 && pct[idx[j]] < pct[idx[j - 1]]; j--) { int t = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = t; }
+        int len = wsprintfA(m, "  its %s: %ld;", kind[k], (long)n);
+        for (int i = 0; i < c && len < 180; i++)
+            len += wsprintfA(m + len, " %ld.%02ld s at %ld%%%s", (long)(ms[idx[i]] / 1000), (long)(ms[idx[i]] % 1000 / 10),
+                             (long)pct[idx[i]], i + 1 < c ? "," : "");
+        Log(m);
+    }
 }
 static int g_destOk;                                            /* this screen's arrival, once known, is kept */
 static DWORD g_destSince;                                       /* when it became known (the ripple fades in from it) */
@@ -1702,6 +1805,8 @@ static void DriftStep(float p, DWORD now)
         g_driftMax = 0;
         g_viewU = g_viewV = g_viewH = 0.5f;
         g_destOk = 0;
+        g_destMap = -1;
+        ArrivalSnap();
     }
     if (p > g_driftMax) g_driftMax = p;
     p = g_driftMax;
@@ -1718,7 +1823,7 @@ static void DriftStep(float p, DWORD now)
     if (zoom) {
         float du, dv, hEnd;
         h = 0.5f;
-        if (MapDest(&du, &dv, &hEnd)) {                            /* once known, kept for the screen */
+        if (MapDest(&du, &dv, &hEnd, p)) {                         /* once known, kept for the screen */
             if (!g_destOk) g_destSince = now;
             g_destOk = 1; g_destU = du; g_destV = dv; g_destH = hEnd;
         } else if (g_destOk) {
@@ -2102,22 +2207,18 @@ static void RippleBuild(float t, DWORD now)
  * keeps that character's entry at [0xB41DF4]. The list is read whenever it is there and the class kept for the session,
  * so a screen after the list has gone (if the game clears it in the world) still shows the last one read; the log says
  * where each screen's came from, and what the entered character's own entry says, to learn which holds. */
-#define CHAR_COUNT_VA   0xB42140
-#define CHAR_LIST_VA    0xB42144
-#define CHAR_PICKED_VA  0x83856C
-#define CHAR_ENTERED_VA 0xB41DF4
-#define CHAR_SIZE       0x120
-#define CHAR_CLASS      0x101
 #define BADGE_PX        36.0f   /* the gold ring's half size on a 2160-tall screen (bigger reads better) */
 static volatile LONG g_class, g_classFrom, g_classEntered;   /* the class (0 none); 1 the list, 2 kept; the entry's own */
-static int g_classSure;                                      /* the code those addresses came from is all there */
 static const struct { DWORD rva; int n; unsigned char bytes[8]; const char *what; } kClassCode[] = {
     { 0x0732E2, 6, { 0x3B, 0x05, 0x40, 0x21, 0xB4, 0x00 }, "GetCharacterInfo's count" },
     { 0x0732EE, 6, { 0x8B, 0x15, 0x44, 0x21, 0xB4, 0x00 }, "GetCharacterInfo's list" },
     { 0x0732F6, 6, { 0x8D, 0x3C, 0xC0, 0xC1, 0xE7, 0x05 }, "GetCharacterInfo's 0x120 a character" },
     { 0x073342, 7, { 0x0F, 0xB6, 0x87, 0x01, 0x01, 0x00, 0x00 }, "GetCharacterInfo's class at +0x101" },
     { 0x072754, 5, { 0xA3, 0x6C, 0x85, 0x83, 0x00 }, "SelectCharacter's pick" },
-    { 0x06B539, 5, { 0xA3, 0xF4, 0x1D, 0xB4, 0x00 }, "entering the world's character" } };
+    { 0x06B539, 5, { 0xA3, 0xF4, 0x1D, 0xB4, 0x00 }, "entering the world's character" },
+    { 0x1B4435, 6, { 0x8D, 0x46, 0x38, 0x50, 0x8B, 0xCF }, "the character list's map at +0x38" },
+    { 0x1B4440, 6, { 0x8D, 0x4E, 0x44, 0x51, 0x8B, 0xCF }, "its x at +0x44" },
+    { 0x1B444B, 6, { 0x8D, 0x56, 0x48, 0x52, 0x8B, 0xCF }, "its y at +0x48" } };
 #define CLASS_CODE ((int)(sizeof kClassCode / sizeof kClassCode[0]))
 
 /* 1 when every place the class's addresses were read from holds the bytes it did in the client this was made for. */
@@ -2283,10 +2384,8 @@ static void GlowBuild(DWORD now)
     g_mkQuads = 0;
     if (!g_destOk) return;
     if (g_glowFor != g_destSince || g_glowPick < -1) {             /* this screen's arrival: which subzone, once */
-        unsigned mb, xb, yb;
         g_glowFor = g_destSince;
-        g_glowPick = ClientWord(MAP_DEST_MAP_VA, &mb) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb)
-                         ? GlowFind((int)mb, MapBits(xb), MapBits(yb)) : -1;
+        g_glowPick = GlowFind(g_destMap, g_destWX, g_destWY);
     }
     float h = (g_bgUV[2] - g_bgUV[0]) * 0.5f, k = FireClamp((GLOW_FROM - h) / (GLOW_FROM - GLOW_FULL), 0, 1);
     float a = k * k * (3 - 2 * k) * FireClamp((float)(now - g_destSince) / (RIPPLE_IN * 1000.0f), 0, 1);
@@ -2303,8 +2402,7 @@ static void GlowBuild(DWORD now)
         QuadPut(g_glowPos, g_glowUV, g_glowCol, 0, x, y, tu, tv, (unsigned)(a * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
         g_glowQuads = 1;
     } else if (g_mark[3].ok) {
-        unsigned mb;
-        float sx, sy, bv = ClientWord(MAP_DEST_MAP_VA, &mb) && mb <= 1 && g_map.m[mb].ok ? g_map.m[mb].bv : 0;
+        float sx, sy, bv = g_destMap >= 0 && g_destMap <= 1 && g_map.m[g_destMap].ok ? g_map.m[g_destMap].bv : 0;
         if (bv < 0) bv = -bv;
         if (bv <= 0) return;
         ViewToScreen(g_destU, g_destV, &sx, &sy);

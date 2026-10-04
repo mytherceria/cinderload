@@ -1092,6 +1092,36 @@ static void LiveTests(void)
         g_screenWatch = 0;
         Check(watched, "with the worker watching, a pause then a dip mid-screen starts nothing over (bar or zoom); without it, it does");
     }
+    /* his stutters, 4 Oct (at 20, 30, 50, 55, 60, 75 and 80%): each screen logs its hitches (no frame for 0.12 s or more)
+     * and its stalls (frames on, the game's bar unmoved 0.3 s or more), the longest six of each, in the bar's order */
+    {
+        Fresh("hitches");
+        GameDir();
+        g_dispNew = 1; g_screenWatch = 1;
+        DWORD t = 950000;
+        float p = 0;
+        DisplayStep(0, t);
+        for (int f = 0; f < 10; f++) { t += 20; p += 0.02f; DisplayStep(p, t); }      /* to 20% */
+        t += 300; DisplayStep(p, t);                                                    /* nothing drawn: 0.3 s at 20% */
+        for (int f = 0; f < 15; f++) { t += 20; p += 0.02f; DisplayStep(p, t); }      /* to 50% */
+        t += 150; DisplayStep(p, t);                                                    /* 0.15 s at 50% */
+        t += 20; p = 0.55f; DisplayStep(p, t);
+        for (int f = 0; f < 25; f++) { t += 20; DisplayStep(p, t); }                   /* frames on, its bar still 0.5 s */
+        t += 20; p = 0.6f; DisplayStep(p, t);
+        for (int f = 0; f < 10; f++) { t += 20; DisplayStep(p, t); }
+        char lm[220];
+        HitchLog(lm);
+        int hl = g_hitchN == 2 && g_stallN == 1 &&
+                 LogSays("its hitches (the game drew nothing): 2; 0.30 s at 20%, 0.15 s at 50%") &&
+                 LogSays("its stalls (frames on, its bar still): 1; 0.52 s at 55%");
+        for (int f = 0; f < 8; f++) { t += 200; p += 0.02f; DisplayStep(p, t); }      /* eight more: the six longest kept */
+        hl &= g_hitchN == 10;
+        int kept = 0;
+        for (int i = 0; i < HITCH_KEEP; i++) kept += g_hitchMs[i] > 0;
+        hl &= kept == HITCH_KEEP;
+        g_screenWatch = 0;
+        Check(hl, "each screen logs its hitches and its stalls, the longest six of each, in the bar's order");
+    }
     /* the worker's word that a screen has gone starts the bar as shown afresh; a leap from nothing to full is crossed no
      * quicker than DISP_FASTEST allows */
     {
@@ -1523,6 +1553,75 @@ static void LiveTests(void)
         Check(bd, "the badge: the class from the list (a bad byte never taken, kept when the list goes); shadow, icon, ring at the arrival; the ring alone without; off when the code moved");
     }
 
+    /* his find, 4 Oct: three characters in three places all showed at Alterac (the game's arrival read 0, 0 at a login).
+     * A login takes the character list's own place at once; a teleport waits for the game to write the new place (the
+     * old one is the last screen's); from half the bar, the game's place as it stands; never 0, 0 */
+    {
+        Fresh("arrival");
+        PackLive(1 | 2 | 4 | 64, 0);
+        Start();
+        g_mapShown = 1;
+        { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+        Poke(BAR_MAP_VA, 0);
+        Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, 0); PutFloat(MAP_DEST_Y_VA, 0);   /* nothing written yet */
+        Poke(CHAR_COUNT_VA, 2); Poke(CHAR_LIST_VA, 0x8B0000); Poke(CHAR_PICKED_VA, 1);
+        unsigned e = 0x8B0000 + 0x120;                                  /* the list's own layout, read from its parser */
+        Poke(e + 0x38, 0); PutFloat(e + 0x44, -5000); PutFloat(e + 0x48, 10000);
+        int ar = g_classSure;
+        g_drift = 0; g_driftAt = 0; g_driftNew = 1;
+        DWORD at = 900000;
+        DriftStep(0, at);
+        ar &= g_destOk && fabsf(g_destU - 0.3f) < 1e-4f && fabsf(g_destV - 0.6f) < 1e-4f && g_destMap == 0 &&
+              g_destWX == -5000 && g_destWY == 10000;                    /* a login: the list's place, at once */
+        /* a teleport: no list; the old place (the last screen's) is not taken, the new one is the moment it lands */
+        Poke(CHAR_COUNT_VA, 0);
+        PutFloat(MAP_DEST_X_VA, -5000); PutFloat(MAP_DEST_Y_VA, 10000);  /* where the last screen arrived */
+        g_driftNew = 1;
+        at += 20; DriftStep(0.1f, at);
+        ar &= !g_destOk;
+        at += 20; DriftStep(0.2f, at);
+        ar &= !g_destOk;
+        PutFloat(MAP_DEST_X_VA, -2500); PutFloat(MAP_DEST_Y_VA, 5000);   /* the game writes the new place */
+        at += 20; DriftStep(0.2f, at);
+        ar &= g_destOk && fabsf(g_destU - 0.4f) < 1e-4f && fabsf(g_destV - 0.55f) < 1e-4f;
+        /* the same place again (a hearth to where you stand): taken from half the bar */
+        g_driftNew = 1;
+        at += 20; DriftStep(0.3f, at);
+        ar &= !g_destOk;
+        at += 20; DriftStep(0.6f, at);
+        ar &= g_destOk && fabsf(g_destU - 0.4f) < 1e-4f;
+        /* never 0, 0, not even past half the bar */
+        PutFloat(MAP_DEST_X_VA, 0); PutFloat(MAP_DEST_Y_VA, 0);
+        g_driftNew = 1;
+        at += 20; DriftStep(0.9f, at);
+        at += 20; DriftStep(1.0f, at);
+        ar &= !g_destOk;
+        /* the list's place on another map than the screen's: not taken */
+        Poke(CHAR_COUNT_VA, 2); Poke(e + 0x38, 1);
+        g_driftNew = 1;
+        at += 20; DriftStep(0.1f, at);
+        ar &= !g_destOk;
+        /* a pick past the list's end, or the list's code not as read: not taken */
+        Poke(e + 0x38, 0);
+        unsigned past = 0x8B0000 + 2 * 0x120;
+        Poke(past + 0x38, 0); PutFloat(past + 0x44, -5000); PutFloat(past + 0x48, 10000);
+        Poke(CHAR_PICKED_VA, 2);
+        g_driftNew = 1;
+        at += 20; DriftStep(0.1f, at);
+        ar &= !g_destOk;
+        Poke(CHAR_PICKED_VA, 1);
+        g_classSure = 0;
+        g_driftNew = 1;
+        at += 20; DriftStep(0.1f, at);
+        ar &= !g_destOk;
+        g_classSure = 1;
+        g_driftNew = 1;
+        at += 20; DriftStep(0.1f, at);
+        ar &= g_destOk;                                                  /* (and with it as read, taken) */
+        Poke(CHAR_COUNT_VA, 0); g_mapShown = 0; g_destOk = 0;
+        Check(ar, "the arrival: a login's from the character list at once; a teleport's only once the game writes it (or from half the bar); never 0, 0");
+    }
+
     /* the arrival's glow: on with its sheet, table and grid (a grid a byte short: off); its subzone found from the arrival's
      * world place; lit as the view closes in; the round glow where no subzone is */
     {
@@ -1550,7 +1649,7 @@ static void LiveTests(void)
           GlowParse(t, (unsigned)strlen(t)); }
         gw &= g_glowItems == 2;
         /* the arrival in the first subzone: x 1150, y 2250 */
-        Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, 1150); PutFloat(MAP_DEST_Y_VA, 2250);
+        g_destMap = 0; g_destWX = 1150; g_destWY = 2250;              /* the arrival's world place, as MapPlace keeps it */
         g_destOk = 1; g_destU = 0.43f; g_destV = 0.515f; g_destSince = 200000; g_glowFor = 0; g_glowPick = -2;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);                    /* far out: not lit yet */
         GlowBuild(201000);
@@ -1564,7 +1663,7 @@ static void LiveTests(void)
         GlowBuild(200100);                                               /* known a tenth of a second ago: faint yet */
         gw &= g_glowQuads == 1 && (g_glowCol[0] >> 24) < 60;
         /* nowhere a subzone is: the round glow, from the marks, its size in the world's */
-        PutFloat(MAP_DEST_X_VA, 1050); g_destSince = 300000;
+        g_destWX = 1050; g_destSince = 300000;
         GlowBuild(301000);
         gw &= g_glowPick == -1 && g_glowQuads == 0 && g_mkQuads == 0;    /* no subzone, and no round glow in this pack: nothing */
         g_mark[3].ok = 1; g_mark[3].x0 = 128; g_mark[3].y0 = 256; g_mark[3].x1 = 256; g_mark[3].y1 = 384;
