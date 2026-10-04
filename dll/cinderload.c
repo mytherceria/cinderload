@@ -1689,6 +1689,12 @@ static volatile LONG g_driftNew = 1;                            /* the next fram
 #define DISP_EASE     0.2f
 #define DISP_FASTEST  1.5f
 #define DISP_LEAD     0.04f
+#define DISP_GAP_MAX  0.75f   /* seconds: a pause between frames counts this much at most. His three logins (4 Oct) all
+                               * paused at 0, 41, 44, 50 and 54% for 0.2 to 0.6 s (the game drew nothing: its interface
+                               * loading, the same for every character), then froze 1 to 2.6 s at 100%. Counting a pause
+                               * whole, the bar comes out of it where its pace would have taken it, instead of lagging and
+                               * hurrying after (3 times its average speed, and ending at 91%); a freeze past this counts
+                               * this much only. */
 static float g_disp, g_dispV, g_dispRate, g_dispMax, g_fillFull;
 static DWORD g_dispAt, g_dispStill;                            /* ms of frames on, the game's bar unmoved, so far */
 #define HITCH_MS 120              /* a gap between frames this long or more is a hitch (4 Oct: he saw stutters at 20, 30,
@@ -1736,18 +1742,23 @@ static float DisplayStep(float p, DWORD now)
     }
     g_dispAt = now;
     float dt = (float)gap / 1000.0f;
-    if (dt > 0.1f) dt = 0.1f;
+    if (dt > DISP_GAP_MAX) dt = DISP_GAP_MAX;
     float rise = p > g_dispMax ? p - g_dispMax : 0;
     if (p > g_dispMax) g_dispMax = p;
     if (dt <= 0) return g_disp;
-    float k = (float)(1.0 - FireExp(-(double)dt / DISP_RATE_TAU));
-    g_dispRate += (rise / dt - g_dispRate) * k;                       /* the game's pace of late */
-    float want = g_dispRate + (g_dispMax - g_disp) / DISP_CATCH;
-    want = FireClamp(want, 0, DISP_FASTEST);
-    g_dispV += (want - g_dispV) * (float)(1.0 - FireExp(-(double)dt / DISP_EASE));
+    /* through the time since the last frame at the pace it had: a pause is crossed as if the bar had moved through it,
+     * never at the catching-up pace the leap after it would ask for (that was his "freezes, then jumps up a ways") */
     float d = g_disp + g_dispV * dt, cap = g_dispMax + DISP_LEAD < 1 ? g_dispMax + DISP_LEAD : 1;
-    if (d > cap) { d = cap; if (g_dispV > 0 && g_disp >= cap) g_dispV = 0; }
+    if (d > cap) d = cap;
     if (d > g_disp) g_disp = d;
+    /* then the pace for what comes: the game's of late, closing the gap, changing gently */
+    float k = (float)(1.0 - FireExp(-(double)dt / DISP_RATE_TAU));
+    g_dispRate += (rise / dt - g_dispRate) * k;
+    float want = FireClamp(g_dispRate + (g_dispMax - g_disp) / DISP_CATCH, 0, DISP_FASTEST);
+    g_dispV += (want - g_dispV) * (float)(1.0 - FireExp(-(double)dt / DISP_EASE));
+    if (g_disp >= cap && g_dispV > 0) g_dispV = 0;                    /* held at the lead: it waits for the game */
+    if (g_dispMax >= 0.999f) g_disp = 1;                              /* the load is done: the bar reads full, as the game's
+                                                                       * freeze at its end holds this frame a second or two */
     InterlockedExchange(&g_frmShown, (LONG)(g_disp * 100 + 0.5f));
     return g_disp;
 }
@@ -1812,7 +1823,7 @@ static void DriftStep(float p, DWORD now)
     p = g_driftMax;
     float dt = g_driftAt ? (float)(now - g_driftAt) / 1000.0f : 0;
     g_driftAt = now;
-    if (dt > 0.1f) dt = 0.1f;
+    if (dt > DISP_GAP_MAX) dt = DISP_GAP_MAX;                       /* as the bar: a pause counts whole, up to a limit */
     int zoom = g_mapShown && g_map.ok;
     float step = (p - g_drift) * (float)(1.0 - FireExp(-(double)dt / (zoom ? MAP_BAR_TAU : DRIFT_TAU)));
     if (zoom && step > dt / g_map.pace) step = dt / g_map.pace;     /* the speed limit: never quicker than pace */
