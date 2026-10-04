@@ -7,6 +7,7 @@ Usage: STORMLIB=/path/to/libstorm.so python3 make_pack.py <client Data dir> <out
        [--test-continents] [--art <map file>] [--bar <dir>] [--fire-bars <dir> --bar-map <file>] [--reveal]
        [--wallpapers <file>] [--drift] [--map <world png> <map.txt>] [--sea <sheet png> <sea.bin>] [--labels <sheet png> <labels.txt>]
        [--logo <logo png> <logo.txt>] [--marks <marks png> <marks.txt>] [--glow <glow png> <glow.txt> <glow.bin>]
+       [--waves <wave tile png>] [--flow <flow png> <flow.bin>]
    e.g. ... make_pack.py ~/Games/RavenCraft-fogtest/Data out 21x9 5120 2160 --test-continents
 
 The loading bar's fire for each screen (CinderLoad.dll picks the bar by the screen's picture; both options or neither):
@@ -336,6 +337,22 @@ if __name__ == '__main__':
         write_blp(sheet, blp, 512, 512, alpha=True)
         files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderMarks.blp'))
         files.append((table, 'CinderLoad\\marks.txt'))
+    if '--waves' in sys.argv:                           # the waves, take two: one tile of small crests, laid at two sizes
+        tile = os.path.expanduser(sys.argv[sys.argv.index('--waves') + 1])
+        if not os.path.isfile(tile):
+            raise SystemExit('--waves: the wave tile (kit/zoom/wavetile.py makes it)')
+        blp = os.path.join(blps, 'CinderWaves.blp')
+        write_blp(tile, blp, 512, 512, alpha=True)
+        files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderWaves.blp'))
+    if '--flow' in sys.argv:                            # the currents: their streaks' sheet and the field they ride
+        i = sys.argv.index('--flow')
+        sheet, field = os.path.expanduser(sys.argv[i + 1]), os.path.expanduser(sys.argv[i + 2])
+        if not (os.path.isfile(sheet) and os.path.isfile(field)):
+            raise SystemExit('--flow: the streaks sheet and flow-<shape>.bin (kit/zoom/flow.py makes both)')
+        blp = os.path.join(blps, 'CinderFlow.blp')
+        write_blp(sheet, blp, 256, 64, alpha=True)
+        files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderFlow.blp'))
+        files.append((field, 'CinderLoad\\flow.bin'))
     if '--glow' in sys.argv:                            # the arrival's subzone lights up: the glows, where they lie, the grid
         i = sys.argv.index('--glow')
         sheet, table, grid = (os.path.expanduser(a) for a in sys.argv[i + 1:i + 4])

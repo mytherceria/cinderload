@@ -53,6 +53,7 @@ static void Fresh(const char *name)
     g_ovOn = 0; g_seaOn = 0; g_seaTried = 0; g_seaTex = NULL; g_seaW = g_seaH = 0;
     g_logoOn = 0; g_logoTried = 0; g_logoTex = NULL; g_logo.ok = 0;
     g_marksOn = 0; g_marksTried = 0; g_marksTex = NULL; g_mael.ok = 0;
+    g_wavesOn = g_wavesTried = 0; g_wavesTex = NULL; g_flowOn = g_flowTried = 0; g_flowTex = NULL; g_flowW = 0;
     g_glowOn = 0; g_glowTried = 0; g_glowTex = NULL; g_glowItems = g_glowSprites = 0; g_glowMap[0].ok = g_glowMap[1].ok = 0;
     g_glowPick = -2; g_glowFor = 0;
     g_class = g_classFrom = g_classEntered = 0; g_classSure = 0;
@@ -878,6 +879,15 @@ static void FireRealClient(const char *client)
 /* ---- tonight's three: the fire revealed with a soft, live front, and the continents' wallpapers ---- */
 static void PutFloat(unsigned va, float f) { memcpy(shim_module + va - 0x400000u, &f, 4); }
 static unsigned FBits(float f) { unsigned u; memcpy(&u, &f, 4); return u; }
+/* flow.bin for the tests: 4 x 4, the equator at eq, every cell the same current (cx, cv) times 0.01 */
+static unsigned char kFlowBin[16 + 32];
+static void FlowBinMake(float eq, int cx, int cv)
+{
+    float scale = 0.01f;
+    memcpy(kFlowBin, "CFLW", 4); kFlowBin[4] = 4; kFlowBin[5] = 0; kFlowBin[6] = 4; kFlowBin[7] = 0;
+    memcpy(kFlowBin + 8, &eq, 4); memcpy(kFlowBin + 12, &scale, 4);
+    for (int i = 0; i < 16; i++) { kFlowBin[16 + 2 * i] = (unsigned char)(signed char)cx; kFlowBin[17 + 2 * i] = (unsigned char)(signed char)cv; }
+}
 /* glow.bin for the tests: map 0, 100-yard cells from x 1000, y 2000, 4 columns along y by 3 rows along x; the middle
  * two cells of the middle row are the first subzone, the cell after them the second */
 static unsigned char kGlowBin[6 + 18 + 24];
@@ -914,6 +924,12 @@ static void PackLive(int reveal, int walls)
     if (reveal & 8) {                                    /* the sea: its sheet, and its table (16: one a byte short) */
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderSea.blp"; data[n++] = "BLP2sea";
         names[n] = "CinderLoad\\sea.bin"; data[n] = (const char *)kSeaBin; lens[n++] = sizeof kSeaBin - ((reveal & 16) ? 1 : 0);
+    }
+    if (reveal & 512) { names[n] = "Interface\\Glues\\LoadingScreens\\CinderWaves.blp"; data[n++] = "BLP2waves"; }
+    if (reveal & 1024) {                                 /* the currents: their sheet and field */
+        FlowBinMake(0.6f, 100, 0);
+        names[n] = "Interface\\Glues\\LoadingScreens\\CinderFlow.blp"; data[n++] = "BLP2flow";
+        names[n] = "CinderLoad\\flow.bin"; data[n] = (const char *)kFlowBin; lens[n++] = sizeof kFlowBin;
     }
     if (reveal & 128) {                                  /* the glow: its sheet, table and grid */
         GlowBinMake();
@@ -1399,7 +1415,7 @@ static void LiveTests(void)
     Fresh("overlay-on");
     PackLive(1 | 2 | 4 | 8, 0);
     Start();
-    ov &= g_ovOn && g_seaOn && g_seaW == 4 && LogSays("overlay on: swells and glints on the open sea");
+    ov &= g_ovOn && g_seaOn && g_seaW == 4 && LogSays("overlay on: glints on the open sea");
     Fresh("overlay-moved");
     PackLive(1 | 2 | 4 | 8, 0);
     shim_module[0x6E0D + 2] ^= 0x10;                                  /* "after a draw" calls somewhere else */
@@ -1417,7 +1433,7 @@ static void LiveTests(void)
         Fresh("overlay-all");
         PackLive(1 | 2 | 4 | 8 | 32, 0);
         Start();
-        lg &= g_ovOn && g_logoOn && g_seaOn && LogSays("overlay on: swells and glints on the open sea, the RavenCraft logo at the top");
+        lg &= g_ovOn && g_logoOn && g_seaOn && LogSays("overlay on: glints on the open sea, the RavenCraft logo at the top");
         float asp = 1016.0f / 480.0f;
         g_scrW = 5120; g_scrH = 2160;                                 /* his 21:9: LOGO_H tall, its own shape */
         LogoBuild();
@@ -1451,7 +1467,7 @@ static void LiveTests(void)
         Fresh("overlay-marks");
         PackLive(1 | 2 | 4 | 8 | 64, 0);
         Start();
-        mk &= g_marksOn && LogSays("overlay on: swells and glints on the open sea, the Maelstrom, the ripple and the badge");
+        mk &= g_marksOn && LogSays("overlay on: glints on the open sea, the Maelstrom, the ripple and the badge");
         Check(mk, "marks.txt read (an id past 31, a rectangle past the sheet, a radius of half the world left out); the marks on, in the log");
 
         /* the Maelstrom: in the world's place and size, square on screen, turning anticlockwise, gone close in */
@@ -1482,19 +1498,16 @@ static void LiveTests(void)
         g_scrW = 3840; g_scrH = 2160;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         g_mael.u = 0.5f; g_mael.v = 0.5f; g_mael.r = 0.08f; g_mael.ok = 1;
-        SwellBuild(20.0f);
-        int row = g_swCols + 1, mid = (SWELL_ROWS / 2) * row + g_swCols / 2 + 2, far = 2 * row + 3;
-        unsigned midOn[2] = { g_swCol[0][mid], g_swCol[1][mid] }, farOn[2] = { g_swCol[0][far], g_swCol[1][far] };
+        float nearOn = WaveLight(0.5f * 1.778f + 0.04f, 0.53f, 20.0f, 0.35f, 1.778f), farOn = WaveLight(0.1f, 0.1f, 20.0f, 0.35f, 1.778f);
         g_mael.ok = 0;
-        SwellBuild(20.0f);
-        int sw = (midOn[0] != g_swCol[0][mid] || midOn[1] != g_swCol[1][mid]) && farOn[0] == g_swCol[0][far] &&
-                 farOn[1] == g_swCol[1][far];
+        int sw = WaveLight(0.5f * 1.778f + 0.04f, 0.53f, 20.0f, 0.35f, 1.778f) != nearOn &&
+                 WaveLight(0.1f, 0.1f, 20.0f, 0.35f, 1.778f) == farOn;
         float x = 0.5f * 1.778f + 0.05f, v = 0.5f, x0 = x, v0 = v;
         g_mael.ok = 1;
         SwirlAt(&x, &v, 1.778f);                                         /* east of it: turned clockwise on screen, so v grows less... */
         float dx = x - 0.5f * 1.778f, dv = v - 0.5f;
         sw &= fabsf(dx * dx + dv * dv - 0.0025f) < 1e-5f && dv < 0 && (x0 != x || v0 != v);   /* ...it moves up: v falls */
-        Check(sw, "the swells bend round the Maelstrom near it (keeping their distance from its middle, clockwise inward), and not far off");
+        Check(sw, "the waves' swells bend round the Maelstrom near it (keeping their distance from its middle, clockwise inward), and not far off");
 
         /* the ripple: nothing until the arrival is known; then rings at it, square, opening and fading, appearing over RIPPLE_IN */
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
@@ -1745,53 +1758,134 @@ static void LiveTests(void)
         Check(sea, "sea.bin read only whole; how open the sea is, between cells, 0 off the picture; full far out, gone close in; a sine for any angle");
     }
 
-    /* the swells: a grid over the screen in the screen's shape, nothing on land, both crests and troughs on the sea, rolling */
+    /* the waves, take two (his word on the swells: "continent sized waves"): tiles of small crests over the open sea only,
+     * their cells the same size on screen at the whole world and at half of it (the next octave), drifting; none without sea.bin */
     {
-        SeaParse(kSeaBin, sizeof kSeaBin);
+        SeaParse(kSeaBin, sizeof kSeaBin);                               /* the left half land, the right half sea */
         g_scrW = 3840; g_scrH = 2160;
-        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);                    /* the whole world: h = 0.5 */
-        int sw = SwellBuild(10.0f) && g_swCols == 85;
-        int row = g_swCols + 1, land = 0, light = 0, dark = 0, maxA = 0;
-        for (int j = 0; j <= SWELL_ROWS; j++)
-            for (int i = 0; i <= g_swCols; i++) {
-                unsigned cl = g_swCol[0][j * row + i], cd = g_swCol[1][j * row + i], al = cl >> 24, ad = cd >> 24;
-                float x = g_swPos[(j * row + i) * 3];
-                if (x < 0.3f && (al || ad)) land++;
-                if (x > 0.9f && al) light++;
-                if (x > 0.9f && ad) dark++;
-                if (al && ad) land++;                                 /* a corner is a crest or a trough, never both */
-                if ((cl & 0xFFFFFFu) != 0xFFFFFFu || (cd & 0xFFFFFFu) != 0xFFFFFFu) land++;   /* colour is the sheet's */
-                if ((int)al > maxA) maxA = (int)al;
-                if ((int)ad > maxA) maxA = (int)ad;
-            }
-        sw &= !land && light > 20 && dark > 20 && maxA <= (int)(SWELL_DARK * 255 + 1) &&
-              g_swUV[0][1] == SEA_WHITE_V && g_swUV[1][1] == SEA_DEEP_V && g_swUV[0][0] == SEA_SQUARE_U;
-        sw &= g_swPos[0] == 0 && g_swPos[1] == 0 && g_swPos[(row * (SWELL_ROWS + 1) - 1) * 3] == 1 &&
-              g_swPos[(row * (SWELL_ROWS + 1) - 1) * 3 + 1] == 1;
-        sw &= g_swIndex[0] == row && g_swIndex[1] == 0 && g_swIndex[2 * g_swCols + 1] == g_swCols &&
-              g_swPos[g_swIndex[0] * 3 + 1] > g_swPos[g_swIndex[1] * 3 + 1];   /* above, then below: the background's winding */
-        unsigned beforeL = g_swCol[0][20 * row + 80], beforeD = g_swCol[1][20 * row + 80];
-        SwellBuild(13.0f);
-        sw &= g_swCol[0][20 * row + 80] != beforeL || g_swCol[1][20 * row + 80] != beforeD;   /* three seconds on, the sea has moved */
-        /* in the world's own place: the view moved by exactly two of its cells, a corner shows what its neighbour did */
-        float du = (g_bgUV[2] - g_bgUV[0]) * 2 / g_swCols;
-        SwellBuild(13.0f);
-        int thereL = (int)(g_swCol[0][20 * row + 82] >> 24), thereD = (int)(g_swCol[1][20 * row + 82] >> 24);
-        g_bgUV[0] += du; g_bgUV[2] += du; g_bgUV[4] += du; g_bgUV[6] += du;
-        SwellBuild(13.0f);
-        int movedL = (int)(g_swCol[0][20 * row + 80] >> 24), movedD = (int)(g_swCol[1][20 * row + 80] >> 24);
-        sw &= thereL + thereD > 3 && thereL - movedL <= 1 && movedL - thereL <= 1 && thereD - movedD <= 1 && movedD - thereD <= 1;
-        g_bgUV[0] = g_bgUV[4] = 0.2f; g_bgUV[2] = g_bgUV[6] = 0.4f;    /* h = 0.1: too close in */
-        sw &= !SwellBuild(13.0f);
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);                       /* the whole world: one octave */
+        WaveBuild(20.0f);
+        int wv = g_wvQuads > 50 && g_wvQuads <= WAVE_QUADS, landLit = 0, uvOut = 0, slots = g_wvQuads * 6 - 2;
+        for (int k = 0; k < slots; k++) {
+            if (g_wvPos[k * 3] < 0.3f && (g_wvCol[k] >> 24)) landLit++;
+            if (g_wvUV[k * 2] < 0 || g_wvUV[k * 2] > 1 || g_wvUV[k * 2 + 1] < 0 || g_wvUV[k * 2 + 1] > 1) uvOut++;
+        }
+        float cellWhole = (float)sqrt((g_wvPos[6] - g_wvPos[0]) * (g_wvPos[6] - g_wvPos[0]) * 1.778f * 1.778f +
+                                      (g_wvPos[7] - g_wvPos[1]) * (g_wvPos[7] - g_wvPos[1]));   /* its left side, in screen heights */
+        float xsum = 0;
+        for (int k = 0; k < slots; k++) xsum += g_wvPos[k * 3];
+        wv &= !landLit && !uvOut && fabsf(cellWhole - WAVE_TILE / 8) < 0.002f;
+        g_bgUV[0] = g_bgUV[4] = 0.25f; g_bgUV[2] = g_bgUV[6] = 0.75f;   /* half the world: the next octave, the same size on screen */
+        g_bgUV[5] = g_bgUV[7] = 0.25f; g_bgUV[1] = g_bgUV[3] = 0.75f;
+        WaveBuild(20.0f);
+        float cellHalf = (float)sqrt((g_wvPos[6] - g_wvPos[0]) * (g_wvPos[6] - g_wvPos[0]) * 1.778f * 1.778f +
+                                     (g_wvPos[7] - g_wvPos[1]) * (g_wvPos[7] - g_wvPos[1]));
+        wv &= g_wvQuads > 0 && fabsf(cellHalf - cellWhole) < 0.002f;
+        (void)xsum;
+        {                                                                 /* drifting: all sea, so every cell is drawn and only */
+            static const unsigned char allSeaW[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+                                                           255, 255, 255, 255, 255, 255, 255, 255 };   /* the drift moves them */
+            SeaParse(allSeaW, sizeof allSeaW);
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            WaveBuild(20.0f);
+            float x20 = g_wvPos[0], y20 = g_wvPos[1];
+            WaveBuild(21.0f);
+            float x21 = g_wvPos[0], y21 = g_wvPos[1];
+            float moved = (float)sqrt((x21 - x20) * (x21 - x20) * 1.778f * 1.778f + (y21 - y20) * (y21 - y20));
+            float S = WAVE_TILE, want = WAVE_DRIFT * S * (float)sqrt(1 + 0.35f * 0.35f);   /* a second's drift, in screen heights */
+            wv &= fabsf(moved - want) < 0.002f || fabsf(moved - want) > S / 8 - 0.002f;  /* (or a cell's step, if it wrapped) */
+            wv &= moved > 0.001f;
+            SeaParse(kSeaBin, sizeof kSeaBin);
+        }
         g_seaW = 0;
+        WaveBuild(30.0f);
+        wv &= g_wvQuads == 0;
+        Check(wv, "the waves: small crests on the open sea only, the same size on screen at every octave, drifting; none without sea.bin");
+    }
+
+    /* the currents (his idea: the sea moving as Earth's, the equator through Booty Bay): flow.bin read only whole; drops born
+     * on open sea in view, more near the equator; carried along the current at FLOW_SPEED of the screen a second; warm at the
+     * equator, cold forty degrees north; sinking sooner in the far north; gone at a coast or in the Maelstrom's eye; two streaks */
+    {
+        static const unsigned char allSea2[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+                                                       255, 255, 255, 255, 255, 255, 255, 255 };
+        FlowBinMake(0.6f, 100, 0);                                       /* eastward everywhere */
+        int fl = FlowParse(kFlowBin, sizeof kFlowBin) && fabsf(g_flowUsual - 1.0f) < 1e-4f;
+        fl &= !FlowParse(kFlowBin, sizeof kFlowBin - 1) && g_flowW == 0;
+        {
+            static unsigned char longer[sizeof kFlowBin + 1];
+            memcpy(longer, kFlowBin, sizeof kFlowBin);
+            fl &= !FlowParse(longer, sizeof longer);                     /* a byte too many */
+        }
+        fl &= FlowParse(kFlowBin, sizeof kFlowBin);
+        float cx, cv;
+        FlowAt(0.37f, 0.81f, &cx, &cv);
+        fl &= fabsf(cx - 1.0f) < 1e-5f && cv == 0;
+        fl &= FlowWarmAt(0) == 1 && FlowWarmAt(40) == 0 && fabsf(FlowWarmAt(-20) - 0.5f) < 1e-6f;
+        SeaParse(allSea2, sizeof allSea2);
+        g_scrW = 3840; g_scrH = 2160;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-        sw &= !SwellBuild(13.0f);                                     /* no sea.bin, no swells */
-        Check(sw, "the swells: a grid in the screen's shape, none on land, crests and troughs on the sea, rolling, in the world's place, gone close in");
+        g_mael.ok = 0;
+        memset(g_drop, 0, sizeof g_drop);
+        g_dropSeed = 7;
+        FlowBuild(0, 0.02f);
+        int live = 0, nearEq = 0;
+        for (int i = 0; i < FLOW_DROPS; i++) if (g_drop[i].live) { live++; if (fabsf(FlowLat(g_drop[i].v)) < 12) nearEq++; }
+        fl &= live > 400 && (float)nearEq / live > 0.35f;                /* the band is 0.32 of the picture; more are born in it */
+        int pick = -1;
+        for (int i = 0; i < FLOW_DROPS && pick < 0; i++) if (g_drop[i].live && g_drop[i].u > 0.2f && g_drop[i].u < 0.7f) pick = i;
+        float u0 = g_drop[pick].u;
+        for (int f = 0; f < 50; f++) FlowBuild(0, 0.02f);
+        fl &= g_drop[pick].live && fabsf((g_drop[pick].u - u0) - FLOW_SPEED / 1.778f) < 0.001f && g_drop[pick].age > 0.99f;
+        /* half the world in view: the same speed on screen, so half the speed on the map */
+        g_bgUV[0] = g_bgUV[4] = 0.25f; g_bgUV[2] = g_bgUV[6] = 0.75f;
+        g_bgUV[5] = g_bgUV[7] = 0.25f; g_bgUV[1] = g_bgUV[3] = 0.75f;
+        g_drop[pick].u = 0.4f; g_drop[pick].v = 0.5f; g_drop[pick].age = 1; g_drop[pick].life = 100; g_drop[pick].live = 1;
+        g_drop[pick].warm = 1;
+        for (int f = 0; f < 50; f++) FlowBuild(0, 0.02f);
+        fl &= fabsf((g_drop[pick].u - 0.4f) - FLOW_SPEED * 0.5f / 1.778f) < 0.001f;
+        /* carried north of the equator it cools toward the water there: from warm 1 at 1.3 degrees, a second on, a little */
+        fl &= g_drop[pick].warm < 1 && g_drop[pick].warm > 0.75f;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        /* its streaks: along its way (eastward: the head right of the tail), gold and blue shared by its warmth */
+        int drew = g_flQuads > 0, eastward = g_flPos[3] > g_flPos[0];
+        fl &= drew && eastward;
+        /* born only on open sea: with the left half land, every newborn drop on the right */
+        SeaParse(kSeaBin, sizeof kSeaBin);
+        memset(g_drop, 0, sizeof g_drop);
+        FlowBuild(0, 0.02f);
+        int onLand = 0, born = 0;
+        for (int i = 0; i < FLOW_DROPS; i++) if (g_drop[i].live) { born++; if (g_drop[i].u < 0.45f) onLand++; }
+        fl &= born > 100 && !onLand;
+        SeaParse(allSea2, sizeof allSea2);
+        /* the far north: sinking sooner; a coast and the Maelstrom's eye: gone */
+        FlowBinMake(0.9f, 100, 0); FlowParse(kFlowBin, sizeof kFlowBin);
+        g_drop[0].u = 0.5f; g_drop[0].v = 0.11f; g_drop[0].age = 0; g_drop[0].life = 100; g_drop[0].live = 1; g_drop[0].warm = 0;
+        for (int f = 0; f < 50; f++) FlowBuild(0, 0.02f);
+        fl &= g_drop[0].age > 2.9f;                                      /* sixty north: three times as fast */
+        SeaParse(kSeaBin, sizeof kSeaBin);
+        g_drop[1].u = 0.1f; g_drop[1].v = 0.5f; g_drop[1].age = 1; g_drop[1].life = 100; g_drop[1].live = 1;
+        g_mael.u = 0.8f; g_mael.v = 0.5f; g_mael.r = 0.1f; g_mael.ok = 1;
+        g_drop[2].u = 0.8f; g_drop[2].v = 0.5f; g_drop[2].age = 1; g_drop[2].life = 100; g_drop[2].live = 1;
+        g_dropSeed = 99;
+        FlowBuild(0, 0.02f);
+        fl &= (!g_drop[1].live || g_drop[1].u > 0.3f) && (!g_drop[2].live || g_drop[2].age < 0.5f);   /* gone (or reborn elsewhere) */
+        g_mael.ok = 0; g_flowW = 0;
+        Check(fl, "the currents: flow.bin whole; drops born on open sea, more near the equator; carried at FLOW_SPEED; warm to cold by latitude; sinking in the north; gone at coasts and in the Maelstrom's eye; drawn along their way");
+    }
+    /* the overlay with the waves and the currents in the pack */
+    {
+        Fresh("overlay-waves");
+        PackLive(1 | 2 | 4 | 8 | 512 | 1024, 0);
+        Start();
+        Check(g_wavesOn && g_flowOn && LogSays("overlay on: waves, currents and glints on the open sea"),
+              "the overlay: the waves and the currents on with their files, in the log");
     }
 
     /* the glints: only where the sea is open, never more than there are, held where they appeared, a steady size, none close in */
     {
         SeaParse(kSeaBin, sizeof kSeaBin);
+        g_scrW = 3840; g_scrH = 2160;                                    /* its own screen, whatever ran before */
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         memset(g_glint, 0, sizeof g_glint);
         int gl = 1, most = 0, seen = 0, held = 1, crest = 0;

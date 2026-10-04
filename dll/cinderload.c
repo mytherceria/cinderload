@@ -1893,8 +1893,8 @@ static int OverlayCallsHold(const unsigned char *base)
  * pos / uv / col. A strip's first quad has 4 corner slots, every later one 6: the last corner of the quad before and
  * its own first again, two empty triangles joining them. */
 #define LBL_BATCH   120                        /* quads to a strip: 6 corners each less 2, so 718 */
-static void QuadPut(float *pos, float *uv, unsigned *col, int q, const float *x, const float *y, const float *tu,
-                    const float *tv, unsigned c)
+static void QuadPut4(float *pos, float *uv, unsigned *col, int q, const float *x, const float *y, const float *tu,
+                     const float *tv, const unsigned *c)
 {
     int inBatch = q % LBL_BATCH, base = (q / LBL_BATCH) * (LBL_BATCH * 6 - 2), at = base + (inBatch ? inBatch * 6 - 2 : 0);
     int order[6], m = 0;
@@ -1910,8 +1910,15 @@ static void QuadPut(float *pos, float *uv, unsigned *col, int q, const float *x,
         }
         pos[slot * 3] = x[k]; pos[slot * 3 + 1] = y[k]; pos[slot * 3 + 2] = 0;
         uv[slot * 2] = tu[k]; uv[slot * 2 + 1] = tv[k];
-        col[slot] = c;
+        col[slot] = c[k];
     }
+}
+/* The same, one colour for all four corners. */
+static void QuadPut(float *pos, float *uv, unsigned *col, int q, const float *x, const float *y, const float *tu,
+                    const float *tv, unsigned c)
+{
+    const unsigned c4[4] = { c, c, c, c };
+    QuadPut4(pos, uv, col, q, x, y, tu, tv, c4);
 }
 
 static void SwirlAt(float *x, float *v, float asp);             /* the marks' (below): the swells bend round the Maelstrom */
@@ -1929,10 +1936,6 @@ static int LblInt(const char *s, int n, int *at, int *out);       /* the labels'
 #define SEA_MAX     256
 #define SEA_FAR     0.30f      /* the view's half height: the sea at its fullest from here out */
 #define SEA_NEAR    0.14f      /* and gone by here */
-#define SWELL_ROWS  48
-#define SWELL_COLS  176        /* at most: the screen's shape sets how many */
-#define SWELL_LIGHT 0.07f      /* the most a crest lightens the sea */
-#define SWELL_DARK  0.16f      /* and a trough darkens it */
 #define SEA_SQUARE_U 0.75f     /* the middle of the sheet's two squares: white above, black below */
 #define SEA_WHITE_V  0.25f
 #define SEA_DEEP_V   0.75f
@@ -1942,13 +1945,9 @@ static int LblInt(const char *s, int n, int *at, int *out);       /* the labels'
 #define GLINT_LIFE  1.1f       /* seconds a glint shows */
 #define GLINT_CREST 0.25f      /* a glint only sparks where the swell is at least this high: on the crests */
 static unsigned char g_seaMask[SEA_MAX * SEA_MAX];
-static int g_seaW, g_seaH, g_seaOn, g_seaTried, g_swCols, g_glQuads;
+static int g_seaW, g_seaH, g_seaOn, g_seaTried, g_glQuads;
 static void *g_seaTex;
 static struct { float u, v; int cycle, set, on; } g_glint[GLINTS];
-__attribute__((used)) float g_swPos[(SWELL_ROWS + 1) * (SWELL_COLS + 1) * 3];
-__attribute__((used)) float g_swUV[2][(SWELL_ROWS + 1) * (SWELL_COLS + 1) * 2];        /* the crests', the troughs' */
-__attribute__((used)) unsigned g_swCol[2][(SWELL_ROWS + 1) * (SWELL_COLS + 1)];
-__attribute__((used)) unsigned short g_swIndex[(SWELL_COLS + 1) * 2];
 __attribute__((used)) float g_glPos[GLINTS * 6 * 3];
 __attribute__((used)) float g_glUV[GLINTS * 6 * 2];
 __attribute__((used)) unsigned g_glCol[GLINTS * 6];
@@ -1995,6 +1994,8 @@ static float SeaSin(float x)
     if (x > pi / 2) x = pi - x;
     return s * FireSin(x);
 }
+static float SeaCos(float x) { return SeaSin(x + 1.5707963f); }
+static float MapFloor(float x) { float t = (float)(int)x; return t > x ? t - 1 : t; }   /* floor (no C runtime) */
 
 /* The swell, -1..1, at x across and v down the picture, both in heights of the world (x = u times the screen's shape),
  * t seconds: two broad waves running nearly the same way (about a sixth and an eighth of the world apart), rolling
@@ -2005,38 +2006,6 @@ static float SwellAt(float x, float v, float t)
     float a = SeaSin(x * 9.0f + v * 40.0f - t * 0.45f + wv);
     float b = SeaSin(-x * 5.0f + v * 53.0f - t * 0.6f + 0.8f * wv + 0.9f);
     return 0.6f * a + 0.4f * b;
-}
-
-/* This frame's swells, from the view (g_bgUV): rows of corners bottom to top into g_swPos, each corner's alpha for the
- * crests' pass (the sheet's white) and the troughs' (its deep blue) into g_swCol[0] and [1] with their g_swUV, and the
- * strip that joins two rows into g_swIndex (each row's corner above, then below, for the background's own winding).
- * 0 when there is nothing to draw (no sea, or the view too close in). */
-static int SwellBuild(float t)
-{
-    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
-    float fade = SeaFade((u1 - u0) * 0.5f), asp = (float)g_scrW / (float)g_scrH;
-    if (!g_seaW || fade <= 0.01f) return 0;
-    int cols = (int)(SWELL_ROWS * asp + 0.5f);
-    if (cols < 8) cols = 8;
-    if (cols > SWELL_COLS) cols = SWELL_COLS;
-    g_swCols = cols;
-    for (int j = 0; j <= SWELL_ROWS; j++) {
-        float y = (float)j / SWELL_ROWS, v = vb + (vt - vb) * y;
-        for (int i = 0; i <= cols; i++) {
-            float x = (float)i / cols, u = u0 + (u1 - u0) * x;
-            int at = j * (cols + 1) + i;
-            g_swPos[at * 3] = x; g_swPos[at * 3 + 1] = y; g_swPos[at * 3 + 2] = 0;
-            g_swUV[0][at * 2] = g_swUV[1][at * 2] = SEA_SQUARE_U;
-            g_swUV[0][at * 2 + 1] = SEA_WHITE_V; g_swUV[1][at * 2 + 1] = SEA_DEEP_V;
-            float m = SeaAt(u, v) * fade, sx = u * asp, sv = v;
-            SwirlAt(&sx, &sv, asp);
-            float s = m > 0.004f ? SwellAt(sx, sv, t) : 0;
-            g_swCol[0][at] = (unsigned)((s > 0 ? s : 0) * m * SWELL_LIGHT * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
-            g_swCol[1][at] = (unsigned)((s < 0 ? -s : 0) * m * SWELL_DARK * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
-        }
-    }
-    for (int i = 0; i <= cols; i++) { g_swIndex[2 * i] = (unsigned short)(cols + 1 + i); g_swIndex[2 * i + 1] = (unsigned short)i; }
-    return 1;
 }
 
 static unsigned SeaHash(unsigned x)
@@ -2140,7 +2109,6 @@ static void MarksParse(const char *s, unsigned len)
     }
 }
 
-static float SeaCos(float x) { return SeaSin(x + 1.5707963f); }
 
 /* Mark id as a quad into g_mk*: its middle at screen sx, sy, half as tall as hs (in screen heights; square on screen),
  * turned ang radians (anticlockwise on screen), alpha shown. Left out off screen, when faint, or when the pass is full. */
@@ -2208,6 +2176,223 @@ static void RippleBuild(float t, DWORD now)
         float px = RIPPLE_PX * (0.12f + 0.88f * ph), a = (1 - ph) * (float)FireExp(0.6 * MapLn(1 - ph + 1e-6f));
         a *= FireClamp(ph / 0.08f, 0, 1) * fade * appear;
         MarkPut(0, sx, sy, px / 2160.0f, 0, a);                       /* the ring's size steady on any screen height */
+    }
+}
+
+/* ---- the waves, take two (4 Oct 2026, his word on the first: "gigantic waves, continent sized waves") ----
+ * CinderWaves.blp (DXT5, 512 square): one tile of small wave crests that repeats on itself (the art kit's wavetile.py),
+ * laid over the open sea at two sizes at a time, cross-fading as the view zooms, so the crests keep their size on screen
+ * at any zoom: with f the octaves the view has closed in (log2 of the whole picture's height over the view's), the
+ * tiles are WAVE_TILE * 2^-floor(f) and half that, weighted 1 - frac(f) and frac(f), between WAVE_TILE / 2 and twice it
+ * of the screen's height. Turned WAVE_TURN off the screen's axes (so the repeat never lines up in columns), drifting
+ * WAVE_DRIFT tiles a second, cut into cells about WAVE_CELL of the screen across, each corner as bright as the open sea
+ * there allows (SeaAt), brighter on the broad swells (SwellAt) and in drifting patches of rougher water. */
+#define WAVES_PATH "Interface\\Glues\\LoadingScreens\\CinderWaves.blp"
+#define WAVE_TILE   0.35f
+#define WAVE_TURN   0.2094395f     /* 12 degrees */
+#define WAVE_DRIFT  0.05f
+#define WAVE_CELL   0.05f
+#define WAVE_ALPHA  0.6f
+#define WAVE_QUADS  12288
+static int g_wavesOn, g_wavesTried, g_wvQuads;
+static void *g_wavesTex;
+__attribute__((used)) float g_wvPos[WAVE_QUADS * 6 * 3];
+__attribute__((used)) float g_wvUV[WAVE_QUADS * 6 * 2];
+__attribute__((used)) unsigned g_wvCol[WAVE_QUADS * 6];
+
+/* How bright the waves are at X across (heights of the world) and V down: the open sea, the swells, the rough patches. */
+static float WaveLight(float X, float V, float t, float S0, float asp)
+{
+    float m = SeaAt(X / asp, V);
+    if (m <= 0.004f) return 0;
+    float sx = X, sv = V;
+    SwirlAt(&sx, &sv, asp);                                        /* the swells curl into the Maelstrom */
+    float sw = FireClamp(SwellAt(sx, sv, t), 0, 1);
+    float patch = 0.5f + 0.25f * SeaSin(X / S0 * 4.37f + V / S0 * 1.9f + t * 0.21f) +
+                  0.25f * SeaSin(-X / S0 * 2.71f + V / S0 * 3.3f + 1.7f - t * 0.17f);
+    return m * (0.45f + 0.4f * sw) * (0.35f + 0.9f * patch);
+}
+
+/* This frame's waves, from the view (g_bgUV) and the clock, into g_wv* (g_wvQuads). */
+static void WaveBuild(float t)
+{
+    g_wvQuads = 0;
+    if (!g_seaW) return;
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1], vh = vb - vt, asp = (float)g_scrW / (float)g_scrH;
+    if (!(vh > 0.001f)) return;
+    float f = vh < 1 ? MapLn(1 / vh) / 0.6931472f : 0;
+    int n0 = (int)f;
+    float frac = f - (float)n0, c = SeaCos(WAVE_TURN), sn = SeaSin(WAVE_TURN), S0 = WAVE_TILE / (float)(1 << n0);
+    /* the view's corners on the lattice's own axes: a = X c - V s, b = X s + V c */
+    float X0 = u0 * asp, X1 = u1 * asp, amin = 1e9f, amax = -1e9f, bmin = 1e9f, bmax = -1e9f;
+    for (int k = 0; k < 4; k++) {
+        float X = (k & 1) ? X1 : X0, V = (k & 2) ? vb : vt, a = X * c - V * sn, b = X * sn + V * c;
+        if (a < amin) amin = a;
+        if (a > amax) amax = a;
+        if (b < bmin) bmin = b;
+        if (b > bmax) bmax = b;
+    }
+    for (int layer = 0; layer < 2; layer++) {
+        float w = layer ? frac : 1 - frac;
+        if (w < 0.02f) continue;
+        float S = WAVE_TILE / (float)(1 << (n0 + layer)), oa = t * WAVE_DRIFT * S, ob = t * WAVE_DRIFT * S * 0.35f;
+        int sub = (int)(S / vh / WAVE_CELL) + 1;
+        if (sub > 12) sub = 12;
+        int i0 = (int)MapFloor((amin - oa) / S), i1 = (int)MapFloor((amax - oa) / S);
+        int j0 = (int)MapFloor((bmin - ob) / S), j1 = (int)MapFloor((bmax - ob) / S);
+        for (int i = i0; i <= i1; i++)
+            for (int j = j0; j <= j1; j++)
+                for (int p = 0; p < sub; p++)
+                    for (int q = 0; q < sub; q++) {
+                        if (g_wvQuads >= WAVE_QUADS) return;
+                        float x[4], y[4], tu[4], tv[4];
+                        unsigned col[4];
+                        int lit = 0, seen = 0;
+                        for (int k = 0; k < 4; k++) {               /* bottom left, bottom right, top left, top right */
+                            float fp = (float)(p + (k & 1)) / sub, fq = (float)(q + ((k & 2) ? 0 : 1)) / sub;
+                            float a = oa + ((float)i + fp) * S, b = ob + ((float)j + fq) * S;
+                            float X = a * c + b * sn, V = -a * sn + b * c;
+                            x[k] = (X / asp - u0) / (u1 - u0);
+                            y[k] = 1 - (V - vt) / vh;
+                            tu[k] = fp; tv[k] = fq;
+                            float al = w * WAVE_ALPHA * WaveLight(X, V, t, S0, asp);
+                            unsigned a8 = (unsigned)(FireClamp(al, 0, 1) * 255.0f + 0.5f);
+                            col[k] = a8 << 24 | 0xFFFFFFu;
+                            lit |= a8 > 0;
+                            seen |= x[k] > -0.05f && x[k] < 1.05f && y[k] > -0.05f && y[k] < 1.05f;
+                        }
+                        if (lit && seen) QuadPut4(g_wvPos, g_wvUV, g_wvCol, g_wvQuads++, x, y, tu, tv, col);
+                    }
+    }
+}
+
+/* ---- the currents (4 Oct 2026, his idea and picks: the sea moves as Earth's does, heated at the equator, the water
+ * carried north as it cools, corralled by the continents; the equator through Booty Bay) ----
+ * CinderLoad\flow.bin (the art kit's flow.py): 'CFLW', its width and height (16 bits each), the equator's v and the speed
+ * scale (floats), then two signed bytes a cell, the current across and down the picture: the trades and the westerlies,
+ * turned along every coast into gyres, the Great Sea one great clockwise gyre with the Maelstrom at its heart, the
+ * Maelstrom a drain. CinderFlow.blp (DXT5, 256 x 64): a warm gold streak above a cold blue one.
+ * FLOW_DROPS drops ride it, drawn as streaks from where they were to where they are: most are born near the equator
+ * (the warm water rising), each warm as the latitude it is born at, cooling toward the latitude it is in, fading out
+ * in the cold north (the water sinking) or at a coast, in the Maelstrom's eye, or when its life is done; reborn in view. */
+#define FLOW_PATH    "Interface\\Glues\\LoadingScreens\\CinderFlow.blp"
+#define FLOW_MAX     256
+#define FLOW_DROPS   900
+#define FLOW_DEGREES 76.0f         /* the picture's height in degrees of latitude (as flow.py) */
+#define FLOW_SPEED   0.035f        /* heights of the screen a second, at the field's usual speed */
+#define FLOW_ALPHA   0.7f
+#define FLOW_PX      3.5f          /* a streak's half width on a 2160-tall screen */
+#define FLOW_DROP_Q  (FLOW_DROPS * 2)
+static signed char g_flowCell[FLOW_MAX * FLOW_MAX * 2];
+static int g_flowW, g_flowH, g_flowOn, g_flowTried, g_flQuads;
+static float g_flowEq, g_flowScale, g_flowUsual;
+static void *g_flowTex;
+static struct { float u, v, du, dv, age, life, warm; int live; } g_drop[FLOW_DROPS];
+static unsigned g_dropSeed;
+__attribute__((used)) float g_flPos[FLOW_DROP_Q * 6 * 3];
+__attribute__((used)) float g_flUV[FLOW_DROP_Q * 6 * 2];
+__attribute__((used)) unsigned g_flCol[FLOW_DROP_Q * 6];
+
+static float GlowF(const unsigned char *p);          /* the glow's (below): a float from four bytes, low first */
+
+/* flow.bin, checked whole: 1 when it is used. */
+static int FlowParse(const unsigned char *d, unsigned len)
+{
+    g_flowW = g_flowH = 0;
+    if (len < 16 || d[0] != 'C' || d[1] != 'F' || d[2] != 'L' || d[3] != 'W') return 0;
+    int w = d[4] | d[5] << 8, h = d[6] | d[7] << 8;
+    float eq = GlowF(d + 8), scale = GlowF(d + 12);
+    if (w < 2 || h < 2 || w > FLOW_MAX || h > FLOW_MAX || len != 16u + (unsigned)(w * h * 2) || !(eq > -2 && eq < 3) ||
+        !(scale > 0 && scale < 100))
+        return 0;
+    long sum = 0;
+    for (int i = 0; i < w * h * 2; i++) { g_flowCell[i] = (signed char)d[16 + i]; sum += g_flowCell[i] < 0 ? -g_flowCell[i] : g_flowCell[i]; }
+    g_flowW = w; g_flowH = h; g_flowEq = eq; g_flowScale = scale;
+    g_flowUsual = (float)sum / (float)(w * h * 2) * scale * 2.0f;     /* about the usual speed at sea (land counts 0) */
+    if (!(g_flowUsual > 0)) g_flowW = g_flowH = 0;
+    return g_flowW > 0;
+}
+
+/* The current at picture u, v (across and down, in the field's units), between the cells' middles; 0 off the picture. */
+static void FlowAt(float u, float v, float *cx, float *cv)
+{
+    *cx = *cv = 0;
+    if (!g_flowW || !(u >= 0 && u <= 1 && v >= 0 && v <= 1)) return;
+    float x = FireClamp(u * g_flowW - 0.5f, 0, (float)(g_flowW - 1)), y = FireClamp(v * g_flowH - 0.5f, 0, (float)(g_flowH - 1));
+    int x0 = (int)x, y0 = (int)y, x1 = x0 + 1 < g_flowW ? x0 + 1 : x0, y1 = y0 + 1 < g_flowH ? y0 + 1 : y0;
+    float fx = x - x0, fy = y - y0;
+    for (int k = 0; k < 2; k++) {
+        float a = g_flowCell[(y0 * g_flowW + x0) * 2 + k], b = g_flowCell[(y0 * g_flowW + x1) * 2 + k];
+        float c = g_flowCell[(y1 * g_flowW + x0) * 2 + k], e = g_flowCell[(y1 * g_flowW + x1) * 2 + k];
+        float top = a + (b - a) * fx, bot = c + (e - c) * fx, val = (top + (bot - top) * fy) * g_flowScale;
+        if (k) *cv = val; else *cx = val;
+    }
+}
+
+static float FlowLat(float v) { return (g_flowEq - v) * FLOW_DEGREES; }
+static float FlowWarmAt(float lat) { float a = lat < 0 ? -lat : lat; return FireClamp(1 - a / 40.0f, 0, 1); }
+static float DropRand(void) { g_dropSeed = SeaHash(g_dropSeed + 0x9E3779B9u); return (float)(g_dropSeed >> 8) / 16777216.0f; }
+
+/* A drop reborn in view, on open sea, most likely near the equator: 1 when placed. */
+static int DropBirth(int i, float u0, float u1, float vt, float vb)
+{
+    for (int tries = 0; tries < 4; tries++) {
+        float u = u0 + (u1 - u0) * DropRand(), v = vt + (vb - vt) * DropRand(), lat = FlowLat(v);
+        float rise = (float)FireExp(-(double)(lat * lat) / (12.0 * 12.0));
+        if (SeaAt(u, v) < 0.5f || DropRand() > 0.35f + 0.65f * rise) continue;
+        g_drop[i].u = u; g_drop[i].v = v; g_drop[i].du = g_drop[i].dv = 0; g_drop[i].age = 0;
+        g_drop[i].life = 4 + 5 * DropRand(); g_drop[i].warm = FlowWarmAt(lat); g_drop[i].live = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* This frame's drops: each moved along the current (at FLOW_SPEED of the screen's height a second for the field's usual
+ * speed, the same on screen at any zoom), cooled, aged, and drawn as two streaks (gold, blue) shared by how warm it is. */
+static void FlowBuild(float t, float dt)
+{
+    g_flQuads = 0;
+    if (!g_flowW || !g_seaW) return;
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1], vh = vb - vt, asp = (float)g_scrW / (float)g_scrH;
+    if (!(vh > 0.001f)) return;
+    (void)t;
+    if (dt > 0.25f) dt = 0.25f;
+    float mx = g_mael.u, mv = g_mael.v, mr2 = g_mael.ok ? (0.3f * g_mael.r) * (0.3f * g_mael.r) : -1;
+    float hs = FLOW_PX / 2160.0f, k = (float)g_scrH / (float)g_scrW;
+    for (int i = 0; i < FLOW_DROPS; i++) {
+        if (!g_drop[i].live && !DropBirth(i, u0, u1, vt, vb)) continue;
+        float cx, cv;
+        FlowAt(g_drop[i].u, g_drop[i].v, &cx, &cv);
+        float step = FLOW_SPEED * vh * dt / g_flowUsual;
+        g_drop[i].du = cx * step / asp; g_drop[i].dv = cv * step;
+        g_drop[i].u += g_drop[i].du; g_drop[i].v += g_drop[i].dv;
+        float lat = FlowLat(g_drop[i].v);
+        g_drop[i].warm += (FlowWarmAt(lat) - g_drop[i].warm) * (float)(1.0 - FireExp(-(double)dt / 4.0));
+        g_drop[i].age += dt * (lat > 50 ? 1 + (lat - 50) / 5 : 1);      /* the cold north: it sinks sooner */
+        float ex = (g_drop[i].u - mx) * asp, ev = g_drop[i].v - mv;
+        if (g_drop[i].age > g_drop[i].life || SeaAt(g_drop[i].u, g_drop[i].v) < 0.15f || ex * ex + ev * ev < mr2 ||
+            g_drop[i].u < u0 - 0.05f * (u1 - u0) || g_drop[i].u > u1 + 0.05f * (u1 - u0) || g_drop[i].v < vt - 0.05f * vh ||
+            g_drop[i].v > vb + 0.05f * vh) {
+            g_drop[i].live = 0;
+            continue;
+        }
+        /* the streak: from a little behind it to where it is, along its way on screen */
+        float hx = (g_drop[i].u - u0) / (u1 - u0), hy = 1 - (g_drop[i].v - vt) / vh;
+        float sx = g_drop[i].du / (u1 - u0) / k, sy = -g_drop[i].dv / vh;   /* its step, in screen heights */
+        float len = (float)FireExp(0.5 * MapLn(sx * sx + sy * sy + 1e-12f));
+        if (len < 1e-7f) continue;
+        float dx = sx / len, dy = sy / len, L = FireClamp(len / dt * 0.5f, 14.0f / 2160, 56.0f / 2160);
+        float tx = hx - dx * L * k, ty = hy - dy * L, nx = -dy * hs * k, ny = dx * hs;
+        float env = FireClamp(g_drop[i].age / 0.6f, 0, 1) * FireClamp((g_drop[i].life - g_drop[i].age) / 1.0f, 0, 1);
+        float a = env * FLOW_ALPHA * SeaAt(g_drop[i].u, g_drop[i].v);
+        if (a < 0.01f || g_flQuads + 2 > FLOW_DROP_Q) continue;
+        float x[4] = { tx - nx, hx - nx, tx + nx, hx + nx }, y[4] = { ty - ny, hy - ny, ty + ny, hy + ny };
+        for (int kind = 0; kind < 2; kind++) {                          /* gold, then blue */
+            float share = kind ? 1 - g_drop[i].warm : g_drop[i].warm, v0 = kind ? 0.5f : 0, v1 = kind ? 1 : 0.5f;
+            float tu[4] = { 0, 1, 0, 1 }, tv[4] = { v1, v1, v0, v0 };
+            if (a * share > 0.01f)
+                QuadPut(g_flPos, g_flUV, g_flCol, g_flQuads++, x, y, tu, tv, (unsigned)(a * share * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
+        }
     }
 }
 
@@ -2616,25 +2801,24 @@ void WINAPI OverlayDraw(void)
     if (!g_ovOn || !g_mapShown) return;
     DWORD now = GetTickCount();
     float t = (float)(now % 3600000u) / 1000.0f;
+    static DWORD last;
+    float dt = last ? (float)(now - last) / 1000.0f : 0;
+    last = now;
     if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
     if (g_marksOn && !g_marksTex && !g_marksTried) { g_marksTried = 1; g_marksTex = OverlayLoad(MARKS_PATH); }
-    if (g_seaTex) {
-        if (SwellBuild(t)) {
-            void *dev = OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0);
-            int row = g_swCols + 1;
-            for (int k = 0; k < 2; k++)                            /* the crests, then the troughs */
-                for (int j = 0; j < SWELL_ROWS; j++) {             /* a strip from each row up to the next */
-                    OV_FN(OvSetup, 0x58A2A0)(row * 2, g_swPos + j * row * 3, 12, 0, 0, g_swCol[k] + j * row, 4, 0, 0,
-                                             g_swUV[k] + j * row * 2, 8, 0, 0);
-                    OV_FN(OvBind, 0x589E80)(0x17, dev);
-                    OV_FN(OvDraw, 0x58A2E0)(4, row * 2, g_swIndex);
-                    OV_FN(OvAfter, 0x58A340)();
-                }
-        }
+    if (g_wavesOn && !g_wavesTex && !g_wavesTried) { g_wavesTried = 1; g_wavesTex = OverlayLoad(WAVES_PATH); }
+    if (g_flowOn && !g_flowTex && !g_flowTried) { g_flowTried = 1; g_flowTex = OverlayLoad(FLOW_PATH); }
+    if (g_wavesTex) {                                              /* the waves, first on the sea */
+        WaveBuild(t);
+        if (g_wvQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_wavesTex, 1, 0), g_wvPos, g_wvUV, g_wvCol, g_wvQuads);
     }
     if (g_marksTex) {                                              /* the Maelstrom, on the sea and under its glints */
         MaelstromBuild(t);
         if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
+    }
+    if (g_flowTex) {                                               /* the currents, over the waves */
+        FlowBuild(t, dt);
+        if (g_flQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_flowTex, 1, 0), g_flPos, g_flUV, g_flCol, g_flQuads);
     }
     if (g_seaTex) {
         GlintsBuild(t);
@@ -2676,7 +2860,7 @@ void WINAPI OverlayDraw(void)
 /* At start, with the world map on: the overlay, when its calls are where they should be and its picture is in the pack. */
 static void OverlayStart(void)
 {
-    g_ovOn = g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = 0;
+    g_ovOn = g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = 0;
     if (!g_map.ok || !g_barLoader) return;
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSea")) {
         unsigned char *data = NULL;
@@ -2724,9 +2908,17 @@ static void OverlayStart(void)
         g_glowOn = g_glowItems > 0 && gridOk;
         g_glowPick = -2;                                           /* nothing picked yet */
     }
+    g_wavesOn = g_seaOn && BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderWaves");
+    if (g_seaOn && BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderFlow")) {
+        unsigned char *data = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\flow.bin", &data, &len) == MPQ_OK && data)
+            g_flowOn = FlowParse(data, len);
+        if (data) HeapFree(GetProcessHeap(), 0, data);
+    }
     if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn && !g_glowOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
-        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = 0;
+        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
@@ -2734,7 +2926,8 @@ static void OverlayStart(void)
     g_ovOn = 1;
     char m[300];
     wsprintfA(m, "overlay on:%s%s%s%s%s%s%s%s%s, drawn over the world map and under the bar (in memory only)",
-              g_seaOn ? " swells and glints on the open sea" : "", g_seaOn && g_marksOn ? "," : "",
+              g_seaOn ? (g_wavesOn ? (g_flowOn ? " waves, currents and glints on the open sea" : " waves and glints on the open sea")
+                                   : " glints on the open sea") : "", g_seaOn && g_marksOn ? "," : "",
               g_marksOn ? (g_mael.ok && g_mark[1].ok ? " the Maelstrom, the ripple and the badge" : " the ripple and the badge") : "",
               (g_seaOn || g_marksOn) && g_glowOn ? "," : "", g_glowOn ? " the arrival's glow" : "",
               (g_seaOn || g_marksOn || g_glowOn) && g_lblOn ? "," : "", g_lblOn ? " names and icons" : "",
