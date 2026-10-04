@@ -709,6 +709,7 @@ static void FireClose(void)
 #define BAR_SHOWN_MAX 96               /* the longest is 60: ", its fire the pack's orange, its wallpaper CinderWall64.blp" */
 static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
+static void OverlayStart(void);
 
 /* One look at the client, every FIRE_POLL_MS. */
 static void FireStep(DWORD now)
@@ -1482,6 +1483,7 @@ static int FireBar(void)
         g_walls.count = 0;
         g_map.ok = 0;
     }
+    OverlayStart();
     return 1;
 }
 
@@ -1670,6 +1672,109 @@ static void DriftStep(float p, DWORD now)
     g_bgUV[4] = u0; g_bgUV[5] = vt; g_bgUV[6] = u1; g_bgUV[7] = vt;
 }
 
+/* ---- the overlay: over the world map, under the bar (4 Oct 2026) ----
+ * Read from WoW.exe: each frame draws the picture, then the bar, whose pass turns blending on (render state 7 = 2, RVA
+ * 0x71AC). RevealStub already runs at the bar's fill entry, before the fill's own vertex setup; there the overlay draws
+ * its own quads with the game's own calls, all __fastcall (the callee cleans): 0x58A2A0 vertex setup, 0x44ACF0 and
+ * 0x589E80 bind a texture, 0x58A2E0 draw a strip, 0x58A340 after a draw. Its picture is loaded once, the way the
+ * screen's picture is: 0x58A980 for the flags, then the loader the fire bar already found (VA 0x449D90).
+ * First: the waves (CinderWaves.blp, DXT5, in the world map's layout, crests over open sea only), drawn twice with
+ * small offsets that sway against each other while the two fade in and out: the sea moves. With the world map only. */
+#define WAVES_PATH "Interface\\Glues\\LoadingScreens\\CinderWaves.blp"
+#define WAVES_SWAY 0.012f     /* each copy sways this much of the view's width */
+static const struct { DWORD rva; unsigned target; const char *what; } kOverlayCalls[] = {
+    { 0x006DD9, 0x58A2A0, "the vertex setup" }, { 0x006DEB, 0x44ACF0, "a texture's device copy" },
+    { 0x006DF7, 0x589E80, "binding it" }, { 0x006E08, 0x58A2E0, "the strip's draw" },
+    { 0x006E0D, 0x58A340, "after a draw" }, { 0x006EA8, 0x58A980, "a texture's flags" } };
+#define OVERLAY_CALLS ((int)(sizeof kOverlayCalls / sizeof kOverlayCalls[0]))
+static int g_ovOn, g_wavesTried;
+static void *g_wavesTex;
+__attribute__((used)) float g_ovPos[12] = { 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0 };   /* the screen's corners */
+__attribute__((used)) float g_ovUV[2][8];
+__attribute__((used)) unsigned g_ovCol[2][4];
+
+/* Every call the overlay makes, where WoW.exe calls it: 1 when all six are there. */
+static int OverlayCallsHold(const unsigned char *base)
+{
+    for (int i = 0; i < OVERLAY_CALLS; i++) {
+        const unsigned char *at = base + kOverlayCalls[i].rva;
+        if (!Readable(at, 5) || at[0] != 0xE8 ||
+            (ULONG_PTR)(at + 5 + (int)Rd32(at + 1)) != (ULONG_PTR)base + (kOverlayCalls[i].target - 0x400000u))
+            return 0;
+    }
+    return 1;
+}
+
+/* The two copies of the waves for this frame, from the view (g_bgUV) and the clock. */
+static void OverlayBuild(DWORD now)
+{
+    float t = (float)(now % 3600000u) / 1000.0f;
+    float w = g_bgUV[2] - g_bgUV[0];                                  /* the view's width on the picture */
+    for (int k = 0; k < 2; k++) {
+        float ph = t * 0.35f + k * 3.14159265f;
+        float du = WAVES_SWAY * w * FireSin(ph - (int)(ph / 6.2831853f) * 6.2831853f);
+        float dv = WAVES_SWAY * w * 0.5f * FireSin(ph * 0.7f + 1.3f - (int)((ph * 0.7f + 1.3f) / 6.2831853f) * 6.2831853f);
+        for (int c = 0; c < 4; c++) {
+            g_ovUV[k][2 * c] = g_bgUV[2 * c] + du;
+            g_ovUV[k][2 * c + 1] = g_bgUV[2 * c + 1] + dv;
+        }
+        float fp = t * 0.5f + k * 3.14159265f;
+        float a = 0.55f + 0.45f * FireSin(fp - (int)(fp / 6.2831853f) * 6.2831853f);   /* the two fade in turn */
+        unsigned al = (unsigned)(FireClamp(a, 0, 1) * 255.0f + 0.5f);
+        for (int c = 0; c < 4; c++) g_ovCol[k][c] = al << 24 | 0xFFFFFFu;
+    }
+}
+
+#if defined(__i386__)
+typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
+                                                  const float *, int, int, int);
+typedef void *(__attribute__((fastcall)) *OvDevice)(void *, int, int);
+typedef void (__attribute__((fastcall)) *OvBind)(int, void *);
+typedef void (__attribute__((fastcall)) *OvDraw)(int, int, const void *);
+typedef void (__attribute__((fastcall)) *OvAfter)(void);
+typedef void *(__attribute__((fastcall)) *OvFlags)(void *, int, int, int, int, int, int, int, int, int);
+typedef void *(__attribute__((fastcall)) *OvLoad)(const char *, void *, unsigned, int, int);
+#define OV_FN(type, va) ((type)(void *)((ULONG_PTR)GetModuleHandleA(NULL) + ((va) - 0x400000u)))
+
+/* From RevealStub, on the game's thread, before the fill's own setup: the overlay's quads. */
+void WINAPI OverlayDraw(void) __attribute__((used));
+void WINAPI OverlayDraw(void)
+{
+    if (!g_ovOn || !g_mapShown) return;
+    if (!g_wavesTex) {
+        if (g_wavesTried) return;
+        g_wavesTried = 1;
+        unsigned slot[4] = { 0 }, status[8] = { 0 };
+        void *f = OV_FN(OvFlags, 0x58A980)(slot, 0, 1, 0, 0, 0, 0, 0, 1, 0);
+        unsigned flags = f ? *(unsigned *)f : 0;
+        g_wavesTex = ((OvLoad)g_barLoader)(WAVES_PATH, status, flags, 0, 0);
+        if (!g_wavesTex) return;
+    }
+    OverlayBuild(GetTickCount());
+    void *dev = OV_FN(OvDevice, 0x44ACF0)(g_wavesTex, 1, 0);
+    for (int k = 0; k < 2; k++) {
+        OV_FN(OvSetup, 0x58A2A0)(4, g_ovPos, 12, 0, 0, g_ovCol[k], 4, 0, 0, g_ovUV[k], 8, 0, 0);
+        OV_FN(OvBind, 0x589E80)(0x17, dev);
+        OV_FN(OvDraw, 0x58A2E0)(4, 4, (const void *)((ULONG_PTR)GetModuleHandleA(NULL) + (0x82F010 - 0x400000u)));
+        OV_FN(OvAfter, 0x58A340)();
+    }
+}
+#endif
+
+/* At start, with the world map on: the overlay, when its calls are where they should be and its picture is in the pack. */
+static void OverlayStart(void)
+{
+    g_ovOn = 0;
+    if (!g_map.ok || !g_barLoader) return;
+    if (!BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderWaves")) return;
+    if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
+        Log("overlay off: the calls it draws with are not where they are in the client it was made for");
+        return;
+    }
+    g_ovOn = 1;
+    Log("overlay on: waves over the open sea, drawn over the world map and under the bar (in memory only)");
+}
+
 static float FillHeat(float d, float t, int k)
 {
     float b;
@@ -1731,6 +1836,7 @@ __attribute__((naked, used)) static void RevealStub(void)
             "pushl %edx\n\t"
             "pushl %edx\n\t"
             "call _RevealFill@4\n\t"
+            "call _OverlayDraw@0\n\t"
             "popl %edx\n\t"
             "popl %ecx\n\t"
             "popl %eax\n\t"

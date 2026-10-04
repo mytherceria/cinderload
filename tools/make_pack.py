@@ -5,7 +5,7 @@ seams; the continents' two screens can be the test pattern instead (--test-conti
 
 Usage: STORMLIB=/path/to/libstorm.so python3 make_pack.py <client Data dir> <out dir> <shape> <screen w> <screen h>
        [--test-continents] [--art <map file>] [--bar <dir>] [--fire-bars <dir> --bar-map <file>] [--reveal]
-       [--wallpapers <file>] [--drift] [--map <world png> <map.txt>]
+       [--wallpapers <file>] [--drift] [--map <world png> <map.txt>] [--waves <waves png>]
    e.g. ... make_pack.py ~/Games/RavenCraft-fogtest/Data out 21x9 5120 2160 --test-continents
 
 The loading bar's fire for each screen (CinderLoad.dll picks the bar by the screen's picture; both options or neither):
@@ -299,6 +299,13 @@ if __name__ == '__main__':
         write_blp(world, blp, 4096, 4096)
         files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderMap.blp'))
         files.append((table, 'CinderLoad\\map.txt'))
+    if '--waves' in sys.argv:                           # the overlay's waves, over the world map's open sea (DXT5)
+        waves = os.path.expanduser(sys.argv[sys.argv.index('--waves') + 1])
+        if not os.path.isfile(waves):
+            raise SystemExit('--waves: the waves picture (kit/zoom/world_texture.py makes it)')
+        blp = os.path.join(blps, 'CinderWaves.blp')
+        write_blp(waves, blp, 2048, 2048, alpha=True)
+        files.append((blp, 'Interface\\Glues\\LoadingScreens\\CinderWaves.blp'))
     if '--drift' in sys.argv or '--map' in sys.argv:    # CinderLoad.dll moves each picture as the bar fills (with the reveal)
         note = os.path.join(blps, 'drift.txt')
         with open(note, 'w') as f:

@@ -8,15 +8,17 @@ so a picture drawn at the screen's shape is squeezed into the texture and the ga
 import os, struct, subprocess, tempfile
 
 
-def write_blp(src, dst, width, height):
+def write_blp(src, dst, width, height, alpha=False):
+    """alpha: DXT5 with the picture's own alpha (the overlay's waves); otherwise DXT1, no alpha, as the loading screens."""
+    fmt = b'DXT5' if alpha else b'DXT1'
     with tempfile.TemporaryDirectory() as tmp:
         dds = os.path.join(tmp, 'tex.dds')
-        subprocess.run(['magick', src, '-resize', f'{width}x{height}!', '-alpha', 'off',
-                        '-define', 'dds:compression=dxt1',
+        subprocess.run(['magick', src, '-resize', f'{width}x{height}!'] + ([] if alpha else ['-alpha', 'off']) +
+                       ['-define', 'dds:compression=' + fmt.decode().lower(),
                         '-define', 'dds:mipmaps=16', dds], check=True)
         data = open(dds, 'rb').read()
-    if data[:4] != b'DDS ' or data[84:88] != b'DXT1':
-        raise SystemExit('ImageMagick did not write a DXT1 DDS')
+    if data[:4] != b'DDS ' or data[84:88] != fmt:
+        raise SystemExit('ImageMagick did not write a %s DDS' % fmt.decode())
     h, w = struct.unpack_from('<II', data, 12)          # DDS_HEADER: height, then width
     mips = struct.unpack_from('<I', data, 28)[0]          # dwMipMapCount, the full-size picture included
     if (w, h) != (width, height):
@@ -24,7 +26,7 @@ def write_blp(src, dst, width, height):
     mips = max(1, mips)
     offsets, sizes, pos, lw, lh = [], [], 128, w, h
     for _ in range(min(mips, 16)):
-        n = max(1, (lw + 3) // 4) * max(1, (lh + 3) // 4) * 8
+        n = max(1, (lw + 3) // 4) * max(1, (lh + 3) // 4) * (16 if alpha else 8)
         offsets.append(pos); sizes.append(n); pos += n
         lw, lh = max(1, lw // 2), max(1, lh // 2)
     if pos > len(data):
@@ -35,7 +37,7 @@ def write_blp(src, dst, width, height):
     for s in sizes:
         out_offsets.append(p); p += s
     out_offsets += [0] * (16 - len(out_offsets)); out_sizes = sizes + [0] * (16 - len(sizes))
-    header = b'BLP2' + struct.pack('<IBBBBII', 1, 2, 0, 0, 1 if len(sizes) > 1 else 0, w, h)
+    header = b'BLP2' + struct.pack('<IBBBBII', 1, 2, 8 if alpha else 0, 7 if alpha else 0, 1 if len(sizes) > 1 else 0, w, h)
     header += struct.pack('<16I', *out_offsets) + struct.pack('<16I', *out_sizes) + bytes(1024)
     assert len(header) == header_len
     with open(dst, 'wb') as f:

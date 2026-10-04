@@ -44,6 +44,12 @@ static void Fresh(const char *name)
         memcpy(shim_module + kRevealCode[i].rva, kRevealCode[i].bytes, (size_t)kRevealCode[i].n);
     memcpy(shim_module + WALL_LOAD_RVA, kWallLoad, sizeof kWallLoad);
     memcpy(shim_module + BG_DRAW_RVA, kBgDraw, sizeof kBgDraw);
+    for (int i = 0; i < OVERLAY_CALLS; i++) {           /* the overlay's six calls, as WoW.exe makes them */
+        unsigned rel = (kOverlayCalls[i].target - 0x400000u) - (kOverlayCalls[i].rva + 5);
+        shim_module[kOverlayCalls[i].rva] = 0xE8;
+        memcpy(shim_module + kOverlayCalls[i].rva + 1, &rel, 4);
+    }
+    g_ovOn = 0; g_wavesTried = 0; g_wavesTex = NULL;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
     for (int i = 0; i < 8; i++) g_bgUV[i] = (float)((0x4F >> i) & 1);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
@@ -780,6 +786,16 @@ static void FireBarRealClient(const char *client)
                  !memcmp(got, kBgDraw, sizeof kBgDraw);
         if (!match) printf("FAIL: RVA 0x%lX (the background's texture coordinates) differs in %s\n", (unsigned long)BG_DRAW_RVA, exe);
     }
+    for (int i = 0; x && match && i < OVERLAY_CALLS; i++) {         /* the overlay's six calls */
+        unsigned char got[5];
+        long off = ExeOffset(x, kOverlayCalls[i].rva);
+        unsigned rel;
+        match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, 5, x) == 5 && got[0] == 0xE8;
+        memcpy(&rel, got + 1, 4);
+        match &= kOverlayCalls[i].rva + 5 + rel == kOverlayCalls[i].target - 0x400000u;
+        if (!match) printf("FAIL: RVA 0x%lX (%s) does not call 0x%X in %s\n", (unsigned long)kOverlayCalls[i].rva,
+                           kOverlayCalls[i].what, kOverlayCalls[i].target, exe);
+    }
     if (x) fclose(x);
     Check(match, "a real client: all eight places hold the bytes the fire bar and the drift expect, in its WoW.exe");
 }
@@ -860,6 +876,7 @@ static void PackLive(int reveal, int walls)
     }
     if (reveal) { names[n] = "CinderLoad\\reveal.txt"; data[n++] = "revealed"; }
     if (reveal & 2) { names[n] = "CinderLoad\\drift.txt"; data[n++] = "drifts"; }
+    if (reveal & 8) { names[n] = "Interface\\Glues\\LoadingScreens\\CinderWaves.blp"; data[n++] = "BLP2waves"; }
     if (reveal & 4) {                                    /* the world map: Eastern Kingdoms only, u = 0.5 - 2e-5 y */
         static char mapTxt[200];
         snprintf(mapTxt, sizeof mapTxt, "# test\r\nmap 0 %08x %08x %08x %08x\r\nmap 2 0 0 0 0\r\nend 3000\r\n",
@@ -1139,9 +1156,41 @@ static void LiveTests(void)
     gone &= g_drift < 0.01f && g_driftNew == 0 && g_viewH > 0.49f;
     Check(freeze && gone, "a freeze at the end of a load keeps the view on the arrival, as does the game clearing it; a screen gone starts the next from the whole world");
 
+    /* the overlay: on only with the world map, the waves' picture and its six calls where they are */
+    Fresh("overlay-no-waves");
+    PackLive(1 | 2 | 4, 0);
+    Start();
+    int ov = !g_ovOn && !LogSays("overlay on");
+    Fresh("overlay-on");
+    PackLive(1 | 2 | 4 | 8, 0);
+    Start();
+    ov &= g_ovOn && LogSays("overlay on: waves over the open sea");
+    Fresh("overlay-moved");
+    PackLive(1 | 2 | 4 | 8, 0);
+    shim_module[0x6E0D + 2] ^= 0x10;                                  /* "after a draw" calls somewhere else */
+    Start();
+    ov &= !g_ovOn && LogSays("overlay off: the calls it draws with");
+    Check(ov, "the overlay: off without its picture, on with it, off (and saying so) when one of its calls has moved");
+    /* the waves follow the view, sway a little of its width, and the two copies fade in turn */
+    for (int i = 0; i < 8; i++) g_bgUV[i] = (float)((0x4F >> i) & 1);
+    g_bgUV[0] = g_bgUV[4] = 0.2f; g_bgUV[2] = g_bgUV[6] = 0.4f;        /* a view 0.2 wide */
+    float maxSway = 0, minA = 1, maxA = 0;
+    for (DWORD ms = 0; ms < 20000; ms += 50) {
+        OverlayBuild(ms);
+        for (int k = 0; k < 2; k++) {
+            float s = fabsf(g_ovUV[k][0] - 0.2f); if (s > maxSway) maxSway = s;
+            float a = (g_ovCol[k][0] >> 24) / 255.0f; if (a < minA) minA = a; if (a > maxA) maxA = a;
+        }
+    }
+    int waves = maxSway > 0.0015f && maxSway <= WAVES_SWAY * 0.2f + 1e-5f && minA < 0.2f && maxA > 0.9f &&
+                fabsf(g_ovUV[0][2] - g_ovUV[0][0] - 0.2f) < 1e-5f;
+    Check(waves, "the waves: the view's own window, swaying at most 1.2% of its width, the two copies fading in turn");
+
     /* his call, 4 Oct: a two-second load must not fly at you. The bar leaping to full at once: the zoom goes at the
      * pace (7 s all the way in when map.txt gives none), half way after 3.5 s; a slow bar is simply followed */
-    int paced = g_map.pace == 7;
+    g_mapShown = 1;                                                   /* its own setting, whatever ran before */
+    { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+    int paced = g_map.pace == 7 && g_map.ok;
     g_drift = 0; g_driftAt = 0; at = 140000;
     DriftStep(0, at);
     for (int i = 0; i < 175; i++) { at += 20; DriftStep(1, at); }    /* 3.5 s */
