@@ -1429,6 +1429,42 @@ __attribute__((used)) void *g_drawSetup;              /* the game's vertex setup
 __attribute__((used)) void *g_drawStrip;              /* the game's indexed draw, VA 0x58A2E0 */
 void WINAPI RevealFill(const float *v) __attribute__((used));
 
+/* ---- the picture moves: the first step of the zoom (3 Oct 2026) ----
+ * Read from WoW.exe (1.12.1 build 5875) on 3 Oct 2026: the loading screen's background (VA 0x406CF0) pushes its
+ * texture coordinates by address, `push 0x882B8C` at RVA 0x6DBC: the whole picture, set once at start (VA 0x406280:
+ * u,v = 0,1  1,1  0,0  1,0 for its corners 0,0  1,0  0,1  1,1) and shared with the bar. That one push is pointed at
+ * g_bgUV instead, and DriftStep, on the game's thread every frame the bar is drawn, eases them: the picture drifts in
+ * toward its centre as the bar fills. Only when the pack holds CinderLoad\drift.txt, and only with the reveal on (its
+ * stub is what runs DriftStep). */
+#define BG_DRAW_RVA 0x006DB6
+#define BG_PUSH_RVA 0x006DBC
+static const unsigned char kBgDraw[] = {                                                         /* RVA 0x6DB6 */
+    0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x08, 0x68, 0x8C, 0x2B, 0x88, 0x00, 0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x00,
+    0x6A, 0x00, 0x6A, 0x00, 0x6A, 0x0C, 0xBA, 0xC0, 0x2D, 0x88, 0x00, 0xB9, 0x04, 0x00, 0x00, 0x00, 0xE8, 0xC2, 0x34,
+    0x18, 0x00 };
+#define BG_PTR_AT (BG_PUSH_RVA + 1 - BG_DRAW_RVA)       /* where in kBgDraw the pushed address sits */
+#define DRIFT_ZOOM 0.12f      /* the picture is this much closer when the bar is full */
+#define DRIFT_TAU  0.6f       /* seconds: how smoothly the drift follows the bar */
+__attribute__((used)) float g_bgUV[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
+static volatile LONG g_driftOn;
+static float g_drift;
+static DWORD g_driftAt;
+
+/* The game's thread only. p: the bar, 0..1. A new screen (the bar back near 0, or no frame for a second) starts again. */
+static void DriftStep(float p, DWORD now)
+{
+    if (!g_driftAt || now - g_driftAt > 1000 || p < g_drift - 0.25f) g_drift = 0;
+    float dt = g_driftAt ? (float)(now - g_driftAt) / 1000.0f : 0;
+    g_driftAt = now;
+    if (dt > 0.1f) dt = 0.1f;
+    g_drift += (p - g_drift) * (float)(1.0 - FireExp(-(double)dt / DRIFT_TAU));
+    float e = g_drift * g_drift * (3 - 2 * g_drift);                /* eased in and out */
+    float h = 0.5f / (1.0f + DRIFT_ZOOM * e);
+    float lo = 0.5f - h, hi = 0.5f + h;
+    g_bgUV[0] = lo; g_bgUV[1] = hi; g_bgUV[2] = hi; g_bgUV[3] = hi;
+    g_bgUV[4] = lo; g_bgUV[5] = lo; g_bgUV[6] = hi; g_bgUV[7] = lo;
+}
+
 static float FillHeat(float d, float t, int k)
 {
     float b;
@@ -1446,6 +1482,7 @@ void WINAPI RevealFill(const float *v)
     if (ClientWord(0x882BE4, &bits)) { union { unsigned u; float f; } c; c.u = bits; p = c.f; }
     if (!(p >= 0)) p = 0;
     if (p > 1) p = 1;
+    if (g_driftOn) DriftStep(p, GetTickCount());
     float L = v[0], B = v[1], z = v[2], R = v[3], T = v[7];
     float full = p > 0.001f ? (R - L) / p : 1.0f;                   /* the bar's whole width, in the same units */
     float t = (float)(GetTickCount() % 3600000u) / 1000.0f;
@@ -1547,6 +1584,50 @@ static int RevealSend(unsigned char *at, unsigned rel)
     return Rd32(at + 1) == rel;
 }
 
+/* The pack asks for its picture to drift: CinderLoad\drift.txt is in Data\patch-~.MPQ. */
+static int DriftWanted(void)
+{
+    unsigned char *text = NULL;
+    unsigned len = 0;
+    int r = mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\drift.txt", &text, &len);
+    if (text) HeapFree(GetProcessHeap(), 0, text);
+    return r == MPQ_OK;
+}
+
+/* Points the background's one push at g_bgUV. 1 when the picture can move. */
+static int BgDrift(void)
+{
+    unsigned char *base = (unsigned char *)GetModuleHandleA(NULL);
+    unsigned char *at = base + BG_DRAW_RVA, *ptr = base + BG_PUSH_RVA + 1;
+    unsigned want = (unsigned)(ULONG_PTR)g_bgUV;
+    int n = (int)sizeof kBgDraw;
+    if (!Readable(at, n)) { Log("picture drift off: the background's draw could not be read"); return 0; }
+    if (Same(at, kBgDraw, BG_PTR_AT) && Same(at + BG_PTR_AT + 4, kBgDraw + BG_PTR_AT + 4, n - BG_PTR_AT - 4) &&
+        Rd32(ptr) == want) {
+        InterlockedExchange(&g_driftOn, 1);
+        Log("picture drift already on: nothing to do");
+        return 1;
+    }
+    if (!Same(at, kBgDraw, n)) {
+        char m[300];
+        int len = wsprintfA(m, "picture drift off: other bytes at RVA 0x%lX (the background's texture coordinates) than in "
+                            "the client it was made for; there:", (unsigned long)BG_DRAW_RVA);
+        for (int k = 0; k < 16; k++) len += wsprintfA(m + len, " %02X", at[k]);
+        Log(m);
+        return 0;
+    }
+    DWORD old;
+    if (!VirtualProtect(ptr, 4, PAGE_EXECUTE_READWRITE, &old)) { Log("picture drift off: the code could not be made writable"); return 0; }
+    for (int i = 0; i < 4; i++)
+        ptr[i] = (unsigned char)(want >> (8 * i));
+    VirtualProtect(ptr, 4, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, (SIZE_T)n);
+    if (Rd32(ptr) != want) { Log("picture drift off: the bytes read back differ"); return 0; }
+    InterlockedExchange(&g_driftOn, 1);
+    Log("picture drift on: each loading screen's picture eases in as the bar fills (one address at RVA 0x6DBD, in memory only)");
+    return 1;
+}
+
 /* The pack asks for its fire to be revealed: CinderLoad\reveal.txt is in Data\patch-~.MPQ. */
 static int RevealWanted(void)
 {
@@ -1604,7 +1685,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         DisableThreadLibraryCalls(inst);
         if (GameDir() && ChooseScreens()) {
             if (Apply()) {
-                WideBar(RevealWanted() && RevealBar());    /* revealed first: only then may the fill be as tall as the log */
+                int reveal = RevealWanted() && RevealBar();
+                WideBar(reveal);                            /* revealed first: only then may the fill be as tall as the log */
+                if (reveal && DriftWanted()) BgDrift();     /* the reveal's stub moves the picture */
                 FireBar();
             } else {
                 TakeOutAfterAll();

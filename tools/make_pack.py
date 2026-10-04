@@ -5,7 +5,7 @@ seams; the continents' two screens can be the test pattern instead (--test-conti
 
 Usage: STORMLIB=/path/to/libstorm.so python3 make_pack.py <client Data dir> <out dir> <shape> <screen w> <screen h>
        [--test-continents] [--art <map file>] [--bar <dir>] [--fire-bars <dir> --bar-map <file>] [--reveal]
-       [--wallpapers <file>]
+       [--wallpapers <file>] [--drift]
    e.g. ... make_pack.py ~/Games/RavenCraft-fogtest/Data out 21x9 5120 2160 --test-continents
 
 The loading bar's fire for each screen (CinderLoad.dll picks the bar by the screen's picture; both options or neither):
@@ -290,6 +290,11 @@ if __name__ == '__main__':
         with open(note, 'w') as f:
             f.write('The bar textures in this pack are made to be revealed, not stretched (CinderLoad 0.1.5 and later).\n')
         files.append((note, 'CinderLoad\\reveal.txt'))
+    if '--drift' in sys.argv:                           # CinderLoad.dll eases each picture in as the bar fills (with the reveal)
+        note = os.path.join(blps, 'drift.txt')
+        with open(note, 'w') as f:
+            f.write('Each loading screen\'s picture eases in as the bar fills (CinderLoad, with the reveal).\n')
+        files.append((note, 'CinderLoad\\drift.txt'))
     mpq = os.path.join(out, 'Data', 'CinderLoad', f'LoadingScreens-{shape}.MPQ')
     os.makedirs(os.path.dirname(mpq), exist_ok=True)
     pack(mpq, files)

@@ -43,6 +43,9 @@ static void Fresh(const char *name)
     for (int i = 0; i < REVEAL_CODE_COUNT; i++)
         memcpy(shim_module + kRevealCode[i].rva, kRevealCode[i].bytes, (size_t)kRevealCode[i].n);
     memcpy(shim_module + WALL_LOAD_RVA, kWallLoad, sizeof kWallLoad);
+    memcpy(shim_module + BG_DRAW_RVA, kBgDraw, sizeof kBgDraw);
+    g_driftOn = 0; g_drift = 0; g_driftAt = 0;
+    for (int i = 0; i < 8; i++) g_bgUV[i] = (float)((0x4F >> i) & 1);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
     g_wallPick = 0;
     g_barsOn = 0;
@@ -770,8 +773,15 @@ static void FireBarRealClient(const char *client)
         match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, (size_t)len, x) == (size_t)len && !memcmp(got, want, (size_t)len);
         if (!match) printf("FAIL: RVA 0x%lX differs in %s\n", (unsigned long)rva, exe);
     }
+    if (x && match) {                                               /* the drift's one place */
+        unsigned char got[64];
+        long off = ExeOffset(x, BG_DRAW_RVA);
+        match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, sizeof kBgDraw, x) == sizeof kBgDraw &&
+                 !memcmp(got, kBgDraw, sizeof kBgDraw);
+        if (!match) printf("FAIL: RVA 0x%lX (the background's texture coordinates) differs in %s\n", (unsigned long)BG_DRAW_RVA, exe);
+    }
     if (x) fclose(x);
-    Check(match, "a real client: all seven places hold the bytes the fire bar expects, in its WoW.exe");
+    Check(match, "a real client: all eight places hold the bytes the fire bar and the drift expect, in its WoW.exe");
 }
 
 /* The mock's timeline (render_frames.py KEYS) through the sound built from a real client's files, polled as the game
@@ -848,6 +858,7 @@ static void PackLive(int reveal, int walls)
         names[n] = borders[f]; data[n++] = "BLP2b";
     }
     if (reveal) { names[n] = "CinderLoad\\reveal.txt"; data[n++] = "revealed"; }
+    if (reveal & 2) { names[n] = "CinderLoad\\drift.txt"; data[n++] = "drifts"; }
     if (walls) {
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall01.blp"; data[n++] = "BLP2wall1";
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall02.blp"; data[n++] = "BLP2wall2";
@@ -974,6 +985,63 @@ static void LiveTests(void)
     Check(LogSays("wallpapers off: other bytes at RVA 0x6EAF") && LogSays("fire bar on") &&
           shim_module[WALL_LOAD_RVA + 1] == (0x4E ^ 0x40) && Same(shim_module + WALL_CALL_RVA, kWallLoad + WALL_REL_AT - 1, 5),
           "the picture's load holding other bytes: logged, untouched, the fire bar still on");
+
+    /* the picture's drift: one pushed address pointed at g_bgUV, eased by the reveal's stub */
+    unsigned uvAt = (unsigned)(unsigned long)g_bgUV;
+    Fresh("drift-on");
+    PackLive(3, 0);
+    Start();
+    Check(LogSays("picture drift on") && Rd32(shim_module + BG_PUSH_RVA + 1) == uvAt && g_driftOn &&
+          shim_module[BG_PUSH_RVA] == 0x68 && Same(shim_module + BG_DRAW_RVA, kBgDraw, BG_PTR_AT) &&
+          Same(shim_module + BG_PUSH_RVA + 5, kBgDraw + BG_PTR_AT + 4, (int)sizeof kBgDraw - BG_PTR_AT - 4),
+          "drift on: only the background's pushed address changes, to g_bgUV");
+    Start();
+    Check(LogSays("picture drift already on") && Rd32(shim_module + BG_PUSH_RVA + 1) == uvAt, "a second start: already on");
+
+    Fresh("drift-not-asked");
+    PackLive(1, 0);
+    Start();
+    Check(!LogSays("picture drift") && Same(shim_module + BG_DRAW_RVA, kBgDraw, (int)sizeof kBgDraw) && !g_driftOn,
+          "a pack without drift.txt: the background untouched");
+
+    Fresh("drift-other");
+    PackLive(3, 0);
+    shim_module[BG_DRAW_RVA + 2] ^= 0x01;
+    Start();
+    Check(LogSays("picture drift off: other bytes at RVA 0x6DB6") && !g_driftOn &&
+          Rd32(shim_module + BG_PUSH_RVA + 1) == 0x00882B8C, "the background holding other bytes: logged, untouched");
+
+    Fresh("drift-no-reveal");
+    PackLive(3, 0);
+    shim_module[kRevealCode[0].rva] ^= 0x01;
+    Start();
+    Check(!LogSays("picture drift on") && !g_driftOn && Rd32(shim_module + BG_PUSH_RVA + 1) == 0x00882B8C,
+          "no reveal (its stub runs the drift): no drift either");
+
+    /* the drift itself */
+    g_drift = 0; g_driftAt = 0;
+    DriftStep(0, 1000);
+    int ident = g_bgUV[0] == 0.5f - 0.5f && g_bgUV[1] == 1 && g_bgUV[6] == 1 && g_bgUV[7] == 0;
+    DWORD now = 1000;
+    for (int i = 0; i < 400; i++) { now += 20; DriftStep(1, now); }
+    float h = 0.5f / (1 + DRIFT_ZOOM);
+    int full = fabsf(g_bgUV[0] - (0.5f - h)) < 1e-4f && fabsf(g_bgUV[1] - (0.5f + h)) < 1e-4f &&
+               fabsf(g_bgUV[6] - (0.5f + h)) < 1e-4f && fabsf(g_bgUV[7] - (0.5f - h)) < 1e-4f;
+    float mid = g_drift;
+    now += 20; DriftStep(0.0f, now);                                  /* the next screen's bar starts again */
+    int reset = g_drift < 0.05f && mid > 0.95f;
+    g_drift = 0; g_driftAt = 0; now = 5000; DriftStep(0, now);
+    now += 20; DriftStep(1, now);
+    int gentle = g_drift > 0 && g_drift < 0.1f;                       /* one frame after a leap: a small step, not a jump */
+    float vv[12] = { 0.0f, 0.0f, 0.5f,  0.5f, 0.0f, 0.5f,  0.0f, 0.09f, 0.5f,  0.5f, 0.09f, 0.5f };
+    g_driftOn = 1; g_drift = 0; g_driftAt = 0; shim_ticks = 9000;
+    PutFloat(0x882BE4, 1.0f);
+    RevealFill(vv); shim_ticks += 50; RevealFill(vv);
+    int framed = g_drift > 0 && g_bgUV[0] > 0;                        /* the stub's frame moved the picture */
+    g_driftOn = 0; g_drift = 0; g_driftAt = 0; shim_ticks += 50; RevealFill(vv);
+    framed &= g_drift == 0;                                           /* and only while the drift is on */
+    Check(ident && full && reset && gentle && framed,
+          "the drift: the whole picture at 0, 12% closer at a full bar, eased (no jump on a leap), starting again on a new screen");
 }
 
 int main(int argc, char **argv)
