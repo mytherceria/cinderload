@@ -815,6 +815,8 @@ static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
 static void LearnScreen(char *m);
 static void HoldSetup(void);
+static void PresentSetup(void);
+static void BlurRelease(void);
 static volatile LONG g_destKnownPct = -1, g_destKnownWay;       /* the arrival: the bar when it became known, and how */
 static void OverlayStart(void);
 static void BadgeLog(char *m);           /* the marks' (below): where a map screen's class came from, into the log */
@@ -1303,6 +1305,20 @@ static int BarFamily(const BarTable *t)
  * stops it the way the glue's own StopGlueMusic does (VA 0x46CF00: push 1.0, call 0x45B050), with map.txt's
  * "music <ms>" fade (MUSIC_FADE_MS when not given; 0 cuts it at once). */
 #define MUSIC_FADE_MS   250
+/* The ending (his ask, 4 Oct: "at the end of every class loading screen ... blur and fade out over about ... half a
+ * second, and then the character appears"; his pick, the higher end: "a true downsample blur on the game's graphics
+ * device ... it'll be worth it in the end", with the matching fade into the world). Every timed screen ends with
+ * map.txt's "blur <ms> <dim %>" (BLUR_MS, BLUR_DIM when not given; blur 0 for none): once the view has landed, the
+ * screen goes out of focus and darkens by that much over those ms (held that long when the game is done sooner, inside
+ * the five seconds), the game's own freeze then holds that frame, and the world's first DISSOLVE_MS dissolve out of it.
+ * The blur is the game's own frame, shrunk on its Direct3D 9 device a half at a time to 1/32 and grown back to a
+ * quarter, all with linear filtering, laid over the frame. Drawn just before the device presents (PRESENT_VA). */
+#define BLUR_MS         500
+#define BLUR_DIM        35         /* percent of black at the end (100: to black) */
+#define DISSOLVE_MS     500
+#define PRESENT_VA      0x5A19FD   /* the game's present: mov eax, [esi+0x38A8] (its IDirect3DDevice9), then Present */
+#define GX_D3D_OFF      0x38A8
+#define GX_SCENE_OFF    0x3A38     /* nonzero while the game is between BeginScene and EndScene */
 #define GLUE_STOP_VA    0x45B050   /* stdcall (float seconds): stops the glue music's sound with that fade, clears it */
 #define GLUE_MUSIC_VA   0xB06038   /* the glue music's sound while it plays, else 0 */
 #define MAP_ENTS        96         /* dungeon, raid and battleground entrances map.txt may list */
@@ -1325,6 +1341,43 @@ static volatile LONG g_holdN, g_holdLast;                       /* holds made, a
 static DWORD g_scrStartAt, g_planEndAt;                         /* this screen: its first frame, when its plan ends */
 static float g_planU;                                           /* the plan's bar, 0..1 */
 static int g_screenKind, g_holdDone, g_timed;                   /* later (1) or first (0); held already; on the plan */
+static volatile LONG g_blurMs = BLUR_MS, g_blurDim = BLUR_DIM, g_blurOn;   /* map.txt's blur; the present's hook set */
+static DWORD g_blurFrom, g_blurTo, g_dissolveAt;                /* this screen's blur; when the world's dissolve began */
+static int g_blurUsed, g_loadFrame;                             /* the blur drew this screen; a loading frame is drawn */
+static const unsigned char kPresent[20] = { 0x8B, 0x86, 0xA8, 0x38, 0x00, 0x00, 0x8B, 0x10, 0x6A, 0x00, 0x6A, 0x00, 0x6A,
+                                            0x00, 0x6A, 0x00, 0x50, 0xFF, 0x52, 0x44 };   /* VA 0x5A19FD, as read */
+
+/* The blur at now: 0 none .. 1 all, eased. */
+static float BlurAmount(DWORD now)
+{
+    if (!g_blurTo || (LONG)(now - g_blurFrom) <= 0) return 0;
+    float k = FireClamp((float)(LONG)(now - g_blurFrom) / (float)(LONG)(g_blurTo - g_blurFrom + 1), 0, 1);
+    return k * k * (3 - 2 * k);
+}
+
+/* What the present draws over this frame (the game's thread): 0 nothing, 1 the blur by *amount, 2 the world's dissolve
+ * by *amount, 3 nothing and the blur's textures go (the dissolve is over). */
+static int BlurStep(int loading, DWORD now, float *amount)
+{
+    if (loading) {
+        g_dissolveAt = 0;
+        float k = BlurAmount(now);
+        if (k <= 0) return 0;
+        g_blurUsed = 1;
+        *amount = k;
+        return 1;
+    }
+    if (!g_blurUsed) return 0;
+    if (!g_dissolveAt) g_dissolveAt = now ? now : 1;
+    float k = FireClamp((float)(LONG)(now - g_dissolveAt) / (float)DISSOLVE_MS, 0, 1);
+    if (k >= 1) {
+        g_blurUsed = 0;
+        g_dissolveAt = 0;
+        return 3;
+    }
+    *amount = 1 - k * k * (3 - 2 * k);
+    return 2;
+}
 static volatile LONG g_musicFadeMs = MUSIC_FADE_MS, g_musicOn, g_musicFaded;   /* map.txt's fade; set up; this screen */
 static const unsigned char kGlueStop[18] = { 0x55, 0x8B, 0xEC, 0x8B, 0x0D, 0x38, 0x60, 0xB0, 0x00, 0x85, 0xC9, 0x74, 0x13,
                                              0x8B, 0x45, 0x08, 0x50, 0xE8 };    /* 0x45B050, as read from his WoW.exe */
@@ -1445,6 +1498,8 @@ static void MapParse(const char *s, unsigned len)
     for (unsigned i = 0; i < sizeof g_map; i++) z[i] = 0;
     InterlockedExchange(&g_holdMs, HOLD_MS);
     InterlockedExchange(&g_musicFadeMs, MUSIC_FADE_MS);
+    InterlockedExchange(&g_blurMs, BLUR_MS);
+    InterlockedExchange(&g_blurDim, BLUR_DIM);
     for (unsigned at = 0; at < len;) {
         unsigned end = at;
         while (end < len && s[end] != '\n') end++;
@@ -1471,14 +1526,22 @@ static void MapParse(const char *s, unsigned len)
                              (n > 5 && l[0] == 'p' && l[1] == 'a' && l[2] == 'c' && l[3] == 'e' && MapSpace(l[4])) ||
                              (n > 5 && l[0] == 'h' && l[1] == 'o' && l[2] == 'l' && l[3] == 'd' && MapSpace(l[4])) ||
                              (n > 6 && l[0] == 'm' && l[1] == 'u' && l[2] == 's' && l[3] == 'i' && l[4] == 'c' &&
-                              MapSpace(l[5])))) {
-            int y = 0, d = 0, pace = l[0] == 'p', hold = l[0] == 'h', music = l[0] == 'm';
-            i = music ? 6 : pace || hold ? 5 : 4;
+                              MapSpace(l[5])) ||
+                             (n > 5 && l[0] == 'b' && l[1] == 'l' && l[2] == 'u' && l[3] == 'r' && MapSpace(l[4])))) {
+            int y = 0, d = 0, pace = l[0] == 'p', hold = l[0] == 'h', music = l[0] == 'm', blur = l[0] == 'b';
+            i = music ? 6 : pace || hold || blur ? 5 : 4;
             while (i < n && MapSpace(l[i])) i++;
             for (; i < n && l[i] >= '0' && l[i] <= '9' && d < 6; i++, d++) y = y * 10 + (l[i] - '0');
             if (d && pace) g_map.pace = (float)y;
             else if (d && hold) InterlockedExchange(&g_holdMs, y <= 20000 ? y : 20000);
             else if (d && music) InterlockedExchange(&g_musicFadeMs, y <= 5000 ? y : 5000);
+            else if (d && blur) {
+                int dim = 0, dd = 0;
+                InterlockedExchange(&g_blurMs, y <= 2000 ? y : 2000);
+                while (i < n && MapSpace(l[i])) i++;
+                for (; i < n && l[i] >= '0' && l[i] <= '9' && dd < 3; i++, dd++) dim = dim * 10 + (l[i] - '0');
+                if (dd) InterlockedExchange(&g_blurDim, dim <= 100 ? dim : 100);
+            }
             else if (d) g_map.endYards = (float)y;
         }
         at = end + 1;
@@ -1720,6 +1783,7 @@ static void MapLoad(void)
     }
     HoldSetup();
     MusicSetup();
+    PresentSetup();
     if (g_map.ents) {
         char m[200];
         wsprintfA(m, "zoom: the world map is in the pack, on every loading screen; the view glides down onto where you arrive, "
@@ -2276,6 +2340,8 @@ static float DisplayStep(float p, DWORD now)
         g_screenKind = g_zoomScreens > 0;                             /* (DriftStep counts this screen after) */
         g_holdDone = 0;
         g_planU = 0;
+        g_blurFrom = g_blurTo = 0;
+        if (g_blurUsed) { g_blurUsed = 0; g_dissolveAt = 0; BlurRelease(); }
         InterlockedExchange(&g_holdLast, 0);
         MusicFade();                                                  /* the character list's music out, snappily */
         LONG full = g_lnN[g_screenKind] > 0 ? g_lnMs[g_screenKind] : (g_screenKind ? 0 : FIRST_GUESS_MS);
@@ -2283,6 +2349,7 @@ static float DisplayStep(float p, DWORD now)
         LONG plan = full > floor ? full : floor;
         g_planEndAt = now + (DWORD)(plan > 300 ? plan : 300);
     }
+    g_loadFrame = 1;                                                  /* this frame is a loading screen's (the present) */
     if (p >= 0.999f && !g_fullMs)                                     /* the game's bar full: the time it took */
         InterlockedExchange(&g_fullMs, now - g_scrStartAt > 0 ? (LONG)(now - g_scrStartAt) : 1);
     if (g_dispMax >= 0.999f && gap >= HITCH_MS && (LONG)gap > g_endFreezeMs)   /* the game's own freeze once it is done */
@@ -2479,13 +2546,19 @@ static void HoldFrame(void)
     if (!g_holdOn || !g_timed || g_holdDone || !ClientWord(HOLD_BAR_VA, &bits) || !(MapBits(bits) >= 0.999f)) return;
     g_holdDone = 1;
     DWORD now = GetTickCount(), start = now;
-    LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, floor = g_holdMs - fz;
+    LONG blur = g_blurOn && g_blurMs > 0 ? g_blurMs : 0;             /* the ending, inside the floor */
+    LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, floor = g_holdMs - fz - blur;
     DWORD floorAt = g_scrStartAt + (DWORD)(floor > 0 ? floor : 0), settleAt = now + HOLD_SETTLE_MS;
     DWORD planAt = (LONG)(g_planEndAt - settleAt) < 0 ? g_planEndAt : settleAt;   /* the plan, hurried to settle */
     DWORD endAt = (LONG)(floorAt - planAt) > 0 ? floorAt : planAt;                 /* but never before the floor */
-    if ((LONG)(endAt - now) <= 0) return;                                         /* met already: no hold */
+    if ((LONG)(endAt - now) <= 0) {
+        if (!blur) return;                                                        /* met already: no hold */
+        endAt = now;                                                              /* (but the ending still plays) */
+    }
     g_planEndAt = endAt;
-    for (int f = 0; f < HOLD_FRAMES && (LONG)(endAt + HOLD_TAIL_MS - now) > 0 && now - start < HOLD_MAX_MS; f++) {
+    if (blur) { g_blurFrom = endAt; g_blurTo = endAt + (DWORD)blur; }
+    DWORD stopAt = endAt + (DWORD)(blur > HOLD_TAIL_MS ? blur : HOLD_TAIL_MS);
+    for (int f = 0; f < HOLD_FRAMES && (LONG)(stopAt - now) > 0 && now - start < HOLD_MAX_MS; f++) {
         Sleep(4);
         g_holdFrame();
         now = GetTickCount();
@@ -4454,6 +4527,206 @@ static void ViewStart(void)
 #else
 static void ViewStart(void) {}
 #endif
+
+/* ---- the ending's drawing, on the game's own device (see BLUR_MS) ----
+ * The present's six bytes at VA 0x5A19FD go to PresentStub, which hands the game's device object (esi) to PrePresent and
+ * then does what they did. PrePresent works out from BlurStep what goes over this frame, and draws it with the frame's
+ * own state saved and put back around it (a state block, the render target too). Any failure turns the ending off for
+ * the session; the game's frame is never left half-drawn. The blur's textures live only from the blur to the end of
+ * the world's dissolve, so they are never there when the game resets its device. */
+#define BLUR_LEVELS 8          /* 1/2, 1/4, 1/8, 1/16, 1/32 down; 1/16, 1/8, 1/4 back up */
+#ifdef __i386__
+__attribute__((used)) void *g_presentBack;            /* VA 0x5A1A03: the present, after the six bytes */
+void WINAPI PrePresent(unsigned char *gx) __attribute__((used));
+__attribute__((naked, used)) static void PresentStub(void)
+{
+    __asm__("pushal\n\t"
+            "pushl %esi\n\t"
+            "call _PrePresent@4\n\t"
+            "popal\n\t"
+            "movl 0x38a8(%esi), %eax\n\t"
+            "jmp *_g_presentBack\n\t");
+}
+static IDirect3DTexture9 *g_blurTex[BLUR_LEVELS];
+static IDirect3DStateBlock9 *g_blurState;
+static UINT g_blurW, g_blurH;
+static int g_blurDead;
+typedef struct { float x, y, z, rhw, u, v; } BlurVert;
+typedef struct { float x, y, z, rhw; DWORD c; } BlurDark;
+
+static void BlurRelease(void)
+{
+    for (int i = 0; i < BLUR_LEVELS; i++)
+        if (g_blurTex[i]) { IDirect3DTexture9_Release(g_blurTex[i]); g_blurTex[i] = NULL; }
+    if (g_blurState) { IDirect3DStateBlock9_Release(g_blurState); g_blurState = NULL; }
+}
+
+/* The level i's size: halving down to 1/32 (i 0..4), then back up (5..7: 1/16, 1/8, 1/4). */
+static void BlurSize(int i, UINT *w, UINT *h)
+{
+    int sh = i < 5 ? i + 1 : 9 - i;
+    *w = g_blurW >> sh; *h = g_blurH >> sh;
+    if (*w < 1) *w = 1;
+    if (*h < 1) *h = 1;
+}
+
+/* The frame in the back buffer, blurred into the last level. 0 on any failure. */
+static int BlurCapture(IDirect3DDevice9 *dev, IDirect3DSurface9 *bb)
+{
+    D3DSURFACE_DESC d;
+    if (FAILED(IDirect3DSurface9_GetDesc(bb, &d))) return 0;
+    if (d.Width != g_blurW || d.Height != g_blurH) { BlurRelease(); g_blurW = d.Width; g_blurH = d.Height; }
+    for (int i = 0; i < BLUR_LEVELS; i++)
+        if (!g_blurTex[i]) {
+            UINT w, h;
+            BlurSize(i, &w, &h);
+            if (FAILED(IDirect3DDevice9_CreateTexture(dev, w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT,
+                                                      &g_blurTex[i], NULL))) { g_blurTex[i] = NULL; return 0; }
+        }
+    IDirect3DSurface9 *from = bb;
+    IDirect3DSurface9_AddRef(bb);
+    int ok = 1;
+    for (int i = 0; i < BLUR_LEVELS && ok; i++) {
+        IDirect3DSurface9 *to = NULL;
+        ok = SUCCEEDED(IDirect3DTexture9_GetSurfaceLevel(g_blurTex[i], 0, &to)) &&
+             SUCCEEDED(IDirect3DDevice9_StretchRect(dev, from, NULL, to, NULL, D3DTEXF_LINEAR));
+        IDirect3DSurface9_Release(from);
+        from = to;
+        if (!from) break;
+    }
+    if (from) IDirect3DSurface9_Release(from);
+    return ok;
+}
+
+/* Over the whole frame: the blurred level at alpha a, then black at alpha dark. */
+static void BlurDraw(IDirect3DDevice9 *dev, float a, float dark)
+{
+    float w = (float)g_blurW, h = (float)g_blurH;
+    IDirect3DDevice9_SetVertexShader(dev, NULL);
+    IDirect3DDevice9_SetPixelShader(dev, NULL);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, D3DZB_FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHATESTENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, TRUE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_FOGENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_SCISSORTESTENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_SRGBWRITEENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_COLORWRITEENABLE, 0xF);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    IDirect3DDevice9_SetTextureStageState(dev, 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    if (a > 0.003f) {
+        IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)g_blurTex[BLUR_LEVELS - 1]);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_SRGBTEXTURE, FALSE);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_TEXCOORDINDEX, 0);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        IDirect3DDevice9_SetRenderState(dev, D3DRS_TEXTUREFACTOR, (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24);
+        IDirect3DDevice9_SetFVF(dev, D3DFVF_XYZRHW | D3DFVF_TEX1);
+        BlurVert v[4] = { { -0.5f, -0.5f, 0, 1, 0, 0 }, { w - 0.5f, -0.5f, 0, 1, 1, 0 },
+                          { -0.5f, h - 0.5f, 0, 1, 0, 1 }, { w - 0.5f, h - 0.5f, 0, 1, 1, 1 } };
+        IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, v, sizeof v[0]);
+    }
+    if (dark > 0.003f) {
+        IDirect3DDevice9_SetTexture(dev, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(dev, 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetFVF(dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        DWORD c = (DWORD)(FireClamp(dark, 0, 1) * 255.0f + 0.5f) << 24;
+        BlurDark v[4] = { { -0.5f, -0.5f, 0, 1, c }, { w - 0.5f, -0.5f, 0, 1, c }, { -0.5f, h - 0.5f, 0, 1, c },
+                          { w - 0.5f, h - 0.5f, 0, 1, c } };
+        IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, v, sizeof v[0]);
+    }
+}
+
+/* From PresentStub, on the game's thread, just before the device presents the frame. */
+void WINAPI PrePresent(unsigned char *gx)
+{
+    int loading = g_loadFrame;
+    g_loadFrame = 0;
+    if (!g_blurOn || g_blurDead || !gx) return;
+    float amount = 0;
+    int mode = BlurStep(loading, GetTickCount(), &amount);
+    if (mode == 3) { BlurRelease(); return; }
+    if (!mode || !Readable(gx + GX_D3D_OFF, 4) || !Readable(gx + GX_SCENE_OFF, 4) || *(volatile DWORD *)(gx + GX_SCENE_OFF))
+        return;                                              /* (inside the game's scene: not this frame) */
+    IDirect3DDevice9 *dev = *(IDirect3DDevice9 *volatile *)(gx + GX_D3D_OFF);
+    IDirect3DSurface9 *bb = NULL, *rt = NULL;
+    if (!dev || FAILED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return;
+    int ok = 1;
+    if (mode == 1) ok = BlurCapture(dev, bb);                /* the loading frame, blurred afresh */
+    else ok = g_blurTex[BLUR_LEVELS - 1] != NULL;            /* the world: the last blurred frame, dissolving */
+    if (ok && !g_blurState) ok = SUCCEEDED(IDirect3DDevice9_CreateStateBlock(dev, D3DSBT_ALL, &g_blurState));
+    if (ok) ok = SUCCEEDED(IDirect3DStateBlock9_Capture(g_blurState)) &&
+                 SUCCEEDED(IDirect3DDevice9_GetRenderTarget(dev, 0, &rt));
+    if (ok && SUCCEEDED(IDirect3DDevice9_SetRenderTarget(dev, 0, bb)) && SUCCEEDED(IDirect3DDevice9_BeginScene(dev))) {
+        D3DVIEWPORT9 vp = { 0, 0, g_blurW, g_blurH, 0.0f, 1.0f };
+        IDirect3DDevice9_SetViewport(dev, &vp);
+        float dim = (float)g_blurDim / 100.0f;
+        BlurDraw(dev, amount, amount * dim);
+        IDirect3DDevice9_EndScene(dev);
+    } else if (ok)
+        ok = 0;
+    if (rt) { IDirect3DDevice9_SetRenderTarget(dev, 0, rt); IDirect3DSurface9_Release(rt); }
+    if (g_blurState) IDirect3DStateBlock9_Apply(g_blurState);
+    IDirect3DSurface9_Release(bb);
+    if (!ok) {
+        g_blurDead = 1;
+        BlurRelease();
+        Log("blur off: the device would not take it, so screens end as the game ends them");
+    }
+}
+#else
+static void PresentStub(void) {}                         /* the tests' stand-in: its address is all they use */
+static void *g_presentBack;
+static void BlurRelease(void) {}
+#endif
+
+/* At start, with a timed world map: the present's six bytes to PresentStub, once they and what follows are as read. */
+static void PresentSetup(void)
+{
+    unsigned char *base = (unsigned char *)GetModuleHandleA(NULL), *at = base + (PRESENT_VA - 0x400000u);
+    InterlockedExchange(&g_blurOn, 0);
+    if (g_blurMs <= 0 || !g_holdOn) return;
+    unsigned ours = (unsigned)((ULONG_PTR)PresentStub - (ULONG_PTR)(at + 5));
+    int mine = Readable(at, (int)sizeof kPresent) && at[0] == 0xE9 && Rd32(at + 1) == ours && at[5] == 0x90 &&
+               Same(at + 6, kPresent + 6, (int)sizeof kPresent - 6);
+    if (!mine && (!Readable(at, (int)sizeof kPresent) || !Same(at, kPresent, (int)sizeof kPresent))) {
+        Log("blur off: the game's present is not where it was read (VA 0x5A19FD), so screens end as the game ends them");
+        return;
+    }
+    g_presentBack = at + 6;
+    if (!mine) {
+        DWORD old;
+        if (!VirtualProtect(at, 6, PAGE_EXECUTE_READWRITE, &old)) { Log("blur off: the code could not be made writable"); return; }
+        at[0] = 0xE9;
+        for (int b = 0; b < 4; b++) at[1 + b] = (unsigned char)(ours >> (8 * b));
+        at[5] = 0x90;
+        VirtualProtect(at, 6, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), at, 6);
+    }
+    InterlockedExchange(&g_blurOn, 1);
+    char m[160];
+    wsprintfA(m, "blur on: each screen ends out of focus and %ld%% darker over %ld ms, dissolving into the world over %d ms "
+              "(VA 0x5A19FD, in memory only)", (long)g_blurDim, (long)g_blurMs, DISSOLVE_MS);
+    Log(m);
+}
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
