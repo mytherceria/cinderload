@@ -300,6 +300,10 @@ static const unsigned char kBorderWide[16]  = { 0x00, 0x00, 0x00, 0x3F, 0xEC, 0x
 /* A pack whose fire is revealed rather than stretched (see RevealBar) gets a fill the size of the log itself, so the
  * cracks can burn from its top edge to its bottom one. */
 #define kFillReveal kBorderWide
+/* A garland's bar (4 Oct 2026): the top banner's mirror, ARCH_H (0.18) tall, flush with the bottom; fill the same. */
+static const unsigned char kBarTall[16]     = { 0x00, 0x00, 0x00, 0x3F, 0xEC, 0x51, 0xB8, 0x3D,   /* 0.5, 0.09 */
+                                                0x00, 0x00, 0x80, 0x3F, 0xEC, 0x51, 0x38, 0x3E }; /* 1.0, 0.18 */
+static int g_barSizeOurs, g_barTallNow;               /* the size table is ours (revealed); it holds the tall size */
 
 /* Read only, before anything is put in place: is this the client CinderLoad was made for? Both places it changes must
  * hold the stock bytes (or ours, from an earlier start in this process). */
@@ -334,6 +338,7 @@ static void WideBar(int reveal)
     }
     if (Same(fill, want, 16) && Same(border, kBorderWide, 16)) {
         Log("bar already full width: nothing to do");
+        g_barSizeOurs = reveal;
         return;
     }
     int ours = (Same(fill, kFillWide, 16) || Same(fill, kFillReveal, 16)) && Same(border, kBorderWide, 16);
@@ -351,11 +356,26 @@ static void WideBar(int reveal)
         border[i] = kBorderWide[i];
     }
     VirtualProtect(fill, (SIZE_T)(border + 16 - fill), old, &old);
+    g_barSizeOurs = reveal && Same(fill, want, 16) && Same(border, kBorderWide, 16);
     Log(Same(fill, want, 16) && Same(border, kBorderWide, 16)
             ? (reveal ? "bar on: the whole width, flush with the bottom, its fire as tall as the log (its size table, in "
                         "memory only)"
                       : "bar on: the whole width, flush with the bottom (its size table, in memory only)")
             : "bar left as it is: the numbers read back differ");
+}
+
+/* The bar's size for this screen (BarPath, on the game's thread, as it begins): a garland's tall, else the log's. */
+static void BarSizeSet(int tall)
+{
+    if (!g_barSizeOurs || tall == g_barTallNow) return;
+    unsigned char *base = (unsigned char *)GetModuleHandleA(NULL);
+    unsigned char *fill = base + BAR_FILL_RVA, *border = base + BAR_BORDER_RVA;
+    const unsigned char *want = tall ? kBarTall : kBorderWide;
+    DWORD old;
+    if (!VirtualProtect(fill, (SIZE_T)(border + 16 - fill), PAGE_READWRITE, &old)) return;
+    for (int i = 0; i < 16; i++) { fill[i] = want[i]; border[i] = want[i]; }
+    VirtualProtect(fill, (SIZE_T)(border + 16 - fill), old, &old);
+    g_barTallNow = tall;
 }
 
 static int Apply(void)
@@ -930,11 +950,15 @@ static const struct { DWORD rva; int n; const unsigned char *bytes; const char *
 /* What bars.txt says, with each family's two texture paths in the DLL's own memory, for BarPath to hand the game. */
 typedef struct {
     int families, screens, fallback, skipped;          /* fallback: the "default" line's family, or -1 */
-    struct { char name[BAR_FAMILY_MAX + 1]; int ok; char fill[80], border[80]; } family[BAR_FAMILIES];
+    struct {
+        char name[BAR_FAMILY_MAX + 1]; int ok; char fill[80], border[80];
+        int garland; char back[80], wisps[80];         /* a garland ("style <family> garland"): see "the garland" below */
+    } family[BAR_FAMILIES];
     struct { char name[BAR_NAME_MAX + 1]; int family; } screen[BAR_SCREENS];
 } BarTable;
 static BarTable g_bars;
 static volatile LONG g_barsOn;                         /* 1 once g_bars is complete and the call is ours */
+static volatile LONG g_barGarland;                     /* the screen showing has a garland: its family + 1, else 0 */
 static volatile LONG g_barShown;                       /* BarPath's last fill: 0 none since the worker looked, -1 the
                                                           pack's orange, else the family's index + 1 */
 
@@ -1038,6 +1062,26 @@ static void BarLine(BarTable *t, const char *s, int n)
         words++;
     }
     if (!words) return;
+    if (words == 3 && len[0] == 5 && Lower(word[0][0]) == 's' && Lower(word[0][1]) == 't' && Lower(word[0][2]) == 'y' &&
+        Lower(word[0][3]) == 'l' && Lower(word[0][4]) == 'e' && len[2] == 7 && len[1] <= BAR_FAMILY_MAX) {
+        static const char kGarland[] = "garland";        /* "style <family> garland": that family grows, not burns */
+        char family[BAR_FAMILY_MAX + 1];
+        for (int i = 0; i < 7; i++) if (Lower(word[2][i]) != kGarland[i]) { t->skipped++; return; }
+        for (int i = 0; i < len[1]; i++) {
+            family[i] = Lower(word[1][i]);
+            if (!((family[i] >= 'a' && family[i] <= 'z') || (family[i] >= '0' && family[i] <= '9'))) { t->skipped++; return; }
+        }
+        family[len[1]] = 0;
+        int f = 0;
+        while (f < t->families && !BarSame(t->family[f].name, family)) f++;
+        if (f == t->families) {
+            if (f == BAR_FAMILIES) { t->skipped++; return; }
+            lstrcpyA(t->family[f].name, family);
+            t->families++;
+        }
+        t->family[f].garland = 1;
+        return;
+    }
     char name[BAR_NAME_MAX + 1], family[BAR_FAMILY_MAX + 1];
     if (words != 2 || !BarBaseName(word[0], len[0], name) || len[1] > BAR_FAMILY_MAX) { t->skipped++; return; }
     for (int i = 0; i < len[1]; i++) {
@@ -1302,6 +1346,9 @@ const char *WINAPI BarPath(const char *path)
         int cf = BarClassFamily(&g_bars, c);           /* the class's own fire, where bars.txt names one */
         if (cf != -2) f = cf;
         InterlockedExchange(&g_barClassUsed, cf != -2 ? (LONG)c : 0);
+        int g = f >= 0 && g_bars.family[f].garland;
+        InterlockedExchange(&g_barGarland, g ? f + 1 : 0);
+        BarSizeSet(g);                                 /* a garland's bar is the banner's mirror, tall */
         g_barFamily = f;
         InterlockedExchange(&g_barShown, f >= 0 ? f + 1 : -1);
     } else
@@ -1461,6 +1508,76 @@ static int WallCall(unsigned char *base)
 
 /* At start, after our screens and the switch are in place: reads bars.txt and the families out of Data\patch-~.MPQ,
  * then sends the one call to BarStub. 1 when the bar's fire follows the screens. */
+/* ---- the garland (4 Oct 2026, his design for the druid: "flowers/plants/leaves that load across the bottom like the
+ * Path of Cenarius", leaves and flowers growing and overlapping left to right, "wispy bluish nightelf wisp magic" at the
+ * front, the bar the top banner's mirror: T tall at both edges, a third of it at the centre) ----
+ * A fire family bars.txt marks "style <family> garland" is drawn as one: the bar ARCH_H tall instead of the log's
+ * height (its size table set as each screen begins), its fill laid once across the bar, not flowing and not cooling,
+ * Loading-BarBack-<family>.blp (the arch's shape, dark) under it in place of the black band, and the wisps of
+ * Loading-BarWisps-<family>.blp (its sprites in CinderLoad\wisps-<family>.txt) rising from the growing front. Without
+ * its backing in the pack a family is no garland (its tall pictures would show squeezed into the log). */
+static int LblInt(const char *s, int n, int *at, int *out);       /* the labels' (below) */
+#define WISP_SPRITES 16
+#define WISP_KINDS   7          /* 0 the wisp, 1 its trail, 2 a second wisp, 3 a small one, 4 the aura, 5 motes, 6 sparkles */
+static struct { int n; struct { int kind; float u0, v0, u1, v1, w, h; } s[WISP_SPRITES]; } g_wispTab[BAR_FAMILIES];
+
+/* CinderLoad\wisps-<family>.txt: "s <kind> <x0> <y0> <x1> <y1>" on a 512 x 512 sheet, sizes as for a 2160-tall screen. */
+static void WispsParse(int f, const char *t, unsigned len)
+{
+    g_wispTab[f].n = 0;
+    for (unsigned at = 0; at < len && g_wispTab[f].n < WISP_SPRITES;) {
+        unsigned end = at;
+        while (end < len && t[end] != '\n') end++;
+        const char *l = t + at;
+        int n = (int)(end - at), i = 2, v[5], k = 0;
+        if (n > 2 && l[0] == 's' && MapSpace(l[1]))
+            while (k < 5 && LblInt(l, n, &i, &v[k])) k++;
+        if (k == 5 && v[0] >= 0 && v[0] < WISP_KINDS && v[1] >= 0 && v[2] >= 0 && v[3] > v[1] && v[4] > v[2] && v[3] <= 512 &&
+            v[4] <= 512) {
+            int j = g_wispTab[f].n++;
+            g_wispTab[f].s[j].kind = v[0];
+            g_wispTab[f].s[j].u0 = v[1] / 512.0f; g_wispTab[f].s[j].v0 = v[2] / 512.0f;
+            g_wispTab[f].s[j].u1 = v[3] / 512.0f; g_wispTab[f].s[j].v1 = v[4] / 512.0f;
+            g_wispTab[f].s[j].w = (float)(v[3] - v[1]); g_wispTab[f].s[j].h = (float)(v[4] - v[2]);
+        }
+        at = end + 1;
+    }
+}
+
+/* FireBar's: each garland family's backing and wisps found in the pack (m: 600 bytes of room for the log). */
+static void GarlandSetup(char *m)
+{
+    for (int f = 0; f < g_bars.families; f++) {
+        if (!g_bars.family[f].garland) continue;
+        lstrcpyA(g_bars.family[f].back, "Interface\\Glues\\LoadingBar\\Loading-BarBack-");
+        lstrcatA(g_bars.family[f].back, g_bars.family[f].name);
+        lstrcpyA(g_bars.family[f].wisps, "Interface\\Glues\\LoadingBar\\Loading-BarWisps-");
+        lstrcatA(g_bars.family[f].wisps, g_bars.family[f].name);
+        if (!g_bars.family[f].ok || !BarHasTexture(g_bars.family[f].back)) {
+            g_bars.family[f].garland = 0;
+            wsprintfA(m, "fire bar: %s is marked a garland but its backing is not in the pack, so it is drawn as a fire",
+                      g_bars.family[f].name);
+            Log(m);
+            continue;
+        }
+        g_wispTab[f].n = 0;
+        if (BarHasTexture(g_bars.family[f].wisps)) {
+            char table[64];
+            unsigned char *text = NULL;
+            unsigned len = 0;
+            lstrcpyA(table, "CinderLoad\\wisps-");
+            lstrcatA(table, g_bars.family[f].name);
+            lstrcatA(table, ".txt");
+            if (mpq_read(&kIoSmall, "patch-~.MPQ", table, &text, &len) == MPQ_OK && text && len < 8192)
+                WispsParse(f, (const char *)text, len);
+            if (text) HeapFree(GetProcessHeap(), 0, text);
+        }
+        wsprintfA(m, "fire bar: %s grows as a garland, the bar the banner's mirror (its backing in the pack; %d wisp sprites)",
+                  g_bars.family[f].name, g_wispTab[f].n);
+        Log(m);
+    }
+}
+
 static int ClassCodeHolds(const unsigned char *base);
 
 static int FireBar(void)
@@ -1528,6 +1645,7 @@ static int FireBar(void)
     wsprintfA(m, "fire bar: families in the pack: %s; named but not in it (their screens keep the pack's orange): %s",
               have ? haveList : "none", miss ? missList : "none");
     Log(m);
+    GarlandSetup(m);
     if (!have) {
         Log("fire bar off: no family bars.txt names has both its textures in the pack");
         return 0;
@@ -2993,6 +3111,113 @@ static void ArchBuild(void)
     QuadPut(g_archPos, g_archUV, g_archCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
 }
 
+/* ---- the garland's backing and wisps (drawn by the overlay, under the bar) ----
+ * The backing: Loading-BarBack-<family>.blp, the arch's dark shape, the full width and ARCH_H tall at the bottom.
+ * The wisps: the wisp, its trail and a soft aura ride the front, bobbing; motes rise from just behind it, sparkles
+ * twinkle there, small wisps linger over the grown leaves; all inside the arch, which is the banner's own curve. */
+#define WISP_MAX 56
+static struct { int live, spr; float x, y, vx, vy, age, life, size, phase; } g_wisp[WISP_MAX];
+static unsigned g_wispSeed = 7;
+static float g_wispCredit, g_wispFront = -1;
+static int g_wsQuads;
+__attribute__((used)) float g_wsPos[(WISP_MAX + 4) * 6 * 3];
+__attribute__((used)) float g_wsUV[(WISP_MAX + 4) * 6 * 2];
+__attribute__((used)) unsigned g_wsCol[(WISP_MAX + 4) * 6];
+__attribute__((used)) float g_backPos[4 * 3];
+__attribute__((used)) float g_backUV[4 * 2];
+__attribute__((used)) unsigned g_backCol[4];
+
+static float WispRand(void) { g_wispSeed = SeaHash(g_wispSeed + 0x9E3779B9u); return (float)(g_wispSeed >> 8) / 16777216.0f; }
+/* sin x for any x (FireSin is only for 0..pi/2) */
+static float WispSin(float x)
+{
+    float tp = 6.2831853f;
+    x -= (float)(int)(x / tp) * tp;
+    if (x < 0) x += tp;
+    if (x < 1.5707963f) return FireSin(x);
+    if (x < 3.1415927f) return FireSin(3.1415927f - x);
+    if (x < 4.712389f) return -FireSin(x - 3.1415927f);
+    return -FireSin(tp - x);
+}
+/* The arch's thickness at x (0..1 of the width), in screen heights: the banner's curve (archlib.py), a circle's arc
+ * through full height at both edges and a third of it at the centre, worked on a 5120 x 2160 screen. */
+static float GarlandThick(float x)
+{
+    float W = 5120.0f, T = ARCH_H * 2160.0f, s = T - T / 3.0f, half = W / 2, R = (half * half + s * s) / (2 * s);
+    float dx = FireClamp(x, 0, 1) * W - half, r2 = R * R - dx * dx;
+    float root = r2 > 0 ? (float)FireExp(0.5 * MapLn(r2)) : 0;
+    return FireClamp(T - (root - (R - s)), T / 3.0f - 1, T) / 2160.0f;
+}
+/* A sprite of the kind: the first (first) or one at random; -1 when the table has none. */
+static int WispPick(int f, int kind, int first)
+{
+    int n = 0, at[WISP_SPRITES];
+    for (int j = 0; j < g_wispTab[f].n; j++) if (g_wispTab[f].s[j].kind == kind) at[n++] = j;
+    if (!n) return -1;
+    return first ? at[0] : at[(int)(WispRand() * n) % n];
+}
+/* One sprite centred at cx, cy (screen fractions, y up), scale times its size on a 2160-tall screen, alpha a. */
+static void WispQuad(int f, int j, float cx, float cy, float scale, float a)
+{
+    if (j < 0 || a < 0.01f || g_wsQuads >= WISP_MAX + 4) return;
+    float k = (float)g_scrH / (float)g_scrW, w = g_wispTab[f].s[j].w * scale / 2160.0f * k, h = g_wispTab[f].s[j].h * scale / 2160.0f;
+    float x[4] = { cx - w / 2, cx + w / 2, cx - w / 2, cx + w / 2 }, y[4] = { cy - h / 2, cy - h / 2, cy + h / 2, cy + h / 2 };
+    float tu[4] = { g_wispTab[f].s[j].u0, g_wispTab[f].s[j].u1, g_wispTab[f].s[j].u0, g_wispTab[f].s[j].u1 };
+    float tv[4] = { g_wispTab[f].s[j].v1, g_wispTab[f].s[j].v1, g_wispTab[f].s[j].v0, g_wispTab[f].s[j].v0 };
+    QuadPut(g_wsPos, g_wsUV, g_wsCol, g_wsQuads++, x, y, tu, tv, (unsigned)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
+}
+/* This frame's wisps for garland f, the front at `front` (the bar as shown, 0..1). */
+static void WispsBuild(int f, float front, float t, float dt)
+{
+    g_wsQuads = 0;
+    if (f < 0 || f >= BAR_FAMILIES || !g_wispTab[f].n) return;
+    if (dt > 0.25f) dt = 0.25f;
+    int moving = g_wispFront >= 0 && front > g_wispFront + 1e-5f, at = front > 0.002f && front < 0.998f;
+    g_wispFront = front;
+    if (at) g_wispCredit += dt * (moving ? 22.0f : 4.0f);
+    while (g_wispCredit >= 1) {                                    /* the new ones, from just behind the front */
+        g_wispCredit -= 1;
+        int i = 0;
+        while (i < WISP_MAX && g_wisp[i].live) i++;
+        if (i == WISP_MAX) { g_wispCredit = 0; break; }
+        float r = WispRand();
+        int kind = r < 0.55f ? 5 : (r < 0.8f ? 6 : 3), spr = WispPick(f, kind, 0);
+        if (spr < 0) continue;
+        float x = front - WispRand() * (kind == 3 ? 0.2f : 0.025f);
+        g_wisp[i].live = 1; g_wisp[i].spr = spr; g_wisp[i].x = x; g_wisp[i].y = WispRand() * GarlandThick(x);
+        g_wisp[i].vx = kind == 5 ? -0.004f - 0.006f * WispRand() : -0.002f;
+        g_wisp[i].vy = kind == 5 ? 0.04f + 0.06f * WispRand() : (kind == 3 ? 0.008f : 0);
+        g_wisp[i].life = kind == 6 ? 0.5f + 0.4f * WispRand() : (kind == 3 ? 2.0f + 1.5f * WispRand() : 1.4f + 1.2f * WispRand());
+        g_wisp[i].size = kind == 6 ? 0.7f + 0.6f * WispRand() : 0.8f + 0.4f * WispRand();
+        g_wisp[i].phase = 6.2831853f * WispRand();
+        g_wisp[i].age = 0;
+    }
+    for (int i = 0; i < WISP_MAX; i++) {                           /* each on its way, fading in and out */
+        if (!g_wisp[i].live) continue;
+        g_wisp[i].age += dt;
+        if (g_wisp[i].age >= g_wisp[i].life) { g_wisp[i].live = 0; continue; }
+        g_wisp[i].x += g_wisp[i].vx * dt; g_wisp[i].y += g_wisp[i].vy * dt;
+        float u = g_wisp[i].age / g_wisp[i].life, a = FireClamp(g_wisp[i].age / 0.15f, 0, 1) * FireClamp((1 - u) / 0.4f, 0, 1);
+        if (g_wispTab[f].s[g_wisp[i].spr].kind == 6) a *= 0.5f + 0.5f * WispSin(t * 9.0f + g_wisp[i].phase);
+        WispQuad(f, g_wisp[i].spr, g_wisp[i].x, g_wisp[i].y, g_wisp[i].size, a);
+    }
+    if (!at) return;
+    float th = GarlandThick(front), bob = 0.12f * th * WispSin(t * 2.1f);   /* last, on top: the front's own */
+    int aura = WispPick(f, 4, 1), wisp = WispPick(f, 0, 1), trail = WispPick(f, 1, 1);
+    if (aura >= 0) WispQuad(f, aura, front, th * 0.5f, th * 2160.0f / g_wispTab[f].s[aura].h, 0.35f);
+    if (trail >= 0) {
+        float k = (float)g_scrH / (float)g_scrW, tw = g_wispTab[f].s[trail].w / 2160.0f * k * 0.8f;
+        WispQuad(f, trail, front - tw * 0.32f, th * 0.5f + bob * 0.5f, 0.8f, 0.7f);    /* its orb at the front, its trail behind */
+    }
+    if (wisp >= 0) WispQuad(f, wisp, front, th * 0.55f + bob, 0.9f, 1.0f);
+}
+/* The garland's backing: one quad, the full width, ARCH_H tall at the bottom, its picture whole. */
+static void BackBuild(void)
+{
+    float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, ARCH_H, ARCH_H }, tu[4] = { 0, 1, 0, 1 }, tv[4] = { 1, 1, 0, 0 };
+    QuadPut(g_backPos, g_backUV, g_backCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
+}
+
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -3095,7 +3320,31 @@ void WINAPI OverlayDraw(void)
         LogoBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_logoTex, 1, 0), g_logoPos, g_logoUV, g_logoCol, 1);
     }
-    if (g_seaTex) {                                                /* last: the log's black, under the bar */
+    LONG garland = g_barGarland;
+    if (garland > 0 && garland <= g_bars.families) {               /* last: a garland's backing, then its wisps */
+        static void *backTex[BAR_FAMILIES], *wispsTex[BAR_FAMILIES];
+        static int backTried[BAR_FAMILIES], wispsTried[BAR_FAMILIES];
+        int f = (int)garland - 1;
+        char path[96];
+        if (!backTex[f] && !backTried[f]) {
+            backTried[f] = 1;
+            lstrcpyA(path, g_bars.family[f].back); lstrcatA(path, ".blp");
+            backTex[f] = OverlayLoad(path);
+        }
+        if (backTex[f]) {
+            BackBuild();
+            OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(backTex[f], 1, 0), g_backPos, g_backUV, g_backCol, 1);
+        }
+        if (g_wispTab[f].n && !wispsTex[f] && !wispsTried[f]) {
+            wispsTried[f] = 1;
+            lstrcpyA(path, g_bars.family[f].wisps); lstrcatA(path, ".blp");
+            wispsTex[f] = OverlayLoad(path);
+        }
+        if (wispsTex[f]) {
+            WispsBuild(f, g_disp, t, dt);
+            if (g_wsQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(wispsTex[f], 1, 0), g_wsPos, g_wsUV, g_wsCol, g_wsQuads);
+        }
+    } else if (g_seaTex) {                                         /* last: the log's black, under the bar */
         BarBlackBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_blackPos, g_blackUV, g_blackCol, 1);
     }
@@ -3218,7 +3467,8 @@ void WINAPI RevealFill(const float *v)
     if (p > 0.02f && v[3] > L) g_fillFull = (v[3] - L) / p;         /* the bar's whole width, in the same units */
     float full = g_fillFull > 0 ? g_fillFull : 1.0f, R = L + shown * full;   /* the front: the bar as shown */
     float t = (float)(GetTickCount() % 3600000u) / 1000.0f;
-    float flow = t * FILL_FLOW;
+    int garland = g_barGarland != 0;                                 /* leaves and flowers: laid once, never cooling */
+    float flow = garland ? 0 : t * FILL_FLOW;
     flow -= (int)(flow / 0.5f) * 0.5f;                               /* the lava repeats every half of its texture */
     float xs[FILL_COLUMNS];
     int n = 0;
@@ -3233,12 +3483,12 @@ void WINAPI RevealFill(const float *v)
         top[0] = xs[k]; top[1] = T; top[2] = z;
         bottom[0] = xs[k]; bottom[1] = B; bottom[2] = z;
         float frac = full > 0 ? (xs[k] - L) / full : 0;            /* where along the whole bar, 0..1 */
-        float u = flow + 0.5f * frac;
+        float u = garland ? frac : flow + 0.5f * frac;
         g_fillUV[4 * k] = u; g_fillUV[4 * k + 1] = 0;
         g_fillUV[4 * k + 2] = u; g_fillUV[4 * k + 3] = 1;
         float d = full > 0 ? (R - xs[k]) / full : 0;                /* how far behind the front */
         float a = d >= REVEAL_FEATHER ? 1.0f : d / REVEAL_FEATHER;
-        unsigned grey = (unsigned)(FillHeat(d, t, k) * 255.0f + 0.5f), alpha = (unsigned)(a * 255.0f + 0.5f);
+        unsigned grey = garland ? 255u : (unsigned)(FillHeat(d, t, k) * 255.0f + 0.5f), alpha = (unsigned)(a * 255.0f + 0.5f);
         g_fillColor[2 * k] = g_fillColor[2 * k + 1] = alpha << 24 | grey << 16 | grey << 8 | grey;
     }
     for (int k = 0; k < 2 * n; k++) g_fillIndex[k] = (unsigned short)k;

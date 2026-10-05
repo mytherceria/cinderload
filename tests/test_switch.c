@@ -722,6 +722,75 @@ static void FireBarTests(void)
               "a bars.txt with no class lines: nothing said about classes, the pictures' fires as before");
     }
 
+    /* the garland (his druid bar, 4 Oct): "style <family> garland" in bars.txt; with its backing in the pack, the class
+     * that takes that family gets the tall bar (the banner's mirror), its fill laid once and never cooling, the
+     * backing and the wisps; any other class the log's size again */
+    {
+        static const char bars[] = "default fel\nclassdruid druid\nclasshunter fel\nstyle druid garland\nstyle fel bonfire\n";
+        static const char wt[] = "# wisps\ns 0 0 0 160 160\ns 1 162 0 418 96\ns 4 164 162 260 356\ns 5 262 162 298 198\n"
+                                 "s 6 402 162 450 210\ns 3 98 162 162 226\ns 9 0 0 10 10\ns 5 500 500 600 600\n";
+        const char *names[] = { "Interface\\Glues\\LoadingScreens\\LoadScreenDeadmines.blp", "CinderLoad\\bars.txt",
+                                "CinderLoad\\reveal.txt", TEX "Loading-BarFill-fel.blp", TEX "Loading-BarBorder-fel.blp",
+                                TEX "Loading-BarFill-druid.blp", TEX "Loading-BarBorder-druid.blp", TEX "Loading-BarBack-druid.blp",
+                                TEX "Loading-BarWisps-druid.blp", "CinderLoad\\wisps-druid.txt" };
+        const char *data[] = { "BLP2screen", bars, "revealed", "BLP2f", "BLP2b", "BLP2f", "BLP2b", "BLP2back", "BLP2wisps", wt };
+        Fresh("garland");
+        MakeMpq(UW, 10, names, data, NULL);
+        Put("WTF/Config.wtf", RES("5120x2160"));
+        Start();
+        FakeTables();
+        int fd = -1, ff = -1;
+        for (int f = 0; f < g_bars.families; f++) {
+            if (!strcmp(g_bars.family[f].name, "druid")) fd = f;
+            if (!strcmp(g_bars.family[f].name, "fel")) ff = f;
+        }
+        int gl = fd >= 0 && ff >= 0 && g_bars.family[fd].garland && !g_bars.family[ff].garland && g_barSizeOurs &&
+                 g_bars.skipped == 1 && LogSays("fire bar: druid grows as a garland") && LogSays("(its backing in the pack; 6 wisp sprites)");
+        Check(gl, "garland: bars.txt's style line read (a style other than garland skipped), its backing found, its wisps' table read (bad lines left out)");
+
+        unsigned char *fill = shim_module + BAR_FILL_RVA, *border = shim_module + BAR_BORDER_RVA;
+        Poke(CHAR_COUNT_VA, 2); Poke(CHAR_LIST_VA, 0x8A0000); Poke(CHAR_PICKED_VA, 0);
+        shim_module[0x8A0000 - 0x400000 + 0 * 0x120 + 0x101] = 11;       /* a druid, a hunter */
+        shim_module[0x8A0000 - 0x400000 + 1 * 0x120 + 0x101] = 3;
+        const char *p = ForMap(36);
+        gl = !strcmp(p, TEX "Loading-BarFill-druid") && g_barGarland == fd + 1 && Same(fill, kBarTall, 16) && Same(border, kBarTall, 16);
+        /* its fill: laid once across the bar (u = how far along), full brightness behind the soft front */
+        float vf[12] = { 0, 0, 0, 0.5f, 0, 0, 0, 0.18f, 0, 0.5f, 0.18f, 0 };   /* the game's front at its 50% */
+        { float h = 0.5f; unsigned u; memcpy(&u, &h, 4); Poke(0x882BE4, u); }
+        g_dispNew = 1;
+        for (int i = 0; i < 40; i++) { shim_ticks += 20; RevealFill(vf); }
+        int flat = g_fillCount >= 4;
+        for (int k = 0; k + 1 < g_fillCount / 2; k++) {
+            float x = g_fillVerts[6 * k];
+            flat &= fabsf(g_fillUV[4 * k] - x) < 1e-4f && (g_fillColor[2 * k] & 0xFFFFFFu) == 0xFFFFFFu;
+        }
+        gl &= flat;
+        Poke(CHAR_PICKED_VA, 1);                                           /* the hunter: fel, a fire, the log's size */
+        p = ForMap(36);
+        gl &= !strcmp(p, TEX "Loading-BarFill-fel") && g_barGarland == 0 && Same(fill, kBorderWide, 16) && Same(border, kBorderWide, 16);
+        Check(gl, "garland: the druid's bar tall (the banner's mirror), its fill laid once and never cooling; the hunter's fire the log's size again");
+
+        /* the arch's curve: full height at the edges, a third of it at the centre, the banner's own */
+        int cv = fabsf(GarlandThick(0) - ARCH_H) < 1e-3f && fabsf(GarlandThick(1) - ARCH_H) < 1e-3f &&
+                 fabsf(GarlandThick(0.5f) - ARCH_H / 3) < 1e-3f && GarlandThick(0.25f) > GarlandThick(0.4f);
+        /* the wisps: spawned from just behind the moving front, inside the arch; the front's own wisp, trail and aura */
+        g_scrW = 5120; g_scrH = 2160;
+        memset(g_wisp, 0, sizeof g_wisp); g_wispFront = -1; g_wispCredit = 0;
+        float fr = 0.3f;
+        for (int i = 0; i < 30; i++) { fr += 0.004f; WispsBuild(fd, fr, i * 0.033f, 0.033f); }
+        int live = 0, inside = 1;
+        for (int i = 0; i < WISP_MAX; i++) if (g_wisp[i].live) {
+            live++;
+            inside &= g_wisp[i].x <= fr + 1e-4f && g_wisp[i].x > fr - 0.32f && g_wisp[i].y >= 0 && g_wisp[i].y <= GarlandThick(g_wisp[i].x) + 0.06f;
+        }
+        cv &= live >= 8 && inside && g_wsQuads == live + 3;
+        WispsBuild(fd, 1.0f, 2.0f, 0.033f);                                 /* the bar full: no front, none new */
+        int after = 0;
+        for (int i = 0; i < WISP_MAX; i++) after += g_wisp[i].live;
+        cv &= g_wsQuads == after && after <= live;
+        Check(cv, "garland: the arch the banner's curve; wisps rising from just behind the front, inside it, the front's own three on top; none new once full");
+    }
+
     /* bars.txt missing, broken or with nothing the pack carries: no redirect, logged */
     Fresh("firebar-no-bars");
     PackWithBars(NULL);
