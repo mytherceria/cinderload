@@ -2960,6 +2960,39 @@ static void LogoBuild(void)
     QuadPut(g_logoPos, g_logoUV, g_logoCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
 }
 
+/* ---- the class banner (4 Oct 2026, his design: black wrought iron and stained glass across the top, full height at
+ * both edges arching to a third of it at the centre, different for each class, the blue moon medallion holding the
+ * RavenCraft logo the same on all) ----
+ * Interface\Glues\LoadingScreens\CinderArch-<class>.blp (DXT5, ARCH_SHEET_W x ARCH_SHEET_H): the banner, the screen's
+ * full width, its top ARCH_ROWS rows; drawn ARCH_H of the screen tall across the top of the map, over the names and the
+ * badge and under the logo (which sits in its medallion). The class is the fire's (BarClassNow); a class whose banner
+ * the pack lacks has none. */
+#define ARCH_H        0.18f
+#define ARCH_SHEET_W  4096
+#define ARCH_SHEET_H  512
+#define ARCH_ROWS     311          /* the banner's 5120 x 389 at 4096 wide */
+static int g_archHas[12], g_archOn;
+static void *g_archTex[12];
+static int g_archTried[12];
+__attribute__((used)) float g_archPos[4 * 3];
+__attribute__((used)) float g_archUV[4 * 2];
+__attribute__((used)) unsigned g_archCol[4];
+/* The banner's path for class c into out (80 bytes), or 0 for no class. */
+static int ArchPath(unsigned c, char *out)
+{
+    if (c == 0 || c >= 12 || kClassName[c][0] == '?') return 0;
+    lstrcpyA(out, "Interface\\Glues\\LoadingScreens\\CinderArch-");
+    lstrcatA(out, kClassName[c]);
+    return 1;
+}
+/* The banner's one quad: the full width, ARCH_H tall, flush with the top. */
+static void ArchBuild(void)
+{
+    float x[4] = { 0, 1, 0, 1 }, y[4] = { 1 - ARCH_H, 1 - ARCH_H, 1, 1 };
+    float tv1 = (float)ARCH_ROWS / ARCH_SHEET_H, tu[4] = { 0, 1, 0, 1 }, tv[4] = { tv1, tv1, 0, 0 };
+    QuadPut(g_archPos, g_archUV, g_archCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
+}
+
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -3044,6 +3077,19 @@ void WINAPI OverlayDraw(void)
         BadgeBuild(now);
         if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
     }
+    if (g_archOn) {                                                /* the class's banner, over the badge, under the logo */
+        unsigned c = (unsigned)g_class;
+        char path[80];
+        if (c > 0 && c < 12 && g_archHas[c] && !g_archTex[c] && !g_archTried[c] && ArchPath(c, path)) {
+            g_archTried[c] = 1;
+            lstrcatA(path, ".blp");
+            g_archTex[c] = OverlayLoad(path);
+        }
+        if (c > 0 && c < 12 && g_archTex[c]) {
+            ArchBuild();
+            OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_archTex[c], 1, 0), g_archPos, g_archUV, g_archCol, 1);
+        }
+    }
     if (g_logoOn && !g_logoTex && !g_logoTried) { g_logoTried = 1; g_logoTex = OverlayLoad(LOGO_PATH); }
     if (g_logoTex) {                                               /* over everything else */
         LogoBuild();
@@ -3060,7 +3106,20 @@ void WINAPI OverlayDraw(void)
 static void OverlayStart(void)
 {
     g_ovOn = g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = 0;
+    g_archOn = 0;
     if (!g_map.ok || !g_barLoader) return;
+    {
+        char path[80], list[12 * 9] = "";
+        for (unsigned c = 1; c < 12; c++) {
+            g_archHas[c] = ArchPath(c, path) && BarHasTexture(path);
+            if (g_archHas[c]) { if (list[0]) lstrcatA(list, ", "); lstrcatA(list, kClassName[c]); g_archOn = 1; }
+        }
+        if (g_archOn) {
+            char m[180];
+            wsprintfA(m, "banner: the class banners in the pack: %s (the rest have none)", list);
+            Log(m);
+        }
+    }
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSea")) {
         unsigned char *data = NULL;
         unsigned len = 0;

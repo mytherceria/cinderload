@@ -1016,6 +1016,7 @@ static void PackLive(int reveal, int walls)
         names[n] = "CinderLoad\\map.txt"; data[n++] = mapTxt;
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderMap.blp"; data[n++] = "BLP2map";
     }
+    if (reveal & 8192) { names[n] = "Interface\\Glues\\LoadingScreens\\CinderArch-druid.blp"; data[n++] = "BLP2arch"; }
     if (walls) {
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall01.blp"; data[n++] = "BLP2wall1";
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall02.blp"; data[n++] = "BLP2wall2";
@@ -1324,6 +1325,25 @@ static void LiveTests(void)
         rd &= g_map.ents == MAP_ENTS;
         Check(rd, "map.txt's entrances: an id over 1, continent 0 or 1, a place inside the world, a later line winning, no more than MAP_ENTS");
         g_map.ok = 0; g_map.ents = 0;
+    }
+
+    /* the class banner (his design, 4 Oct): one per class the pack carries, the full width, ARCH_H tall at the top */
+    {
+        Fresh("banner");
+        PackLive(1 | 4 | 8 | 4096 | 8192, 0);
+        Start();
+        char path[80];
+        int bn = g_archOn && g_archHas[11] && !g_archHas[3] && !g_archHas[2] && LogSays("banner: the class banners in the pack: druid") &&
+                 ArchPath(11, path) && !strcmp(path, "Interface\\Glues\\LoadingScreens\\CinderArch-druid") && !ArchPath(6, path) &&
+                 !ArchPath(0, path) && !ArchPath(12, path);
+        ArchBuild();
+        bn &= g_archPos[0] == 0 && g_archPos[1] == 1 - ARCH_H && g_archPos[3] == 1 && g_archPos[3 * 3 + 1] == 1 &&
+              fabsf(g_archUV[1] - 311.0f / 512.0f) < 1e-6f && g_archUV[3 * 2 + 1] == 0 && g_archCol[0] == 0xFFFFFFFFu;
+        Check(bn, "the class banner: found per class in the pack (druid here), its path, one quad the full width and ARCH_H tall at the top");
+        Fresh("banner-none");
+        PackLive(1 | 4 | 8 | 4096, 0);
+        Start();
+        Check(!g_archOn && !LogSays("banner:"), "no banner in the pack: none drawn, nothing said");
     }
 
     /* the wallpapers */
