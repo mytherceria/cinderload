@@ -18,6 +18,7 @@ char shim_gamedir[512];
 unsigned char shim_module[SHIM_MODULE_SIZE];
 int shim_threads;
 DWORD shim_ticks;
+int shim_vq;
 int shim_screen_w = 3440, shim_screen_h = 1440;
 
 static int fails, checks;
@@ -2895,6 +2896,43 @@ static void ViewTests(void)
         ok &= g_charKept[0] == 0 && g_destOk && fabsf(g_destU - 0.4f) < 1e-4f && g_stepLock.held == 0;
         g_viewOn = 0; g_viewSteps = 0; g_mapShown = 0; g_driftOn = 0; g_screenWatch = 0; g_classSure = 0; g_zoomScreens = 0;
         Check(ok, "the view: the character list read on the game's thread only, its place kept for the view's; the view takes what the game's last frame read, and keeps the arrival once the list is gone");
+    }
+    /* WoW.exe's .data, found in its own headers: a read inside it needs no VirtualQuery (under Wine that waits on the
+     * game's memory lock); anywhere else every read is still checked; a header that is not a PE image's finds nothing */
+    {
+        Fresh("view-data");
+        unsigned char *h = shim_module;
+        unsigned pe = 0x100, vs = 0x3FE000, va = 0x1000, v = 0;
+        h[0] = 'M'; h[1] = 'Z'; memcpy(h + 0x3C, &pe, 4);
+        memcpy(h + pe, "PE\0\0", 4); h[pe + 6] = 2; h[pe + 20] = 0xE0;   /* two sections, after 0xE0 of optional header */
+        unsigned char *sec = h + pe + 24 + 0xE0;
+        memcpy(sec, ".text\0\0\0", 8); memcpy(sec + 8, &vs, 4); memcpy(sec + 12, &va, 4);
+        vs = 0x4D4002; va = 0x427000;                                    /* as in his WoW.exe, from 0x827000 */
+        memcpy(sec + 40, ".data\0\0\0", 8); memcpy(sec + 48, &vs, 4); memcpy(sec + 52, &va, 4);
+        ClientDataFind();
+        Poke(BAR_MAP_VA, 7);
+        int before = shim_vq;
+        int ok = g_dataLo == (ULONG_PTR)(shim_module + 0x427000) && g_dataHi == g_dataLo + 0x4D4002 &&
+                 ClientWord(BAR_MAP_VA, &v) && v == 7 && ClientWord(MAP_DEST_X_VA, &v) && shim_vq == before;
+        ok &= ClientWord(0x401000, &v) && shim_vq == before + 1;            /* its code: checked */
+        ok &= ClientWord(0x827000 + 0x4D4000, &v) && shim_vq == before + 2;       /* across its end: checked */
+        h[pe + 1] = 'F'; ClientDataFind();
+        ok &= !g_dataLo && !g_dataHi;
+        memset(h, 0, 0x400);
+        Check(ok, "WoW.exe's .data found in its own headers: reads inside it skip VirtualQuery, every other read is checked, and a header that is not a PE image's finds nothing");
+    }
+    /* the fade: once the game has shown the world (it showed the game's last loading frame for 0.8 s, then the world at
+     * once); without the present's hook, at once; never more than VIEW_WORLD_WAIT_MS */
+    {
+        g_blurOn = 0;
+        LONG w = g_worldFrames;
+        int ok = ViewFadeDue(1000, 1000, w);
+        g_blurOn = 1;
+        ok &= !ViewFadeDue(1500, 1000, w) && !ViewFadeDue(1000 + VIEW_WORLD_WAIT_MS - 1, 1000, w);
+        g_worldFrames = w + 1; ok &= ViewFadeDue(1001, 1000, w);
+        g_worldFrames = w; ok &= ViewFadeDue(1000 + VIEW_WORLD_WAIT_MS, 1000, w);
+        g_blurOn = 0;
+        Check(ok, "the view's fade begins once the game shows the world, at once without the present's hook, and never later than VIEW_WORLD_WAIT_MS");
     }
 }
 

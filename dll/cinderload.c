@@ -1095,10 +1095,16 @@ static void BarStub(void) {}                           /* the tests' stand-in, n
 #ifndef ClientAt
 #define ClientAt(va) ((const unsigned char *)(ULONG_PTR)(va))
 #endif
+/* WoW.exe's own .data section, its globals (the bar, the arrival, the character list's head), found in its PE header at
+ * start (ClientDataFind): mapped for the process's whole life, so a read inside it needs no VirtualQuery. The view's
+ * thread reads these every frame, and under Wine VirtualQuery waits on the process's memory lock, which the game's own
+ * loading holds (4 Oct 2026, his first look at the view: it paused about a tenth of a second inside each of the game's
+ * add-on hitches). 0, 0 until found: every read is checked. */
+static ULONG_PTR g_dataLo, g_dataHi;
 static int ClientWord(unsigned va, unsigned *out)
 {
     const unsigned char *p = ClientAt(va);
-    if (!p || !Readable(p, 4)) return 0;
+    if (!p || (!((ULONG_PTR)p >= g_dataLo && (ULONG_PTR)p + 4 <= g_dataHi) && !Readable(p, 4))) return 0;
     *out = *(volatile const unsigned int *)p;
     return 1;
 }
@@ -1729,6 +1735,28 @@ static unsigned BarRel(const unsigned char *base)
     return (unsigned)((ULONG_PTR)BarStub - (ULONG_PTR)(base + BAR_CALL_RVA + 5));
 }
 static unsigned Rd32(const unsigned char *p) { return (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24; }
+
+/* At start: where WoW.exe's .data section lies (see ClientWord), from its own headers in memory; left 0, 0 when they are
+ * not as a PE image's. */
+static void ClientDataFind(void)
+{
+    const unsigned char *b = (const unsigned char *)GetModuleHandleA(NULL);
+    g_dataLo = g_dataHi = 0;
+    if (!b || !Readable(b, 0x40) || b[0] != 'M' || b[1] != 'Z') return;
+    unsigned pe = Rd32(b + 0x3C);
+    if (pe < 0x40 || pe > 0x1000 || !Readable(b + pe, 24) || Rd32(b + pe) != 0x4550u) return;   /* "PE\0\0" */
+    unsigned n = b[pe + 6] | (unsigned)b[pe + 7] << 8, sh = pe + 24 + (b[pe + 20] | (unsigned)b[pe + 21] << 8);
+    for (unsigned i = 0; i < n && i < 32 && Readable(b + sh + 40 * i, 40); i++) {
+        const unsigned char *x = b + sh + 40 * i;
+        unsigned size = Rd32(x + 8), rva = Rd32(x + 12);
+        if (x[0] == '.' && x[1] == 'd' && x[2] == 'a' && x[3] == 't' && x[4] == 'a' && !x[5] && rva >= 0x1000 && size &&
+            size < 0x4000000 && Readable(b + rva, 1) && Readable(b + rva + size - 1, 1)) {
+            g_dataLo = (ULONG_PTR)(b + rva);
+            g_dataHi = g_dataLo + size;
+            return;
+        }
+    }
+}
 
 /* Place i holds its bytes; the call's rel32 may already be ours, from an earlier start in this process. */
 static int BarPlaceHolds(const unsigned char *base, int i)
@@ -4585,23 +4613,40 @@ static int ViewReady(LONG seen, int *ours)
     StepUnlock(held);
     return ready;
 }
-/* The view's thread, each of its frames: the bar and the zoom a step on for the game's bar p at now, and the frame's
- * quads for W x H; never while the game's thread is to begin a screen (0: nothing moved, the last quads stand). */
-static int ViewStep(float p, DWORD now, float W, float H)
+/* The view's thread, each of its frames, g_stepLock held: the bar and the zoom a step on for the game's bar p at now,
+ * and the frame's quads for W x H; never while the game's thread is to begin a screen (0: nothing moved, the last quads
+ * stand). */
+static int ViewStepLocked(float p, DWORD now, float W, float H)
 {
     if (!(p >= 0)) p = 0;
     if (p > 1) p = 1;
-    int held = StepLock(), ok = !g_dispNew && !g_driftNew;
-    if (ok) {
-        InterlockedExchange(&g_viewSteps, 1);
-        now = StepNow(now);
-        float s = BarStep(p, now);
-        if (g_driftOn) DriftStep(s, now);
-        g_viewShown = s;
-        ViewBuild(W, H, s);
-    }
+    if (g_dispNew || g_driftNew) return 0;
+    InterlockedExchange(&g_viewSteps, 1);
+    now = StepNow(now);
+    float s = BarStep(p, now);
+    if (g_driftOn) DriftStep(s, now);
+    g_viewShown = s;
+    ViewBuild(W, H, s);
+    return 1;
+}
+/* The same, taking the lock itself: the tests' way in (the view's thread times its wait for the lock). */
+__attribute__((unused)) static int ViewStep(float p, DWORD now, float W, float H)
+{
+    int held = StepLock(), ok = ViewStepLocked(p, now, W, H);
     StepUnlock(held);
     return ok;
+}
+
+/* The world's first frame (4 Oct 2026, his video: the loading screen's layer clears about 0.8 s before the game shows
+ * the world, and a view that faded as it cleared showed the game's last loading frame, then the world all at once): the
+ * game's presents that are not a loading screen's, counted by PrePresent. The view's thread, its screen gone at goneAt
+ * with seen of them then: 1 when its fade may begin, once the game has shown the world, or with no way to see that (no
+ * present hook), or after VIEW_WORLD_WAIT_MS. */
+#define VIEW_WORLD_WAIT_MS 3000
+static volatile LONG g_worldFrames;
+static int ViewFadeDue(DWORD now, DWORD goneAt, LONG seen)
+{
+    return !g_blurOn || g_worldFrames != seen || (LONG)(now - goneAt) >= VIEW_WORLD_WAIT_MS;
 }
 
 #ifdef __i386__
@@ -4842,8 +4887,10 @@ static int ViewOpen(const char **why)
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
     return 1;
 }
-/* g_vl, drawn and shown: 0 when it could not be (the view then goes). */
-static int ViewFrame(void)
+static DWORD ViewNow(void);
+/* g_vl, drawn and shown: 0 when it could not be (the view then goes). drawn, when given: when the drawing was handed
+ * over, before the swap (the slow frames' parts, below). */
+static int ViewFrame(DWORD *drawn)
 {
     gl.Viewport(0, 0, g_view.w, g_view.h);
     gl.ClearColor(0, 0, 0, 1);
@@ -4863,7 +4910,23 @@ static int ViewFrame(void)
         gl.TexCoord2f(q->u0, q->v1); gl.Vertex2f(q->x0, q->y1);
         gl.End();
     }
+    if (drawn) *drawn = ViewNow();
     return gl.Swap(g_view.dc) != 0;
+}
+/* The view's slow frames, per screen (4 Oct 2026: it paused about a tenth of a second inside the game's add-on hitches,
+ * and the log said only its longest gap): frames over VIEW_SLOW_MS, the slowest one's parts, and the most each part took.
+ * Parts: its messages, the wait for g_stepLock, the step, the drawing, the swap. */
+#define VIEW_SLOW_MS 40
+#define VIEW_PARTS   5
+static struct { DWORD n, worst, part[VIEW_PARTS], most[VIEW_PARTS]; } g_slow;
+static void ViewSlowKeep(DWORD all, const DWORD *part)
+{
+    for (int i = 0; i < VIEW_PARTS; i++) if (part[i] > g_slow.most[i]) g_slow.most[i] = part[i];
+    if (all >= VIEW_SLOW_MS) g_slow.n++;
+    if (all > g_slow.worst) {
+        g_slow.worst = all;
+        for (int i = 0; i < VIEW_PARTS; i++) g_slow.part[i] = part[i];
+    }
 }
 /* GetTickCount, between its ticks too: on Windows it moves in steps of about 16 ms, too coarse for a view drawn 144 times
  * a second; QueryPerformanceCounter fills them in, never past the next tick, so it never runs ahead of the game's clock. */
@@ -4901,28 +4964,41 @@ static DWORD ViewOff(const char *why)
 static DWORD WINAPI ViewThread(LPVOID arg)
 {
     const unsigned char *base = (const unsigned char *)arg;
-    char m[200];
+    char m[400];
     int r = mpq_read(&kIo, "patch-~.MPQ", MAP_PATH, &g_view.blp, &g_view.blpLen);
     if (r != MPQ_OK) {
         wsprintfA(m, "its picture could not be read from Data\\patch-~.MPQ (%s)", mpq_error_text(r));
         return ViewOff(m);
     }
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
-    LONG seen = g_gameSeq;
-    DWORD fadeAt = 0;
+    LONG seen = g_gameSeq, worldSeen = 0;
+    DWORD fadeAt = 0, waitAt = 0;
     for (;;) {
+        DWORD t0 = ViewNow();
         MSG msg;
         while (g_view.win && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
         int screen = *(volatile const unsigned int *)(base + FIRE_LAYER_RVA) != 0;
         DWORD now = ViewNow();
         if (!screen) { seen = g_gameSeq; skip = 0; }
-        if (fadeAt && screen) { fadeAt = 0; ShowWindow(g_view.win, SW_HIDE); }   /* a new screen mid-fade: afresh */
-        if (fadeAt) {                                       /* the screen has gone: fade out on its last frame, then hide */
+        if ((fadeAt || waitAt) && screen) { fadeAt = waitAt = 0; ShowWindow(g_view.win, SW_HIDE); }   /* a new screen */
+        if (waitAt) {                                       /* the screen has gone: its last frame, until the world shows */
+            if (!ViewFadeDue(now, waitAt, worldSeen)) {
+                if (!ViewFrame(NULL)) return ViewOff("its OpenGL frame could not be shown");
+                if (!g_view.vsync) Sleep(4);
+                continue;
+            }
+            wsprintfA(m, "  the view: the world showed %lu ms after the screen went%s", (unsigned long)(now - waitAt),
+                      g_worldFrames != worldSeen ? "" : ", or no frame of it was seen and it faded anyway");
+            Log(m);
+            waitAt = 0;
+            fadeAt = now ? now : 1;
+        }
+        if (fadeAt) {                                       /* then it fades out on that frame, and hides */
             LONG t = (LONG)(now - fadeAt);
             if (t < VIEW_FADE_MS && fadeOk) {
                 fadeOk = ViewAlpha((BYTE)(255 - 255 * t / VIEW_FADE_MS));
                 if (!fadeOk) Log("  the view's fade: the system would not set its window's alpha, so it just goes");
-                if (fadeOk && ViewFrame()) { if (!g_view.vsync) Sleep(4); continue; }
+                if (fadeOk && ViewFrame(NULL)) { if (!g_view.vsync) Sleep(4); continue; }
             }
             ShowWindow(g_view.win, SW_HIDE);
             fadeAt = 0;
@@ -4942,14 +5018,23 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             if (!open) return ViewOff(why);
             showing = 1; built = 0;
             g_view.since = g_view.last = now; g_view.gap = 0; g_view.frames = 0;
+            for (unsigned i = 0; i < sizeof g_slow; i++) ((unsigned char *)&g_slow)[i] = 0;
+            continue;                                       /* (the open took a moment: a fresh clock for the first) */
         }
         if (screen && showing) {
             float p = *(volatile const float *)(base + FIRE_PROGRESS_RVA);
-            if (ViewStep(p, ViewNow(), (float)g_view.w, (float)g_view.h)) built = 1;   /* (now: the open took a moment) */
+            DWORD part[VIEW_PARTS], t1 = ViewNow();
+            int held = StepLock();
+            DWORD t2 = ViewNow();
+            if (ViewStepLocked(p, t2, (float)g_view.w, (float)g_view.h)) built = 1;
+            StepUnlock(held);
+            DWORD t3 = ViewNow(), t4 = t3;
             if (!built) { Sleep(1); continue; }              /* (this screen's first quads not made yet) */
-            if (!ViewFrame()) return ViewOff("its OpenGL frame could not be shown");
+            if (!ViewFrame(&t4)) return ViewOff("its OpenGL frame could not be shown");
             if (!g_view.vsync) Sleep(4);
             DWORD t = ViewNow();
+            part[0] = t1 - t0; part[1] = t2 - t1; part[2] = t3 - t2; part[3] = t4 - t3; part[4] = t - t4;
+            ViewSlowKeep(t - t0, part);
             if (t - g_view.last > g_view.gap) g_view.gap = t - g_view.last;
             g_view.last = t;
             g_view.frames++;
@@ -4960,11 +5045,19 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             InterlockedExchange(&g_viewSteps, 0);
             StepUnlock(held);
             showing = 0;
-            fadeAt = now ? now : 1;                         /* hidden once the fade is over (above) */
+            waitAt = now ? now : 1;                         /* it fades once the world shows (above) */
+            worldSeen = g_worldFrames;
             DWORD ms = now - g_view.since;
             wsprintfA(m, "  the view: %lu frames of its own in %lu.%lu s (%lu a second), its longest gap %lu ms",
                       (unsigned long)g_view.frames, (unsigned long)(ms / 1000), (unsigned long)(ms % 1000 / 100),
                       ms ? (unsigned long)(g_view.frames * 1000 / ms) : 0ul, (unsigned long)g_view.gap);
+            Log(m);
+            const DWORD *a = g_slow.part, *b = g_slow.most;
+            wsprintfA(m, "  its slow frames: %lu over %d ms; the slowest %lu ms (messages %lu, lock %lu, step %lu, draw %lu, "
+                      "swap %lu); each part's most: messages %lu, lock %lu, step %lu, draw %lu, swap %lu",
+                      (unsigned long)g_slow.n, VIEW_SLOW_MS, (unsigned long)g_slow.worst, (unsigned long)a[0],
+                      (unsigned long)a[1], (unsigned long)a[2], (unsigned long)a[3], (unsigned long)a[4], (unsigned long)b[0],
+                      (unsigned long)b[1], (unsigned long)b[2], (unsigned long)b[3], (unsigned long)b[4]);
             Log(m);
         }
         Sleep(5);
@@ -5122,6 +5215,7 @@ void WINAPI PrePresent(unsigned char *gx)
 {
     int loading = g_loadFrame;
     g_loadFrame = 0;
+    if (!loading) InterlockedExchange(&g_worldFrames, g_worldFrames + 1);   /* (the view waits for one to fade) */
     if (!g_blurOn || g_blurDead || !gx) return;
     float amount = 0;
     int mode = BlurStep(loading, GetTickCount(), &amount);
@@ -5198,6 +5292,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 #ifdef __i386__
         g_inst = inst;
 #endif
+        ClientDataFind();
         if (GameDir() && ChooseScreens()) {
             if (Apply()) {
                 int reveal = RevealWanted() && RevealBar();

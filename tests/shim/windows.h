@@ -102,9 +102,10 @@ static char *lstrcpyA(char *d, const char *s) { return strcpy(d, s); }
 static char *lstrcatA(char *d, const char *s) { return strcat(d, s); }
 static int wsprintfA(char *out, const char *fmt, ...) { va_list a; va_start(a, fmt); int n = vsprintf(out, fmt, a); va_end(a); return n; }
 static int GetSystemMetrics(int i) { return i == SM_CXSCREEN ? shim_screen_w : shim_screen_h; }
+extern int shim_vq;                                  /* VirtualQuery's calls, so a test can see one was not made */
 static size_t VirtualQuery(const void *at, MEMORY_BASIC_INFORMATION *m, size_t n)
 {
-    (void)at; memset(m, 0, n); m->BaseAddress = shim_module; m->RegionSize = SHIM_MODULE_SIZE;
+    (void)at; shim_vq++; memset(m, 0, n); m->BaseAddress = shim_module; m->RegionSize = SHIM_MODULE_SIZE;
     m->State = MEM_COMMIT; m->Protect = PAGE_EXECUTE_READ; return n;
 }
 typedef size_t SIZE_T;
