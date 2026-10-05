@@ -544,13 +544,23 @@ static struct {
                                           when the bar moves, so this is a lower bound on that */
 } g_fire;
 
+/* The classes' own sounds (fire.h, "a class's own sound"): each family's table, its loops once built, which one plays. */
+static SndSpec g_sndSpec[SND_FAMILIES];
+static SndSet g_snd[SND_FAMILIES];
+static int g_sndHas[SND_FAMILIES];
+static volatile LONG g_sndFam = -1;                  /* the family whose sound plays this screen, -1 the fire */
+static volatile LONG g_barFamNow = -1;               /* BarPath's: the screen's fire family, -1 the pack's orange */
+
 static signed char WINAPI FireCallback(void *stream, void *buff, int len, void *user)
 {
     (void)stream; (void)user;
     union { LONG bits; float f; } fill;
     fill.bits = g_fire.fillBits;
     int frames = len > 0 ? len / 4 : 0;
-    int on = FireRender(&g_fire.mix, (int)g_fire.gate, fill.f, (short *)buff, frames);
+    LONG fam = g_sndFam;
+    int on = fam >= 0 && fam < SND_FAMILIES && g_snd[fam].n
+                 ? SndRender(&g_fire.mix, &g_snd[fam], &g_sndSpec[fam], (int)g_fire.gate, fill.f, (short *)buff, frames)
+                 : FireRender(&g_fire.mix, (int)g_fire.gate, fill.f, (short *)buff, frames);
     for (int i = frames * 4; i < len; i++) ((unsigned char *)buff)[i] = 0;
     InterlockedExchange(&g_fire.quiet, !on);
     return 1;
@@ -610,6 +620,74 @@ static void FireFree(void)
         g_fire.mix.loop[i] = NULL;
         g_fire.mix.len[i] = 0;
     }
+    for (int f = 0; f < SND_FAMILIES; f++) {
+        for (int i = 0; i < SND_LOOPS; i++) {
+            if (g_snd[f].loop[i]) HeapFree(GetProcessHeap(), 0, g_snd[f].loop[i]);
+            g_snd[f].loop[i] = NULL; g_snd[f].len[i] = 0;
+        }
+        if (g_snd[f].sting) HeapFree(GetProcessHeap(), 0, g_snd[f].sting);
+        g_snd[f].sting = NULL; g_snd[f].stingLen = 0; g_snd[f].n = 0;
+    }
+}
+
+/* One of a class's sounds at the mixer's rate, from the client's own files (the newest copy across its archives): a
+ * loop (seamed as the fire's) or the stinger (whole). NULL, and why, when it cannot be had. */
+static float *SndLoad(const char *path, int rate, int loop, unsigned *outLen, const char **why)
+{
+    static const char *const kArch[] = { "patch-9.MPQ", "patch-8.MPQ", "patch-7.MPQ", "patch-6.MPQ", "patch-5.MPQ", "patch-4.MPQ",
+                                         "patch-3.MPQ", "patch-2.MPQ", "patch.MPQ", "sound.MPQ" };
+    *why = "in none of the client's archives";
+    for (int a = 0; a < (int)(sizeof kArch / sizeof kArch[0]); a++) {
+        unsigned char *wav = NULL;
+        unsigned len = 0, frames = 0;
+        int r = mpq_read(&kIo, kArch[a], path, &wav, &len), srate = 0, channels = 0;
+        const unsigned char *data = NULL;
+        if (r == MPQ_E_NOT_FOUND || r == MPQ_E_NO_ARCHIVE || r == MPQ_E_EMPTY) continue;
+        if (r != MPQ_OK) { *why = "unreadable"; continue; }
+        float *src = NULL, *out = NULL;
+        unsigned n = 0;
+        if (!FireWavInfo(wav, len, &srate, &channels, &data, &frames)) *why = "not a 16-bit PCM sound";
+        else {
+            if (frames > (unsigned)srate * SND_MAX_S) frames = (unsigned)srate * SND_MAX_S;
+            if (!(src = HeapAlloc(GetProcessHeap(), 0, frames * sizeof(float))) ||
+                !(out = HeapAlloc(GetProcessHeap(), 0, (FireResampledLength(frames, srate, rate) + 1) * sizeof(float))))
+                *why = "out of memory";
+            else {
+                FireWavRead(data, channels, frames, src);
+                n = loop ? FireMakeLoop(src, frames, srate, rate, 0, out) : SndOneShot(src, frames, srate, rate, out);
+                if (!n) *why = "too short";
+            }
+        }
+        if (src) HeapFree(GetProcessHeap(), 0, src);
+        HeapFree(GetProcessHeap(), 0, wav);
+        if (n) { *outLen = n; return out; }
+        if (out) HeapFree(GetProcessHeap(), 0, out);
+        return NULL;                                   /* the newest copy decides, as for the fire */
+    }
+    return NULL;
+}
+/* Every family's own sound, at the mixer's rate. */
+static void SndBuildAll(int rate)
+{
+    char m[300];
+    for (int f = 0; f < SND_FAMILIES; f++) {
+        if (!g_sndHas[f]) continue;
+        int made = 0;
+        const char *why = "";
+        for (int i = 0; i < g_sndSpec[f].n; i++) {
+            g_snd[f].loop[i] = SndLoad(g_sndSpec[f].l[i].path, rate, 1, &g_snd[f].len[i], &why);
+            if (g_snd[f].loop[i]) made++;
+            else { wsprintfA(m, "sound: %s is %s, so it plays without it", g_sndSpec[f].l[i].path, why); Log(m); }
+        }
+        g_snd[f].n = made ? g_sndSpec[f].n : 0;
+        if (g_sndSpec[f].sting) {
+            g_snd[f].sting = SndLoad(g_sndSpec[f].stingPath, rate, 0, &g_snd[f].stingLen, &why);
+            if (!g_snd[f].sting) { wsprintfA(m, "sound: its stinger %s is %s", g_sndSpec[f].stingPath, why); Log(m); }
+        }
+        wsprintfA(m, "sound: a family's own (%d of %d loops%s) made from the client's own files", made, g_sndSpec[f].n,
+                  g_snd[f].sting ? ", and its stinger" : "");
+        Log(m);
+    }
 }
 
 /* The six loops at the mixer's rate, from the client's own files. Only while no stream is open. 1 when at least one
@@ -668,6 +746,7 @@ static int FireBuild(int rate)
     if (made) wsprintfA(m, "fire sound: %d of %d loops made from the client's own files, at %d Hz", made, FIRE_LOOPS, rate);
     else wsprintfA(m, "fire sound off: none of its %d loops could be made from the client's files", FIRE_LOOPS);
     Log(m);
+    SndBuildAll(rate);
     return made > 0;
 }
 
@@ -741,6 +820,16 @@ static volatile LONG g_hitchN, g_hitchMs[HITCH_KEEP], g_hitchPct[HITCH_KEEP];   
 static volatile LONG g_stallN, g_stallMs[HITCH_KEEP], g_stallPct[HITCH_KEEP];   /* the bar still over STALL_MS, frames on */
 static void HitchLog(char *m);           /* the bar as shown's (below): this screen's hitches and stalls, into the log */
 
+/* The sound for the screen coming up: its family's own, if the pack gave it one, else the fire. A change resets it. */
+static void SndChoose(void)
+{
+    LONG f = g_barFamNow, want = f >= 0 && f < SND_FAMILIES && g_sndHas[f] && g_snd[f].n ? f : -1;
+    if (want != g_sndFam) {
+        if (want >= 0) SndReset(&g_snd[want]);
+        InterlockedExchange(&g_sndFam, want);
+    }
+}
+
 /* One look at the client, every FIRE_POLL_MS. */
 static void FireStep(DWORD now)
 {
@@ -770,6 +859,7 @@ static void FireStep(DWORD now)
             FirePublish(g_fire.fill.fill);
             InterlockedExchange(&g_fire.gate, 1);
         }
+        SndChoose();
         g_fire.playing = 1;
         g_fire.since = now;
         g_fire.reached = g_fire.fill.fill;
@@ -777,6 +867,7 @@ static void FireStep(DWORD now)
         return;
     }
     if (screen && g_fire.playing > 0) {
+        if (now - g_fire.since < 400) SndChoose();   /* the bar's textures (so its family) can come a moment after */
         float fill = FireFillRead(&g_fire.fill, read);
         FirePublish(fill);
         if (fill > g_fire.reached) { g_fire.reached = fill; g_fire.steps++; }
@@ -1349,6 +1440,7 @@ const char *WINAPI BarPath(const char *path)
         int g = f >= 0 && g_bars.family[f].garland;
         InterlockedExchange(&g_barGarland, g ? f + 1 : 0);
         BarSizeSet(g);                                 /* a garland's bar is the banner's mirror, tall */
+        InterlockedExchange(&g_barFamNow, f);
         g_barFamily = f;
         InterlockedExchange(&g_barShown, f >= 0 ? f + 1 : -1);
     } else
@@ -1686,6 +1778,23 @@ static int FireBar(void)
               have ? haveList : "none", miss ? missList : "none");
     Log(m);
     GarlandSetup(m);
+    for (int f = 0; f < g_bars.families && f < SND_FAMILIES; f++) {   /* each family's own sound, if the pack has one */
+        char table[64];
+        unsigned char *text = NULL;
+        unsigned len = 0;
+        lstrcpyA(table, "CinderLoad\\sound-");
+        lstrcatA(table, g_bars.family[f].name);
+        lstrcatA(table, ".txt");
+        g_sndHas[f] = 0;
+        if (g_bars.family[f].ok && mpq_read(&kIoSmall, "patch-~.MPQ", table, &text, &len) == MPQ_OK && text && len < 8192)
+            g_sndHas[f] = SndParse(&g_sndSpec[f], (const char *)text, len);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        if (g_sndHas[f]) {
+            wsprintfA(m, "sound: %s has its own (%d layers%s), building to its peak instead of the fire's", g_bars.family[f].name,
+                      g_sndSpec[f].n, g_sndSpec[f].sting ? " and a stinger" : "");
+            Log(m);
+        }
+    }
     if (!have) {
         Log("fire bar off: no family bars.txt names has both its textures in the pack");
         return 0;
@@ -3163,9 +3272,14 @@ static int g_wsQuads;
 __attribute__((used)) float g_wsPos[(WISP_MAX + 4) * 6 * 3];
 __attribute__((used)) float g_wsUV[(WISP_MAX + 4) * 6 * 2];
 __attribute__((used)) unsigned g_wsCol[(WISP_MAX + 4) * 6];
-__attribute__((used)) float g_backPos[4 * 3];
-__attribute__((used)) float g_backUV[4 * 2];
-__attribute__((used)) unsigned g_backCol[4];
+__attribute__((used)) float g_backPos[2 * 6 * 3];
+__attribute__((used)) float g_backUV[2 * 6 * 2];
+__attribute__((used)) unsigned g_backCol[2 * 6];
+static int g_backQuads;
+#define WISP_ZIPS      4        /* his v2 note (4 Oct): wisps "floating and zipping around whimsically around the forward
+                                 * leading edge": small ones looping around the front, each with a fading tail */
+#define WISP_ZIP_TAIL  5
+#define BACK_FEATHER   0.02f    /* the backing fades in over this much of the width ahead of the front */
 
 static float WispRand(void) { g_wispSeed = SeaHash(g_wispSeed + 0x9E3779B9u); return (float)(g_wispSeed >> 8) / 16777216.0f; }
 /* sin x for any x (FireSin is only for 0..pi/2) */
@@ -3243,6 +3357,16 @@ static void WispsBuild(int f, float front, float t, float dt)
     }
     if (!at) return;
     float th = GarlandThick(front), bob = 0.12f * th * WispSin(t * 2.1f);   /* last, on top: the front's own */
+    int zip = WispPick(f, 3, 1);
+    for (int z = 0; zip >= 0 && z < WISP_ZIPS; z++) {               /* the zipping ones, oldest of each tail first */
+        float ph = 1.618f * (float)z * 3.1415927f;
+        for (int k = WISP_ZIP_TAIL - 1; k >= 0; k--) {
+            float tt = t - 0.035f * (float)k;
+            float zx = front + 0.014f * WispSin(1.7f * tt + ph) + 0.006f * WispSin(4.3f * tt + 2 * ph);
+            float zy = th * (0.5f + 0.42f * WispSin(2.3f * tt + 3 * ph));
+            WispQuad(f, zip, zx, zy, 0.7f * (1 - 0.12f * (float)k), 0.9f * (1 - (float)k / WISP_ZIP_TAIL));
+        }
+    }
     int aura = WispPick(f, 4, 1), wisp = WispPick(f, 0, 1), trail = WispPick(f, 1, 1);
     if (aura >= 0) WispQuad(f, aura, front, th * 0.5f, th * 2160.0f / g_wispTab[f].s[aura].h, 0.35f);
     if (trail >= 0) {
@@ -3305,11 +3429,23 @@ static void BloomsBuild(int f, float front, DWORD now, int screen)
     }
 }
 
-/* The garland's backing: one quad, the full width, ARCH_H tall at the bottom, its picture whole. */
-static void BackBuild(void)
+/* The garland's backing, ARCH_H tall at the bottom, only AHEAD of the front (his v2 note, 4 Oct: no black line along
+ * the leaves' top; "the edges of the leaves should be the edge of the border, with the map layers below it"): behind
+ * the front the map shows between the leaves; a soft edge BACK_FEATHER wide just ahead of it. */
+static void BackBuild(float front)
 {
-    float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, ARCH_H, ARCH_H }, tu[4] = { 0, 1, 0, 1 }, tv[4] = { 1, 1, 0, 0 };
-    QuadPut(g_backPos, g_backUV, g_backCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
+    g_backQuads = 0;
+    float a = FireClamp(front, 0, 1), b = FireClamp(front + BACK_FEATHER, 0, 1);
+    if (a >= 1) return;
+    if (b > a) {                                                     /* the soft edge: clear to dark */
+        float x[4] = { a, b, a, b }, y[4] = { 0, 0, ARCH_H, ARCH_H }, tu[4] = { a, b, a, b }, tv[4] = { 1, 1, 0, 0 };
+        unsigned c[4] = { 0x00FFFFFFu, 0xFFFFFFFFu, 0x00FFFFFFu, 0xFFFFFFFFu };
+        QuadPut4(g_backPos, g_backUV, g_backCol, g_backQuads++, x, y, tu, tv, c);
+    }
+    if (b < 1) {
+        float x[4] = { b, 1, b, 1 }, y[4] = { 0, 0, ARCH_H, ARCH_H }, tu[4] = { b, 1, b, 1 }, tv[4] = { 1, 1, 0, 0 };
+        QuadPut(g_backPos, g_backUV, g_backCol, g_backQuads++, x, y, tu, tv, 0xFFFFFFFFu);
+    }
 }
 
 #if defined(__i386__)
@@ -3426,8 +3562,8 @@ void WINAPI OverlayDraw(void)
             backTex[f] = OverlayLoad(path);
         }
         if (backTex[f]) {
-            BackBuild();
-            OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(backTex[f], 1, 0), g_backPos, g_backUV, g_backCol, 1);
+            BackBuild(g_disp);
+            if (g_backQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(backTex[f], 1, 0), g_backPos, g_backUV, g_backCol, g_backQuads);
         }
     } else if (g_seaTex) {                                         /* last: the log's black, under the bar */
         BarBlackBuild();

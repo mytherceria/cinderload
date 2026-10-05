@@ -298,6 +298,54 @@ static void FireTests(void)
     Check(line, "loop: 1 kHz to 2 kHz by straight lines between frames");
     Check(FireResampledLength(66152, 22050, 44100) == 132304 && FireResampledLength(66152, 22050, 48000) == 144004,
           "loop: as many frames at the mixer's rate as the mock's resampler makes");
+
+    /* a class's own sound (his rule, 4 Oct): its table read carefully; a bed rising with the fill, a swell silent until
+     * its start and whole by its end, the stinger once as the fill passes its mark, centred, the fade the fire's */
+    {
+        static const char tab[] = "# druid\nlevel 0.8632\nloop bed 0.950 0.000 1.000 Sound\\Ambience\\ZoneAmbience\\EnchangedForestDay.wav\n"
+            "loop swell 0.550 0.150 0.600 Sound\\Doodad\\MoonWellLightLoop.wav\r\nloop swell 0.700 0.450 0.950 Sound\\Creature\\Whisp\\WispLoop01.wav\n"
+            "loop motion 0.350 0.000 0.000 Sound\\Spells\\Missile\\NAtureMissileLoop.wav\nloop hum 1 0 1 Sound\\x.wav\n"
+            "loop bed 9 0 1 Sound\\y.wav\nstinger 0.900 0.970 Sound\\Spells\\Tranquility.wav\n";
+        static SndSpec sp;
+        int ok = SndParse(&sp, tab, sizeof tab - 1) && sp.n == 4 && sp.sting && Near(sp.level, 0.8632, 1e-4) &&
+                 sp.l[0].kind == SND_BED && sp.l[1].kind == SND_SWELL && sp.l[3].kind == SND_MOTION && Near(sp.l[1].from, 0.15, 1e-6) &&
+                 Near(sp.l[2].to, 0.95, 1e-6) && !strcmp(sp.l[1].path, "Sound\\Doodad\\MoonWellLightLoop.wav") &&
+                 !strcmp(sp.stingPath, "Sound\\Spells\\Tranquility.wav") && Near(sp.stingAt, 0.97, 1e-6);
+        ok &= !SndParse(&sp, "loop bed 1 0 1 Sound\\a.wav\n", 27);                      /* no level: none */
+        Check(ok, "class sound: its table read (CRLF, comments; an unknown kind and a gain over 4 skipped); no level, no sound");
+
+        static float one[100], sting[50];
+        for (int i = 0; i < 100; i++) one[i] = 1;
+        for (int i = 0; i < 50; i++) sting[i] = 1;
+        static SndSet st;
+        memset(&st, 0, sizeof st);
+        SndParse(&sp, tab, sizeof tab - 1);
+        for (int i = 0; i < 4; i++) { st.loop[i] = one; st.len[i] = 100; }
+        st.n = 4; st.sting = sting; st.stingLen = 50;
+        FireMix mx;
+        memset(&mx, 0, sizeof mx);
+        FireSetRate(&mx, 1000);
+        mx.env = 1;                                                                /* past the fade */
+        static short pcm[2 * 500];
+        SndRender(&mx, &st, &sp, 1, 0.0f, pcm, 50);                                 /* still: no motion */
+        float at0 = pcm[2 * 49] / 32767.0f;
+        int centred = pcm[2 * 49] == pcm[2 * 49 + 1];
+        for (int k = 0; k < 12; k++) SndRender(&mx, &st, &sp, 1, 0.1f, pcm, 400);   /* the glide settled: still again */
+        float at10 = pcm[2 * 399] / 32767.0f;
+        /* at 0: the bed at 0.55 of 0.95, nothing else; at 0.1 (once still again): the bed a little up, the swells silent */
+        float want0 = 0.95f * 0.55f * 0.8632f * 0.70710678f;
+        float bed10 = 0.55f + 0.45f * SndSmooth(0, 1, 0.1f), want10 = 0.95f * bed10 * 0.8632f * 0.70710678f;
+        ok = centred && Near(at0, want0, 2e-4) && Near(at10, want10, 2e-3) && st.stingState == 0;
+        SndRender(&mx, &st, &sp, 1, 0.97f, pcm, 1);                                 /* the mark: the stinger starts */
+        int playing = st.stingState == 1;
+        SndRender(&mx, &st, &sp, 1, 0.98f, pcm, 60);
+        int played = st.stingState == 2;
+        SndRender(&mx, &st, &sp, 1, 0.99f, pcm, 60);
+        ok &= playing && played && st.stingState == 2;                              /* once */
+        SndReset(&st);
+        ok &= st.stingState == 0 && st.pos[0] == 0;
+        Check(ok, "class sound: the bed at 0.55 rising, the swells silent before their start, the stinger once at its mark, centred");
+    }
     Check(FireMakeLoop(src, 200, 1000, 1000, 0, loop) == 0, "loop: one too short to cross-fade is refused");
 
     /* the source files */
@@ -785,7 +833,18 @@ static void FireBarTests(void)
             live++;
             inside &= g_wisp[i].x <= fr + 1e-4f && g_wisp[i].x > fr - 0.32f && g_wisp[i].y >= 0 && g_wisp[i].y <= GarlandThick(g_wisp[i].x) + 0.06f;
         }
-        cv &= live >= 8 && inside && g_wsQuads == live + 3;
+        cv &= live >= 8 && inside && g_wsQuads == live + 3 + WISP_ZIPS * WISP_ZIP_TAIL;
+        /* the zipping ones stay near the front and inside the arch */
+        for (int q = live; q < g_wsQuads; q++) {
+            int c0 = q ? q * 6 : 0;
+            float zx = (g_wsPos[c0 * 3] + g_wsPos[(c0 + 1) * 3]) / 2, zy = (g_wsPos[c0 * 3 + 1] + g_wsPos[(c0 + 2) * 3 + 1]) / 2;
+            cv &= fabsf(zx - fr) < 0.05f && zy > -0.02f && zy < GarlandThick(fr) + 0.04f;
+        }
+        /* the backing: only ahead of the front, soft for BACK_FEATHER, none once full */
+        BackBuild(0.4f);
+        cv &= g_backQuads == 2 && fabsf(g_backPos[0] - 0.4f) < 1e-6f && (g_backCol[0] >> 24) == 0 && (g_backCol[1] >> 24) == 0xFF;
+        BackBuild(1.0f);
+        cv &= g_backQuads == 0;
         WispsBuild(fd, 1.0f, 2.0f, 0.033f);                                 /* the bar full: no front, none new */
         int after = 0;
         for (int i = 0; i < WISP_MAX; i++) after += g_wisp[i].live;
@@ -1041,6 +1100,41 @@ static void FireRealClient(const char *client)
     static unsigned char out[sizeof pcm + 64];
     size_t len = Wav(out, 1, 2, 16, 44100, pcm, total);
     FILE *f = fopen(path, "wb");
+    if (f) { fwrite(out, 1, len, f); fclose(f); printf("wrote %s (peak %d)\n", path, peak); }
+
+    /* the druid's own sound (his rule, 4 Oct), from the same client's files, over the same timeline: it builds */
+    static const char tab[] = "level 0.8632\nloop bed 0.950 0.000 1.000 Sound\\Ambience\\ZoneAmbience\\EnchangedForestDay.wav\n"
+        "loop swell 0.550 0.150 0.600 Sound\\Doodad\\MoonWellLightLoop.wav\nloop swell 0.700 0.450 0.950 Sound\\Creature\\Whisp\\WispLoop01.wav\n"
+        "loop motion 0.350 0.000 0.000 Sound\\Spells\\Missile\\NAtureMissileLoop.wav\nstinger 0.900 0.970 Sound\\Spells\\Tranquility.wav\n";
+    memset(g_sndHas, 0, sizeof g_sndHas);
+    g_sndHas[0] = SndParse(&g_sndSpec[0], tab, sizeof tab - 1);
+    SndBuildAll(44100);
+    int built4 = g_snd[0].n == 4 && g_snd[0].sting && LogSays("4 of 4 loops, and its stinger");
+    Check(built4, "a real client: the druid's four loops and its stinger made from its own files");
+    if (!built4) return;
+    FireReset(&g_fire.mix);
+    SndReset(&g_snd[0]);
+    done = 0;
+    for (int poll = 0; done < total; poll++) {
+        float t = poll * 0.02f, fill = 0;
+        for (int k = 0; k + 1 < 10; k++)
+            if (t >= keys[k][0] && t <= keys[k + 1][0]) fill = keys[k][1] + (keys[k + 1][1] - keys[k][1]) * (t - keys[k][0]) / (keys[k + 1][0] - keys[k][0]);
+        int n = total - done < pollFrames ? total - done : pollFrames;
+        SndRender(&g_fire.mix, &g_snd[0], &g_sndSpec[0], t < 11.6f, fill, pcm + 2 * done, n);
+        done += n;
+    }
+    double early = 0, late = 0;
+    int centred = 1;
+    peak = 0;
+    for (int i = 1 * 44100; i < 3 * 44100; i++) early += (double)pcm[2 * i] * pcm[2 * i];
+    for (int i = 9 * 44100; i < 11 * 44100; i++) late += (double)pcm[2 * i] * pcm[2 * i];
+    for (int i = 0; i < total; i++) { centred &= pcm[2 * i] == pcm[2 * i + 1]; if (abs(pcm[2 * i]) > peak) peak = (short)abs(pcm[2 * i]); }
+    Check(late > early * 20 && centred && peak < 32767 && g_snd[0].stingState >= 1,
+          "a real client: the druid's sound builds (its last seconds far louder than its first), centred, never clips, Tranquility begun");
+    printf("druid: seconds 9-11 are %.1f times seconds 1-3 in power\n", early > 0 ? late / early : 0);
+    snprintf(path, sizeof path, "%s/druid-timeline.wav", g_root);
+    len = Wav(out, 1, 2, 16, 44100, pcm, total);
+    f = fopen(path, "wb");
     if (f) { fwrite(out, 1, len, f); fclose(f); printf("wrote %s (peak %d)\n", path, peak); }
 }
 

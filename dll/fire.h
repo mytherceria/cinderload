@@ -217,6 +217,163 @@ static int FireRender(FireMix *m, int gate, float fill, short *out, int frames)
     return m->env > 0 || gate;
 }
 
+/* ---- a class's own sound (4 Oct 2026, his rule: "a sound that fits with the class design ... it should feel like it's
+ * building towards a crescendo as the bar loads"; the fire's left-to-right sweep is not needed) ----
+ * A family whose pack carries CinderLoad\sound-<family>.txt plays it instead of the fire while its bar shows:
+ *   level <x>                          the mix's scale (the art kit's preview brought to a peak of 0.8)
+ *   loop <bed|swell|motion> <gain> <from> <to> <path>
+ *       bed: there from the start at 0.55 of its gain, rising to all of it as the fill goes from <from> to <to>;
+ *       swell: silent until <from>, all of it by <to> (an S curve between); motion: as loud as the bar is moving,
+ *       the fire's crackle measure
+ *   stinger <gain> <at> <path>         played once, whole, as the fill passes <at>: the crescendo's peak
+ * Centred: the same in both ears. The same fade, glide and motion as the fire's (FireMix). Paths are the client's own
+ * files, read and built as the fire's are; none is shipped. */
+#define SND_LOOPS 6
+#define SND_FAMILIES 16          /* as BAR_FAMILIES: a set per fire family */
+#define SND_MAX_S 30             /* a loop's source is cut to this many seconds (the forest's 77 s is 13 MB at 44.1 kHz) */
+#define SND_PATH  120
+enum { SND_BED, SND_SWELL, SND_MOTION };
+typedef struct {
+    int n, sting;                                   /* loops listed; a stinger listed */
+    float level, stingGain, stingAt;
+    struct { int kind; float gain, from, to; char path[SND_PATH]; } l[SND_LOOPS];
+    char stingPath[SND_PATH];
+} SndSpec;
+typedef struct {
+    int n;
+    float *loop[SND_LOOPS];
+    unsigned len[SND_LOOPS], pos[SND_LOOPS];
+    float *sting;
+    unsigned stingLen, stingPos;
+    int stingState;                                 /* 0 waiting, 1 playing, 2 played */
+} SndSet;
+
+/* A decimal number ("0.55", "1", ".9") at s[*at] after spaces: 1 with it in *out. */
+static int SndNum(const char *s, int n, int *at, float *out)
+{
+    while (*at < n && (s[*at] == ' ' || s[*at] == '\t')) (*at)++;
+    float v = 0, scale = 0;
+    int digits = 0;
+    for (; *at < n; (*at)++) {
+        char c = s[*at];
+        if (c >= '0' && c <= '9') { if (scale) { v += (c - '0') * scale; scale *= 0.1f; } else v = v * 10 + (c - '0'); digits++; }
+        else if (c == '.' && !scale) scale = 0.1f;
+        else break;
+    }
+    if (!digits || digits > 9) return 0;
+    *out = v;
+    return 1;
+}
+/* A word at s[*at] after spaces, compared with w (lower case); 1 and past it when it is that word. */
+static int SndWord(const char *s, int n, int *at, const char *w)
+{
+    int i = *at;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    int k = 0;
+    while (w[k] && i + k < n && (s[i + k] | 0x20) == w[k]) k++;
+    if (w[k] || (i + k < n && s[i + k] != ' ' && s[i + k] != '\t')) return 0;
+    *at = i + k;
+    return 1;
+}
+/* The rest of the line, spaces before and after cut, into out (SND_PATH): 1 when it is a path that fits. */
+static int SndRest(const char *s, int n, int at, char *out)
+{
+    while (at < n && (s[at] == ' ' || s[at] == '\t')) at++;
+    while (n > at && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r')) n--;
+    if (n - at < 5 || n - at >= SND_PATH) return 0;
+    for (int i = at; i < n; i++) { if ((unsigned char)s[i] < 0x20) return 0; out[i - at] = s[i]; }
+    out[n - at] = 0;
+    return 1;
+}
+/* CinderLoad\sound-<family>.txt into sp: 1 when it has a level and at least one loop. Bad lines are skipped. */
+static int SndParse(SndSpec *sp, const char *t, unsigned len)
+{
+    unsigned char *z = (unsigned char *)sp;
+    for (unsigned i = 0; i < sizeof *sp; i++) z[i] = 0;
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && t[end] != '\n') end++;
+        const char *l = t + at;
+        int n = (int)(end - at), i = 0;
+        float a, b, c;
+        if (SndWord(l, n, &i, "level") && SndNum(l, n, &i, &a) && a > 0 && a < 100) sp->level = a;
+        else if ((i = 0, SndWord(l, n, &i, "loop")) && sp->n < SND_LOOPS) {
+            int kind = SndWord(l, n, &i, "bed") ? SND_BED : SndWord(l, n, &i, "swell") ? SND_SWELL :
+                       SndWord(l, n, &i, "motion") ? SND_MOTION : -1;
+            if (kind >= 0 && SndNum(l, n, &i, &a) && SndNum(l, n, &i, &b) && SndNum(l, n, &i, &c) && a <= 4 && b <= 1 && c <= 1 &&
+                SndRest(l, n, i, sp->l[sp->n].path)) {
+                sp->l[sp->n].kind = kind; sp->l[sp->n].gain = a; sp->l[sp->n].from = b; sp->l[sp->n].to = c;
+                sp->n++;
+            }
+        } else if ((i = 0, SndWord(l, n, &i, "stinger")) && SndNum(l, n, &i, &a) && SndNum(l, n, &i, &b) && a <= 4 &&
+                   b <= 1 && SndRest(l, n, i, sp->stingPath)) {
+            sp->sting = 1; sp->stingGain = a; sp->stingAt = b;
+        }
+        at = end + 1;
+    }
+    return sp->level > 0 && sp->n > 0;
+}
+
+/* The stinger at the mixer's rate, whole (no seam): the same straight-line resampling as the loops'. Returns frames. */
+static unsigned SndOneShot(const float *src, unsigned frames, int from, int to, float *out)
+{
+    if (from <= 0 || to <= 0 || frames < 2) return 0;
+    unsigned n = FireResampledLength(frames, from, to), idx = 0, rem = 0;
+    for (unsigned j = 0; j < n; j++) {
+        float a = src[idx];
+        out[j] = idx + 1 < frames ? a + (src[idx + 1] - a) * ((float)rem / (float)to) : src[frames - 1];
+        rem += (unsigned)from;
+        while (rem >= (unsigned)to) { rem -= (unsigned)to; idx++; }
+        if (idx >= frames) idx = frames - 1;
+    }
+    return n;
+}
+static float SndSmooth(float e0, float e1, float x)
+{
+    float u = FireClamp((x - e0) / (e1 - e0 > 1e-6f ? e1 - e0 : 1e-6f), 0, 1);
+    return u * u * (3 - 2 * u);
+}
+static void SndReset(SndSet *s)
+{
+    for (int i = 0; i < SND_LOOPS; i++) s->pos[i] = 0;
+    s->stingPos = 0;
+    s->stingState = 0;
+}
+/* As FireRender, for a class's sound: the same gate, fade, glide and motion (in m), its layers by the fill, the stinger
+ * once, centred. */
+static int SndRender(FireMix *m, SndSet *s, const SndSpec *sp, int gate, float fill, short *out, int frames)
+{
+    fill = FireClamp(fill, 0, 1);
+    for (int f = 0; f < frames; f++) {
+        if (gate && m->env <= 0) { m->front = m->last = fill; m->speed = 0; }
+        m->env = FireClamp(m->env + (gate ? m->stepIn : -m->stepOut), 0, 1);
+        m->front += (fill - m->front) * m->kGlide;
+        float speed = (m->front - m->last) * (float)m->rate;
+        m->last = m->front;
+        m->speed += ((speed < FIRE_MOVE_CAP ? speed : FIRE_MOVE_CAP) - m->speed) * m->kMove;
+        float sum = 0;
+        for (int i = 0; i < sp->n && i < SND_LOOPS; i++) {
+            if (!s->loop[i]) continue;
+            float v = s->loop[i][s->pos[i]] * sp->l[i].gain, lvl;
+            if (++s->pos[i] >= s->len[i]) s->pos[i] = 0;
+            if (sp->l[i].kind == SND_BED) lvl = 0.55f + 0.45f * SndSmooth(sp->l[i].from, sp->l[i].to, fill);
+            else if (sp->l[i].kind == SND_SWELL) lvl = SndSmooth(sp->l[i].from, sp->l[i].to, fill);
+            else lvl = FireCrackleLevel(m->speed);
+            sum += v * lvl;
+        }
+        if (s->sting && gate && s->stingState == 0 && fill >= sp->stingAt) { s->stingState = 1; s->stingPos = 0; }
+        if (s->stingState == 1) {
+            sum += s->sting[s->stingPos] * sp->stingGain;
+            if (++s->stingPos >= s->stingLen) s->stingState = 2;
+        }
+        float mono = sum * sp->level * m->env * 0.70710678f;
+        short v = (short)FireClamp(mono * 32767.0f, -32767.0f, 32767.0f);
+        out[2 * f] = v;
+        out[2 * f + 1] = v;
+    }
+    return m->env > 0 || gate;
+}
+
 /* ---- what the worker makes of the client's numbers ---- */
 
 /* The bar's fill as the worker passes it on: the client clears the number to 0 and then works it out again every
