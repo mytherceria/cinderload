@@ -1313,13 +1313,14 @@ static int BarFamily(const BarTable *t)
  * the five seconds), the game's own freeze then holds that frame, and the world's first DISSOLVE_MS dissolve out of it.
  * The blur is the game's own frame, shrunk on its Direct3D 9 device a half at a time to 1/32 and grown back to a
  * quarter, all with linear filtering, laid over the frame. Drawn just before the device presents (PRESENT_VA). */
-#define BLUR_MS         500
+#define BLUR_MS         300        /* after the view lands; with BLUR_LEAD_MS, the last half second (his rule, 4 Oct 21:47:
+                                    * "just have it be the last half a second, no matter how long it is") */
 #define BLUR_DIM        35         /* percent of black at the end (100: to black) */
 /* His notes on the first in game (4 Oct, 21:40): "it gets to as max zoom in as it's going to get and then just blurs
  * from there and instead it should be blurring a little bit earlier and the zoom should keep zooming in until it
  * completely fades away. And we should see Stormwind City on the map": the blur begins BLUR_LEAD_MS before the view
  * lands, and through it the view keeps closing in, BLUR_PUSH times closer by its end. */
-#define BLUR_LEAD_MS    400
+#define BLUR_LEAD_MS    200
 #define BLUR_PUSH       2.5f
 #define DISSOLVE_MS     500
 #define PRESENT_VA      0x5A19FD   /* the game's present: mov eax, [esi+0x38A8] (its IDirect3DDevice9), then Present */

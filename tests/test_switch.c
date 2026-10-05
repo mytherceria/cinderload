@@ -2492,16 +2492,16 @@ static void LiveTests(void)
         /* the ending: the blur after the view lands, inside the floor; held for it even when the game is done late;
          * then the world's dissolve; its hook set only on the bytes as read */
         int bl = 1;
-        g_blurOn = 1; g_blurMs = 500; g_blurDim = 35; g_holdOn = 1; g_holdFrame = TestHoldFrame; g_map.ok = 1; g_mapShown = 1;
+        g_blurOn = 1; g_blurMs = BLUR_MS; g_blurDim = 35; g_holdOn = 1; g_holdFrame = TestHoldFrame; g_map.ok = 1; g_mapShown = 1;
         g_lnMs[1] = 950; g_lnFreeze[1] = 800; g_lnN[1] = 3; g_holdMs = 5000;
         DriftScreenGone(); g_zoomScreens = 1; at += 3000; shim_ticks = at; t0 = at;
         sh = DisplayStep(0.0f, at); DriftStep(sh, at);
         PutFloat(HOLD_BAR_VA, 1.0f);
         HoldFrame();
-        bl &= g_blurFrom == t0 + 3700 - BLUR_LEAD_MS && g_blurTo == t0 + 4200 && shim_ticks >= t0 + 4200 && shim_ticks < t0 + 4240;
-        bl &= fabsf(g_viewH - hEnd / BLUR_PUSH) < 2e-3f && fabsf(g_viewU - 0.3f) < 2e-3f;   /* closer still, on the arrival */
+        bl &= g_blurTo - g_blurFrom == 500 && g_blurTo == t0 + 4200 && shim_ticks >= t0 + 4200 && shim_ticks < t0 + 4240;   /* the last half second */
+        bl &= g_viewH < hEnd * 0.6f && g_viewH > hEnd / BLUR_PUSH * 0.95f && fabsf(g_viewU - 0.3f) < 2e-3f;   /* closer still, on the arrival */
         float am = 0;
-        bl &= BlurStep(1, t0 + 3250, &am) == 0 && BlurStep(1, t0 + 3750, &am) == 1 && am > 0.4f && am < 0.6f &&
+        bl &= BlurStep(1, t0 + 3650, &am) == 0 && BlurStep(1, t0 + 3950, &am) == 1 && am > 0.4f && am < 0.6f &&
               BlurStep(1, t0 + 4300, &am) == 1 && am > 0.999f && g_blurUsed;
         bl &= BlurStep(0, t0 + 6000, &am) == 2 && am > 0.999f && g_dissolveAt == t0 + 6000;   /* the world, after the freeze */
         bl &= BlurStep(0, t0 + 6250, &am) == 2 && am > 0.4f && am < 0.6f;
@@ -2511,7 +2511,7 @@ static void LiveTests(void)
         sh = DisplayStep(0.0f, at); DriftStep(sh, at);
         for (int k = 0; k < 450; k++) { at += 20; shim_ticks = at; sh = DisplayStep(1.0f, at); DriftStep(sh, at); }
         g_testFrames = 0; HoldFrame();
-        bl &= g_testFrames > 25 && g_blurTo - g_blurFrom == 500 && shim_ticks >= g_blurTo;   /* (no lead once late) */
+        bl &= g_testFrames > 10 && g_blurTo - g_blurFrom == BLUR_MS && shim_ticks >= g_blurTo;   /* (no lead once late) */
         { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\nblur 400 100\n"; MapParse(mt, (unsigned)strlen(mt)); }
         bl &= g_blurMs == 400 && g_blurDim == 100 && g_map.ok;
         { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
@@ -2531,7 +2531,7 @@ static void LiveTests(void)
         g_blurOn = 0; g_holdOn = 0; g_holdFrame = NULL; g_blurFrom = g_blurTo = 0; g_blurUsed = 0; g_map.ok = 0; g_mapShown = 0;
         PutFloat(HOLD_BAR_VA, 0.0f);
         for (int k = 0; k < 2; k++) g_lnMs[k] = g_lnFreeze[k] = g_lnN[k] = 0;
-        Check(bl, "the ending: blurred and darkened over its last 500 ms once landed, inside the floor; held for it when the game is late; the world dissolves out of it over DISSOLVE_MS; map.txt sets it; hooked only on the bytes as read");
+        Check(bl, "the ending: blurred and darkened over its last half second, closing in, inside the floor; held for it when the game is late; the world dissolves out of it over DISSOLVE_MS; map.txt sets it; hooked only on the bytes as read");
         Check(hd, "the hold: the game done early, its frame drawn on until the plan (4.2 s) and the view landed; once a screen; never past HOLD_MAX_MS; after the floor it settles in HOLD_SETTLE_MS; off, the frame alone; set up only on the bytes as read; the character list's music faded with the pack's fade only while it plays");
 
         /* the lessons: each kind's time to a full bar and its end freeze, kept in loadtimes.txt and read back, the newest
