@@ -4367,7 +4367,10 @@ static int RevealBar(void)
  * the focus or a click, with its own Direct3D 9 device (the game's own d3d9.dll) on its own thread, presenting at the
  * screen's refresh. The proof draws a dark field, a bar from the game's progress, and a marker sweeping across once
  * every 2 s that keeps moving whatever the game does; the log says, per screen, its frames and its longest gap, beside
- * the game's own (the fire's lines). Only while Data\CinderLoad\view.txt exists: delete it to turn this off. Any failure
+ * the game's own (the fire's lines). For his first look (4 Oct, night) it is a BAND below the arrival (VIEW_BAND_*), so
+ * one video shows the game's map stopping where the game stalls while the band's marker carries on, and as the screen
+ * goes it fades out over VIEW_FADE_MS on its window's own alpha: whether a window of ours can dissolve into the world on
+ * his system. Only while Data\CinderLoad\view.txt exists: delete it to turn this off. Any failure
  * is logged once and the view stays off for the session; the game's own drawing is never touched. */
 #ifdef __i386__
 #include <d3d9.h>
@@ -4377,6 +4380,23 @@ static struct {
     DWORD since, last, gap, frames; float fill;
 } g_view;
 typedef struct { float x, y, z, rhw; DWORD c; } ViewVert;
+
+#define VIEW_BAND_TOP   62     /* percent of the game window's height: where the proof's band begins */
+#define VIEW_BAND_TALL  10     /* and how tall it is (below the arrival, above the bar) */
+#define VIEW_FADE_MS    500    /* the band fades out over this as the screen goes (the world's dissolve, to be) */
+
+/* The window's own alpha (a layered window's): 255 whole. 0 when the system will not do it (the log says, once). */
+static int ViewAlpha(BYTE a)
+{
+    LONG ex = GetWindowLongA(g_view.win, GWL_EXSTYLE);
+    if (!(ex & WS_EX_LAYERED)) SetWindowLongA(g_view.win, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+    return SetLayeredWindowAttributes(g_view.win, 0, a, LWA_ALPHA) != 0;
+}
+static void ViewOpaque(void)
+{
+    LONG ex = GetWindowLongA(g_view.win, GWL_EXSTYLE);
+    if (ex & WS_EX_LAYERED) SetWindowLongA(g_view.win, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
+}
 
 static BOOL CALLBACK ViewFind(HWND h, LPARAM lp)
 {
@@ -4408,6 +4428,8 @@ static int ViewOpen(const char **why)
     if (!GetClientRect(game, &r) || !ClientToScreen(game, &o)) { *why = "the game window's size could not be read"; return 0; }
     int w = r.right - r.left, h = r.bottom - r.top;
     if (w < 64 || h < 64) { *why = "the game's window is minimised or too small"; return 0; }
+    o.y += h * VIEW_BAND_TOP / 100;                      /* the proof: a band, the game's own screen above and below */
+    h = h * VIEW_BAND_TALL / 100;
     static int registered;
     if (!registered) {
         WNDCLASSEXA wc;
@@ -4423,6 +4445,7 @@ static int ViewOpen(const char **why)
     else
         SetWindowPos(g_view.win, NULL, o.x, o.y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
     if (!g_view.win) { *why = "its window could not be made"; return 0; }
+    ViewOpaque();                                        /* whole again after the last screen's fade */
     if (!g_view.d3d) {
         typedef IDirect3D9 *(WINAPI *Create9)(UINT);
         HMODULE m = LoadLibraryA("d3d9.dll");
@@ -4476,13 +4499,26 @@ static int ViewFrame(const unsigned char *base, DWORD now)
 static DWORD WINAPI ViewThread(LPVOID arg)
 {
     const unsigned char *base = (const unsigned char *)arg;
-    int showing = 0;
+    int showing = 0, fadeOk = 1;
+    DWORD fadeAt = 0;
     char m[200];
     for (;;) {
         MSG msg;
         while (g_view.win && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
         int screen = *(volatile const unsigned int *)(base + FIRE_LAYER_RVA) != 0;
         DWORD now = GetTickCount();
+        if (fadeAt && screen) { fadeAt = 0; ViewOpaque(); }  /* a new screen in the middle of the fade: whole again */
+        if (fadeAt) {                                       /* the screen has gone: fade out, still moving, then hide */
+            LONG t = (LONG)(now - fadeAt);
+            if (t < VIEW_FADE_MS && fadeOk) {
+                fadeOk = ViewAlpha((BYTE)(255 - 255 * t / VIEW_FADE_MS));
+                if (!fadeOk) Log("  the view's fade: the system would not set its window's alpha, so it just goes");
+                if (fadeOk && ViewFrame(base, now)) { Sleep(1); continue; }
+            }
+            ShowWindow(g_view.win, SW_HIDE);
+            fadeAt = 0;
+            continue;
+        }
         if (screen && !showing) {
             const char *why = "";
             if (!ViewOpen(&why)) {
@@ -4507,7 +4543,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             continue;
         }
         if (showing) {
-            ShowWindow(g_view.win, SW_HIDE);
+            fadeAt = now;                                   /* hidden once the fade is over (above) */
             showing = 0;
             DWORD ms = now - g_view.since;
             wsprintfA(m, "  the view: %lu frames of its own in %lu.%lu s (%lu a second), its longest gap %lu ms",
