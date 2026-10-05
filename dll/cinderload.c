@@ -3352,11 +3352,191 @@ static int RevealBar(void)
     return 1;
 }
 
+/* ---- the view: CinderLoad's own window over the game while a loading screen shows (4 Oct 2026; piece 1, the proof) ----
+ * His ask (4 Oct): "I don't want the stutter of other add-ons and stuff loading to cause the map to stutter." The game
+ * draws a loading frame only when a phase reports progress (0x406900, from the three setters at 0x407F70/A0/D0), so
+ * while a big add-on file runs or the world finishes, nothing the game draws can move. The way out is a renderer of our
+ * own: for each loading screen this opens a borderless window over the game window's client area, owned by it (so it
+ * stays above the game only, and goes when it is minimised; never topmost over his other windows), that never takes
+ * the focus or a click, with its own Direct3D 9 device (the game's own d3d9.dll) on its own thread, presenting at the
+ * screen's refresh. The proof draws a dark field, a bar from the game's progress, and a marker sweeping across once
+ * every 2 s that keeps moving whatever the game does; the log says, per screen, its frames and its longest gap, beside
+ * the game's own (the fire's lines). Only while Data\CinderLoad\view.txt exists: delete it to turn this off. Any failure
+ * is logged once and the view stays off for the session; the game's own drawing is never touched. */
+#ifdef __i386__
+#include <d3d9.h>
+static HINSTANCE g_inst;
+static struct {
+    HWND win; IDirect3D9 *d3d; IDirect3DDevice9 *dev; int w, h;
+    DWORD since, last, gap, frames; float fill;
+} g_view;
+typedef struct { float x, y, z, rhw; DWORD c; } ViewVert;
+
+static BOOL CALLBACK ViewFind(HWND h, LPARAM lp)
+{
+    DWORD pid = 0;
+    char cls[64];
+    GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId() || h == g_view.win || !IsWindowVisible(h)) return TRUE;
+    if (!GetClassNameA(h, cls, (int)sizeof cls)) return TRUE;
+    cls[13] = 0;                                         /* "GxWindowClassD3d", "GxWindowClassOpenGl": 13 letters */
+    if (lstrcmpiA(cls, "GxWindowClass")) return TRUE;
+    *(HWND *)lp = h;
+    return FALSE;
+}
+static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    if (m == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    if (m == WM_NCHITTEST) return HTTRANSPARENT;
+    return DefWindowProcA(h, m, w, l);
+}
+/* Our window over the game window's client area, and the device on it: 1 when both are there and shown. why: what
+ * failed, for the log. */
+static int ViewOpen(const char **why)
+{
+    HWND game = NULL;
+    EnumWindows(ViewFind, (LPARAM)&game);
+    if (!game) { *why = "the game's window was not found"; return 0; }
+    RECT r;
+    POINT o = { 0, 0 };
+    if (!GetClientRect(game, &r) || !ClientToScreen(game, &o)) { *why = "the game window's size could not be read"; return 0; }
+    int w = r.right - r.left, h = r.bottom - r.top;
+    if (w < 64 || h < 64) { *why = "the game's window is minimised or too small"; return 0; }
+    static int registered;
+    if (!registered) {
+        WNDCLASSEXA wc;
+        unsigned char *z = (unsigned char *)&wc;
+        for (unsigned i = 0; i < sizeof wc; i++) z[i] = 0;
+        wc.cbSize = sizeof wc; wc.lpfnWndProc = ViewProc; wc.hInstance = g_inst; wc.lpszClassName = "CinderView";
+        if (!RegisterClassExA(&wc)) { *why = "its window class could not be made"; return 0; }
+        registered = 1;
+    }
+    if (!g_view.win)
+        g_view.win = CreateWindowExA(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT, "CinderView", "CinderLoad",
+                                     WS_POPUP, o.x, o.y, w, h, game, NULL, g_inst, NULL);
+    else
+        SetWindowPos(g_view.win, NULL, o.x, o.y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+    if (!g_view.win) { *why = "its window could not be made"; return 0; }
+    if (!g_view.d3d) {
+        typedef IDirect3D9 *(WINAPI *Create9)(UINT);
+        HMODULE m = LoadLibraryA("d3d9.dll");
+        Create9 c = m ? (Create9)(void *)GetProcAddress(m, "Direct3DCreate9") : NULL;
+        g_view.d3d = c ? c(D3D_SDK_VERSION) : NULL;
+        if (!g_view.d3d) { *why = "the game's d3d9.dll would not make Direct3D 9"; return 0; }
+    }
+    if (g_view.dev && (w != g_view.w || h != g_view.h)) { IDirect3DDevice9_Release(g_view.dev); g_view.dev = NULL; }
+    if (!g_view.dev) {
+        D3DPRESENT_PARAMETERS pp;
+        unsigned char *z = (unsigned char *)&pp;
+        for (unsigned i = 0; i < sizeof pp; i++) z[i] = 0;
+        pp.Windowed = TRUE; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.BackBufferFormat = D3DFMT_X8R8G8B8;
+        pp.BackBufferWidth = (UINT)w; pp.BackBufferHeight = (UINT)h; pp.BackBufferCount = 1; pp.hDeviceWindow = g_view.win;
+        pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+        if (FAILED(IDirect3D9_CreateDevice(g_view.d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, g_view.win,
+                                           D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED | D3DCREATE_FPU_PRESERVE,
+                                           &pp, &g_view.dev)) || !g_view.dev) {
+            g_view.dev = NULL;
+            *why = "its Direct3D 9 device could not be made";
+            return 0;
+        }
+        g_view.w = w; g_view.h = h;
+    }
+    ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
+    return 1;
+}
+static void ViewQuad(float x0, float y0, float x1, float y1, DWORD c)
+{
+    ViewVert v[4] = { { x0, y0, 0, 1, c }, { x1, y0, 0, 1, c }, { x0, y1, 0, 1, c }, { x1, y1, 0, 1, c } };
+    IDirect3DDevice9_DrawPrimitiveUP(g_view.dev, D3DPT_TRIANGLESTRIP, 2, v, sizeof v[0]);
+}
+/* One frame of the proof: 0 when the device is lost (the view then stays off). */
+static int ViewFrame(const unsigned char *base, DWORD now)
+{
+    float p = *(volatile const float *)(base + FIRE_PROGRESS_RVA);
+    if (p > g_view.fill && p <= 1.0f) g_view.fill = p;      /* the game writes 0 first, then the sum: keep the largest */
+    float W = (float)g_view.w, H = (float)g_view.h, s = (float)((now - g_view.since) % 2000) / 2000.0f;
+    IDirect3DDevice9_Clear(g_view.dev, 0, NULL, D3DCLEAR_TARGET, 0xFF0B1A2Eu, 1.0f, 0);
+    if (SUCCEEDED(IDirect3DDevice9_BeginScene(g_view.dev))) {
+        IDirect3DDevice9_SetFVF(g_view.dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        IDirect3DDevice9_SetRenderState(g_view.dev, D3DRS_LIGHTING, FALSE);
+        IDirect3DDevice9_SetRenderState(g_view.dev, D3DRS_CULLMODE, D3DCULL_NONE);
+        ViewQuad(0, H * 0.91f, W, H, 0xFF000000u);                                   /* the band under the bar */
+        ViewQuad(0, H * 0.93f, W * g_view.fill, H * 0.98f, 0xFFFF7D0Au);             /* the bar, the game's progress */
+        ViewQuad(W * s - H * 0.01f, H * 0.42f, W * s + H * 0.01f, H * 0.58f, 0xFFFFFFFFu);   /* the marker: never stops */
+        IDirect3DDevice9_EndScene(g_view.dev);
+    }
+    return SUCCEEDED(IDirect3DDevice9_Present(g_view.dev, NULL, NULL, NULL, NULL));
+}
+static DWORD WINAPI ViewThread(LPVOID arg)
+{
+    const unsigned char *base = (const unsigned char *)arg;
+    int showing = 0;
+    char m[200];
+    for (;;) {
+        MSG msg;
+        while (g_view.win && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
+        int screen = *(volatile const unsigned int *)(base + FIRE_LAYER_RVA) != 0;
+        DWORD now = GetTickCount();
+        if (screen && !showing) {
+            const char *why = "";
+            if (!ViewOpen(&why)) {
+                wsprintfA(m, "view off for this session: %s", why);
+                Log(m);
+                if (g_view.win) ShowWindow(g_view.win, SW_HIDE);
+                return 0;
+            }
+            showing = 1;
+            g_view.since = g_view.last = now; g_view.gap = 0; g_view.frames = 0; g_view.fill = 0;
+        }
+        if (screen) {
+            if (!ViewFrame(base, now)) {
+                Log("view off for this session: its device was lost");
+                ShowWindow(g_view.win, SW_HIDE);
+                return 0;
+            }
+            DWORD t = GetTickCount();
+            if (t - g_view.last > g_view.gap) g_view.gap = t - g_view.last;
+            g_view.last = t;
+            g_view.frames++;
+            continue;
+        }
+        if (showing) {
+            ShowWindow(g_view.win, SW_HIDE);
+            showing = 0;
+            DWORD ms = now - g_view.since;
+            wsprintfA(m, "  the view: %lu frames of its own in %lu.%lu s (%lu a second), its longest gap %lu ms",
+                      (unsigned long)g_view.frames, (unsigned long)(ms / 1000), (unsigned long)(ms % 1000 / 100),
+                      ms ? (unsigned long)(g_view.frames * 1000 / ms) : 0ul, (unsigned long)g_view.gap);
+            Log(m);
+        }
+        Sleep(5);
+    }
+}
+/* At start: the view's thread, only while Data\CinderLoad\view.txt exists. */
+static void ViewStart(void)
+{
+    char flag[MAX_PATH];
+    const unsigned char *base = (const unsigned char *)GetModuleHandleA(NULL);
+    if (!Join(flag, g_dir, "Data\\CinderLoad\\view.txt") || GetFileAttributesA(flag) == INVALID_FILE_ATTRIBUTES) return;
+    if (!Readable(base + FIRE_LAYER_RVA, 8)) { Log("view off: the loading screen's numbers could not be read"); return; }
+    HANDLE t = CreateThread(NULL, 0, ViewThread, (LPVOID)base, 0, NULL);
+    if (!t) { Log("view off: its thread could not be started"); return; }
+    CloseHandle(t);
+    Log("view on (the proof): its own window and Direct3D device over the game while a loading screen shows "
+        "(Data\\CinderLoad\\view.txt; delete it to turn this off)");
+}
+#else
+static void ViewStart(void) {}
+#endif
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
+#ifdef __i386__
+        g_inst = inst;
+#endif
         if (GameDir() && ChooseScreens()) {
             if (Apply()) {
                 int reveal = RevealWanted() && RevealBar();
@@ -3368,6 +3548,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             }
         }
         if (g_dir[0]) FireStart();
+        if (g_dir[0]) ViewStart();
     }
     return TRUE;
 }
