@@ -4706,6 +4706,7 @@ static struct {
     const unsigned char *(WINAPI *GetString)(unsigned);
     void (WINAPI *GetIntegerv)(unsigned, int *);
     unsigned (WINAPI *GetError)(void);
+    void (WINAPI *Finish)(void);
     void (WINAPI *CompressedTexImage2D)(unsigned, int, unsigned, int, int, int, int, const void *);   /* 1.3: by name */
     int (WINAPI *ChoosePF)(HDC, const PIXELFORMATDESCRIPTOR *);
     BOOL (WINAPI *SetPF)(HDC, int, const PIXELFORMATDESCRIPTOR *);
@@ -4738,6 +4739,7 @@ static int GlLoad(void)
         !GLP(TexParameteri, gl.lib, "glTexParameteri") || !GLP(TexImage2D, gl.lib, "glTexImage2D") ||
         !GLP(PixelStorei, gl.lib, "glPixelStorei") || !GLP(GetString, gl.lib, "glGetString") ||
         !GLP(GetIntegerv, gl.lib, "glGetIntegerv") || !GLP(GetError, gl.lib, "glGetError") ||
+        !GLP(Finish, gl.lib, "glFinish") ||
         !GLP(ChoosePF, gl.gdi, "ChoosePixelFormat") || !GLP(SetPF, gl.gdi, "SetPixelFormat") ||
         !GLP(Swap, gl.gdi, "SwapBuffers"))
         return gl.Swap = NULL, 0;
@@ -4888,9 +4890,9 @@ static int ViewOpen(const char **why)
     return 1;
 }
 static DWORD ViewNow(void);
-/* g_vl, drawn and shown: 0 when it could not be (the view then goes). drawn, when given: when the drawing was handed
- * over, before the swap (the slow frames' parts, below). */
-static int ViewFrame(DWORD *drawn)
+/* g_vl, drawn and shown: 0 when it could not be (the view then goes). drawn and gpu, when given: when the drawing was
+ * handed over, and when the GPU had finished it (glFinish), before the swap (the slow frames' parts, below). */
+static int ViewFrame(DWORD *drawn, DWORD *gpu)
 {
     gl.Viewport(0, 0, g_view.w, g_view.h);
     gl.ClearColor(0, 0, 0, 1);
@@ -4911,20 +4913,24 @@ static int ViewFrame(DWORD *drawn)
         gl.End();
     }
     if (drawn) *drawn = ViewNow();
+    if (gpu) { gl.Finish(); *gpu = ViewNow(); }
     return gl.Swap(g_view.dc) != 0;
 }
 /* The view's slow frames, per screen (4 Oct 2026: it paused about a tenth of a second inside the game's add-on hitches,
- * and the log said only its longest gap): frames over VIEW_SLOW_MS, the slowest one's parts, and the most each part took.
- * Parts: its messages, the wait for g_stepLock, the step, the drawing, the swap. */
+ * and the log said only its longest gap): frames over VIEW_SLOW_MS, how many of them came while the game was drawing
+ * nothing (its last frame HITCH_MS or more before), the slowest one's parts and the game's quiet then, and the most each
+ * part took. Parts: its messages, the wait for g_stepLock, the step, the drawing, the GPU finishing it (glFinish), the
+ * swap. (His next load, 23:50: all 106 ms of the slowest were in the swap; this splits the GPU's share out of it.) */
 #define VIEW_SLOW_MS 40
-#define VIEW_PARTS   5
-static struct { DWORD n, worst, part[VIEW_PARTS], most[VIEW_PARTS]; } g_slow;
-static void ViewSlowKeep(DWORD all, const DWORD *part)
+#define VIEW_PARTS   6
+static struct { DWORD n, quiet, worst, worstQuiet, part[VIEW_PARTS], most[VIEW_PARTS]; } g_slow;
+static void ViewSlowKeep(DWORD all, const DWORD *part, DWORD quiet)
 {
     for (int i = 0; i < VIEW_PARTS; i++) if (part[i] > g_slow.most[i]) g_slow.most[i] = part[i];
-    if (all >= VIEW_SLOW_MS) g_slow.n++;
+    if (all >= VIEW_SLOW_MS) { g_slow.n++; if (quiet >= HITCH_MS) g_slow.quiet++; }
     if (all > g_slow.worst) {
         g_slow.worst = all;
+        g_slow.worstQuiet = quiet;
         for (int i = 0; i < VIEW_PARTS; i++) g_slow.part[i] = part[i];
     }
 }
@@ -4983,7 +4989,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         if ((fadeAt || waitAt) && screen) { fadeAt = waitAt = 0; ShowWindow(g_view.win, SW_HIDE); }   /* a new screen */
         if (waitAt) {                                       /* the screen has gone: its last frame, until the world shows */
             if (!ViewFadeDue(now, waitAt, worldSeen)) {
-                if (!ViewFrame(NULL)) return ViewOff("its OpenGL frame could not be shown");
+                if (!ViewFrame(NULL, NULL)) return ViewOff("its OpenGL frame could not be shown");
                 if (!g_view.vsync) Sleep(4);
                 continue;
             }
@@ -4998,7 +5004,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             if (t < VIEW_FADE_MS && fadeOk) {
                 fadeOk = ViewAlpha((BYTE)(255 - 255 * t / VIEW_FADE_MS));
                 if (!fadeOk) Log("  the view's fade: the system would not set its window's alpha, so it just goes");
-                if (fadeOk && ViewFrame(NULL)) { if (!g_view.vsync) Sleep(4); continue; }
+                if (fadeOk && ViewFrame(NULL, NULL)) { if (!g_view.vsync) Sleep(4); continue; }
             }
             ShowWindow(g_view.win, SW_HIDE);
             fadeAt = 0;
@@ -5028,13 +5034,14 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             DWORD t2 = ViewNow();
             if (ViewStepLocked(p, t2, (float)g_view.w, (float)g_view.h)) built = 1;
             StepUnlock(held);
-            DWORD t3 = ViewNow(), t4 = t3;
+            DWORD t3 = ViewNow(), t4 = t3, t5 = t3, gameAt = g_gameAt;
+            LONG quiet = (LONG)(t0 - gameAt);                /* the game's last loading frame, before this one began */
             if (!built) { Sleep(1); continue; }              /* (this screen's first quads not made yet) */
-            if (!ViewFrame(&t4)) return ViewOff("its OpenGL frame could not be shown");
+            if (!ViewFrame(&t4, &t5)) return ViewOff("its OpenGL frame could not be shown");
             if (!g_view.vsync) Sleep(4);
             DWORD t = ViewNow();
-            part[0] = t1 - t0; part[1] = t2 - t1; part[2] = t3 - t2; part[3] = t4 - t3; part[4] = t - t4;
-            ViewSlowKeep(t - t0, part);
+            part[0] = t1 - t0; part[1] = t2 - t1; part[2] = t3 - t2; part[3] = t4 - t3; part[4] = t5 - t4; part[5] = t - t5;
+            ViewSlowKeep(t - t0, part, quiet > 0 ? (DWORD)quiet : 0);
             if (t - g_view.last > g_view.gap) g_view.gap = t - g_view.last;
             g_view.last = t;
             g_view.frames++;
@@ -5053,11 +5060,15 @@ static DWORD WINAPI ViewThread(LPVOID arg)
                       ms ? (unsigned long)(g_view.frames * 1000 / ms) : 0ul, (unsigned long)g_view.gap);
             Log(m);
             const DWORD *a = g_slow.part, *b = g_slow.most;
-            wsprintfA(m, "  its slow frames: %lu over %d ms; the slowest %lu ms (messages %lu, lock %lu, step %lu, draw %lu, "
-                      "swap %lu); each part's most: messages %lu, lock %lu, step %lu, draw %lu, swap %lu",
-                      (unsigned long)g_slow.n, VIEW_SLOW_MS, (unsigned long)g_slow.worst, (unsigned long)a[0],
-                      (unsigned long)a[1], (unsigned long)a[2], (unsigned long)a[3], (unsigned long)a[4], (unsigned long)b[0],
-                      (unsigned long)b[1], (unsigned long)b[2], (unsigned long)b[3], (unsigned long)b[4]);
+            wsprintfA(m, "  its slow frames: %lu over %d ms, %lu of them while the game drew nothing; the slowest %lu ms "
+                      "(messages %lu, lock %lu, step %lu, draw %lu, gpu %lu, swap %lu), the game's last frame %lu ms before it",
+                      (unsigned long)g_slow.n, VIEW_SLOW_MS, (unsigned long)g_slow.quiet, (unsigned long)g_slow.worst,
+                      (unsigned long)a[0], (unsigned long)a[1], (unsigned long)a[2], (unsigned long)a[3], (unsigned long)a[4],
+                      (unsigned long)a[5], (unsigned long)g_slow.worstQuiet);
+            Log(m);                                         /* (two lines: Log's own line holds 400 bytes) */
+            wsprintfA(m, "  its parts' most: messages %lu, lock %lu, step %lu, draw %lu, gpu %lu, swap %lu ms",
+                      (unsigned long)b[0], (unsigned long)b[1], (unsigned long)b[2], (unsigned long)b[3], (unsigned long)b[4],
+                      (unsigned long)b[5]);
             Log(m);
         }
         Sleep(5);
