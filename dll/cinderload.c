@@ -4028,11 +4028,24 @@ static void OverlayStrips(void *dev, const float *pos, const float *uv, const un
     }
 }
 
-/* From RevealStub, on the game's thread, before the fill's own setup: the overlay's quads, the sea under the names. */
+/* From RevealStub, on the game's thread, before the fill's own setup: the overlay's quads, the sea under the names.
+ * While the view's thread moves the view, it builds and draws the overlay itself (ViewOverlayBuild), so this frame, hidden
+ * under the view, only reads the class (the character list is the game's thread's alone) and builds nothing: the two
+ * never build the same layer at once. Otherwise all of it, under g_stepLock, so the view cannot take over halfway. */
 void WINAPI OverlayDraw(void) __attribute__((used));
+static void OverlayDrawAll(void);
 void WINAPI OverlayDraw(void)
 {
     if (!g_ovOn || !g_mapShown) return;
+    if (!g_viewSteps) {                                            /* (the view, once it moves them, keeps them) */
+        int held = StepLock();
+        if (!g_viewSteps) { OverlayDrawAll(); StepUnlock(held); return; }
+        StepUnlock(held);
+    }
+    ClassStep();
+}
+static void OverlayDrawAll(void)
+{
     DWORD now = GetTickCount();
     float t = (float)(now % 3600000u) / 1000.0f;
     static DWORD last;
@@ -4581,26 +4594,109 @@ static int TextHas(const char *list, const char *name)
     return 0;
 }
 
-/* A frame of the view, as the quads it draws (pixels, y down; tex 1: the world map, at its picture's u, v). Made where the
- * bar and the zoom move (under g_stepLock), drawn after; kept for the fade. */
-#define VIEW_QUADS 4
-typedef struct { int tex; float x0, y0, x1, y1, u0, v0, u1, v1; DWORD c; } ViewItem;
-static struct { int n; ViewItem q[VIEW_QUADS]; } g_vl;
-static void ViewPut(int tex, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, DWORD c)
+/* A frame of the view, as the quads it draws, in batches by picture (the renderer's seam: the tests read the list):
+ * pixels, y down; each corner's place on its picture and its colour (RGBA). Made where the bar and the zoom move (under
+ * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, each class's
+ * banner; g_viewTex holds OpenGL's name for each (0 while it has none). */
+enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_ARCH, VT_COUNT = VT_ARCH + 12 };
+static unsigned g_viewTex[VT_COUNT];
+typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
+#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + 8)
+#define VIEW_BATCHES   32
+static ViewVert g_vv[VIEW_QUADS_MAX * 4];
+static struct { int tex, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
+static int g_vbN, g_vvN, g_vbFull;
+static void ViewListStart(void) { g_vbN = g_vvN = g_vbFull = 0; }
+
+/* Room for one more quad of picture tex: its four corners, in the last batch when that is the same picture's; NULL once
+ * the list is full (that quad and every one after it left out, so nothing is drawn out of its order). */
+static ViewVert *ViewQuadNew(int tex)
 {
-    if (g_vl.n >= VIEW_QUADS) return;
-    ViewItem *q = &g_vl.q[g_vl.n++];
-    q->tex = tex; q->x0 = x0; q->y0 = y0; q->x1 = x1; q->y1 = y1; q->u0 = u0; q->v0 = v0; q->u1 = u1; q->v1 = v1; q->c = c;
+    if (g_vbFull || g_vvN + 4 > VIEW_QUADS_MAX * 4) return g_vbFull = 1, (ViewVert *)NULL;
+    if (!g_vbN || g_vb[g_vbN - 1].tex != tex) {
+        if (g_vbN >= VIEW_BATCHES) return g_vbFull = 1, (ViewVert *)NULL;
+        g_vb[g_vbN].tex = tex; g_vb[g_vbN].first = g_vvN; g_vb[g_vbN].count = 0;
+        g_vbN++;
+    }
+    ViewVert *v = &g_vv[g_vvN];
+    g_vvN += 4;
+    g_vb[g_vbN - 1].count += 4;
+    return v;
 }
-/* W x H pixels: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its top left, [2], [3] its
- * bottom right), and slice 1's plain bar, its track dark and its fill the bar as shown. */
-static void ViewBuild(float W, float H, float shown)
+static void ViewVertSet(ViewVert *v, float x, float y, float u, float t, DWORD argb)
 {
-    g_vl.n = 0;
-    ViewPut(1, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
+    v->x = x; v->y = y; v->u = u; v->v = t;
+    v->c[0] = (unsigned char)(argb >> 16); v->c[1] = (unsigned char)(argb >> 8); v->c[2] = (unsigned char)argb;
+    v->c[3] = (unsigned char)(argb >> 24);
+}
+/* A rectangle, x0, y0 its top left (pixels), u0, v0 there on its picture. */
+static void ViewRect(int tex, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, DWORD c)
+{
+    ViewVert *q = ViewQuadNew(tex);
+    if (!q) return;
+    ViewVertSet(q, x0, y0, u0, v0, c); ViewVertSet(q + 1, x1, y0, u1, v0, c);
+    ViewVertSet(q + 2, x1, y1, u1, v1, c); ViewVertSet(q + 3, x0, y1, u0, v1, c);
+}
+/* quads of one of the overlay's sets (QuadPut's strips: screen fractions up from the bottom left; each quad's corners
+ * bottom left, bottom right, top left, top right) into the list on picture tex, for a W x H window. */
+static void ViewStrips(int tex, const float *pos, const float *uv, const unsigned *col, int quads, float W, float H)
+{
+    static const int order[4] = { 0, 1, 3, 2 };                 /* round the quad: bottom left, bottom right, top right */
+    for (int q = 0; q < quads; q++) {
+        int in = q % LBL_BATCH, s = (q / LBL_BATCH) * (LBL_BATCH * 6 - 2) + (in ? in * 6 : 0);
+        ViewVert *v = ViewQuadNew(tex);
+        if (!v) return;
+        for (int k = 0; k < 4; k++) {
+            int i = s + order[k];
+            ViewVertSet(v + k, pos[i * 3] * W, (1 - pos[i * 3 + 1]) * H, uv[i * 2], uv[i * 2 + 1], col[i]);
+        }
+    }
+}
+
+/* The overlay's layers over the map (slice 2, 5 Oct 2026), in the game's own order (OverlayDraw), each made by its own
+ * builder and copied into the list with its sheet. The view's thread, under g_stepLock: while it moves the view, the
+ * game's frame builds none of them (OverlayDraw stands down and only reads the class, which only the game's thread
+ * may). A layer whose sheet OpenGL does not have is left out. The log's black band under the bar is the bar's (slice
+ * 3). now: the view's clock. */
+static DWORD g_ovViewAt;
+static void ViewOverlayBuild(float W, float H, DWORD now)
+{
+    if (!g_ovOn || !g_mapShown) return;
+    float t = (float)(now % 3600000u) / 1000.0f, dt = g_ovViewAt ? (float)(LONG)(now - g_ovViewAt) / 1000.0f : 0;
+    g_ovViewAt = now;
+    if (dt < 0) dt = 0;
+    if (dt > 0.25f) dt = 0.25f;                                  /* (a new screen, or a pause: no leap of the currents) */
+    if (g_wavesOn && g_viewTex[VT_WAVES]) { WaveBuild(t); ViewStrips(VT_WAVES, g_wvPos, g_wvUV, g_wvCol, g_wvQuads, W, H); }
+    if (g_marksOn && g_viewTex[VT_MARKS]) { MaelstromBuild(t); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
+    if (g_flowOn && g_viewTex[VT_FLOW]) { FlowBuild(t, dt); ViewStrips(VT_FLOW, g_flPos, g_flUV, g_flCol, g_flQuads, W, H); }
+    if (g_seaOn && g_viewTex[VT_SEA]) { GlintsBuild(t); ViewStrips(VT_SEA, g_glPos, g_glUV, g_glCol, g_glQuads, W, H); }
+    if (g_marksOn && g_viewTex[VT_MARKS]) { RippleBuild(t, now); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
+    if (g_glowOn && g_viewTex[VT_GLOW]) {                        /* the arrival's subzone, or the round glow in its place */
+        GlowBuild(now);
+        if (g_glowQuads) ViewStrips(VT_GLOW, g_glowPos, g_glowUV, g_glowCol, 1, W, H);
+        if (g_mkQuads && g_marksOn && g_viewTex[VT_MARKS]) ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H);
+    }
+    if (g_lblOn && g_viewTex[VT_LABELS]) { LabelsBuild(); ViewStrips(VT_LABELS, g_lblPos, g_lblUV, g_lblCol, g_lblQuads, W, H); }
+    if (g_marksOn && g_viewTex[VT_MARKS]) { BadgeBuild(now); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
+    LONG c = g_class;
+    if (g_archOn && c > 0 && c < 12 && g_archHas[c] && g_viewTex[VT_ARCH + c]) {
+        ArchBuild();
+        ViewStrips(VT_ARCH + (int)c, g_archPos, g_archUV, g_archCol, 1, W, H);
+    }
+    if (g_logoOn && g_viewTex[VT_LOGO]) { LogoBuild(); ViewStrips(VT_LOGO, g_logoPos, g_logoUV, g_logoCol, 1, W, H); }
+}
+
+/* W x H pixels at the view's clock now: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its
+ * top left, [2], [3] its bottom right), the overlay over it, and slice 1's plain bar along the bottom, its track dark
+ * and its fill the bar as shown. */
+static void ViewBuild(float W, float H, float shown, DWORD now)
+{
+    ViewListStart();
+    ViewRect(VT_MAP, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
+    ViewOverlayBuild(W, H, now);
     float top = H * (1 - VIEW_BAR_TALL);
-    ViewPut(0, 0, top, W, H, 0, 0, 0, 0, 0xFF0A0604u);
-    if (shown > 0) ViewPut(0, 0, top, W * FireClamp(shown, 0, 1), H, 0, 0, 0, 0, 0xFFFF7D0Au);
+    ViewRect(-1, 0, top, W, H, 0, 0, 0, 0, 0xFF0A0604u);
+    if (shown > 0) ViewRect(-1, 0, top, W * FireClamp(shown, 0, 1), H, 0, 0, 0, 0, 0xFFFF7D0Au);
 }
 
 /* The view's thread, a screen up and the view not open: 1 once the game's first frame of it has begun it (seen: the
@@ -4626,7 +4722,7 @@ static int ViewStepLocked(float p, DWORD now, float W, float H)
     float s = BarStep(p, now);
     if (g_driftOn) DriftStep(s, now);
     g_viewShown = s;
-    ViewBuild(W, H, s);
+    ViewBuild(W, H, s, now);
     return 1;
 }
 /* The same, taking the lock itself: the tests' way in (the view's thread times its wait for the lock). */
@@ -4707,6 +4803,12 @@ static int ViewFadeDue(DWORD now, DWORD goneAt, LONG seen)
 #define GL_DXT1_RGB_             0x83F0
 #define GL_DXT1_RGBA_            0x83F1
 #define GL_DXT5_RGBA_            0x83F3
+#define GL_VERTEX_ARRAY_         0x8074
+#define GL_COLOR_ARRAY_          0x8076
+#define GL_TEXTURE_COORD_ARRAY_  0x8078
+#define GL_FLOAT_                0x1406
+#define GL_SRC_ALPHA_            0x0302
+#define GL_ONE_MINUS_SRC_ALPHA_  0x0303
 static struct {
     HMODULE lib, gdi;
     HGLRC (WINAPI *CreateContext)(HDC);
@@ -4720,11 +4822,12 @@ static struct {
     void (WINAPI *Ortho)(double, double, double, double, double, double);
     void (WINAPI *Enable)(unsigned);
     void (WINAPI *Disable)(unsigned);
-    void (WINAPI *Begin)(unsigned);
-    void (WINAPI *End)(void);
-    void (WINAPI *Color4ub)(unsigned char, unsigned char, unsigned char, unsigned char);
-    void (WINAPI *TexCoord2f)(float, float);
-    void (WINAPI *Vertex2f)(float, float);
+    void (WINAPI *EnableClientState)(unsigned);
+    void (WINAPI *VertexPointer)(int, unsigned, int, const void *);
+    void (WINAPI *TexCoordPointer)(int, unsigned, int, const void *);
+    void (WINAPI *ColorPointer)(int, unsigned, int, const void *);
+    void (WINAPI *DrawArrays)(unsigned, int, int);
+    void (WINAPI *BlendFunc)(unsigned, unsigned);
     void (WINAPI *GenTextures)(int, unsigned *);
     void (WINAPI *BindTexture)(unsigned, unsigned);
     void (WINAPI *TexParameteri)(unsigned, unsigned, int);
@@ -4741,11 +4844,12 @@ static struct {
 } gl;
 static HINSTANCE g_inst;
 static struct {
-    HWND win; HDC dc; HGLRC rc; int w, h, vsync;
-    unsigned tex;
-    unsigned char *blp; unsigned blpLen;                        /* the picture's file, until OpenGL has it */
+    HWND win; HDC dc; HGLRC rc; int w, h, vsync, s3tc, maxTex;
+    unsigned char *blp[VT_COUNT]; unsigned len[VT_COUNT];      /* each picture's file, read as the game starts, until
+                                                                 * OpenGL has it */
     DWORD since, last, gap, frames;
 } g_view;
+static char g_viewArch[12][80];                                 /* each class's banner's path */
 
 /* opengl32.dll and gdi32.dll's few calls: 1 when every one is there. */
 static int GlLoad(void)
@@ -4760,8 +4864,9 @@ static int GlLoad(void)
         !GLP(ClearColor, gl.lib, "glClearColor") || !GLP(Clear, gl.lib, "glClear") ||
         !GLP(MatrixMode, gl.lib, "glMatrixMode") || !GLP(LoadIdentity, gl.lib, "glLoadIdentity") ||
         !GLP(Ortho, gl.lib, "glOrtho") || !GLP(Enable, gl.lib, "glEnable") || !GLP(Disable, gl.lib, "glDisable") ||
-        !GLP(Begin, gl.lib, "glBegin") || !GLP(End, gl.lib, "glEnd") || !GLP(Color4ub, gl.lib, "glColor4ub") ||
-        !GLP(TexCoord2f, gl.lib, "glTexCoord2f") || !GLP(Vertex2f, gl.lib, "glVertex2f") ||
+        !GLP(EnableClientState, gl.lib, "glEnableClientState") || !GLP(VertexPointer, gl.lib, "glVertexPointer") ||
+        !GLP(TexCoordPointer, gl.lib, "glTexCoordPointer") || !GLP(ColorPointer, gl.lib, "glColorPointer") ||
+        !GLP(DrawArrays, gl.lib, "glDrawArrays") || !GLP(BlendFunc, gl.lib, "glBlendFunc") ||
         !GLP(GenTextures, gl.lib, "glGenTextures") || !GLP(BindTexture, gl.lib, "glBindTexture") ||
         !GLP(TexParameteri, gl.lib, "glTexParameteri") || !GLP(TexImage2D, gl.lib, "glTexImage2D") ||
         !GLP(PixelStorei, gl.lib, "glPixelStorei") || !GLP(GetString, gl.lib, "glGetString") ||
@@ -4782,56 +4887,68 @@ static PROC GlExt(const char *name)
     return v > 3 && v != (ULONG_PTR)-1 ? f : NULL;
 }
 
-/* The world map's picture, given to OpenGL once a context is current: 1 when it took it. why: what failed, for the log. */
-static int ViewTexture(const char **why)
+/* What this OpenGL takes, once its context is current: DXT blocks as they are (GL_EXT_texture_compression_s3tc, and
+ * its call by name), and its largest picture. */
+static void ViewGlCaps(void)
 {
-    BlpInfo b;
-    char m[200];
-    if (!BlpParse(g_view.blp, g_view.blpLen, &b)) { *why = "CinderMap.blp is not a BLP2 of DXT1 or DXT5 blocks whole"; return 0; }
-    int max = 0, s3tc = 0;
-    gl.GetIntegerv(GL_MAX_TEXTURE_SIZE_, &max);
     const char *ext = (const char *)gl.GetString(GL_EXTENSIONS_);
+    gl.GetIntegerv(GL_MAX_TEXTURE_SIZE_, &g_view.maxTex);
     if (ext && TextHas(ext, "GL_EXT_texture_compression_s3tc")) {
         *(PROC *)&gl.CompressedTexImage2D = GlExt("glCompressedTexImage2D");
         if (!gl.CompressedTexImage2D) *(PROC *)&gl.CompressedTexImage2D = GlExt("glCompressedTexImage2DARB");
-        s3tc = gl.CompressedTexImage2D != NULL;
+        g_view.s3tc = gl.CompressedTexImage2D != NULL;
     }
-    int first = 0;
+}
+/* Picture slot's file, given to OpenGL: 1 when it took it (g_viewTex[slot]); the file's memory goes either way. why:
+ * what failed, for the log. */
+static int ViewTexUp(int slot, const char **why)
+{
+    BlpInfo b;
+    unsigned char *d = g_view.blp[slot];
+    unsigned n = g_view.len[slot];
+    g_view.blp[slot] = NULL;
+    int ok = 0, max = g_view.maxTex, s3tc = g_view.s3tc, first = 0;
+    unsigned char *rgba = NULL;
+    if (!d || !BlpParse(d, n, &b)) { *why = "it is not a BLP2 of DXT1 or DXT5 blocks whole"; goto done; }
     while (first < b.levels - 1 && ((int)(b.w >> first) > max || (int)(b.h >> first) > max ||
                                     (!s3tc && (b.w >> first) > VIEW_DECODE_MAX)))
         first++;
     unsigned w0 = b.w >> first, h0 = b.h >> first;
-    if (!w0 || !h0 || (int)w0 > max || (int)h0 > max) { *why = "its OpenGL takes no picture that large"; return 0; }
-    unsigned char *rgba = s3tc ? NULL : (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w0 * h0 * 4);
-    if (!s3tc && !rgba) { *why = "no memory to decode its picture"; return 0; }
+    if (!w0 || !h0 || (int)w0 > max || (int)h0 > max) { *why = "its OpenGL takes no picture that large"; goto done; }
+    rgba = s3tc ? NULL : (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w0 * h0 * 4);
+    if (!s3tc && !rgba) { *why = "no memory to decode it"; goto done; }
     while (gl.GetError()) {}
-    gl.GenTextures(1, &g_view.tex);
-    gl.BindTexture(GL_TEXTURE_2D_, g_view.tex);
+    gl.GenTextures(1, &g_viewTex[slot]);
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
     gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
     unsigned fmt = b.dxt == 5 ? GL_DXT5_RGBA_ : b.alpha ? GL_DXT1_RGBA_ : GL_DXT1_RGB_;
     for (int i = first; i < b.levels; i++) {
         unsigned w = b.w >> i ? b.w >> i : 1, h = b.h >> i ? b.h >> i : 1;
         if (s3tc)
-            gl.CompressedTexImage2D(GL_TEXTURE_2D_, i - first, fmt, (int)w, (int)h, 0, (int)b.len[i], g_view.blp + b.off[i]);
+            gl.CompressedTexImage2D(GL_TEXTURE_2D_, i - first, fmt, (int)w, (int)h, 0, (int)b.len[i], d + b.off[i]);
         else {
-            DxtDecode(g_view.blp + b.off[i], w, h, b.dxt, rgba);
+            DxtDecode(d + b.off[i], w, h, b.dxt, rgba);
             gl.TexImage2D(GL_TEXTURE_2D_, i - first, GL_RGBA8_, (int)w, (int)h, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, rgba);
         }
     }
-    if (rgba) HeapFree(GetProcessHeap(), 0, rgba);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, b.levels - 1 - first);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, b.levels - first > 1 ? GL_LINEAR_MIPMAP_LINEAR_ : GL_LINEAR_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
-    if (gl.GetError()) { *why = "its OpenGL would not take the world map's picture"; return 0; }
-    HeapFree(GetProcessHeap(), 0, g_view.blp);
-    g_view.blp = NULL;
-    wsprintfA(m, "  the view's picture: CinderMap.blp, %u x %u in %d levels, %s%s", w0, h0, b.levels - first,
-              s3tc ? "its DXT blocks as they are" : "decoded here (its OpenGL has no DXT)",
-              g_view.vsync ? ", at the screen's refresh" : ", paced by the clock (no vsync)");
-    Log(m);
-    return 1;
+    if (gl.GetError()) { g_viewTex[slot] = 0; *why = "its OpenGL would not take it"; goto done; }
+    if (slot == VT_MAP) {
+        char m[200];
+        wsprintfA(m, "  the view's picture: CinderMap.blp, %u x %u in %d levels, %s%s", w0, h0, b.levels - first,
+                  s3tc ? "its DXT blocks as they are" : "decoded here (its OpenGL has no DXT)",
+                  g_view.vsync ? ", at the screen's refresh" : ", paced by the clock (no vsync)");
+        Log(m);
+    }
+    ok = 1;
+done:
+    if (rgba) HeapFree(GetProcessHeap(), 0, rgba);
+    if (d) HeapFree(GetProcessHeap(), 0, d);
+    return ok;
 }
 
 /* The window's own alpha (a layered window's): 255 whole. 0 when the system will not do it. */
@@ -4911,14 +5028,29 @@ static int ViewOpen(const char **why)
         *(PROC *)&interval = GlExt("wglSwapIntervalEXT");
         g_view.vsync = interval && interval(1);
     }
-    if (!g_view.tex && !ViewTexture(why)) return 0;
+    if (!g_viewTex[VT_MAP]) {                            /* once: the pictures, read as the game started */
+        ViewGlCaps();
+        if (!ViewTexUp(VT_MAP, why)) return 0;
+        int sheets = 0, given = 0;
+        char m[200];
+        for (int i = VT_MAP + 1; i < VT_COUNT; i++) {
+            if (!g_view.blp[i]) continue;
+            const char *w = "";
+            sheets++;
+            if (ViewTexUp(i, &w)) given++;
+            else { wsprintfA(m, "  the view: an overlay's sheet (slot %d) was not given to OpenGL, as %s; that layer is left out", i, w); Log(m); }
+        }
+        wsprintfA(m, "  the view's overlay: %d of its %d sheets given to OpenGL", given, sheets);
+        Log(m);
+    }
     g_view.w = w; g_view.h = h;
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
     return 1;
 }
 static DWORD ViewNow(void);
-/* g_vl, drawn and shown: 0 when it could not be (the view then goes). drawn and gpu, when given: when the drawing was
- * handed over, and when the GPU had finished it (glFinish), before the swap (the slow frames' parts, below). */
+/* The list (g_vb, g_vv), drawn and shown: 0 when it could not be (the view then goes). drawn and gpu, when given: when
+ * the drawing was handed over, and when the GPU had finished it (glFinish), before the swap (the slow frames' parts,
+ * below). */
 static int ViewFrame(DWORD *drawn, DWORD *gpu)
 {
     gl.Viewport(0, 0, g_view.w, g_view.h);
@@ -4926,18 +5058,19 @@ static int ViewFrame(DWORD *drawn, DWORD *gpu)
     gl.Clear(GL_COLOR_BUFFER_BIT_);
     gl.MatrixMode(GL_PROJECTION_); gl.LoadIdentity(); gl.Ortho(0, g_view.w, g_view.h, 0, -1, 1);   /* pixels, y down */
     gl.MatrixMode(GL_MODELVIEW_); gl.LoadIdentity();
-    gl.Disable(GL_DEPTH_TEST_); gl.Disable(GL_BLEND_);
-    for (int i = 0; i < g_vl.n; i++) {
-        const ViewItem *q = &g_vl.q[i];
-        if (q->tex) { gl.Enable(GL_TEXTURE_2D_); gl.BindTexture(GL_TEXTURE_2D_, g_view.tex); }
-        else gl.Disable(GL_TEXTURE_2D_);
-        gl.Color4ub((unsigned char)(q->c >> 16), (unsigned char)(q->c >> 8), (unsigned char)q->c, (unsigned char)(q->c >> 24));
-        gl.Begin(GL_QUADS_);
-        gl.TexCoord2f(q->u0, q->v0); gl.Vertex2f(q->x0, q->y0);
-        gl.TexCoord2f(q->u1, q->v0); gl.Vertex2f(q->x1, q->y0);
-        gl.TexCoord2f(q->u1, q->v1); gl.Vertex2f(q->x1, q->y1);
-        gl.TexCoord2f(q->u0, q->v1); gl.Vertex2f(q->x0, q->y1);
-        gl.End();
+    gl.Disable(GL_DEPTH_TEST_);
+    gl.Enable(GL_BLEND_);
+    gl.BlendFunc(GL_SRC_ALPHA_, GL_ONE_MINUS_SRC_ALPHA_);
+    gl.EnableClientState(GL_VERTEX_ARRAY_); gl.EnableClientState(GL_TEXTURE_COORD_ARRAY_); gl.EnableClientState(GL_COLOR_ARRAY_);
+    gl.VertexPointer(2, GL_FLOAT_, (int)sizeof(ViewVert), &g_vv[0].x);
+    gl.TexCoordPointer(2, GL_FLOAT_, (int)sizeof(ViewVert), &g_vv[0].u);
+    gl.ColorPointer(4, GL_UNSIGNED_BYTE_, (int)sizeof(ViewVert), g_vv[0].c);
+    for (int i = 0; i < g_vbN; i++) {
+        int t = g_vb[i].tex;
+        if (t < 0) gl.Disable(GL_TEXTURE_2D_);
+        else if (!g_viewTex[t]) continue;
+        else { gl.Enable(GL_TEXTURE_2D_); gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[t]); }
+        gl.DrawArrays(GL_QUADS_, g_vb[i].first, g_vb[i].count);
     }
     if (drawn) *drawn = ViewNow();
     if (gpu) { gl.Finish(); *gpu = ViewNow(); }
@@ -4989,7 +5122,8 @@ static DWORD ViewOff(const char *why)
     InterlockedExchange(&g_viewSteps, 0);
     StepUnlock(held);
     if (g_view.win) ShowWindow(g_view.win, SW_HIDE);
-    if (g_view.blp) { HeapFree(GetProcessHeap(), 0, g_view.blp); g_view.blp = NULL; }
+    for (int i = 0; i < VT_COUNT; i++)
+        if (g_view.blp[i]) { HeapFree(GetProcessHeap(), 0, g_view.blp[i]); g_view.blp[i] = NULL; }
     wsprintfA(m, "view off for this session: %s", why);
     Log(m);
     return 0;
@@ -4998,10 +5132,23 @@ static DWORD WINAPI ViewThread(LPVOID arg)
 {
     const unsigned char *base = (const unsigned char *)arg;
     char m[400];
-    int r = mpq_read(&kIo, "patch-~.MPQ", MAP_PATH, &g_view.blp, &g_view.blpLen);
+    int r = mpq_read(&kIo, "patch-~.MPQ", MAP_PATH, &g_view.blp[VT_MAP], &g_view.len[VT_MAP]);
     if (r != MPQ_OK) {
         wsprintfA(m, "its picture could not be read from Data\\patch-~.MPQ (%s)", mpq_error_text(r));
         return ViewOff(m);
+    }
+    if (g_ovOn) {                                       /* the overlay's sheets (a layer whose sheet will not read is left out) */
+        static const struct { int slot, *on; const char *path; } kSheets[] = {
+            { VT_SEA, &g_seaOn, SEA_PATH }, { VT_MARKS, &g_marksOn, MARKS_PATH }, { VT_WAVES, &g_wavesOn, WAVES_PATH },
+            { VT_FLOW, &g_flowOn, FLOW_PATH }, { VT_GLOW, &g_glowOn, GLOW_PATH }, { VT_LABELS, &g_lblOn, LABELS_PATH },
+            { VT_LOGO, &g_logoOn, LOGO_PATH } };
+        for (unsigned i = 0; i < sizeof kSheets / sizeof kSheets[0]; i++)
+            if (*kSheets[i].on) mpq_read(&kIo, "patch-~.MPQ", kSheets[i].path, &g_view.blp[kSheets[i].slot], &g_view.len[kSheets[i].slot]);
+        for (unsigned c = 1; c < 12; c++)
+            if (g_archOn && g_archHas[c] && ArchPath(c, g_viewArch[c]) && lstrlenA(g_viewArch[c]) + 5 < (int)sizeof g_viewArch[c]) {
+                lstrcatA(g_viewArch[c], ".blp");
+                mpq_read(&kIo, "patch-~.MPQ", g_viewArch[c], &g_view.blp[VT_ARCH + c], &g_view.len[VT_ARCH + c]);
+            }
     }
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
     LONG seen = g_gameSeq, worldSeen = 0;

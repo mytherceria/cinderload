@@ -2777,14 +2777,16 @@ static void ViewTests(void)
     {
         static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
         memcpy(g_bgUV, uv, sizeof uv);
-        ViewBuild(1000, 500, 0.25f);
-        const ViewItem *q = g_vl.q;
-        int ok = g_vl.n == 3 && q[0].tex == 1 && q[0].x0 == 0 && q[0].y0 == 0 && q[0].x1 == 1000 && q[0].y1 == 500 &&
-                 q[0].u0 == 0.2f && q[0].v0 == 0.3f && q[0].u1 == 0.6f && q[0].v1 == 0.7f && q[0].c == 0xFFFFFFFFu &&
-                 !q[1].tex && q[1].x0 == 0 && q[1].x1 == 1000 && fabsf(q[1].y0 - 496) < 1e-3f && q[1].y1 == 500 &&
-                 !q[2].tex && q[2].x1 == 250 && q[2].y0 == q[1].y0;
-        ViewBuild(1000, 500, 0); ok &= g_vl.n == 2;
-        ViewBuild(1000, 500, 1.5f); ok &= g_vl.n == 3 && g_vl.q[2].x1 == 1000;
+        g_ovOn = 0;
+        ViewBuild(1000, 500, 0.25f, 0);
+        const ViewVert *v = g_vv;
+        int ok = g_vbN == 2 && g_vb[0].tex == VT_MAP && g_vb[0].first == 0 && g_vb[0].count == 4 && g_vb[1].tex == -1 &&
+                 g_vb[1].first == 4 && g_vb[1].count == 8 && v[0].x == 0 && v[0].y == 0 && v[0].u == 0.2f && v[0].v == 0.3f &&
+                 v[2].x == 1000 && v[2].y == 500 && v[2].u == 0.6f && v[2].v == 0.7f && v[1].x == 1000 && v[1].y == 0 &&
+                 v[0].c[0] == 255 && v[0].c[3] == 255 && fabsf(v[4].y - 496) < 1e-3f && v[5].x == 1000 && v[6].y == 500 &&
+                 v[9].x == 250 && v[8].c[0] == 0xFF && v[8].c[1] == 0x7D && v[8].c[2] == 0x0A && v[8].c[3] == 0xFF;
+        ViewBuild(1000, 500, 0, 0); ok &= g_vbN == 2 && g_vb[1].count == 4;
+        ViewBuild(1000, 500, 1.5f, 0); ok &= g_vb[1].count == 8 && g_vv[9].x == 1000;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         Check(ok, "the view's frame: the world map over the whole window at the zoom's corners, top left to bottom right; the bar along the bottom to the bar as shown");
     }
@@ -2819,7 +2821,7 @@ static void ViewTests(void)
         ok &= g_destOk && g_viewH < 0.5f;
         /* the view takes them: from here its frames (7 ms) step them, the game's frame only notes its facts */
         t += 7;
-        ok &= ViewStep(p, t, 1000, 500) && g_viewSteps == 1 && g_stepLock.held == 0 && g_vl.n == 3;
+        ok &= ViewStep(p, t, 1000, 500) && g_viewSteps == 1 && g_stepLock.held == 0 && g_vbN == 2 && g_vb[0].tex == VT_MAP;
         DWORD at = g_dispAt;
         float d = g_disp, h = g_viewH;
         LONG frames = g_frmCount;
@@ -2920,6 +2922,60 @@ static void ViewTests(void)
         ok &= !g_dataLo && !g_dataHi;
         memset(h, 0, 0x400);
         Check(ok, "WoW.exe's .data found in its own headers: reads inside it skip VirtualQuery, every other read is checked, and a header that is not a PE image's finds nothing");
+    }
+    /* slice 2: the overlay's quads into the view's list (QuadPut's strips, screen fractions up from the bottom left) as
+     * pixels down from the top left, each quad round its corners, across a strip's end too; the list never overruns */
+    {
+        static float pos[130 * 6 * 3], uv[130 * 6 * 2];
+        static unsigned col[130 * 6];
+        for (int q = 0; q < 122; q++) {
+            float x0 = q * 0.001f, x[4] = { x0, x0 + 0.5f, x0, x0 + 0.5f }, y[4] = { 0.1f, 0.1f, 0.3f, 0.3f };
+            float tu[4] = { 0, 1, 0, 1 }, tv[4] = { 1, 1, 0, 0 };
+            QuadPut(pos, uv, col, q, x, y, tu, tv, 0x80FF0000u | (unsigned)q);
+        }
+        ViewListStart();
+        ViewStrips(VT_LABELS, pos, uv, col, 122, 1000, 500);
+        int ok = g_vbN == 1 && g_vb[0].tex == VT_LABELS && g_vb[0].count == 122 * 4;
+        for (int q = 0; q < 122; q++) {
+            const ViewVert *w = g_vv + 4 * q;
+            float x0 = q * 1.0f;                                         /* q * 0.001 of 1000 pixels */
+            ok &= fabsf(w[0].x - x0) < 1e-3f && fabsf(w[0].y - 450) < 1e-3f && fabsf(w[1].x - x0 - 500) < 1e-3f &&
+                  fabsf(w[2].y - 350) < 1e-3f && fabsf(w[2].x - x0 - 500) < 1e-3f && fabsf(w[3].x - x0) < 1e-3f &&
+                  w[0].u == 0 && w[0].v == 1 && w[2].u == 1 && w[2].v == 0 && w[0].c[0] == 0xFF && w[0].c[2] == (unsigned char)q &&
+                  w[0].c[3] == 0x80;
+        }
+        ViewListStart();
+        for (int i = 0; i < VIEW_BATCHES + 8; i++) ViewRect(i & 1 ? VT_SEA : VT_MARKS, 0, 0, 1, 1, 0, 0, 1, 1, 0);
+        ok &= g_vbN == VIEW_BATCHES && g_vvN == VIEW_BATCHES * 4;            /* (and nothing after the first left out) */
+        Check(ok, "slice 2: the overlay's strips into the view's list as pixels from the top left, round each quad's corners, across a strip's end; colours as RGBA; no more batches than it holds");
+    }
+    /* slice 2: the layers in the game's own order, each on its sheet, a layer without one left out */
+    {
+        Fresh("view-overlay");
+        PackLive(1 | 2 | 4 | 8 | 32 | 64, 0);
+        Start();
+        int ok = g_ovOn && g_seaOn && g_logoOn && g_marksOn;
+        g_mapShown = 1; g_scrW = 1000; g_scrH = 500;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+        g_viewTex[VT_MAP] = g_viewTex[VT_MARKS] = g_viewTex[VT_SEA] = g_viewTex[VT_LOGO] = 1;
+        ViewBuild(1000, 500, 0.5f, 100000);
+        int order[VIEW_BATCHES], n = 0, logo = -1;
+        for (int i = 0; i < g_vbN; i++) { order[n++] = g_vb[i].tex; if (g_vb[i].tex == VT_LOGO) logo = i; }
+        ok &= n >= 4 && order[0] == VT_MAP && order[1] == VT_MARKS && order[n - 1] == -1 && order[n - 2] == VT_LOGO;
+        for (int i = 2; i < n - 2; i++) ok &= order[i] == VT_SEA || order[i] == VT_MARKS;   /* glints, ripple, badge */
+        if (logo >= 0) {
+            const ViewVert *w = g_vv + g_vb[logo].first;
+            ok &= g_vb[logo].count == 4 && fabsf(w[0].x - g_logoPos[0] * 1000) < 1e-3f &&
+                  fabsf(w[0].y - (1 - g_logoPos[1]) * 500) < 1e-3f && fabsf(w[2].x - g_logoPos[9] * 1000) < 1e-3f &&
+                  fabsf(w[2].y - (1 - g_logoPos[10]) * 500) < 1e-3f && w[2].u == g_logoUV[6] && w[2].v == g_logoUV[7];
+        } else ok = 0;
+        g_viewTex[VT_LOGO] = 0;
+        ViewBuild(1000, 500, 0.5f, 100020);
+        for (int i = 0; i < g_vbN; i++) ok &= g_vb[i].tex != VT_LOGO;
+        g_mapShown = 0; g_ovOn = 0;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+        Check(ok, "slice 2: the view's layers in the game's order (the map, the Maelstrom, the sea's glints and marks, the logo, then the bar), the logo where the game puts it; a layer whose sheet OpenGL lacks is left out");
     }
     /* the view's own clock (his yes, 5 Oct: "hide the jump"): steady frames keep the wall clock; after a pause behind the
      * game's burst on the card it goes on from where it stopped, then catches up a quarter faster, never past the wall */
