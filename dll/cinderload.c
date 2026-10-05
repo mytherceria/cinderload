@@ -3400,6 +3400,9 @@ static void WispsBuild(int f, float front, float t, float dt)
  * leap (more than a little behind it) are open at once. Drawn over the garland, under the wisps. */
 #define BLOOM_MAX    64
 #define BLOOM_OPEN_S 0.7f
+#define BLOOM_LOWER  0.125f    /* his v5 note (4 Oct): "the leaves and flowers should be 10-15% lower across board": each
+                                * bloom drops this share of the garland's height there (the arch plus the leaves' 85 px
+                                * reach), as the art does (class-bar/druid/src/lower.py), never below a tenth of the arch */
 static struct { float x, y, scale; int type, on; DWORD t0; } g_bloom[BLOOM_MAX];
 static int g_bloomFam = -1, g_bloomScreen = -1, g_bmQuads;
 static float g_bloomLast;
@@ -3415,7 +3418,8 @@ static void BloomsPlace(int f)
         for (int k = 0; k < 4; k++) { seed = SeaHash(seed + 0x9E3779B9u); r[k] = (float)(seed >> 8) / 16777216.0f; }
         float x = ((float)i + 0.2f + 0.6f * r[0]) / BLOOM_MAX, th = GarlandThick(x);
         g_bloom[i].x = x;
-        g_bloom[i].y = th * (0.2f + 0.6f * r[1]);
+        float y = th * (0.2f + 0.6f * r[1]) - BLOOM_LOWER * (th + 85.0f / 2160.0f);
+        g_bloom[i].y = y > th * 0.1f ? y : th * 0.1f;
         g_bloom[i].type = g_bloomTab[f].types < 2 || r[2] < 0.4f ? 0 : 1 + (int)(r[3] * (g_bloomTab[f].types - 1)) % (g_bloomTab[f].types - 1);
         g_bloom[i].scale = (0.8f + 0.5f * r[3]) * FireClamp(th / ARCH_H * 1.6f, 0.55f, 1.15f);
         g_bloom[i].on = 0;

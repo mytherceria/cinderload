@@ -865,6 +865,8 @@ static void FireBarTests(void)
             int in = 1, kinds[4] = { 0 };
             for (int i = 0; i < BLOOM_MAX; i++) {
                 in &= g_bloom[i].y > 0 && g_bloom[i].y < GarlandThick(g_bloom[i].x) && g_bloom[i].x > 0 && g_bloom[i].x < 1;
+                float th = GarlandThick(g_bloom[i].x);                  /* his v5 note: 10-15% lower than v4's places */
+                in &= g_bloom[i].y <= th * 0.8f - 0.10f * (th + 85.0f / 2160.0f) + 1e-6f && g_bloom[i].y >= th * 0.1f - 1e-6f;
                 if (g_bloom[i].type >= 0 && g_bloom[i].type < 4) kinds[g_bloom[i].type]++;
             }
             bm &= in && kinds[0] > kinds[1] && kinds[1] && kinds[2] && kinds[3];          /* orange most, every kind used */
