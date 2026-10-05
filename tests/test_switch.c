@@ -833,7 +833,7 @@ static void FireBarTests(void)
             live++;
             inside &= g_wisp[i].x <= fr + 1e-4f && g_wisp[i].x >= 0 && g_wisp[i].y >= 0 && g_wisp[i].y <= GarlandThick(g_wisp[i].x) + 0.06f;
         }
-        cv &= live >= 8 && inside && g_wsQuads == live + 3 + WISP_ZIPS * WISP_ZIP_TAIL;
+        cv &= live >= 8 && inside && g_wsQuads <= live + 3 + WISP_ZIPS * WISP_ZIP_TAIL && g_wsQuads >= 3 + WISP_ZIPS * WISP_ZIP_TAIL;   /* a twinkle at its dimmest draws nothing */
         /* the zipping ones stay near the front and inside the arch */
         for (int q = live; q < g_wsQuads; q++) {
             int c0 = q ? q * 6 : 0;
@@ -848,7 +848,7 @@ static void FireBarTests(void)
         WispsBuild(fd, 1.0f, 2.0f, 0.033f);                                 /* the bar full: no front's own three */
         int after = 0;
         for (int i = 0; i < WISP_MAX; i++) after += g_wisp[i].live;
-        cv &= g_wsQuads == after;
+        cv &= g_wsQuads <= after;
         /* his ask: sparkles keep coming across the whole grown bar, full or not */
         memset(g_wisp, 0, sizeof g_wisp);
         for (int i = 0; i < 60; i++) WispsBuild(fd, 1.0f, 3.0f + i * 0.033f, 0.033f);
