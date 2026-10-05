@@ -1007,9 +1007,12 @@ static void PackLive(int reveal, int walls)
         names[n] = "CinderLoad\\logo.txt"; data[n++] = "# logo\r\nlogo 1024 512 4 4 1020 484\r\n";
     }
     if (reveal & 4) {                                    /* the world map: Eastern Kingdoms only, u = 0.5 - 2e-5 y */
-        static char mapTxt[200];
-        snprintf(mapTxt, sizeof mapTxt, "# test\r\nmap 0 %08x %08x %08x %08x\r\nmap 2 0 0 0 0\r\nend 3000\r\n",
-                 FBits(0.5f), FBits(-2e-5f), FBits(0.5f), FBits(-2e-5f));
+        static char mapTxt[400];
+        int mt = snprintf(mapTxt, sizeof mapTxt, "# test\r\nmap 0 %08x %08x %08x %08x\r\nmap 2 0 0 0 0\r\nend 3000\r\n",
+                          FBits(0.5f), FBits(-2e-5f), FBits(0.5f), FBits(-2e-5f));
+        if (reveal & 4096)                               /* entrances: the Deadmines (36) here, Molten Core (409) on Kalimdor */
+            snprintf(mapTxt + mt, sizeof mapTxt - (size_t)mt, "ent 24 0 %08x %08x\r\nent 199 1 %08x %08x\r\n",
+                     FBits(-1000.0f), FBits(1000.0f), FBits(500.0f), FBits(500.0f));
         names[n] = "CinderLoad\\map.txt"; data[n++] = mapTxt;
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderMap.blp"; data[n++] = "BLP2map";
     }
@@ -1272,6 +1275,55 @@ static void LiveTests(void)
         Check(fabsf(at20 - 0.2f) < 1e-5f && next >= 0.2f && next < 0.25f && then > 0.2f && then < 0.3f &&
               fabsf(g_fillFull - 1.0f) < 1e-5f && zoomShown,
               "the fill's front is the bar as shown: a leap from 20% to 90% has only begun a frame later, the zoom's too");
+    }
+
+    /* his rule, 4 Oct: with entrances in map.txt every loading screen is the world map, and a dungeon's, raid's or
+     * battleground's zooms onto its entrance; without them, as before */
+    {
+        const char *dmPath = "Interface\\Glues\\LoadingScreens\\LoadScreenDeadmines.blp";
+        Fresh("map-entrances");
+        PackLive(1 | 4 | 4096, 0);
+        Start();
+        FakeTables();
+        int en = g_map.ok && g_map.ents == 2 && LogSays("on every loading screen") && LogSays("(2 listed)");
+        ForMap(36);
+        en &= g_mapShown == 1 && !strcmp(BarPath(dmPath), MAP_PATH);
+        float du, dv, hEnd;
+        Poke(BAR_MAP_VA, 36);
+        en &= MapDest(&du, &dv, &hEnd, 0) && fabsf(du - (0.5f - 2e-5f * 1000)) < 1e-5f &&
+              fabsf(dv - (0.5f - 2e-5f * -1000)) < 1e-5f && g_destMap == 0;
+        Poke(BAR_MAP_VA, 409);                           /* its entrance is on Kalimdor, which this map cannot show */
+        en &= !MapDest(&du, &dv, &hEnd, 0);
+        ForMap(409);
+        en &= g_mapShown == 1;                           /* the map all the same, the whole world */
+        Poke(BAR_MAP_VA, 0xFFFFFFFFu);                   /* the default screen: no entrance */
+        en &= !MapDest(&du, &dv, &hEnd, 0);
+        Check(en, "with entrances: every screen the world map; the Deadmines zooms onto its entrance; one on a continent the map lacks, or none, the whole world");
+
+        Fresh("map-no-entrances");
+        PackLive(1 | 4, 0);
+        Start();
+        FakeTables();
+        ForMap(36);
+        Check(g_mapShown == 0 && BarPath(dmPath) == dmPath && LogSays("on Eastern Kingdoms and Kalimdor screens"),
+              "without entrances: a dungeon keeps its own picture, as before");
+
+        /* the ent lines, read carefully: a map id over 1, a continent of 0 or 1, a place inside the world; a later line wins */
+        char t[2400];
+        int n = snprintf(t, sizeof t, "map 0 %08x %08x %08x %08x\nend 3000\nent 1 0 %08x %08x\nent 24 2 %08x %08x\n"
+                         "ent 24 0 7fc00000 %08x\nent 24 0 %08x %08x\nent 24 0 %08x %08x\nent 30 0 %08x %08x\n",
+                         FBits(0.5f), FBits(-2e-5f), FBits(0.5f), FBits(-2e-5f), FBits(1), FBits(1), FBits(1), FBits(1), FBits(1),
+                         FBits(10), FBits(10), FBits(20), FBits(20), FBits(-30000), FBits(5));
+        MapParse(t, (unsigned)n);
+        unsigned c; float x, y;
+        int rd = g_map.ents == 1 && MapEntrance(0x24, &c, &x, &y) && c == 0 && x == 20 && y == 20 && !MapEntrance(1, &c, &x, &y) &&
+                 !MapEntrance(0x30, &c, &x, &y);
+        n = 0;
+        for (int i = 0; i < 120; i++) n += snprintf(t + n, sizeof t - (size_t)n, "ent %x 0 0 0\n", 100 + i);
+        MapParse(t, (unsigned)n);
+        rd &= g_map.ents == MAP_ENTS;
+        Check(rd, "map.txt's entrances: an id over 1, continent 0 or 1, a place inside the world, a later line winning, no more than MAP_ENTS");
+        g_map.ok = 0; g_map.ents = 0;
     }
 
     /* the wallpapers */

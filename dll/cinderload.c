@@ -1130,7 +1130,14 @@ static int BarFamily(const BarTable *t)
 #define MAP_DEST_Y_VA   0x882690   /* float: y there */
 #define MAP_TAU         0.15f      /* seconds: how smoothly the view follows, so a late position glides in */
 #define MAP_BAR_TAU     0.15f      /* seconds: how closely the zoom follows the bar (a quick load is over in a second) */
-static struct { int ok; struct { int ok; float au, bu, av, bv; } m[2]; float endYards, pace; } g_map;
+#define MAP_ENTS        96         /* dungeon, raid and battleground entrances map.txt may list */
+/* map.txt's "ent <map id> <continent> <x> <y>" lines (hex; x and y float bits, world yards): where each instance's
+ * entrance lies on the world map (4 Oct 2026, his rule: "no separate log in screens for being in a dungeon or raid,
+ * everyone who uses CinderLoad will get the zoom in map loading screen", the class icon on the dungeon's icon). */
+static struct {
+    int ok; struct { int ok; float au, bu, av, bv; } m[2]; float endYards, pace;
+    int ents; struct { unsigned id; int c; float x, y; } ent[MAP_ENTS];
+} g_map;
 static volatile LONG g_mapShown;  /* the screen showing has the world map */
 static float g_viewU = 0.5f, g_viewV = 0.5f, g_viewH = 0.5f;     /* the world map's view, eased */
 static volatile LONG g_driftResets;                             /* a fallback reset within a screen (the log says) */
@@ -1175,6 +1182,15 @@ static void MapParse(const char *s, unsigned len)
                 g_map.m[id].au = au; g_map.m[id].bu = bu; g_map.m[id].av = av; g_map.m[id].bv = bv;
                 g_map.m[id].ok = 1;
             }
+        } else if (n > 4 && l[0] == 'e' && l[1] == 'n' && l[2] == 't' && MapSpace(l[3]) && MapHex(l, n, &i, &id) && id > 1 &&
+                   MapHex(l, n, &i, &v[0]) && v[0] <= 1 && MapHex(l, n, &i, &v[1]) && MapHex(l, n, &i, &v[2])) {
+            float x = MapBits(v[1]), y = MapBits(v[2]);
+            int k = 0;
+            while (k < g_map.ents && g_map.ent[k].id != id) k++;               /* a later line for the same map wins */
+            if (x > -20000 && x < 20000 && y > -20000 && y < 20000 && k < MAP_ENTS) {
+                g_map.ent[k].id = id; g_map.ent[k].c = (int)v[0]; g_map.ent[k].x = x; g_map.ent[k].y = y;
+                if (k == g_map.ents) g_map.ents++;
+            }
         } else if (n > 4 && ((l[0] == 'e' && l[1] == 'n' && l[2] == 'd' && MapSpace(l[3])) ||
                              (n > 5 && l[0] == 'p' && l[1] == 'a' && l[2] == 'c' && l[3] == 'e' && MapSpace(l[4])))) {
             int y = 0, d = 0, pace = l[0] == 'p';
@@ -1188,6 +1204,16 @@ static void MapParse(const char *s, unsigned len)
     }
     if (!(g_map.pace >= 1 && g_map.pace <= 60)) g_map.pace = 7;
     g_map.ok = (g_map.m[0].ok || g_map.m[1].ok) && g_map.endYards >= 100;
+}
+/* Instance id's entrance: 1 with its continent and world place, when map.txt lists one on a continent it can show. */
+static int MapEntrance(unsigned id, unsigned *c, float *x, float *y)
+{
+    for (int k = 0; k < g_map.ents; k++)
+        if (g_map.ent[k].id == id && g_map.m[g_map.ent[k].c].ok) {
+            *c = (unsigned)g_map.ent[k].c; *x = g_map.ent[k].x; *y = g_map.ent[k].y;
+            return 1;
+        }
+    return 0;
 }
 
 #define WALL_MAX 64
@@ -1248,15 +1274,17 @@ const char *WINAPI BarPath(const char *path)
     if (!border && !fill) {                            /* the screen's picture: a continent's gets the map or a wallpaper */
         LONG w = g_wallPick, m = g_mapShown;
         char name[BAR_NAME_MAX + 1];
-        if ((m || (w > 0 && w <= g_walls.count)) && BarBaseName(path, lstrlenA(path), name) && BarIsOverworld(name))
-            return m ? MAP_PATH : g_walls.path[w - 1];
+        if (!BarBaseName(path, lstrlenA(path), name)) return path;
+        if (m && (g_map.ents || BarIsOverworld(name))) return MAP_PATH;   /* with entrances: every screen's picture */
+        if (!m && w > 0 && w <= g_walls.count && BarIsOverworld(name)) return g_walls.path[w - 1];
         return path;
     }
     int f;
     if (fill) {                                        /* the fill comes first: the screen's choices are made here */
         char name[BAR_NAME_MAX + 1];
-        int over = (g_map.ok || g_walls.count) && BarScreen(name) && BarIsOverworld(name);
-        if (over && g_map.ok) {                        /* the world map, its fire from bars.txt's "cindermap" line */
+        int named = BarScreen(name), over = (g_map.ok || g_walls.count) && named && BarIsOverworld(name);
+        if (g_map.ok && (over || g_map.ents)) {        /* the world map (with entrances, on every screen), its fire from
+                                                        * bars.txt's "cindermap" line */
             InterlockedExchange(&g_wallPick, 0);
             InterlockedExchange(&g_mapShown, 1);
             f = BarFamilyOf(&g_bars, "cindermap");
@@ -1380,8 +1408,14 @@ static void MapLoad(void)
         Log("zoom off: the pack has map.txt but no CinderMap.blp");
         return;
     }
-    Log("zoom: the world map is in the pack; on Eastern Kingdoms and Kalimdor screens the view glides down onto where "
-        "you arrive");
+    if (g_map.ents) {
+        char m[200];
+        wsprintfA(m, "zoom: the world map is in the pack, on every loading screen; the view glides down onto where you arrive, "
+                  "or onto the entrance of the dungeon, raid or battleground (%d listed)", g_map.ents);
+        Log(m);
+    } else
+        Log("zoom: the world map is in the pack; on Eastern Kingdoms and Kalimdor screens the view glides down onto where "
+            "you arrive");
 }
 
 /* The screen's picture is loaded by the same loader as the bar's textures (RVA 0x6EBA, ecx = the picture's path from
@@ -1712,8 +1746,12 @@ static unsigned CharEntry(void)
  * known (see above). p: the bar so far. */
 static int MapDest(float *du, float *dv, float *hEnd, float p)
 {
-    unsigned id, dm, xb, yb, e;
-    if (!ClientWord(BAR_MAP_VA, &id) || id > 1 || !g_map.m[id].ok) return 0;
+    unsigned id, dm, xb, yb, e, c;
+    float ex, ey;
+    if (!ClientWord(BAR_MAP_VA, &id)) return 0;
+    if (id > 1)                                      /* a dungeon, raid or battleground: its entrance, from the start */
+        return MapEntrance(id, &c, &ex, &ey) && MapPlace(c, ex, ey, du, dv, hEnd);
+    if (!g_map.m[id].ok) return 0;
     int game = ClientWord(MAP_DEST_MAP_VA, &dm) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb);
     int fresh = game && (dm != g_destSnap[0] || xb != g_destSnap[1] || yb != g_destSnap[2]);
     if (fresh && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd)) return 1;
