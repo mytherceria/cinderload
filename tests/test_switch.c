@@ -1066,6 +1066,13 @@ static void FireBarRealClient(const char *client)
         }
         if (!match) printf("FAIL: RVA 0x%X (the hold's %s) differs in %s\n", rva, i == 3 ? "loading frame" : "call", exe);
     }
+    if (x && match) {                                               /* the glue music's stop */
+        unsigned char got[sizeof kGlueStop];
+        long off = ExeOffset(x, GLUE_STOP_VA - 0x400000u);
+        match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, sizeof got, x) == sizeof got &&
+                 !memcmp(got, kGlueStop, sizeof kGlueStop);
+        if (!match) printf("FAIL: VA 0x%X (the glue music's stop) differs in %s\n", GLUE_STOP_VA, exe);
+    }
     if (x) fclose(x);
     Check(match, "a real client: all eight places hold the bytes the fire bar and the drift expect, in its WoW.exe");
 }
@@ -1164,6 +1171,8 @@ static void FireRealClient(const char *client)
 /* ---- tonight's three: the fire revealed with a soft, live front, and the continents' wallpapers ---- */
 static void PutFloat(unsigned va, float f) { memcpy(shim_module + va - 0x400000u, &f, 4); }
 static int g_testFrames;
+static float g_testFade;
+static void WINAPI TestGlueStop(float s) { g_testFade = s; Poke(GLUE_MUSIC_VA, 0); }
 static void TestHoldFrame(void)                         /* the game's loading frame, as the hold sees it: 16 ms, the bar full */
 {
     shim_ticks += 16; g_testFrames++;
@@ -2458,7 +2467,24 @@ static void LiveTests(void)
         for (int c = 0; c < 3; c++) memset(shim_module + kHoldCall[c] - 0x400000u, 0, 5);
         g_holdOn = 0; g_map.ok = 0; g_holdFrame = NULL;
         hd &= hs;
-        Check(hd, "the hold: the game done early, its frame drawn on until the plan (4.2 s) and the view landed; once a screen; never past HOLD_MAX_MS; after the floor it settles in HOLD_SETTLE_MS; off, the frame alone; set up only on the bytes as read");
+        /* the character list's music: faded out with the pack's fade as a screen begins, only while it plays */
+        memcpy(shim_module + GLUE_STOP_VA - 0x400000u, kGlueStop, sizeof kGlueStop);
+        g_musicFadeMs = 250; MusicSetup();
+        int mu = g_musicOn && LogSays("music: the character list's music fades out over 250 ms");
+        g_glueStop = TestGlueStop; g_testFade = -1;
+        Poke(GLUE_MUSIC_VA, 0x1234);                                    /* the glue music still plays */
+        DriftScreenGone(); at += 3000; DisplayStep(0.0f, at);
+        mu &= fabsf(g_testFade - 0.25f) < 1e-6f && g_musicFaded;
+        g_testFade = -1; Poke(GLUE_MUSIC_VA, 0);                        /* in the world: none plays, nothing called */
+        DriftScreenGone(); at += 3000; DisplayStep(0.0f, at);
+        mu &= g_testFade < 0 && !g_musicFaded;
+        shim_module[GLUE_STOP_VA - 0x400000u + 5] ^= 1;                 /* another client: never set up */
+        MusicSetup();
+        mu &= !g_musicOn && LogSays("music: the glue music's stop is not where it was read");
+        memset(shim_module + GLUE_STOP_VA - 0x400000u, 0, sizeof kGlueStop);
+        g_glueStop = NULL;
+        hd &= mu;
+        Check(hd, "the hold: the game done early, its frame drawn on until the plan (4.2 s) and the view landed; once a screen; never past HOLD_MAX_MS; after the floor it settles in HOLD_SETTLE_MS; off, the frame alone; set up only on the bytes as read; the character list's music faded with the pack's fade only while it plays");
 
         /* the lessons: each kind's time to a full bar and its end freeze, kept in loadtimes.txt and read back, the newest
          * counting half; never from a later login or a time no load takes */

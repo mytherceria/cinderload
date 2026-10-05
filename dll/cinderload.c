@@ -1297,6 +1297,14 @@ static int BarFamily(const BarTable *t)
 #define LEARN_MIN_MS    100        /* a time outside these is no lesson */
 #define LEARN_MAX_MS    120000
 #define LEARN_FILE      "Data\\CinderLoad\\loadtimes.txt"
+/* The character list's music (his ask, 4 Oct: "once you click a character, it should fade out that sound pretty
+ * quickly and transition over to the sound of the character class loading screen ... that transition out will need to
+ * be snappy"): as a loading screen begins, if the glue music still plays (its sound at [GLUE_MUSIC_VA]), CinderLoad
+ * stops it the way the glue's own StopGlueMusic does (VA 0x46CF00: push 1.0, call 0x45B050), with map.txt's
+ * "music <ms>" fade (MUSIC_FADE_MS when not given; 0 cuts it at once). */
+#define MUSIC_FADE_MS   250
+#define GLUE_STOP_VA    0x45B050   /* stdcall (float seconds): stops the glue music's sound with that fade, clears it */
+#define GLUE_MUSIC_VA   0xB06038   /* the glue music's sound while it plays, else 0 */
 #define MAP_ENTS        96         /* dungeon, raid and battleground entrances map.txt may list */
 /* map.txt's "ent <map id> <continent> <x> <y>" lines (hex; x and y float bits, world yards): where each instance's
  * entrance lies on the world map (4 Oct 2026, his rule: "no separate log in screens for being in a dungeon or raid,
@@ -1317,6 +1325,37 @@ static volatile LONG g_holdN, g_holdLast;                       /* holds made, a
 static DWORD g_scrStartAt, g_planEndAt;                         /* this screen: its first frame, when its plan ends */
 static float g_planU;                                           /* the plan's bar, 0..1 */
 static int g_screenKind, g_holdDone, g_timed;                   /* later (1) or first (0); held already; on the plan */
+static volatile LONG g_musicFadeMs = MUSIC_FADE_MS, g_musicOn, g_musicFaded;   /* map.txt's fade; set up; this screen */
+static const unsigned char kGlueStop[18] = { 0x55, 0x8B, 0xEC, 0x8B, 0x0D, 0x38, 0x60, 0xB0, 0x00, 0x85, 0xC9, 0x74, 0x13,
+                                             0x8B, 0x45, 0x08, 0x50, 0xE8 };    /* 0x45B050, as read from his WoW.exe */
+static void (WINAPI *g_glueStop)(float);
+
+/* As a world map screen begins, on the game's thread: the glue music, if it still plays, out with the pack's fade. */
+static void MusicFade(void)
+{
+    unsigned h;
+    InterlockedExchange(&g_musicFaded, 0);
+    if (!g_musicOn || !g_glueStop || !ClientWord(GLUE_MUSIC_VA, &h) || !h) return;
+    g_glueStop((float)g_musicFadeMs / 1000.0f);
+    InterlockedExchange(&g_musicFaded, 1);
+}
+
+/* At start, with the world map: the glue music's stop, once its bytes are where they were read. */
+static void MusicSetup(void)
+{
+    const unsigned char *at = (const unsigned char *)GetModuleHandleA(NULL) + (GLUE_STOP_VA - 0x400000u);
+    InterlockedExchange(&g_musicOn, 0);
+    if (g_musicFadeMs < 0) return;
+    if (!Readable(at, (int)sizeof kGlueStop) || !Same(at, kGlueStop, (int)sizeof kGlueStop)) {
+        Log("music: the glue music's stop is not where it was read (VA 0x45B050), so it plays on through the screen");
+        return;
+    }
+    g_glueStop = (void (WINAPI *)(float))(ULONG_PTR)at;
+    InterlockedExchange(&g_musicOn, 1);
+    char m[120];
+    wsprintfA(m, "music: the character list's music fades out over %ld ms as a loading screen begins", (long)g_musicFadeMs);
+    Log(m);
+}
 static volatile LONG g_zoomHalf;                                /* this one starts halfway in (his ask, 4 Oct: the first
                                                                  * load after a cold boot is long, the rest a fraction) */
 static volatile LONG g_screenMap;                               /* this screen zooms the world map */
@@ -1405,6 +1444,7 @@ static void MapParse(const char *s, unsigned len)
     unsigned char *z = (unsigned char *)&g_map;
     for (unsigned i = 0; i < sizeof g_map; i++) z[i] = 0;
     InterlockedExchange(&g_holdMs, HOLD_MS);
+    InterlockedExchange(&g_musicFadeMs, MUSIC_FADE_MS);
     for (unsigned at = 0; at < len;) {
         unsigned end = at;
         while (end < len && s[end] != '\n') end++;
@@ -1429,13 +1469,16 @@ static void MapParse(const char *s, unsigned len)
             }
         } else if (n > 4 && ((l[0] == 'e' && l[1] == 'n' && l[2] == 'd' && MapSpace(l[3])) ||
                              (n > 5 && l[0] == 'p' && l[1] == 'a' && l[2] == 'c' && l[3] == 'e' && MapSpace(l[4])) ||
-                             (n > 5 && l[0] == 'h' && l[1] == 'o' && l[2] == 'l' && l[3] == 'd' && MapSpace(l[4])))) {
-            int y = 0, d = 0, pace = l[0] == 'p', hold = l[0] == 'h';
-            i = pace || hold ? 5 : 4;
+                             (n > 5 && l[0] == 'h' && l[1] == 'o' && l[2] == 'l' && l[3] == 'd' && MapSpace(l[4])) ||
+                             (n > 6 && l[0] == 'm' && l[1] == 'u' && l[2] == 's' && l[3] == 'i' && l[4] == 'c' &&
+                              MapSpace(l[5])))) {
+            int y = 0, d = 0, pace = l[0] == 'p', hold = l[0] == 'h', music = l[0] == 'm';
+            i = music ? 6 : pace || hold ? 5 : 4;
             while (i < n && MapSpace(l[i])) i++;
             for (; i < n && l[i] >= '0' && l[i] <= '9' && d < 6; i++, d++) y = y * 10 + (l[i] - '0');
             if (d && pace) g_map.pace = (float)y;
             else if (d && hold) InterlockedExchange(&g_holdMs, y <= 20000 ? y : 20000);
+            else if (d && music) InterlockedExchange(&g_musicFadeMs, y <= 5000 ? y : 5000);
             else if (d) g_map.endYards = (float)y;
         }
         at = end + 1;
@@ -1594,6 +1637,7 @@ static void BarShownSince(char *out, int cap)
             BarCat(out, cap, z);
         }
         if (g_driftResets) { wsprintfA(z, ", %ld resets mid-screen", (long)g_driftResets); BarCat(out, cap, z); }
+        if (g_musicFaded) BarCat(out, cap, ", the character list's music faded out");
         LONG hl = g_holdLast;
         if (hl > 0) { wsprintfA(z, ", held %ld.%ld s for the floor", (long)(hl / 1000), (long)(hl % 1000 / 100)); BarCat(out, cap, z); }
     }
@@ -1675,6 +1719,7 @@ static void MapLoad(void)
         Log(m);
     }
     HoldSetup();
+    MusicSetup();
     if (g_map.ents) {
         char m[200];
         wsprintfA(m, "zoom: the world map is in the pack, on every loading screen; the view glides down onto where you arrive, "
@@ -2232,6 +2277,7 @@ static float DisplayStep(float p, DWORD now)
         g_holdDone = 0;
         g_planU = 0;
         InterlockedExchange(&g_holdLast, 0);
+        MusicFade();                                                  /* the character list's music out, snappily */
         LONG full = g_lnN[g_screenKind] > 0 ? g_lnMs[g_screenKind] : (g_screenKind ? 0 : FIRST_GUESS_MS);
         LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, floor = g_holdMs - fz;
         LONG plan = full > floor ? full : floor;
