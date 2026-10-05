@@ -4637,6 +4637,33 @@ __attribute__((unused)) static int ViewStep(float p, DWORD now, float W, float H
     return ok;
 }
 
+/* The view's own clock (his yes, 5 Oct 2026: "hide the jump"). The card is sometimes busy with a burst of the game's
+ * own work as it comes out of a hitch, the same stall the game has had since 2005 on every card, and the view's frame
+ * waits about a tenth of a second behind it; on the wall clock its next frame then leaps ahead to where the zoom would
+ * be. Its steps run on this clock instead: never more than two and a half of its usual frames in one go, so after a
+ * pause the picture goes on from where it stopped, then up to a quarter faster until it has caught the wall clock up (a
+ * tenth of a second in about a third of one), never past it, so it still lands when it should. Times in ms; the usual
+ * frame kept in sixteenths of one. */
+#define VIEW_CLOCK_MIN   20       /* a step is at most two and a half usual frames, and never held under this (ms) */
+static struct { DWORD at, real, usual16; } g_vclk;
+static void ViewClockStart(DWORD real) { g_vclk.at = g_vclk.real = real; g_vclk.usual16 = 0; }
+static DWORD ViewClock(DWORD real)
+{
+    DWORD d = real - g_vclk.real, behind = real - g_vclk.at;
+    DWORD cap = g_vclk.usual16 * 5 / 32;                                     /* 2.5 usual frames */
+    if (cap < VIEW_CLOCK_MIN) cap = VIEW_CLOCK_MIN;
+    g_vclk.real = real;
+    if ((LONG)d < 0 || (LONG)behind < 0) return g_vclk.at;                 /* (a clock that went back: hold) */
+    DWORD step = d < cap ? d : cap;
+    if (d < cap) g_vclk.usual16 = g_vclk.usual16 ? g_vclk.usual16 + ((LONG)(d * 16) - (LONG)g_vclk.usual16) / 8 : d * 16;
+    if (d < cap && behind > step) {                    /* behind, on a usual frame: catch up, a quarter faster */
+        DWORD more = behind - step, most = (step + 1) / 4;
+        step += more < most ? more : most;
+    }
+    g_vclk.at += step;
+    return g_vclk.at;
+}
+
 /* The world's first frame (4 Oct 2026, his video: the loading screen's layer clears about 0.8 s before the game shows
  * the world, and a view that faded as it cleared showed the game's last loading frame, then the world all at once): the
  * game's presents that are not a loading screen's, counted by PrePresent. The view's thread, its screen gone at goneAt
@@ -5025,6 +5052,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             showing = 1; built = 0;
             g_view.since = g_view.last = now; g_view.gap = 0; g_view.frames = 0;
             for (unsigned i = 0; i < sizeof g_slow; i++) ((unsigned char *)&g_slow)[i] = 0;
+            ViewClockStart(now);
             continue;                                       /* (the open took a moment: a fresh clock for the first) */
         }
         if (screen && showing) {
@@ -5032,7 +5060,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             DWORD part[VIEW_PARTS], t1 = ViewNow();
             int held = StepLock();
             DWORD t2 = ViewNow();
-            if (ViewStepLocked(p, t2, (float)g_view.w, (float)g_view.h)) built = 1;
+            if (ViewStepLocked(p, ViewClock(t2), (float)g_view.w, (float)g_view.h)) built = 1;
             StepUnlock(held);
             DWORD t3 = ViewNow(), t4 = t3, t5 = t3, gameAt = g_gameAt;
             LONG quiet = (LONG)(t0 - gameAt);                /* the game's last loading frame, before this one began */

@@ -2921,6 +2921,29 @@ static void ViewTests(void)
         memset(h, 0, 0x400);
         Check(ok, "WoW.exe's .data found in its own headers: reads inside it skip VirtualQuery, every other read is checked, and a header that is not a PE image's finds nothing");
     }
+    /* the view's own clock (his yes, 5 Oct: "hide the jump"): steady frames keep the wall clock; after a pause behind the
+     * game's burst on the card it goes on from where it stopped, then catches up a quarter faster, never past the wall */
+    {
+        DWORD real = 5000000, v = 0, prev;
+        ViewClockStart(real);
+        int ok = 1;
+        for (int i = 0; i < 100; i++) { real += 7; v = ViewClock(real); ok &= v == real; }      /* 147 a second */
+        prev = v;
+        real += 114; v = ViewClock(real);                                /* a pause of 114 ms */
+        ok &= v - prev == VIEW_CLOCK_MIN;                                /* goes on, it does not leap the 114 */
+        int frames = 0, fastest = 0, mono = 1;
+        while (v != real && frames < 200) {
+            prev = v; real += 7; v = ViewClock(real); frames++;
+            if ((int)(v - prev) > fastest) fastest = (int)(v - prev);
+            mono &= v >= prev && v <= real;
+        }
+        ok &= mono && v == real && frames >= 30 && frames <= 60 && fastest <= 9;   /* about a third of a second, at most 9 ms a 7 */
+        for (int i = 0; i < 100; i++) { real += 17; v = ViewClock(real); }       /* a 60 Hz screen: the usual frame moves */
+        ok &= v == real;
+        prev = v; real += 30; v = ViewClock(real); ok &= v == real;      /* a missed refresh at 60 Hz is no pause */
+        ViewClockStart(9000000); ok &= ViewClock(9000025) == 9000020;   /* a first step is never over VIEW_CLOCK_MIN */
+        Check(ok, "the view's own clock: steady frames keep the wall clock; a 114 ms pause goes on from where it stopped and catches up in about a third of a second, a quarter faster at most, never past the wall; a 60 Hz screen's usual frame is learned");
+    }
     /* the fade: once the game has shown the world (it showed the game's last loading frame for 0.8 s, then the world at
      * once); without the present's hook, at once; never more than VIEW_WORLD_WAIT_MS */
     {
