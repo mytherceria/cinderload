@@ -831,7 +831,7 @@ static void FireBarTests(void)
         int live = 0, inside = 1;
         for (int i = 0; i < WISP_MAX; i++) if (g_wisp[i].live) {
             live++;
-            inside &= g_wisp[i].x <= fr + 1e-4f && g_wisp[i].x > fr - 0.32f && g_wisp[i].y >= 0 && g_wisp[i].y <= GarlandThick(g_wisp[i].x) + 0.06f;
+            inside &= g_wisp[i].x <= fr + 1e-4f && g_wisp[i].x >= 0 && g_wisp[i].y >= 0 && g_wisp[i].y <= GarlandThick(g_wisp[i].x) + 0.06f;
         }
         cv &= live >= 8 && inside && g_wsQuads == live + 3 + WISP_ZIPS * WISP_ZIP_TAIL;
         /* the zipping ones stay near the front and inside the arch */
@@ -845,10 +845,16 @@ static void FireBarTests(void)
         cv &= g_backQuads == 2 && fabsf(g_backPos[0] - 0.4f) < 1e-6f && (g_backCol[0] >> 24) == 0 && (g_backCol[1] >> 24) == 0xFF;
         BackBuild(1.0f);
         cv &= g_backQuads == 0;
-        WispsBuild(fd, 1.0f, 2.0f, 0.033f);                                 /* the bar full: no front, none new */
+        WispsBuild(fd, 1.0f, 2.0f, 0.033f);                                 /* the bar full: no front's own three */
         int after = 0;
         for (int i = 0; i < WISP_MAX; i++) after += g_wisp[i].live;
-        cv &= g_wsQuads == after && after <= live;
+        cv &= g_wsQuads == after;
+        /* his ask: sparkles keep coming across the whole grown bar, full or not */
+        memset(g_wisp, 0, sizeof g_wisp);
+        for (int i = 0; i < 60; i++) WispsBuild(fd, 1.0f, 3.0f + i * 0.033f, 0.033f);
+        int left = 0, right = 0;
+        for (int i = 0; i < WISP_MAX; i++) if (g_wisp[i].live) { if (g_wisp[i].x < 0.5f) left++; else right++; }
+        cv &= left >= 3 && right >= 3;
         Check(cv, "garland: the arch the banner's curve; wisps rising from just behind the front, inside it, the front's own three on top; none new once full");
         /* the blooms (his v2 note): the same places every screen, inside the arch; each opens once the front reaches it,
          * bud to full bloom over BLOOM_OPEN_S, growing as it opens; one the front leapt past is open at once; a new

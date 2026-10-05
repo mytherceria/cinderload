@@ -3267,7 +3267,7 @@ static void ArchBuild(void)
  * The backing: Loading-BarBack-<family>.blp, the arch's dark shape, the full width and ARCH_H tall at the bottom.
  * The wisps: the wisp, its trail and a soft aura ride the front, bobbing; motes rise from just behind it, sparkles
  * twinkle there, small wisps linger over the grown leaves; all inside the arch, which is the banner's own curve. */
-#define WISP_MAX 56
+#define WISP_MAX 96
 static struct { int live, spr; float x, y, vx, vy, age, life, size, phase; } g_wisp[WISP_MAX];
 static unsigned g_wispSeed = 7;
 static float g_wispCredit, g_wispFront = -1;
@@ -3332,6 +3332,23 @@ static void WispsBuild(int f, float front, float t, float dt)
     int moving = g_wispFront >= 0 && front > g_wispFront + 1e-5f, at = front > 0.002f && front < 0.998f;
     g_wispFront = front;
     if (at) g_wispCredit += dt * (moving ? 22.0f : 4.0f);
+    /* his ask (4 Oct, ~19:45): the whitish-blue sparkles keep appearing ACROSS the grown bar after the big wisp has
+     * passed, and on once it is full: a second, quieter spawner over all of it */
+    static float ambient;
+    if (front > 0.01f) ambient += dt * 14.0f * FireClamp(front, 0, 1);
+    while (ambient >= 1) {
+        ambient -= 1;
+        int i = 0;
+        while (i < WISP_MAX && g_wisp[i].live) i++;
+        if (i == WISP_MAX) { ambient = 0; break; }
+        int kind = WispRand() < 0.6f ? 6 : 5, spr = WispPick(f, kind, 0);
+        if (spr < 0) continue;
+        float x = WispRand() * FireClamp(front, 0, 1);
+        g_wisp[i].live = 1; g_wisp[i].spr = spr; g_wisp[i].x = x; g_wisp[i].y = WispRand() * GarlandThick(x) * 1.15f;
+        g_wisp[i].vx = 0; g_wisp[i].vy = kind == 5 ? 0.02f + 0.03f * WispRand() : 0;
+        g_wisp[i].life = 0.8f + 0.8f * WispRand(); g_wisp[i].size = 0.6f + 0.5f * WispRand();
+        g_wisp[i].phase = 6.2831853f * WispRand(); g_wisp[i].age = 0;
+    }
     while (g_wispCredit >= 1) {                                    /* the new ones, from just behind the front */
         g_wispCredit -= 1;
         int i = 0;
