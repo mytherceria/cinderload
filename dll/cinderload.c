@@ -824,6 +824,8 @@ static volatile LONG g_screenWatch;      /* 1 once the fire's worker watches for
 static volatile LONG g_dispNew = 1;      /* the bar as shown: the next frame begins a new screen */
 static volatile LONG g_viewOn, g_viewSteps, g_gameSeq;   /* the view (below): on; its thread moves the bar and the zoom
                                                           * now; the game's loading frames drawn */
+static int g_settleView;                 /* the hold's glide in is the view's (HoldFrame): the push its last stretch, landing
+                                          * with the world */
 static volatile LONG g_frmCount, g_frmGap, g_frmGapFrom, g_frmGapTo, g_frmDips, g_frmShown;   /* this screen's, for the log */
 #define HITCH_KEEP 6
 static volatile LONG g_hitchN, g_hitchMs[HITCH_KEEP], g_hitchPct[HITCH_KEEP];   /* gaps between frames over HITCH_MS */
@@ -2425,6 +2427,7 @@ static void GameFacts(float p, DWORD now)
         InterlockedExchange(&g_endFreezeMs, 0);
         g_screenKind = g_zoomScreens > 0;                             /* (DriftStep counts this screen after) */
         g_holdDone = 0;
+        g_settleView = 0;
         g_planU = 0;
         g_blurFrom = g_blurTo = 0;
         if (g_blurUsed) { g_blurUsed = 0; g_dissolveAt = 0; BlurRelease(); }
@@ -2527,6 +2530,7 @@ static DWORD g_destSince;                                       /* when it becam
 static float g_destU, g_destV, g_destH;
 static DWORD g_settleFrom, g_settleTo;                          /* the hold's glide in (see HoldFrame), 0 for none */
 static float g_settleU, g_settleV, g_settleH;                   /* ... from the view as the game finished */
+#define VIEW_WORLD_GAP_MS 400   /* the world shows this long after the screen goes (his loads, 4-5 Oct: 378 to 394 ms) */
 #define SETTLE_NEAR     0.02f      /* of the zoom (in its even steps) or of the view's width: landed already */
 
 /* The fire's worker, when a screen has gone (the loading screen's layer cleared): the next screen starts from the
@@ -2624,9 +2628,11 @@ static void DriftStep(float p, DWORD now)
             LONG span = (LONG)(g_settleTo - g_settleFrom);
             float t = span > 0 ? FireClamp((float)(LONG)(now - g_settleFrom) / (float)span, 0, 1) : 1;
             float s = t * t * (3 - 2 * t);
-            float lh = (float)FireExp((double)((1 - s) * MapLn(g_settleH) + s * MapLn(g_destH)));
-            float kc = g_settleH - g_destH > 1e-6f ? FireClamp((g_settleH - lh) / (g_settleH - g_destH), 0, 1) : 1;
-            float pb = BlurAmount(now);
+            float hEnd = g_settleView ? g_destH / BLUR_PUSH : g_destH;    /* the view's: the push its last stretch */
+            if (hEnd > g_settleH) hEnd = g_settleH;                       /* (never back out) */
+            float lh = (float)FireExp((double)((1 - s) * MapLn(g_settleH) + s * MapLn(hEnd)));
+            float kc = g_settleH - hEnd > 1e-6f ? FireClamp((g_settleH - lh) / (g_settleH - hEnd), 0, 1) : 1;
+            float pb = g_settleView ? 0 : BlurAmount(now);
             g_viewU = g_settleU + (g_destU - g_settleU) * kc;
             g_viewV = g_settleV + (g_destV - g_settleV) * kc;
             g_viewH = pb > 0 ? lh * (float)FireExp(-(double)pb * MapLn(BLUR_PUSH)) : lh;
@@ -2707,18 +2713,33 @@ static void HoldFrame(void)
         g_settleFrom = now;
         g_settleTo = (LONG)(endAt - now) > 0 ? endAt : now + 1;
         g_settleU = g_viewU; g_settleV = g_viewV; g_settleH = g_viewH;
+        g_settleView = 0;
     }
+    int hold = 1;
     if ((LONG)(endAt - now) <= 0) {
-        if (!blur) { StepUnlock(held); return; }                                  /* met already: no hold */
-        endAt = now;                                                              /* (but the ending still plays) */
+        if (!blur) hold = 0;                                                      /* met already: no hold */
+        else endAt = now;                                                         /* (but the ending still plays) */
     }
-    g_planEndAt = endAt;
-    if (blur) {                                                   /* from a little before it lands, never before now */
-        g_blurFrom = (LONG)(endAt - BLUR_LEAD_MS - now) > 0 ? endAt - BLUR_LEAD_MS : now;
-        g_blurTo = endAt + (DWORD)blur;
+    DWORD stopAt = now;
+    if (hold) {
+        g_planEndAt = endAt;
+        if (blur) {                                               /* from a little before it lands, never before now */
+            g_blurFrom = (LONG)(endAt - BLUR_LEAD_MS - now) > 0 ? endAt - BLUR_LEAD_MS : now;
+            g_blurTo = endAt + (DWORD)blur;
+        }
+        stopAt = endAt + (DWORD)(blur > HOLD_TAIL_MS ? blur : HOLD_TAIL_MS);
     }
-    DWORD stopAt = endAt + (DWORD)(blur > HOLD_TAIL_MS ? blur : HOLD_TAIL_MS);
+    /* With the view (his clip, 5 Oct 00:22: "from 7-11s it rushes to get to stormwind fully zoomed in and then just
+     * sits there"): the glide above landed by endAt and the push closer came in half a second, because the game's frames
+     * were about to stop for its end freeze; the blur hid the rest. The view draws through that freeze, so its last
+     * glide in, the push with it, lands as the world appears: the hold's end, this machine's freeze, and the world's
+     * own moment after the screen goes (VIEW_WORLD_GAP_MS). */
+    if (g_viewSteps && g_destOk) {
+        g_settleTo = stopAt + (DWORD)(fz > 0 ? fz : 0) + VIEW_WORLD_GAP_MS;
+        g_settleView = 1;
+    }
     StepUnlock(held);                                             /* never held through the frames: the view goes on */
+    if (!hold) return;
     for (int f = 0; f < HOLD_FRAMES && (LONG)(stopAt - now) > 0 && now - start < HOLD_MAX_MS; f++) {
         Sleep(4);
         g_holdFrame();

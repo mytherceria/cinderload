@@ -2901,6 +2901,28 @@ static void ViewTests(void)
         g_holdFrame = TestHoldFrame; g_holdOn = 1; g_testFrames = 0; shim_ticks = t;
         HoldFrame();
         ok &= g_testFrames > 1 && g_stepLock.held == 0 && g_settleTo != 0;
+        /* with the view, its last glide lands as the world appears (the hold's end, the machine's freeze, the world's moment
+         * after the screen goes), the push closer its last stretch: it landed by the hold's end and pushed in half a second
+         * (his 00:22 clip, 5 Oct: "rushes to get to stormwind fully zoomed in and then just sits there") */
+        {
+            LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS;
+            DWORD land = g_settleTo, at2 = shim_ticks;
+            float hEnd = g_destH / BLUR_PUSH, lastH = 1;
+            ok &= g_settleView == 1 && (LONG)(land - at2) >= fz + VIEW_WORLD_GAP_MS - 24 && (LONG)(land - at2) <= fz + VIEW_WORLD_GAP_MS;
+            ViewStep(1.0f, at2, 1000, 500);
+            ok &= g_viewH > hEnd * 1.3f;                                      /* the push still to come at the hold's end */
+            int down = 1;
+            for (DWORD tt = at2; (LONG)(tt - land) <= 0; tt += 7) { ViewStep(1.0f, tt, 1000, 500); down &= g_viewH <= lastH + 1e-6f; lastH = g_viewH; }
+            ViewStep(1.0f, land + 7, 1000, 500);
+            ok &= down && fabsf(g_viewH - hEnd) < 1e-3f * hEnd + 1e-6f && fabsf(g_viewU - g_destU) < 1e-4f && fabsf(g_viewV - g_destV) < 1e-4f;
+        }
+        {                                                                    /* already closer than that: it never backs out */
+            DWORD at3 = g_settleTo + 100;
+            g_settleH = g_destH / BLUR_PUSH * 0.5f; g_settleU = g_destU; g_settleV = g_destV;
+            g_settleFrom = at3; g_settleTo = at3 + 1000;
+            ViewStep(1.0f, at3 + 500, 1000, 500);
+            ok &= g_viewH <= g_settleH * 1.0001f;
+        }
         PutFloat(HOLD_BAR_VA, 0.0f); g_holdOn = 0; g_lnN[1] = 0; g_holdMs = HOLD_MS;
         /* the screen ends: the next begins on the game's thread again */
         DriftScreenGone();
