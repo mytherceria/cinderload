@@ -300,9 +300,12 @@ static const unsigned char kBorderWide[16]  = { 0x00, 0x00, 0x00, 0x3F, 0xEC, 0x
 /* A pack whose fire is revealed rather than stretched (see RevealBar) gets a fill the size of the log itself, so the
  * cracks can burn from its top edge to its bottom one. */
 #define kFillReveal kBorderWide
-/* A garland's bar (4 Oct 2026): the top banner's mirror, ARCH_H (0.18) tall, flush with the bottom; fill the same. */
-static const unsigned char kBarTall[16]     = { 0x00, 0x00, 0x00, 0x3F, 0xEC, 0x51, 0xB8, 0x3D,   /* 0.5, 0.09 */
-                                                0x00, 0x00, 0x80, 0x3F, 0xEC, 0x51, 0x38, 0x3E }; /* 1.0, 0.18 */
+/* A garland's bar (4 Oct 2026): the top banner's mirror, flush with the bottom; fill the same. GARLAND_H tall, not
+ * ARCH_H: his standing rule for every class's bottom bar (4 Oct, ~18:35), its leaves "finish naturally and stick out
+ * past" the arch line, so the bar has headroom above the arch (the arch itself is ARCH_H at the edges, at the bottom). */
+#define GARLAND_H 0.22f
+static const unsigned char kBarTall[16]     = { 0x00, 0x00, 0x00, 0x3F, 0xAE, 0x47, 0xE1, 0x3D,   /* 0.5, 0.11 */
+                                                0x00, 0x00, 0x80, 0x3F, 0xAE, 0x47, 0x61, 0x3E }; /* 1.0, 0.22 */
 static int g_barSizeOurs, g_barTallNow;               /* the size table is ours (revealed); it holds the tall size */
 
 /* Read only, before anything is put in place: is this the client CinderLoad was made for? Both places it changes must
@@ -3465,7 +3468,17 @@ static void *OverlayLoad(const char *path)
     unsigned slot[4] = { 0 }, status[8] = { 0 };
     void *f = OV_FN(OvFlags, 0x58A980)(slot, 0, 1, 0, 0, 0, 0, 0, 1, 0);
     unsigned flags = f ? *(unsigned *)f : 0;
-    return ((OvLoad)g_barLoader)(path, status, flags, 0, 0);
+    void *tex = ((OvLoad)g_barLoader)(path, status, flags, 0, 0);
+    static int logged;
+    if (logged++ < 24) {                       /* 4 Oct: labels drawn as white boxes on a session's first screen */
+        char m[260];
+        const char *n = path;
+        for (const char *q = path; *q; q++) if (*q == '\\') n = q + 1;
+        wsprintfA(m, "  overlay load %s: handle %08lX, status %08lX %08lX %08lX, at %lu ms", n, (unsigned long)(ULONG_PTR)tex,
+                  (unsigned long)status[0], (unsigned long)status[1], (unsigned long)status[2], (unsigned long)GetTickCount());
+        Log(m);
+    }
+    return tex;
 }
 
 /* Quads put by QuadPut, drawn as strips of LBL_BATCH with the picture dev. */
@@ -3491,6 +3504,7 @@ void WINAPI OverlayDraw(void)
     static DWORD last;
     float dt = last ? (float)(now - last) / 1000.0f : 0;
     last = now;
+    if (g_lblOn && !g_lblTex && !g_lblTried) { g_lblTried = 1; g_lblTex = OverlayLoad(LABELS_PATH); }   /* the biggest: first */
     if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
     if (g_marksOn && !g_marksTex && !g_marksTried) { g_marksTried = 1; g_marksTex = OverlayLoad(MARKS_PATH); }
     if (g_wavesOn && !g_wavesTex && !g_wavesTried) { g_wavesTried = 1; g_wavesTex = OverlayLoad(WAVES_PATH); }
@@ -3525,7 +3539,17 @@ void WINAPI OverlayDraw(void)
     if (g_lblOn && !g_lblTex && !g_lblTried) { g_lblTried = 1; g_lblTex = OverlayLoad(LABELS_PATH); }
     if (g_lblTex) {
         LabelsBuild();
-        OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_lblTex, 1, 0), g_lblPos, g_lblUV, g_lblCol, g_lblQuads);
+        void *dev = OV_FN(OvDevice, 0x44ACF0)(g_lblTex, 1, 0);
+        static void *lastDev;
+        static int devLogs;
+        if (dev != lastDev && devLogs < 8) {           /* does its device copy change while the first screen shows? */
+            char m[120];
+            wsprintfA(m, "  labels' device copy %08lX at %lu ms", (unsigned long)(ULONG_PTR)dev, (unsigned long)now);
+            Log(m);
+            devLogs++;
+            lastDev = dev;
+        }
+        OverlayStrips(dev, g_lblPos, g_lblUV, g_lblCol, g_lblQuads);
     }
     if (g_marksTex) {                                              /* the badge: over the names, never hidden by one */
         ClassStep();
