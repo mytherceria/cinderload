@@ -2427,6 +2427,9 @@ static void HitchLog(char *m)
 static int g_destOk;                                            /* this screen's arrival, once known, is kept */
 static DWORD g_destSince;                                       /* when it became known (the ripple fades in from it) */
 static float g_destU, g_destV, g_destH;
+static DWORD g_settleFrom, g_settleTo;                          /* the hold's glide in (see HoldFrame), 0 for none */
+static float g_settleU, g_settleV, g_settleH;                   /* ... from the view as the game finished */
+#define SETTLE_NEAR     0.02f      /* of the zoom (in its even steps) or of the view's width: landed already */
 
 /* The fire's worker, when a screen has gone (the loading screen's layer cleared): the next screen starts from the
  * whole world. Written between screens, when no loading screen is drawn, so no frame shows it. */
@@ -2465,6 +2468,7 @@ static void DriftStep(float p, DWORD now)
         g_viewU = g_viewV = g_viewH = 0.5f;
         g_destOk = 0;
         g_destMap = -1;
+        g_settleTo = 0;
         InterlockedExchange(&g_destKnownPct, -1);
         ArrivalSnap();
         InterlockedExchange(&g_zoomHalf, g_zoomScreens > 0);
@@ -2516,10 +2520,22 @@ static void DriftStep(float p, DWORD now)
             float pb = BlurAmount(now);                             /* through the blur, closer still */
             if (pb > 0) h *= (float)FireExp(-(double)pb * MapLn(BLUR_PUSH));
         }
-        float a = snap ? 1.0f : (float)(1.0 - FireExp(-(double)dt / MAP_TAU));
-        g_viewU += (cu - g_viewU) * a;
-        g_viewV += (cv - g_viewV) * a;
-        g_viewH += (h - g_viewH) * a;
+        if (g_settleTo && g_destOk) {                               /* the hold's glide in: on the clock, not the bar */
+            LONG span = (LONG)(g_settleTo - g_settleFrom);
+            float t = span > 0 ? FireClamp((float)(LONG)(now - g_settleFrom) / (float)span, 0, 1) : 1;
+            float s = t * t * (3 - 2 * t);
+            float lh = (float)FireExp((double)((1 - s) * MapLn(g_settleH) + s * MapLn(g_destH)));
+            float kc = g_settleH - g_destH > 1e-6f ? FireClamp((g_settleH - lh) / (g_settleH - g_destH), 0, 1) : 1;
+            float pb = BlurAmount(now);
+            g_viewU = g_settleU + (g_destU - g_settleU) * kc;
+            g_viewV = g_settleV + (g_destV - g_settleV) * kc;
+            g_viewH = pb > 0 ? lh * (float)FireExp(-(double)pb * MapLn(BLUR_PUSH)) : lh;
+        } else {
+            float a = snap ? 1.0f : (float)(1.0 - FireExp(-(double)dt / MAP_TAU));
+            g_viewU += (cu - g_viewU) * a;
+            g_viewV += (cv - g_viewV) * a;
+            g_viewH += (h - g_viewH) * a;
+        }
         cu = g_viewU; cv = g_viewV; h = g_viewH;
         if (cu < h) cu = h;
         if (cu > 1 - h) cu = 1 - h;
@@ -2560,6 +2576,19 @@ static void HoldFrame(void)
     DWORD floorAt = g_scrStartAt + (DWORD)(floor > 0 ? floor : 0), settleAt = now + HOLD_SETTLE_MS;
     DWORD planAt = (LONG)(g_planEndAt - settleAt) < 0 ? g_planEndAt : settleAt;   /* the plan, hurried to settle */
     DWORD endAt = (LONG)(floorAt - planAt) > 0 ? floorAt : planAt;                 /* but never before the floor */
+    /* The view still out as the game finishes (his clip, 4 Oct 22:04: the game sat near half, then finished in a
+     * rush; the zoom, never ahead of the game, was still over the zone, and the blur came on there and froze). It
+     * gets its own glide in, never shorter than HOLD_SETTLE_MS, from where it is onto the arrival, landing at endAt
+     * as the blur comes on; every frame after, the game's own freeze included, shows that landed view. */
+    if (g_destOk) {
+        float rem = g_viewH > g_destH && g_destH < 0.5f ? MapLn(g_viewH / g_destH) / MapLn(0.5f / g_destH) : 0;
+        float du = g_viewU - g_destU, dv = g_viewV - g_destV, off = (du < 0 ? -du : du) + (dv < 0 ? -dv : dv);
+        if ((rem > SETTLE_NEAR || off > SETTLE_NEAR * 2 * g_viewH) && (LONG)(now + HOLD_SETTLE_MS - endAt) > 0)
+            endAt = now + HOLD_SETTLE_MS;
+        g_settleFrom = now;
+        g_settleTo = (LONG)(endAt - now) > 0 ? endAt : now + 1;
+        g_settleU = g_viewU; g_settleV = g_viewV; g_settleH = g_viewH;
+    }
     if ((LONG)(endAt - now) <= 0) {
         if (!blur) return;                                                        /* met already: no hold */
         endAt = now;                                                              /* (but the ending still plays) */

@@ -2437,6 +2437,24 @@ static void LiveTests(void)
         for (int k = 0; k < 300; k++) { at += 20; shim_ticks = at; sh = DisplayStep(0.9f, at); DriftStep(sh, at); }
         g_testFrames = 0; HoldFrame();
         hd &= shim_ticks - at <= HOLD_SETTLE_MS + HOLD_TAIL_MS + 40 && g_planU > 0.999f;
+        /* his clip, 4 Oct 22:04: a first load, the game near a tenth long past its plan, then done in a rush with the
+         * view still far out. It glides in over the settle, lands on the arrival as the blur comes on, and a frame
+         * after the game's freeze shows that same view (it used to blur where it was, then jump in mid-freeze) */
+        g_lnMs[0] = 2000; g_lnFreeze[0] = 800; g_lnN[0] = 3; g_blurOn = 1; g_blurMs = 300;
+        DriftScreenGone(); g_zoomScreens = 0; at += 3000; shim_ticks = at;
+        sh = DisplayStep(0.0f, at); DriftStep(sh, at);
+        for (int k = 0; k < 250; k++) { at += 20; shim_ticks = at; sh = DisplayStep(0.1f, at); DriftStep(sh, at); }
+        float hOut = g_viewH;
+        DWORD land = shim_ticks + 16 + HOLD_SETTLE_MS;                  /* the hold draws one frame (16 ms here) first */
+        g_testFrames = 0; HoldFrame();
+        float vh = g_viewH, vu = g_viewU, vv = g_viewV;
+        int st = hOut > 4 * hEnd && g_blurFrom == land - BLUR_LEAD_MS && g_blurTo == land + 300 && g_testFrames > 40 &&
+                 fabsf(vh - hEnd / BLUR_PUSH) < 0.03f * hEnd && fabsf(vu - 0.3f) < 2e-3f;
+        at = shim_ticks + 2400; shim_ticks = at;                        /* the game's freeze, then one more frame */
+        sh = DisplayStep(1.0f, at); DriftStep(sh, at);
+        st &= fabsf(g_viewH - vh) < 1e-5f && fabsf(g_viewU - vu) < 1e-5f && fabsf(g_viewV - vv) < 1e-5f;
+        g_lnN[0] = 0; g_blurOn = 0; g_blurFrom = g_blurTo = 0;
+        Check(st, "the game done long after its plan, the view far out: it glides in over the settle and lands as the blur comes on, and the frame after the freeze shows that same view");
         g_lnMs[1] = 950; g_holdOn = 0; g_testFrames = 0;                /* off: the frame alone */
         DriftScreenGone(); g_zoomScreens = 1; at += 3000; shim_ticks = at;
         sh = DisplayStep(0.0f, at); DriftStep(sh, at);
