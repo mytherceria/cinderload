@@ -1,11 +1,12 @@
 # CinderLoad
 
-Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client, with a charred log for a loading bar and fire in its cracks.
+Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client: the world map zooms in on where you are going while the bar burns in your class's colour.
 
 - Every loading screen fills the whole screen instead of sitting in a 4:3 box: 16:10, 16:9, 21:9 and 32:9.
-- The bar is a burning log. The fire is uncovered as the bar fills, with live lava behind a soft front, in the picture's own colour: orange, aqua, arcane or fel.
-- The fire has a sound, built at run time from your own client's fire loops (none are shipped). It follows the fire from left to right.
-- Eastern Kingdoms and Kalimdor show a wallpaper drawn at random from Turtle WoW's commissioned art. Dungeons, raids and battlegrounds keep their own screens, widened.
+- Every loading screen is the world map, stitched from the client's own map tiles. As the bar fills, the view zooms in on where you are arriving; for a dungeon, raid or battleground, on its entrance. Cities, zones with their levels, towns, flight paths and every instance entrance are marked, more of them as you get closer, and currents run across the sea.
+- The bar is a burning log, the fire uncovered as the bar fills, in your class's colour: Druid orange, Hunter green, Mage light blue, Paladin pink, Priest white, Rogue yellow, Shaman blue, Warlock purple, Warrior tan.
+- Druids get their own frame on 21:9 screens: a wrought iron and stained glass banner across the top with the bear, cat, stag and raven, and a garland of leaves and flowers that grows in along the bottom, with wisps and its own sound building as it loads. The other classes follow, one at a time.
+- The sounds are built at run time from your own client's sound files (none are shipped).
 - Everything is checked against your WoW.exe first and changed in memory only. If anything differs, that part stays off and Logs/CinderLoad.log says why. WoW.exe on disk is never changed.
 
 CinderLoad began inside [Azeroth Atmosphere](https://github.com/mytherceria/azeroth-atmosphere) and has its own home here from 0.1.6 on.
@@ -32,7 +33,7 @@ Check the files against SHA256SUMS on the release.
 
 ## Credits
 
-The wallpapers are Turtle WoW's commissioned art, credited on each screen: Lionel Schramm, Misho Tenev, Stonegut and Ghor. Two more, a handheld game screen and an 8-bit map, are drawn from scratch for CinderLoad.
+The world map is stitched from the client's own map tiles. The banner, the garland and the bar are drawn from code; the animals on the banner are traced from the client's own models. Releases before 0.2.0 carried wallpapers from Turtle WoW's commissioned art by Lionel Schramm, Misho Tenev, Stonegut and Ghor.
 
 ## License
 
