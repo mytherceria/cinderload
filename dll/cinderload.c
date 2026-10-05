@@ -2366,7 +2366,8 @@ static volatile LONG g_driftNew = 1;                            /* the next fram
                                * hurrying after (3 times its average speed, and ending at 91%); a freeze past this counts
                                * this much only. */
 static float g_disp, g_dispV, g_dispRate, g_dispMax, g_fillFull;
-static DWORD g_dispAt, g_dispStill;                            /* ms of frames on, the game's bar unmoved, so far */
+static float g_fillShown;                                      /* the bar as shown on the game's last loading frame */
+static DWORD g_dispAt, g_dispStill;                           /* ms of frames on, the game's bar unmoved, so far */
 static DWORD g_gameAt;                                         /* the game's last loading frame (GameFacts) */
 static float g_gameMax;                                        /* the game's bar, its highest this screen */
 #define HITCH_MS 120              /* a gap between frames this long or more is a hitch (4 Oct: he saw stutters at 20, 30,
@@ -4156,7 +4157,7 @@ static void OverlayDrawAll(void)
 
 #if defined(__i386__)
 /* From RevealStub at the border's entry, on the game's thread: over the garland's leaves and under the border, its
- * blooms opening and its wisps. */
+ * blooms opening and its wisps, at the fill's front as RevealFill drew it this frame (g_fillShown). */
 void WINAPI OverlayAfterFill(void) __attribute__((used));
 static void OverlayAfterFillAll(int f);
 void WINAPI OverlayAfterFill(void)
@@ -4183,7 +4184,7 @@ static void OverlayAfterFillAll(int f)
         bloomsTex[f] = OverlayLoad(path);
     }
     if (bloomsTex[f]) {
-        BloomsBuild(f, g_disp, now, g_zoomScreens);
+        BloomsBuild(f, g_fillShown, now, g_zoomScreens);
         if (g_bmQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(bloomsTex[f], 1, 0), g_bmPos, g_bmUV, g_bmCol, g_bmQuads);
     }
     if (g_wispTab[f].n && !wispsTex[f] && !wispsTried[f]) {
@@ -4192,7 +4193,7 @@ static void OverlayAfterFillAll(int f)
         wispsTex[f] = OverlayLoad(path);
     }
     if (wispsTex[f]) {
-        WispsBuild(f, g_disp, t, dt);
+        WispsBuild(f, g_fillShown, t, dt);
         if (g_wsQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(wispsTex[f], 1, 0), g_wsPos, g_wsUV, g_wsCol, g_wsQuads);
     }
 }
@@ -4343,6 +4344,7 @@ void WINAPI RevealFill(const float *v)
     if (!(p >= 0)) p = 0;
     if (p > 1) p = 1;
     float shown = GameStep(p, GetTickCount());
+    g_fillShown = FireClamp(shown, 0, 1);                           /* the garland's front too (OverlayAfterFill) */
     float L = v[0], B = v[1], z = v[2], T = v[7];
     if (p > 0.02f && v[3] > L) g_fillFull = (v[3] - L) / p;         /* the bar's whole width, in the same units */
     float full = g_fillFull > 0 ? g_fillFull : 1.0f;
@@ -4786,14 +4788,19 @@ static void ViewBarBuild(float W, float H, float shown, DWORD now)
             }
         }
     }
-    if (g_ovOn && gar > 0 && gar <= g_bars.families) {         /* a garland: its blooms opening, its wisps */
+    if (g_ovOn && gar > 0 && gar <= g_bars.families) {         /* a garland: its blooms opening, its wisps, at the fill's
+                                                                * front (the bar as shown, never the game's own: on a later
+                                                                * load that is full in a third of a second, and every flower
+                                                                * opened at once while the leaves still grew in; his 5 Oct
+                                                                * teleports) */
         int fi = (int)gar - 1;
+        float front = FireClamp(shown, 0, 1);
         if (g_bloomTab[fi].types && g_viewTex[VT_BLOOMS + fi]) {
-            BloomsBuild(fi, g_disp, now, g_zoomScreens);
+            BloomsBuild(fi, front, now, g_zoomScreens);
             ViewStrips(VT_BLOOMS + fi, g_bmPos, g_bmUV, g_bmCol, g_bmQuads, W, H);
         }
         if (g_wispTab[fi].n && g_viewTex[VT_WISPS + fi]) {
-            WispsBuild(fi, g_disp, t, dt);
+            WispsBuild(fi, front, t, dt);
             ViewStrips(VT_WISPS + fi, g_wsPos, g_wsUV, g_wsCol, g_wsQuads, W, H);
         }
     }

@@ -61,7 +61,7 @@ static void Fresh(const char *name)
     for (int i = 0; i < CLASS_CODE; i++) memcpy(shim_module + kClassCode[i].rva, kClassCode[i].bytes, (size_t)kClassCode[i].n);
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
-    g_dispNew = 1; g_dispAt = 0; g_gameAt = 0; g_fillFull = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
+    g_dispNew = 1; g_dispAt = 0; g_gameAt = 0; g_fillFull = 0; g_fillShown = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
     for (int k = 0; k < 2; k++) g_lnMs[k] = g_lnFreeze[k] = g_lnN[k] = 0;
     g_fullMs = 0; g_endFreezeMs = 0; g_screenLogin = 0; g_screenMap = 0; g_zoomStart = 0; g_holdOn = 0; g_holdMs = HOLD_MS; g_timed = 0; g_blurOn = 0; g_blurUsed = 0; g_blurFrom = g_blurTo = 0; g_dissolveAt = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
@@ -897,6 +897,60 @@ static void FireBarTests(void)
             BloomsParse(fd, "cell 256\ntypes 5\nframes 8\n", 26);                         /* 5 x 256 > 1024: none */
             bm &= g_bloomTab[fd].types == 0;
             Check(bm, "garland: blooms inside the arch, mostly orange; open once the front reaches them, bud to bloom and growing; a leap opens them at once; a new screen closes them; a sheet too big none");
+        }
+        /* his teleports (5 Oct, Moonglade and the hearth back): a later load the game fills in a third of a second, its
+         * bar then on the plan's 4.2 s, and the flowers were already open across the bottom while the leaves still grew
+         * in. They open as the fill's front reaches them, left to right, on the game's frame (RevealFill keeps the bar
+         * as shown for OverlayAfterFill) and on the view's alike, and the wisps ride that front */
+        {
+            BloomsParse(fd, "cell 128\ntypes 4\nframes 8\n", 26);
+            Poke(CHAR_PICKED_VA, 0);                                        /* the druid again */
+            ForMap(36);
+            int lt = g_barGarland == fd + 1 && g_bloomTab[fd].types == 4;
+            g_mapShown = 1;
+            { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+            g_map.ok = 1;
+            Poke(BAR_MAP_VA, 0);
+            Poke(MAP_DEST_MAP_VA, 0);
+            { float x = -5000.0f, y = 10000.0f; unsigned u; memcpy(&u, &x, 4); Poke(MAP_DEST_X_VA, u); memcpy(&u, &y, 4); Poke(MAP_DEST_Y_VA, u); }
+            g_driftOn = 1; g_screenWatch = 1; g_holdMs = 5000;
+            g_lnMs[1] = 950; g_lnFreeze[1] = 800; g_lnN[1] = 3;            /* a quick machine's later loads: the plan 4.2 s */
+            g_zoomScreens = 1;
+            DriftScreenGone();
+            /* the game's frame: a second of them, its bar full from 0.3 s */
+            float vg[12] = { 0, 0, 0, 0, 0, 0, 0, 0.18f, 0, 0, 0.18f, 0 };
+            for (int k = 0; k <= 50; k++) {
+                float h = k * 20 < 300 ? k * 20 / 300.0f : 1.0f;
+                unsigned u; memcpy(&u, &h, 4); Poke(0x882BE4, u);
+                vg[3] = vg[9] = h;
+                shim_ticks += 20; RevealFill(vg);
+            }
+            lt &= g_disp == 1.0f && g_fillShown > 0.15f && g_fillShown < 0.35f &&      /* the game's full, the bar as shown not */
+                  fabsf(g_fillVerts[6 * (g_fillCount / 2 - 1)] - g_fillShown) < 1e-4f;  /* the fill's own front */
+            /* the view's frames (7 ms), the next teleport: every flower open is one the front has reached, none ahead */
+            InitializeCriticalSection(&g_stepLock);
+            g_viewOn = 1; g_ovOn = 1;
+            for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+            g_viewTex[VT_BLOOMS + fd] = g_viewTex[VT_WISPS + fd] = 1;
+            memset(g_wisp, 0, sizeof g_wisp); g_wispFront = -1; g_wispCredit = 0;
+            DriftScreenGone();
+            { float h = 0; unsigned u; memcpy(&u, &h, 4); Poke(0x882BE4, u); }
+            DWORD t = shim_ticks + 3000;
+            GameStep(0.0f, t);                                              /* the game's first frame begins it */
+            int ahead = 0;
+            for (int k = 1; k <= 145; k++) {
+                t += 7;
+                ViewStep(k * 7 < 300 ? k * 7 / 300.0f : 1.0f, t, 5120, 2160);
+                for (int i = 0; i < BLOOM_MAX; i++) ahead += g_bloom[i].on && g_bloom[i].x > g_viewShown + 1e-6f;
+            }
+            int open = 0, closed = 0;
+            for (int i = 0; i < BLOOM_MAX; i++) { open += g_bloom[i].on; closed += g_bloom[i].x > g_viewShown && !g_bloom[i].on; }
+            lt &= g_viewSteps == 1 && g_disp == 1.0f && g_viewShown > 0.15f && g_viewShown < 0.35f && ahead == 0 && open >= 8 &&
+                  closed >= 40 && fabsf(g_wispFront - g_viewShown) < 1e-6f;
+            g_viewOn = 0; g_viewSteps = 0; g_ovOn = 0; g_mapShown = 0; g_map.ok = 0; g_driftOn = 0; g_screenWatch = 0;
+            g_zoomScreens = 0; g_destEndOk = 0; g_holdMs = HOLD_MS; g_lnN[1] = 0;
+            for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+            Check(lt, "garland, his teleports: a later load the game fills in 0.3 s, its bar on the plan's 4.2 s: the flowers open only as the fill's front reaches them (the game's frame and the view's), none ahead of it, and the wisps ride that front");
         }
     }
 
