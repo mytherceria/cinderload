@@ -1315,6 +1315,12 @@ static int BarFamily(const BarTable *t)
  * quarter, all with linear filtering, laid over the frame. Drawn just before the device presents (PRESENT_VA). */
 #define BLUR_MS         500
 #define BLUR_DIM        35         /* percent of black at the end (100: to black) */
+/* His notes on the first in game (4 Oct, 21:40): "it gets to as max zoom in as it's going to get and then just blurs
+ * from there and instead it should be blurring a little bit earlier and the zoom should keep zooming in until it
+ * completely fades away. And we should see Stormwind City on the map": the blur begins BLUR_LEAD_MS before the view
+ * lands, and through it the view keeps closing in, BLUR_PUSH times closer by its end. */
+#define BLUR_LEAD_MS    400
+#define BLUR_PUSH       2.5f
 #define DISSOLVE_MS     500
 #define PRESENT_VA      0x5A19FD   /* the game's present: mov eax, [esi+0x38A8] (its IDirect3DDevice9), then Present */
 #define GX_D3D_OFF      0x38A8
@@ -2506,6 +2512,8 @@ static void DriftStep(float p, DWORD now)
             }
             cu = 0.5f + (du - 0.5f) * k;
             cv = 0.5f + (dv - 0.5f) * k;
+            float pb = BlurAmount(now);                             /* through the blur, closer still */
+            if (pb > 0) h *= (float)FireExp(-(double)pb * MapLn(BLUR_PUSH));
         }
         float a = snap ? 1.0f : (float)(1.0 - FireExp(-(double)dt / MAP_TAU));
         g_viewU += (cu - g_viewU) * a;
@@ -2556,7 +2564,10 @@ static void HoldFrame(void)
         endAt = now;                                                              /* (but the ending still plays) */
     }
     g_planEndAt = endAt;
-    if (blur) { g_blurFrom = endAt; g_blurTo = endAt + (DWORD)blur; }
+    if (blur) {                                                   /* from a little before it lands, never before now */
+        g_blurFrom = (LONG)(endAt - BLUR_LEAD_MS - now) > 0 ? endAt - BLUR_LEAD_MS : now;
+        g_blurTo = endAt + (DWORD)blur;
+    }
     DWORD stopAt = endAt + (DWORD)(blur > HOLD_TAIL_MS ? blur : HOLD_TAIL_MS);
     for (int f = 0; f < HOLD_FRAMES && (LONG)(stopAt - now) > 0 && now - start < HOLD_MAX_MS; f++) {
         Sleep(4);
@@ -3651,14 +3662,9 @@ static int g_wsQuads;
 __attribute__((used)) float g_wsPos[(WISP_MAX + 4) * 6 * 3];
 __attribute__((used)) float g_wsUV[(WISP_MAX + 4) * 6 * 2];
 __attribute__((used)) unsigned g_wsCol[(WISP_MAX + 4) * 6];
-__attribute__((used)) float g_backPos[2 * 6 * 3];
-__attribute__((used)) float g_backUV[2 * 6 * 2];
-__attribute__((used)) unsigned g_backCol[2 * 6];
-static int g_backQuads;
 #define WISP_ZIPS      4        /* his v2 note (4 Oct): wisps "floating and zipping around whimsically around the forward
                                  * leading edge": small ones looping around the front, each with a fading tail */
 #define WISP_ZIP_TAIL  5
-#define BACK_FEATHER   0.02f    /* the backing fades in over this much of the width ahead of the front */
 
 static float WispRand(void) { g_wispSeed = SeaHash(g_wispSeed + 0x9E3779B9u); return (float)(g_wispSeed >> 8) / 16777216.0f; }
 /* sin x for any x (FireSin is only for 0..pi/2) */
@@ -3829,25 +3835,6 @@ static void BloomsBuild(int f, float front, DWORD now, int screen)
     }
 }
 
-/* The garland's backing, ARCH_H tall at the bottom, only AHEAD of the front (his v2 note, 4 Oct: no black line along
- * the leaves' top; "the edges of the leaves should be the edge of the border, with the map layers below it"): behind
- * the front the map shows between the leaves; a soft edge BACK_FEATHER wide just ahead of it. */
-static void BackBuild(float front)
-{
-    g_backQuads = 0;
-    float a = FireClamp(front, 0, 1), b = FireClamp(front + BACK_FEATHER, 0, 1);
-    if (a >= 1) return;
-    if (b > a) {                                                     /* the soft edge: clear to dark */
-        float x[4] = { a, b, a, b }, y[4] = { 0, 0, ARCH_H, ARCH_H }, tu[4] = { a, b, a, b }, tv[4] = { 1, 1, 0, 0 };
-        unsigned c[4] = { 0x00FFFFFFu, 0xFFFFFFFFu, 0x00FFFFFFu, 0xFFFFFFFFu };
-        QuadPut4(g_backPos, g_backUV, g_backCol, g_backQuads++, x, y, tu, tv, c);
-    }
-    if (b < 1) {
-        float x[4] = { b, 1, b, 1 }, y[4] = { 0, 0, ARCH_H, ARCH_H }, tu[4] = { b, 1, b, 1 }, tv[4] = { 1, 1, 0, 0 };
-        QuadPut(g_backPos, g_backUV, g_backCol, g_backQuads++, x, y, tu, tv, 0xFFFFFFFFu);
-    }
-}
-
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -3972,20 +3959,10 @@ void WINAPI OverlayDraw(void)
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_logoTex, 1, 0), g_logoPos, g_logoUV, g_logoCol, 1);
     }
     LONG garland = g_barGarland;
-    if (garland > 0 && garland <= g_bars.families) {               /* last: a garland's backing, under its leaves */
-        static void *backTex[BAR_FAMILIES];
-        static int backTried[BAR_FAMILIES];
-        int f = (int)garland - 1;
-        char path[96];
-        if (!backTex[f] && !backTried[f]) {
-            backTried[f] = 1;
-            lstrcpyA(path, g_bars.family[f].back); lstrcatA(path, ".blp");
-            backTex[f] = OverlayLoad(path);
-        }
-        if (backTex[f]) {
-            BackBuild(g_disp);
-            if (g_backQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(backTex[f], 1, 0), g_backPos, g_backUV, g_backCol, g_backQuads);
-        }
+    if (garland > 0 && garland <= g_bars.families) {
+        /* a garland draws nothing ahead of its front: the map shows there until it grows over it (his note, 4 Oct
+         * evening: "There's a black bar. That should not be black. That should be the map"); its backing in the pack
+         * still marks the family a garland */
     } else if (g_seaTex) {                                         /* last: the log's black, under the bar */
         BarBlackBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_blackPos, g_blackUV, g_blackCol, 1);

@@ -842,11 +842,6 @@ static void FireBarTests(void)
             float zx = (g_wsPos[c0 * 3] + g_wsPos[(c0 + 1) * 3]) / 2, zy = (g_wsPos[c0 * 3 + 1] + g_wsPos[(c0 + 2) * 3 + 1]) / 2;
             cv &= fabsf(zx - fr) < 0.05f && zy > -0.02f && zy < GarlandThick(fr) + 0.04f;
         }
-        /* the backing: only ahead of the front, soft for BACK_FEATHER, none once full */
-        BackBuild(0.4f);
-        cv &= g_backQuads == 2 && fabsf(g_backPos[0] - 0.4f) < 1e-6f && (g_backCol[0] >> 24) == 0 && (g_backCol[1] >> 24) == 0xFF;
-        BackBuild(1.0f);
-        cv &= g_backQuads == 0;
         WispsBuild(fd, 1.0f, 2.0f, 0.033f);                                 /* the bar full: no front's own three */
         int after = 0;
         for (int i = 0; i < WISP_MAX; i++) after += g_wisp[i].live;
@@ -2503,9 +2498,10 @@ static void LiveTests(void)
         sh = DisplayStep(0.0f, at); DriftStep(sh, at);
         PutFloat(HOLD_BAR_VA, 1.0f);
         HoldFrame();
-        bl &= g_blurFrom == t0 + 3700 && g_blurTo == t0 + 4200 && shim_ticks >= t0 + 4200 && shim_ticks < t0 + 4240;
+        bl &= g_blurFrom == t0 + 3700 - BLUR_LEAD_MS && g_blurTo == t0 + 4200 && shim_ticks >= t0 + 4200 && shim_ticks < t0 + 4240;
+        bl &= fabsf(g_viewH - hEnd / BLUR_PUSH) < 2e-3f && fabsf(g_viewU - 0.3f) < 2e-3f;   /* closer still, on the arrival */
         float am = 0;
-        bl &= BlurStep(1, t0 + 3600, &am) == 0 && BlurStep(1, t0 + 3950, &am) == 1 && am > 0.4f && am < 0.6f &&
+        bl &= BlurStep(1, t0 + 3250, &am) == 0 && BlurStep(1, t0 + 3750, &am) == 1 && am > 0.4f && am < 0.6f &&
               BlurStep(1, t0 + 4300, &am) == 1 && am > 0.999f && g_blurUsed;
         bl &= BlurStep(0, t0 + 6000, &am) == 2 && am > 0.999f && g_dissolveAt == t0 + 6000;   /* the world, after the freeze */
         bl &= BlurStep(0, t0 + 6250, &am) == 2 && am > 0.4f && am < 0.6f;
@@ -2515,7 +2511,7 @@ static void LiveTests(void)
         sh = DisplayStep(0.0f, at); DriftStep(sh, at);
         for (int k = 0; k < 450; k++) { at += 20; shim_ticks = at; sh = DisplayStep(1.0f, at); DriftStep(sh, at); }
         g_testFrames = 0; HoldFrame();
-        bl &= g_testFrames > 25 && g_blurTo - g_blurFrom == 500 && shim_ticks >= g_blurTo;
+        bl &= g_testFrames > 25 && g_blurTo - g_blurFrom == 500 && shim_ticks >= g_blurTo;   /* (no lead once late) */
         { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\nblur 400 100\n"; MapParse(mt, (unsigned)strlen(mt)); }
         bl &= g_blurMs == 400 && g_blurDim == 100 && g_map.ok;
         { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
