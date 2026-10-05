@@ -732,10 +732,12 @@ static void FireBarTests(void)
         const char *names[] = { "Interface\\Glues\\LoadingScreens\\LoadScreenDeadmines.blp", "CinderLoad\\bars.txt",
                                 "CinderLoad\\reveal.txt", TEX "Loading-BarFill-fel.blp", TEX "Loading-BarBorder-fel.blp",
                                 TEX "Loading-BarFill-druid.blp", TEX "Loading-BarBorder-druid.blp", TEX "Loading-BarBack-druid.blp",
-                                TEX "Loading-BarWisps-druid.blp", "CinderLoad\\wisps-druid.txt" };
-        const char *data[] = { "BLP2screen", bars, "revealed", "BLP2f", "BLP2b", "BLP2f", "BLP2b", "BLP2back", "BLP2wisps", wt };
+                                TEX "Loading-BarWisps-druid.blp", "CinderLoad\\wisps-druid.txt", TEX "Loading-BarBlooms-druid.blp",
+                                "CinderLoad\\blooms-druid.txt" };
+        const char *data[] = { "BLP2screen", bars, "revealed", "BLP2f", "BLP2b", "BLP2f", "BLP2b", "BLP2back", "BLP2wisps", wt,
+                               "BLP2blooms", "# blooms\ncell 128\ntypes 4\nframes 8\n" };
         Fresh("garland");
-        MakeMpq(UW, 10, names, data, NULL);
+        MakeMpq(UW, 12, names, data, NULL);
         Put("WTF/Config.wtf", RES("5120x2160"));
         Start();
         FakeTables();
@@ -745,7 +747,7 @@ static void FireBarTests(void)
             if (!strcmp(g_bars.family[f].name, "fel")) ff = f;
         }
         int gl = fd >= 0 && ff >= 0 && g_bars.family[fd].garland && !g_bars.family[ff].garland && g_barSizeOurs &&
-                 g_bars.skipped == 1 && LogSays("fire bar: druid grows as a garland") && LogSays("(its backing in the pack; 6 wisp sprites)");
+                 g_bars.skipped == 1 && LogSays("fire bar: druid grows as a garland") && LogSays("(its backing in the pack; 6 wisp sprites; 4 kinds of flower opening in 8 frames)");
         Check(gl, "garland: bars.txt's style line read (a style other than garland skipped), its backing found, its wisps' table read (bad lines left out)");
 
         unsigned char *fill = shim_module + BAR_FILL_RVA, *border = shim_module + BAR_BORDER_RVA;
@@ -789,6 +791,48 @@ static void FireBarTests(void)
         for (int i = 0; i < WISP_MAX; i++) after += g_wisp[i].live;
         cv &= g_wsQuads == after && after <= live;
         Check(cv, "garland: the arch the banner's curve; wisps rising from just behind the front, inside it, the front's own three on top; none new once full");
+        /* the blooms (his v2 note): the same places every screen, inside the arch; each opens once the front reaches it,
+         * bud to full bloom over BLOOM_OPEN_S, growing as it opens; one the front leapt past is open at once; a new
+         * screen closes them all; a sheet that does not fit makes none */
+        {
+            BloomsBuild(fd, 0.0f, 100000, 1);
+            int bm = g_bmQuads == 0 && g_bloomTab[fd].cell == 128 && g_bloomTab[fd].types == 4 && g_bloomTab[fd].frames == 8;
+            int in = 1, kinds[4] = { 0 };
+            for (int i = 0; i < BLOOM_MAX; i++) {
+                in &= g_bloom[i].y > 0 && g_bloom[i].y < GarlandThick(g_bloom[i].x) && g_bloom[i].x > 0 && g_bloom[i].x < 1;
+                if (g_bloom[i].type >= 0 && g_bloom[i].type < 4) kinds[g_bloom[i].type]++;
+            }
+            bm &= in && kinds[0] > kinds[1] && kinds[1] && kinds[2] && kinds[3];          /* orange most, every kind used */
+            BloomsBuild(fd, 0.30f, 100000, 1);                                            /* the front at 30%: a leap */
+            int open = 0;
+            for (int i = 0; i < BLOOM_MAX; i++) open += g_bloom[i].on;
+            bm &= open > 10 && open < 25;
+            for (int i = 0; i < BLOOM_MAX; i++) bm &= g_bloom[i].on == (g_bloom[i].x <= 0.30f);
+            for (int i = 0; i < BLOOM_MAX; i++)                                          /* far behind: open already */
+                if (g_bloom[i].on) bm &= g_bloom[i].x < 0.05f ? g_bloom[i].t0 == 100000 - 1000
+                                                              : (g_bloom[i].x > 0.29f ? g_bloom[i].t0 > 100000 - 100 : 1);
+            BloomsBuild(fd, 0.32f, 100050, 1);                                            /* just reached: a bud, small */
+            int j = -1;
+            for (int i = 0; i < BLOOM_MAX && j < 0; i++) if (g_bloom[i].x > 0.30f && g_bloom[i].x <= 0.32f) j = i;
+            if (j >= 0) {
+                BloomsBuild(fd, 0.32f, g_bloom[j].t0, 1);
+                int q = 0;
+                for (int i = 0; i < j; i++) q += g_bloom[i].on;                           /* bloom j's quad */
+                float u0 = g_bmUV[(q ? q * 6 - 2 + 2 : 0) * 2];
+                float h0 = g_bmPos[((q ? q * 6 : 0) + 2) * 3 + 1] - g_bmPos[(q ? q * 6 : 0) * 3 + 1];
+                BloomsBuild(fd, 0.32f, g_bloom[j].t0 + 1000, 1);                          /* a second on: fully open */
+                float u1 = g_bmUV[(q ? q * 6 - 2 + 2 : 0) * 2];
+                float h1 = g_bmPos[((q ? q * 6 : 0) + 2) * 3 + 1] - g_bmPos[(q ? q * 6 : 0) * 3 + 1];
+                bm &= u0 == 0 && fabsf(u1 - 7 * 128 / 1024.0f) < 1e-6f && h1 > h0 * 1.7f;
+            } else bm = 0;
+            BloomsBuild(fd, 0.0f, 101000, 2);                                              /* a new screen */
+            int still = 0;
+            for (int i = 0; i < BLOOM_MAX; i++) still += g_bloom[i].on;
+            bm &= still == 0;
+            BloomsParse(fd, "cell 256\ntypes 5\nframes 8\n", 26);                         /* 5 x 256 > 1024: none */
+            bm &= g_bloomTab[fd].types == 0;
+            Check(bm, "garland: blooms inside the arch, mostly orange; open once the front reaches them, bud to bloom and growing; a leap opens them at once; a new screen closes them; a sheet too big none");
+        }
     }
 
     /* bars.txt missing, broken or with nothing the pack carries: no redirect, logged */

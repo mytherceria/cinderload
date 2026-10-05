@@ -952,7 +952,7 @@ typedef struct {
     int families, screens, fallback, skipped;          /* fallback: the "default" line's family, or -1 */
     struct {
         char name[BAR_FAMILY_MAX + 1]; int ok; char fill[80], border[80];
-        int garland; char back[80], wisps[80];         /* a garland ("style <family> garland"): see "the garland" below */
+        int garland; char back[80], wisps[80], blooms[80];   /* a garland ("style <family> garland"): see "the garland" */
     } family[BAR_FAMILIES];
     struct { char name[BAR_NAME_MAX + 1]; int family; } screen[BAR_SCREENS];
 } BarTable;
@@ -1544,6 +1544,31 @@ static void WispsParse(int f, const char *t, unsigned len)
     }
 }
 
+/* The blooms (his v2 note, 4 Oct: "the flowers should open up and bloom"): Loading-BarBlooms-<family>.blp, a sheet of
+ * flowers opening, a row a kind and a column a frame from bud to full bloom, described by CinderLoad\blooms-<family>.txt
+ * ("cell <px>", "types <n>", "frames <n>"); sheet 1024 x 1024. */
+static struct { int cell, types, frames; } g_bloomTab[BAR_FAMILIES];
+static void BloomsParse(int f, const char *t, unsigned len)
+{
+    int v[3] = { 0, 0, 0 };
+    static const char *const key[3] = { "cell", "types", "frames" };
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && t[end] != '\n') end++;
+        const char *l = t + at;
+        int n = (int)(end - at);
+        for (int k = 0; k < 3; k++) {
+            int kl = lstrlenA(key[k]), i = kl, x = 0, j = 0;
+            while (j < kl && j < n && l[j] == key[k][j]) j++;
+            if (j == kl && n > kl && MapSpace(l[kl]) && LblInt(l, n, &i, &x)) v[k] = x;
+        }
+        at = end + 1;
+    }
+    g_bloomTab[f].cell = v[0]; g_bloomTab[f].types = v[1]; g_bloomTab[f].frames = v[2];
+    if (!(v[0] >= 16 && v[0] <= 512 && v[1] >= 1 && v[2] >= 2 && v[1] * v[0] <= 1024 && v[2] * v[0] <= 1024))
+        g_bloomTab[f].types = 0;                                        /* no blooms from a sheet that does not fit */
+}
+
 /* FireBar's: each garland family's backing and wisps found in the pack (m: 600 bytes of room for the log). */
 static void GarlandSetup(char *m)
 {
@@ -1572,8 +1597,23 @@ static void GarlandSetup(char *m)
                 WispsParse(f, (const char *)text, len);
             if (text) HeapFree(GetProcessHeap(), 0, text);
         }
-        wsprintfA(m, "fire bar: %s grows as a garland, the bar the banner's mirror (its backing in the pack; %d wisp sprites)",
-                  g_bars.family[f].name, g_wispTab[f].n);
+        g_bloomTab[f].types = 0;
+        lstrcpyA(g_bars.family[f].blooms, "Interface\\Glues\\LoadingBar\\Loading-BarBlooms-");
+        lstrcatA(g_bars.family[f].blooms, g_bars.family[f].name);
+        if (BarHasTexture(g_bars.family[f].blooms)) {
+            char table[64];
+            unsigned char *text = NULL;
+            unsigned len = 0;
+            lstrcpyA(table, "CinderLoad\\blooms-");
+            lstrcatA(table, g_bars.family[f].name);
+            lstrcatA(table, ".txt");
+            if (mpq_read(&kIoSmall, "patch-~.MPQ", table, &text, &len) == MPQ_OK && text && len < 4096)
+                BloomsParse(f, (const char *)text, len);
+            if (text) HeapFree(GetProcessHeap(), 0, text);
+        }
+        wsprintfA(m, "fire bar: %s grows as a garland, the bar the banner's mirror (its backing in the pack; %d wisp sprites; "
+                  "%d kinds of flower opening in %d frames)", g_bars.family[f].name, g_wispTab[f].n, g_bloomTab[f].types,
+                  g_bloomTab[f].types ? g_bloomTab[f].frames : 0);
         Log(m);
     }
 }
@@ -3211,6 +3251,60 @@ static void WispsBuild(int f, float front, float t, float dt)
     }
     if (wisp >= 0) WispQuad(f, wisp, front, th * 0.55f + bob, 0.9f, 1.0f);
 }
+/* The blooms: BLOOM_MAX flowers set through the arch for the family (the same places every screen), each opening over
+ * BLOOM_OPEN_S once the front reaches it, its frames bud to full bloom, growing as it opens; any the front passed in a
+ * leap (more than a little behind it) are open at once. Drawn over the garland, under the wisps. */
+#define BLOOM_MAX    64
+#define BLOOM_OPEN_S 0.7f
+static struct { float x, y, scale; int type, on; DWORD t0; } g_bloom[BLOOM_MAX];
+static int g_bloomFam = -1, g_bloomScreen = -1, g_bmQuads;
+static float g_bloomLast;
+__attribute__((used)) float g_bmPos[BLOOM_MAX * 6 * 3];
+__attribute__((used)) float g_bmUV[BLOOM_MAX * 6 * 2];
+__attribute__((used)) unsigned g_bmCol[BLOOM_MAX * 6];
+
+static void BloomsPlace(int f)
+{
+    unsigned seed = 0xB100Du + (unsigned)f * 7919u;
+    for (int i = 0; i < BLOOM_MAX; i++) {
+        float r[4];
+        for (int k = 0; k < 4; k++) { seed = SeaHash(seed + 0x9E3779B9u); r[k] = (float)(seed >> 8) / 16777216.0f; }
+        float x = ((float)i + 0.2f + 0.6f * r[0]) / BLOOM_MAX, th = GarlandThick(x);
+        g_bloom[i].x = x;
+        g_bloom[i].y = th * (0.2f + 0.6f * r[1]);
+        g_bloom[i].type = g_bloomTab[f].types < 2 || r[2] < 0.4f ? 0 : 1 + (int)(r[3] * (g_bloomTab[f].types - 1)) % (g_bloomTab[f].types - 1);
+        g_bloom[i].scale = (0.8f + 0.5f * r[3]) * FireClamp(th / ARCH_H * 1.6f, 0.55f, 1.15f);
+        g_bloom[i].on = 0;
+    }
+}
+/* This frame's blooms for garland f, the front at `front` (0..1), screen `screen` (a new one closes them all). */
+static void BloomsBuild(int f, float front, DWORD now, int screen)
+{
+    g_bmQuads = 0;
+    if (f < 0 || f >= BAR_FAMILIES || !g_bloomTab[f].types) return;
+    if (g_bloomFam != f) { BloomsPlace(f); g_bloomFam = f; }
+    if (screen != g_bloomScreen || front < g_bloomLast - 0.05f)
+        for (int i = 0; i < BLOOM_MAX; i++) g_bloom[i].on = 0;
+    g_bloomScreen = screen;
+    g_bloomLast = front;
+    float k = (float)g_scrH / (float)g_scrW, cell = (float)g_bloomTab[f].cell, frames = (float)g_bloomTab[f].frames;
+    for (int i = 0; i < BLOOM_MAX; i++) {
+        if (!g_bloom[i].on && front >= g_bloom[i].x) {
+            g_bloom[i].on = 1;
+            g_bloom[i].t0 = now - (DWORD)FireClamp((front - g_bloom[i].x) * 4000.0f, 0, 1000);
+        }
+        if (!g_bloom[i].on) continue;
+        float u = FireClamp((float)(now - g_bloom[i].t0) / 1000.0f / BLOOM_OPEN_S, 0, 1);
+        int fr = (int)(u * (frames - 1) + 0.5f);
+        float sc = g_bloom[i].scale * (0.55f + 0.45f * u), h = cell * sc / 2160.0f, w = h * k;
+        float cx = g_bloom[i].x, cy = g_bloom[i].y;
+        float x[4] = { cx - w / 2, cx + w / 2, cx - w / 2, cx + w / 2 }, y[4] = { cy - h / 2, cy - h / 2, cy + h / 2, cy + h / 2 };
+        float u0 = fr * cell / 1024.0f, u1 = (fr + 1) * cell / 1024.0f, v0 = g_bloom[i].type * cell / 1024.0f, v1 = v0 + cell / 1024.0f;
+        float tu[4] = { u0, u1, u0, u1 }, tv[4] = { v1, v1, v0, v0 };
+        QuadPut(g_bmPos, g_bmUV, g_bmCol, g_bmQuads++, x, y, tu, tv, (unsigned)(FireClamp(u * 3, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
+    }
+}
+
 /* The garland's backing: one quad, the full width, ARCH_H tall at the bottom, its picture whole. */
 static void BackBuild(void)
 {
@@ -3321,9 +3415,9 @@ void WINAPI OverlayDraw(void)
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_logoTex, 1, 0), g_logoPos, g_logoUV, g_logoCol, 1);
     }
     LONG garland = g_barGarland;
-    if (garland > 0 && garland <= g_bars.families) {               /* last: a garland's backing, then its wisps */
-        static void *backTex[BAR_FAMILIES], *wispsTex[BAR_FAMILIES];
-        static int backTried[BAR_FAMILIES], wispsTried[BAR_FAMILIES];
+    if (garland > 0 && garland <= g_bars.families) {               /* last: a garland's backing, under its leaves */
+        static void *backTex[BAR_FAMILIES];
+        static int backTried[BAR_FAMILIES];
         int f = (int)garland - 1;
         char path[96];
         if (!backTex[f] && !backTried[f]) {
@@ -3335,18 +3429,46 @@ void WINAPI OverlayDraw(void)
             BackBuild();
             OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(backTex[f], 1, 0), g_backPos, g_backUV, g_backCol, 1);
         }
-        if (g_wispTab[f].n && !wispsTex[f] && !wispsTried[f]) {
-            wispsTried[f] = 1;
-            lstrcpyA(path, g_bars.family[f].wisps); lstrcatA(path, ".blp");
-            wispsTex[f] = OverlayLoad(path);
-        }
-        if (wispsTex[f]) {
-            WispsBuild(f, g_disp, t, dt);
-            if (g_wsQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(wispsTex[f], 1, 0), g_wsPos, g_wsUV, g_wsCol, g_wsQuads);
-        }
     } else if (g_seaTex) {                                         /* last: the log's black, under the bar */
         BarBlackBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_blackPos, g_blackUV, g_blackCol, 1);
+    }
+}
+#endif
+
+#if defined(__i386__)
+/* From RevealStub at the border's entry, on the game's thread: over the garland's leaves and under the border, its
+ * blooms opening and its wisps. */
+void WINAPI OverlayAfterFill(void) __attribute__((used));
+void WINAPI OverlayAfterFill(void)
+{
+    LONG garland = g_barGarland;
+    if (!g_ovOn || !g_mapShown || garland <= 0 || garland > g_bars.families) return;
+    int f = (int)garland - 1;
+    static void *bloomsTex[BAR_FAMILIES], *wispsTex[BAR_FAMILIES];
+    static int bloomsTried[BAR_FAMILIES], wispsTried[BAR_FAMILIES];
+    static DWORD last;
+    DWORD now = GetTickCount();
+    float t = (float)(now % 3600000u) / 1000.0f, dt = last ? (float)(now - last) / 1000.0f : 0;
+    last = now;
+    char path[96];
+    if (g_bloomTab[f].types && !bloomsTex[f] && !bloomsTried[f]) {
+        bloomsTried[f] = 1;
+        lstrcpyA(path, g_bars.family[f].blooms); lstrcatA(path, ".blp");
+        bloomsTex[f] = OverlayLoad(path);
+    }
+    if (bloomsTex[f]) {
+        BloomsBuild(f, g_disp, now, g_zoomScreens);
+        if (g_bmQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(bloomsTex[f], 1, 0), g_bmPos, g_bmUV, g_bmCol, g_bmQuads);
+    }
+    if (g_wispTab[f].n && !wispsTex[f] && !wispsTried[f]) {
+        wispsTried[f] = 1;
+        lstrcpyA(path, g_bars.family[f].wisps); lstrcatA(path, ".blp");
+        wispsTex[f] = OverlayLoad(path);
+    }
+    if (wispsTex[f]) {
+        WispsBuild(f, g_disp, t, dt);
+        if (g_wsQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(wispsTex[f], 1, 0), g_wsPos, g_wsUV, g_wsCol, g_wsQuads);
     }
 }
 #endif
@@ -3502,7 +3624,7 @@ void WINAPI RevealFill(const float *v)
 __attribute__((naked, used)) static void RevealStub(void)
 {
     __asm__("cmpl $0x7FFD34, %esi\n\t"
-            "jne 1f\n\t"
+            "jne 2f\n\t"
             "pushl %eax\n\t"
             "pushl %ecx\n\t"
             "pushl %edx\n\t"
@@ -3516,7 +3638,18 @@ __attribute__((naked, used)) static void RevealStub(void)
             "movl $_g_fillVerts, %edx\n\t"
             "movl $_g_fillColor, 16(%esp)\n\t"
             "movl $4, 20(%esp)\n\t"
-            "movl $_g_fillUV, 32(%esp)\n"
+            "movl $_g_fillUV, 32(%esp)\n\t"
+            "jmp 1f\n"
+            "2:\n\t"
+            "cmpl $0x7FFD4C, %esi\n\t"          /* the border's entry: over the fill, under the border */
+            "jne 1f\n\t"
+            "pushl %eax\n\t"
+            "pushl %ecx\n\t"
+            "pushl %edx\n\t"
+            "call _OverlayAfterFill@0\n\t"
+            "popl %edx\n\t"
+            "popl %ecx\n\t"
+            "popl %eax\n"
             "1:\n\t"
             "jmp *_g_drawSetup\n\t");
 }
