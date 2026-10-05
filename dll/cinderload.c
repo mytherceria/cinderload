@@ -813,6 +813,8 @@ static void FireClose(void)
 #define BAR_SHOWN_MAX 160              /* the longest about 115: its fire, the class, "the world map from halfway in ...", resets */
 static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
+static void LearnScreen(char *m);
+static void HoldSetup(void);
 static volatile LONG g_destKnownPct = -1, g_destKnownWay;       /* the arrival: the bar when it became known, and how */
 static void OverlayStart(void);
 static void BadgeLog(char *m);           /* the marks' (below): where a map screen's class came from, into the log */
@@ -900,6 +902,7 @@ static void FireStep(DWORD now)
         InterlockedExchange(&g_fire.gate, 0);
         g_fire.playing = 0;
         g_fire.gone = now;
+        LearnScreen(m);
         DriftScreenGone();
         return;
     }
@@ -1269,14 +1272,31 @@ static int BarFamily(const BarTable *t)
 #define MAP_DEST_Y_VA   0x882690   /* float: y there */
 #define MAP_TAU         0.15f      /* seconds: how smoothly the view follows, so a late position glides in */
 #define MAP_BAR_TAU     0.15f      /* seconds: how closely the zoom follows the bar (a quick load is over in a second) */
-/* Every screen after the session's first (his rule, 4 Oct 2026, the later loads taking 3 to 5 s: "start halfway to the
- * spot the character is loading to (from the initial maelstrom/dead center of the map starting position)" and "speed up
- * the zoom by half"): the view starts LATER_START of the way in (the zoom's steps) with its middle LATER_MIDDLE of the
- * way from the world's middle to the arrival, set there at once when the arrival is known from the start, and the zoom
- * runs LATER_SPEED times as fast as the pace allows. */
+/* Every screen after the session's first (his rule, 4 Oct 2026: "start halfway to the spot the character is loading to
+ * (from the initial maelstrom/dead center of the map starting position)"): the view starts LATER_START of the way in
+ * (the zoom's steps) with its middle LATER_MIDDLE of the way from the world's middle to the arrival, set there at once
+ * when the arrival is known from the start. */
 #define LATER_START     0.5f
 #define LATER_MIDDLE    0.5f
-#define LATER_SPEED     1.5f
+/* The screen's TIME (his rule, 4 Oct, later the same night: "build a five second minimum loading screen time even if
+ * that leaves a character unprotected for a second or two ... so that it's not so jarring to the eye", the zoom going
+ * "at whatever percentage it needs to in order to finish where it would normally end by the time that five seconds is
+ * up"; and for every machine, "not everyone's computer will be as beefy as mine", learning "how long the initial cold
+ * boot load times are and also from the intersession load times that are faster"). Each world map screen plans when
+ * its bar and zoom finish: this machine's learned time to a full bar for its kind (the session's first, or a later
+ * one), but never sooner than the floor (map.txt "hold <ms>", HOLD_MS when not given; 0 turns all this off) less the
+ * game's own freeze at the end (learned too). The bar and the zoom run on that plan, never ahead of the game; when the
+ * game is done first, HoldFrame holds the screen, drawing the game's own loading frame, until the plan is met.
+ * LEARN_FILE keeps the lessons across sessions, the newest load counting half. */
+#define HOLD_MS         5000       /* the floor: no loading screen shorter (his five seconds) */
+#define HOLD_MAX_MS     6000       /* never hold the game longer than this, whatever the plan says */
+#define HOLD_SETTLE_MS  600        /* the game done after the floor yet ahead of the plan: the rest of the way in this */
+#define HOLD_TAIL_MS    200        /* held past the plan's end, so the view settles on the arrival */
+#define FREEZE_GUESS_MS 1000       /* the game's freeze at the end of a load, before one is learned */
+#define FIRST_GUESS_MS  7000       /* a session's first screen to a full bar, before one is learned */
+#define LEARN_MIN_MS    100        /* a time outside these is no lesson */
+#define LEARN_MAX_MS    120000
+#define LEARN_FILE      "Data\\CinderLoad\\loadtimes.txt"
 #define MAP_ENTS        96         /* dungeon, raid and battleground entrances map.txt may list */
 /* map.txt's "ent <map id> <continent> <x> <y>" lines (hex; x and y float bits, world yards): where each instance's
  * entrance lies on the world map (4 Oct 2026, his rule: "no separate log in screens for being in a dungeon or raid,
@@ -1289,8 +1309,76 @@ static volatile LONG g_mapShown;  /* the screen showing has the world map */
 static float g_viewU = 0.5f, g_viewV = 0.5f, g_viewH = 0.5f;     /* the world map's view, eased */
 static volatile LONG g_driftResets;                             /* a fallback reset within a screen (the log says) */
 static int g_zoomScreens;                                       /* the world map's screens begun this session */
+static float g_zoomStart;                                       /* how far in this screen starts (0 the whole world) */
+static volatile LONG g_lnMs[2], g_lnFreeze[2], g_lnN[2];        /* learned [first, later]: to a full bar, the end freeze */
+static volatile LONG g_fullMs, g_endFreezeMs, g_screenLogin;    /* this screen: ms to a full bar (0 not yet), its freeze */
+static volatile LONG g_holdMs = HOLD_MS;                        /* the floor (map.txt "hold"), 0 for none */
+static volatile LONG g_holdN, g_holdLast;                       /* holds made, and the last one's ms (the log) */
+static DWORD g_scrStartAt, g_planEndAt;                         /* this screen: its first frame, when its plan ends */
+static float g_planU;                                           /* the plan's bar, 0..1 */
+static int g_screenKind, g_holdDone, g_timed;                   /* later (1) or first (0); held already; on the plan */
 static volatile LONG g_zoomHalf;                                /* this one starts halfway in (his ask, 4 Oct: the first
                                                                  * load after a cold boot is long, the rest a fraction) */
+static volatile LONG g_screenMap;                               /* this screen zooms the world map */
+
+/* A decimal of up to 7 digits at *q, spaces before it skipped: its value, or -1 when there is none. */
+static LONG LearnNum(const char **q)
+{
+    LONG v = 0;
+    int d = 0;
+    while (**q == ' ') (*q)++;
+    for (; **q >= '0' && **q <= '9' && d < 7; (*q)++, d++) v = v * 10 + (**q - '0');
+    return d ? v : -1;
+}
+
+/* The lessons, from LEARN_FILE ("first|later <ms to a full bar> <end freeze ms> <count>" lines): at start. */
+static void LearnLoad(void)
+{
+    char path[MAX_PATH], *t;
+    for (int k = 0; k < 2; k++) {
+        InterlockedExchange(&g_lnMs[k], 0); InterlockedExchange(&g_lnFreeze[k], 0); InterlockedExchange(&g_lnN[k], 0);
+    }
+    if (!g_dir[0] || !Join(path, g_dir, LEARN_FILE) || !(t = ReadText(path, 512))) return;
+    for (const char *q = t; *q;) {
+        int k = -1;
+        if (q[0] == 'f' && q[1] == 'i' && q[2] == 'r' && q[3] == 's' && q[4] == 't' && q[5] == ' ') k = 0;
+        else if (q[0] == 'l' && q[1] == 'a' && q[2] == 't' && q[3] == 'e' && q[4] == 'r' && q[5] == ' ') k = 1;
+        if (k >= 0) {
+            q += 6;
+            LONG ms = LearnNum(&q), fz = LearnNum(&q), n = LearnNum(&q);
+            if (ms >= LEARN_MIN_MS && ms <= LEARN_MAX_MS && fz >= 0 && fz <= LEARN_MAX_MS && n > 0) {
+                InterlockedExchange(&g_lnMs[k], ms); InterlockedExchange(&g_lnFreeze[k], fz);
+                InterlockedExchange(&g_lnN[k], n);
+            }
+        }
+        while (*q && *q != '\n') q++;
+        if (*q) q++;
+    }
+    HeapFree(GetProcessHeap(), 0, t);
+}
+
+/* The worker, as a screen ends (m: 200 bytes of room): a world map screen teaches its kind its time to a full bar and
+ * the game's freeze after it; a later screen that is a login teaches nothing (a login is not a later load's length). */
+static void LearnScreen(char *m)
+{
+    LONG v = InterlockedExchange(&g_fullMs, 0), fz = g_endFreezeMs;
+    int k = g_screenKind ? 1 : 0;
+    if (!g_screenMap || (k && g_screenLogin) || v < LEARN_MIN_MS || v > LEARN_MAX_MS) return;
+    if (fz < 0 || fz > LEARN_MAX_MS) fz = 0;
+    LONG n = g_lnN[k], ms = n > 0 ? (g_lnMs[k] + v) / 2 : v, f2 = n > 0 ? (g_lnFreeze[k] + fz) / 2 : fz;
+    if (n < 9999) n++;
+    InterlockedExchange(&g_lnMs[k], ms); InterlockedExchange(&g_lnFreeze[k], f2); InterlockedExchange(&g_lnN[k], n);
+    char path[MAX_PATH], text[96];
+    if (g_dir[0] && Join(path, g_dir, LEARN_FILE)) {
+        wsprintfA(text, "first %ld %ld %ld\r\nlater %ld %ld %ld\r\n", (long)g_lnMs[0], (long)g_lnFreeze[0], (long)g_lnN[0],
+                  (long)g_lnMs[1], (long)g_lnFreeze[1], (long)g_lnN[1]);
+        WriteText(path, text);
+    }
+    wsprintfA(m, "  learned: this machine's %s loads fill the bar in %ld.%02ld s and then freeze %ld.%02ld s (%ld so far)",
+              k ? "later" : "first", (long)(ms / 1000), (long)(ms % 1000 / 10), (long)(f2 / 1000), (long)(f2 % 1000 / 10),
+              (long)n);
+    Log(m);
+}
 
 static int MapSpace(char c) { return c == ' ' || c == '\t'; }
 /* A hex number of up to 8 digits at text[*at], spaces before it skipped. */
@@ -1316,6 +1404,7 @@ static void MapParse(const char *s, unsigned len)
 {
     unsigned char *z = (unsigned char *)&g_map;
     for (unsigned i = 0; i < sizeof g_map; i++) z[i] = 0;
+    InterlockedExchange(&g_holdMs, HOLD_MS);
     for (unsigned at = 0; at < len;) {
         unsigned end = at;
         while (end < len && s[end] != '\n') end++;
@@ -1339,12 +1428,14 @@ static void MapParse(const char *s, unsigned len)
                 if (k == g_map.ents) g_map.ents++;
             }
         } else if (n > 4 && ((l[0] == 'e' && l[1] == 'n' && l[2] == 'd' && MapSpace(l[3])) ||
-                             (n > 5 && l[0] == 'p' && l[1] == 'a' && l[2] == 'c' && l[3] == 'e' && MapSpace(l[4])))) {
-            int y = 0, d = 0, pace = l[0] == 'p';
-            i = pace ? 5 : 4;
+                             (n > 5 && l[0] == 'p' && l[1] == 'a' && l[2] == 'c' && l[3] == 'e' && MapSpace(l[4])) ||
+                             (n > 5 && l[0] == 'h' && l[1] == 'o' && l[2] == 'l' && l[3] == 'd' && MapSpace(l[4])))) {
+            int y = 0, d = 0, pace = l[0] == 'p', hold = l[0] == 'h';
+            i = pace || hold ? 5 : 4;
             while (i < n && MapSpace(l[i])) i++;
             for (; i < n && l[i] >= '0' && l[i] <= '9' && d < 6; i++, d++) y = y * 10 + (l[i] - '0');
             if (d && pace) g_map.pace = (float)y;
+            else if (d && hold) InterlockedExchange(&g_holdMs, y <= 20000 ? y : 20000);
             else if (d) g_map.endYards = (float)y;
         }
         at = end + 1;
@@ -1490,7 +1581,9 @@ static void BarShownSince(char *out, int cap)
         char z[64];
         float h = g_viewH;
         int x10 = h > 0.001f ? (int)(5.0f / h + 0.5f) : 0;            /* 0.5 / h, in tenths */
-        wsprintfA(z, ", the world map%s, ending %d.%dx in", g_zoomHalf ? " from halfway in" : "", x10 / 10, x10 % 10);
+        int z100 = (int)(g_zoomStart * 100 + 0.5f);
+        if (g_zoomHalf) wsprintfA(z, ", the world map from %d%% in, ending %d.%dx in", z100, x10 / 10, x10 % 10);
+        else wsprintfA(z, ", the world map, ending %d.%dx in", x10 / 10, x10 % 10);
         BarCat(out, cap, z);
         static const char *const way[6] = { "", "its entrance", "the game's, written during it", "the character list's",
                                             "the game's as it stood", "the game's, written before it" };
@@ -1501,6 +1594,8 @@ static void BarShownSince(char *out, int cap)
             BarCat(out, cap, z);
         }
         if (g_driftResets) { wsprintfA(z, ", %ld resets mid-screen", (long)g_driftResets); BarCat(out, cap, z); }
+        LONG hl = g_holdLast;
+        if (hl > 0) { wsprintfA(z, ", held %ld.%ld s for the floor", (long)(hl / 1000), (long)(hl % 1000 / 100)); BarCat(out, cap, z); }
     }
     LONG w = g_wallPick;
     if (g_barsOn && !g_mapShown && w > 0 && w <= g_walls.count) {
@@ -1567,6 +1662,19 @@ static void MapLoad(void)
         Log("zoom off: the pack has map.txt but no CinderMap.blp");
         return;
     }
+    LearnLoad();
+    {
+        char m[200];
+        if (g_holdMs > 0)
+            wsprintfA(m, "zoom: no loading screen under %ld.%ld s; learned here: first loads %ld.%02ld s (%ld), later %ld.%02ld s "
+                      "(%ld)", (long)(g_holdMs / 1000), (long)(g_holdMs % 1000 / 100), (long)(g_lnMs[0] / 1000),
+                      (long)(g_lnMs[0] % 1000 / 10), (long)g_lnN[0], (long)(g_lnMs[1] / 1000), (long)(g_lnMs[1] % 1000 / 10),
+                      (long)g_lnN[1]);
+        else
+            lstrcpyA(m, "zoom: no floor (map.txt says hold 0): the bar and the zoom follow the game alone");
+        Log(m);
+    }
+    HoldSetup();
     if (g_map.ents) {
         char m[200];
         wsprintfA(m, "zoom: the world map is in the pack, on every loading screen; the view glides down onto where you arrive, "
@@ -2117,6 +2225,27 @@ static float DisplayStep(float p, DWORD now)
         }
         g_dispStill = 0;
         gap = 0;
+        g_scrStartAt = now;
+        InterlockedExchange(&g_fullMs, 0);
+        InterlockedExchange(&g_endFreezeMs, 0);
+        g_screenKind = g_zoomScreens > 0;                             /* (DriftStep counts this screen after) */
+        g_holdDone = 0;
+        g_planU = 0;
+        InterlockedExchange(&g_holdLast, 0);
+        LONG full = g_lnN[g_screenKind] > 0 ? g_lnMs[g_screenKind] : (g_screenKind ? 0 : FIRST_GUESS_MS);
+        LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, floor = g_holdMs - fz;
+        LONG plan = full > floor ? full : floor;
+        g_planEndAt = now + (DWORD)(plan > 300 ? plan : 300);
+    }
+    if (p >= 0.999f && !g_fullMs)                                     /* the game's bar full: the time it took */
+        InterlockedExchange(&g_fullMs, now - g_scrStartAt > 0 ? (LONG)(now - g_scrStartAt) : 1);
+    if (g_dispMax >= 0.999f && gap >= HITCH_MS && (LONG)gap > g_endFreezeMs)   /* the game's own freeze once it is done */
+        InterlockedExchange(&g_endFreezeMs, (LONG)gap);
+    /* the plan's bar: on to 1 by g_planEndAt, through any pause (time does not stop for one) */
+    g_timed = g_holdMs > 0 && g_mapShown && g_map.ok;
+    if (gap > 0) {
+        LONG left = (LONG)(g_planEndAt - now);
+        g_planU = left <= 0 ? 1 : g_planU + (1 - g_planU) * FireClamp((float)gap / (float)(left + (LONG)gap), 0, 1);
     }
     InterlockedExchange(&g_frmCount, g_frmCount + 1);                 /* the game thread is these counts' only writer */
     if (gap > (DWORD)g_frmGap) {
@@ -2137,7 +2266,7 @@ static float DisplayStep(float p, DWORD now)
     if (dt > DISP_GAP_MAX) dt = DISP_GAP_MAX;
     float rise = p > g_dispMax ? p - g_dispMax : 0;
     if (p > g_dispMax) g_dispMax = p;
-    if (dt <= 0) return g_disp;
+    if (dt <= 0) return g_timed && g_planU < g_disp ? g_planU : g_disp;
     /* through the time since the last frame at the pace it had: a pause is crossed as if the bar had moved through it,
      * never at the catching-up pace the leap after it would ask for (that was his "freezes, then jumps up a ways") */
     float d = g_disp + g_dispV * dt, cap = g_dispMax + DISP_LEAD < 1 ? g_dispMax + DISP_LEAD : 1;
@@ -2151,8 +2280,9 @@ static float DisplayStep(float p, DWORD now)
     if (g_disp >= cap && g_dispV > 0) g_dispV = 0;                    /* held at the lead: it waits for the game */
     if (g_dispMax >= 0.999f) g_disp = 1;                              /* the load is done: the bar reads full, as the game's
                                                                        * freeze at its end holds this frame a second or two */
-    InterlockedExchange(&g_frmShown, (LONG)(g_disp * 100 + 0.5f));
-    return g_disp;
+    float shown = g_timed && g_planU < g_disp ? g_planU : g_disp;    /* on the plan: never ahead of it, nor of the game */
+    InterlockedExchange(&g_frmShown, (LONG)(shown * 100 + 0.5f));
+    return shown;
 }
 
 /* The worker, as a screen ends: its hitches and stalls, longest kept, in the bar's order (m: 220 bytes of room). */
@@ -2218,6 +2348,9 @@ static void DriftStep(float p, DWORD now)
         InterlockedExchange(&g_destKnownPct, -1);
         ArrivalSnap();
         InterlockedExchange(&g_zoomHalf, g_zoomScreens > 0);
+        InterlockedExchange(&g_screenLogin, CharEntry() != 0);
+        InterlockedExchange(&g_screenMap, g_mapShown && g_map.ok);
+        g_zoomStart = g_zoomScreens > 0 ? LATER_START : 0;          /* the session's first: the whole world */
         if (g_mapShown && g_map.ok) g_zoomScreens++;
     }
     if (p > g_driftMax) g_driftMax = p;
@@ -2227,8 +2360,7 @@ static void DriftStep(float p, DWORD now)
     if (dt > DISP_GAP_MAX) dt = DISP_GAP_MAX;                       /* as the bar: a pause counts whole, up to a limit */
     int zoom = g_mapShown && g_map.ok;
     float step = (p - g_drift) * (float)(1.0 - FireExp(-(double)dt / (zoom ? MAP_BAR_TAU : DRIFT_TAU)));
-    float pace = g_zoomHalf ? g_map.pace / LATER_SPEED : g_map.pace;
-    if (zoom && step > dt / pace) step = dt / pace;                 /* the speed limit: never quicker than pace */
+    if (zoom && !g_timed && step > dt / g_map.pace) step = dt / g_map.pace;   /* untimed: never quicker than pace */
     g_drift += step;
     float e = zoom ? 1 - (1 - g_drift) * (1 - g_drift)              /* the zoom: done early, then resting on them */
                    : g_drift * g_drift * (3 - 2 * g_drift);         /* the drift: eased in and out */
@@ -2249,13 +2381,15 @@ static void DriftStep(float p, DWORD now)
             du = g_destU; dv = g_destV; hEnd = g_destH;
         }
         if (g_destOk) {
-            if (g_zoomHalf) e = LATER_START + (1 - LATER_START) * e; /* after the first: from LATER_START in */
+            float z0 = g_zoomHalf ? g_zoomStart : 0;
+            e = z0 + (1 - z0) * e;                                  /* after the first: from g_zoomStart in */
             h = 0.5f * (float)FireExp((double)(e * MapLn(hEnd / 0.5f)));
             float k = (0.5f - h) / (0.5f - hEnd);                   /* how far the zoom has come */
-            if (g_zoomHalf) {                                       /* ... its middle from LATER_MIDDLE of the way */
-                float h0 = 0.5f * (float)FireExp((double)(LATER_START * MapLn(hEnd / 0.5f)));
+            if (g_zoomHalf) {                                       /* ... its middle as far: LATER_MIDDLE at halfway */
+                float h0 = 0.5f * (float)FireExp((double)(z0 * MapLn(hEnd / 0.5f)));
                 float k0 = (0.5f - h0) / (0.5f - hEnd);
-                k = k0 < 0.999f ? LATER_MIDDLE + (1 - LATER_MIDDLE) * FireClamp((k - k0) / (1 - k0), 0, 1) : 1;
+                float m0 = LATER_MIDDLE + (1 - LATER_MIDDLE) * (z0 - LATER_START) / (1 - LATER_START);
+                k = k0 < 0.999f ? m0 + (1 - m0) * FireClamp((k - k0) / (1 - k0), 0, 1) : 1;
             }
             cu = 0.5f + (du - 0.5f) * k;
             cv = 0.5f + (dv - 0.5f) * k;
@@ -2274,6 +2408,79 @@ static void DriftStep(float p, DWORD now)
     float u0 = cu - h, u1 = cu + h, vt = cv - h, vb = cv + h;       /* v grows downward on the picture */
     g_bgUV[0] = u0; g_bgUV[1] = vb; g_bgUV[2] = u1; g_bgUV[3] = vb;
     g_bgUV[4] = u0; g_bgUV[5] = vt; g_bgUV[6] = u1; g_bgUV[7] = vt;
+}
+
+/* ---- the hold (his five-second floor, 4 Oct 2026; see HOLD_MS) ----
+ * Read from his WoW.exe: the game draws a loading frame only as a phase reports progress. Three setters (VA 0x407F70,
+ * 0x407FA0, 0x407FD0) store their phase and call 0x406900, one loading frame (0x406920 works out the bar into
+ * [0x882BE4], 0x406A60 draws, 0x58A960 presents; no arguments, its registers the caller's to lose). Those three calls go
+ * to HoldFrame: the frame as ever, then, the first time on a timed screen that the game's bar is full while the plan is
+ * not yet met, the same frame again and again until it is (never past HOLD_MAX_MS), and back to the game, which then
+ * builds the world. The game's own freeze comes after, on the landed frame. */
+#define HOLD_FRAME_VA 0x406900
+#define HOLD_BAR_VA   0x882BE4
+#define HOLD_FRAMES   4000     /* frames in one hold at most, whatever the clock says */
+static const unsigned kHoldCall[3] = { 0x407F8B, 0x407FBB, 0x407FEB };    /* each "call 0x406900" (E8 rel32) */
+static const unsigned char kHoldFrame[9] = { 0xE8, 0x1B, 0x00, 0x00, 0x00, 0x6A, 0x00, 0x6A, 0x00 };   /* its start */
+static void (*g_holdFrame)(void);
+static volatile LONG g_holdOn;
+
+/* The game's thread, in place of each setter's call to the loading frame. */
+static void HoldFrame(void)
+{
+    g_holdFrame();
+    unsigned bits;
+    if (!g_holdOn || !g_timed || g_holdDone || !ClientWord(HOLD_BAR_VA, &bits) || !(MapBits(bits) >= 0.999f)) return;
+    g_holdDone = 1;
+    DWORD now = GetTickCount(), start = now;
+    LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, floor = g_holdMs - fz;
+    DWORD floorAt = g_scrStartAt + (DWORD)(floor > 0 ? floor : 0), settleAt = now + HOLD_SETTLE_MS;
+    DWORD planAt = (LONG)(g_planEndAt - settleAt) < 0 ? g_planEndAt : settleAt;   /* the plan, hurried to settle */
+    DWORD endAt = (LONG)(floorAt - planAt) > 0 ? floorAt : planAt;                 /* but never before the floor */
+    if ((LONG)(endAt - now) <= 0) return;                                         /* met already: no hold */
+    g_planEndAt = endAt;
+    for (int f = 0; f < HOLD_FRAMES && (LONG)(endAt + HOLD_TAIL_MS - now) > 0 && now - start < HOLD_MAX_MS; f++) {
+        Sleep(4);
+        g_holdFrame();
+        now = GetTickCount();
+    }
+    InterlockedExchange(&g_holdLast, (LONG)(now - start));
+    InterlockedExchange(&g_holdN, g_holdN + 1);
+}
+
+/* At start, with a timed world map: the three calls to HoldFrame, once every byte is where it was read. */
+static void HoldSetup(void)
+{
+    unsigned char *base = (unsigned char *)GetModuleHandleA(NULL);
+    const unsigned char *frame = base + (HOLD_FRAME_VA - 0x400000u);
+    InterlockedExchange(&g_holdOn, 0);
+    if (g_holdMs <= 0 || !g_map.ok) return;
+    if (!Readable(frame, (int)sizeof kHoldFrame) || !Same(frame, kHoldFrame, (int)sizeof kHoldFrame)) {
+        Log("hold off: the game's loading frame is not where it was read (VA 0x406900), so loads keep the game's own length");
+        return;
+    }
+    unsigned rel[3];
+    for (int i = 0; i < 3; i++) {
+        unsigned char *at = base + (kHoldCall[i] - 0x400000u);
+        unsigned game = (unsigned)((ULONG_PTR)frame - (ULONG_PTR)(at + 5)), ours = (unsigned)((ULONG_PTR)HoldFrame - (ULONG_PTR)(at + 5));
+        if (!Readable(at, 5) || at[0] != 0xE8 || (Rd32(at + 1) != game && Rd32(at + 1) != ours)) {
+            Log("hold off: a loading phase's call to its frame is not where it was read, so loads keep the game's own length");
+            return;
+        }
+        rel[i] = ours;
+    }
+    g_holdFrame = (void (*)(void))(ULONG_PTR)frame;
+    for (int i = 0; i < 3; i++) {
+        unsigned char *at = base + (kHoldCall[i] - 0x400000u);
+        DWORD old;
+        if (!VirtualProtect(at + 1, 4, PAGE_EXECUTE_READWRITE, &old)) { Log("hold off: the code could not be made writable"); return; }
+        for (int b = 0; b < 4; b++) at[1 + b] = (unsigned char)(rel[i] >> (8 * b));
+        VirtualProtect(at + 1, 4, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), at, 5);
+    }
+    InterlockedExchange(&g_holdOn, 1);
+    Log("hold on: a loading screen the game finishes early stays up to its plan (three calls at VA 0x407F8B, 0x407FBB, "
+        "0x407FEB, in memory only)");
 }
 
 /* ---- the overlay: over the world map, under the bar (4 Oct 2026) ----

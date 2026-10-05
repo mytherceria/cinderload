@@ -61,6 +61,8 @@ static void Fresh(const char *name)
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
     g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
+    for (int k = 0; k < 2; k++) g_lnMs[k] = g_lnFreeze[k] = g_lnN[k] = 0;
+    g_fullMs = 0; g_endFreezeMs = 0; g_screenLogin = 0; g_screenMap = 0; g_zoomStart = 0; g_holdOn = 0; g_holdMs = HOLD_MS; g_timed = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
     g_wallPick = 0;
@@ -1051,6 +1053,19 @@ static void FireBarRealClient(const char *client)
                  !memcmp(got, kClassCode[i].bytes, (size_t)kClassCode[i].n);
         if (!match) printf("FAIL: RVA 0x%lX (%s) differs in %s\n", (unsigned long)kClassCode[i].rva, kClassCode[i].what, exe);
     }
+    for (int i = 0; x && match && i <= 3; i++) {                     /* the hold: the frame's start, its three calls */
+        unsigned rva = (i == 3 ? HOLD_FRAME_VA : kHoldCall[i]) - 0x400000u;
+        unsigned char got[9];
+        long off = ExeOffset(x, rva);
+        match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, 9, x) == 9;
+        if (i == 3) match &= !memcmp(got, kHoldFrame, sizeof kHoldFrame);
+        else {
+            unsigned rel;
+            memcpy(&rel, got + 1, 4);
+            match &= got[0] == 0xE8 && rva + 5 + rel == HOLD_FRAME_VA - 0x400000u;
+        }
+        if (!match) printf("FAIL: RVA 0x%X (the hold's %s) differs in %s\n", rva, i == 3 ? "loading frame" : "call", exe);
+    }
     if (x) fclose(x);
     Check(match, "a real client: all eight places hold the bytes the fire bar and the drift expect, in its WoW.exe");
 }
@@ -1148,6 +1163,13 @@ static void FireRealClient(const char *client)
 
 /* ---- tonight's three: the fire revealed with a soft, live front, and the continents' wallpapers ---- */
 static void PutFloat(unsigned va, float f) { memcpy(shim_module + va - 0x400000u, &f, 4); }
+static int g_testFrames;
+static void TestHoldFrame(void)                         /* the game's loading frame, as the hold sees it: 16 ms, the bar full */
+{
+    shim_ticks += 16; g_testFrames++;
+    float sh = DisplayStep(1.0f, shim_ticks);
+    DriftStep(sh, shim_ticks);
+}
 static unsigned FBits(float f) { unsigned u; memcpy(&u, &f, 4); return u; }
 /* flow.bin for the tests: 4 x 4, the equator at eq, every cell the same current (cx, cv) times 0.01 */
 static unsigned char kFlowBin[16 + 32];
@@ -2328,7 +2350,7 @@ static void LiveTests(void)
 
         /* his rule, 4 Oct (later loads take 3 to 5 s): a later screen whose arrival the game wrote before it began
          * starts at once halfway in, its middle halfway from the world's middle to the arrival, no glide from the whole
-         * world; its zoom runs LATER_SPEED times as fast; a login's stale place (as the last screen left it) never counts */
+         * world; a login's stale place (as the last screen left it) never counts */
         g_mapShown = 1;
         Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, -5000.0f); PutFloat(MAP_DEST_Y_VA, 10000.0f);
         DriftScreenGone();                                              /* the last screen left the arrival here */
@@ -2339,14 +2361,130 @@ static void LiveTests(void)
                  fabsf(g_viewU - (0.5f + (0.2f - 0.5f) * LATER_MIDDLE)) < 1e-4f &&
                  fabsf(g_viewV - (0.5f + (0.6f - 0.5f) * LATER_MIDDLE)) < 1e-4f;
         for (int i = 0; i < 50; i++) { at += 20; DriftStep(1.0f, at); } /* a second at a full bar: the pace, 1.5 times */
-        lt &= fabsf(g_drift - LATER_SPEED / g_map.pace) < 0.01f && LATER_SPEED > 1.4f;
+        lt &= fabsf(g_drift - 1.0f / g_map.pace) < 0.01f;              /* (untimed here: the pace; timed, the plan) */
         for (int i = 0; i < 400; i++) { at += 20; DriftStep(1.0f, at); }
         lt &= fabsf(g_viewH - hEnd) < 2e-3f && fabsf(g_viewU - 0.2f) < 2e-3f;   /* and it still lands on the arrival */
         DriftScreenGone();                                              /* this one ends where it arrived */
         g_zoomScreens = 1; at += 3000; DriftStep(0.0f, at);             /* the next, the game's arrival unchanged */
         lt &= !g_destOk && g_viewH > 0.49f && g_destKnownPct == -1;
         g_mapShown = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
-        Check(lt, "a later screen: the arrival written before it counts at once; it starts halfway in, its middle halfway there, no glide; the zoom 1.5 times as fast and still landing; an unchanged arrival does not count");
+        Check(lt, "a later screen: the arrival written before it counts at once; it starts halfway in, its middle halfway there, no glide, and lands; an unchanged arrival does not count");
+
+        /* his rule, 4 Oct: the five-second floor, on every machine. A screen plans its end from what this machine has
+         * learned for its kind, never under the floor less the game's own end freeze; the bar and the zoom run on that
+         * plan and never ahead of the game */
+        g_mapShown = 1; g_holdMs = 5000;
+        g_lnMs[1] = 950; g_lnFreeze[1] = 800; g_lnN[1] = 3;            /* a quick machine's later loads */
+        PutFloat(MAP_DEST_Y_VA, 15000.0f); DriftScreenGone();
+        PutFloat(MAP_DEST_Y_VA, 10000.0f);                              /* NEW_WORLD wrote the next (u 0.3) */
+        g_zoomScreens = 1; at += 3000;
+        DWORD t0 = at;
+        float sh = DisplayStep(0.0f, at); DriftStep(sh, at);
+        int pl = g_timed && g_screenKind == 1 && g_planEndAt == t0 + 4200 && fabsf(g_zoomStart - LATER_START) < 1e-6f &&
+                 fabsf(g_viewH - 0.5f * powf(hEnd / 0.5f, LATER_START)) < 1e-4f;
+        for (int k = 0; k < 25; k++) { at += 20; sh = DisplayStep(1.0f, at); DriftStep(sh, at); }   /* the game done at 0.5 s */
+        pl &= sh > 0.10f && sh < 0.14f;                                 /* the bar on the plan (0.5 / 4.2), not the game's */
+        g_lnMs[1] = 10000; g_lnN[1] = 3;                                /* a slow machine: its own ten seconds */
+        DriftScreenGone(); g_zoomScreens = 1; at += 3000; t0 = at;
+        sh = DisplayStep(0.0f, at); DriftStep(sh, at);
+        pl &= g_planEndAt == t0 + 10000;
+        for (int k = 0; k < 100; k++) { at += 20; sh = DisplayStep(0.1f, at); DriftStep(sh, at); }   /* the game slower */
+        pl &= sh <= 0.1f + DISP_LEAD + 1e-4f && g_planU > 0.19f;        /* the game's (and its lead), not the plan's */
+        g_lnN[0] = 0; g_zoomScreens = 0;                                /* the session's first, nothing learned */
+        DriftScreenGone(); at += 3000; t0 = at;
+        sh = DisplayStep(0.0f, at); DriftStep(sh, at);
+        pl &= g_screenKind == 0 && g_planEndAt == t0 + FIRST_GUESS_MS && g_zoomStart == 0;
+        Check(pl, "the plan: a quick machine's later load ends on the floor less the end freeze (4.2 s), the bar on it; a slow one on its own 10 s, never ahead of the game; a first one on its guess, from the whole world");
+
+        /* the hold: the game done first, HoldFrame draws its frame until the plan is met, then the view has landed */
+        g_lnMs[1] = 950; g_lnFreeze[1] = 800; g_lnN[1] = 3;
+        PutFloat(MAP_DEST_Y_VA, 15000.0f); DriftScreenGone(); PutFloat(MAP_DEST_Y_VA, 10000.0f);
+        g_zoomScreens = 1; at += 3000; t0 = at; shim_ticks = at;
+        sh = DisplayStep(0.0f, at); DriftStep(sh, at);
+        for (int k = 0; k < 25; k++) { at += 20; shim_ticks = at; sh = DisplayStep(0.6f, at); DriftStep(sh, at); }
+        PutFloat(HOLD_BAR_VA, 1.0f);
+        g_holdFrame = TestHoldFrame; g_holdOn = 1; g_testFrames = 0;
+        HoldFrame();                                                    /* the setter's call, the game's bar full */
+        at = shim_ticks;
+        int hd = g_testFrames > 200 && at >= t0 + 4200 + HOLD_TAIL_MS && at < t0 + 4200 + HOLD_TAIL_MS + 40 &&
+                 g_holdLast > 3500 && g_planU > 0.999f && fabsf(g_viewH - hEnd) < 2e-3f && fabsf(g_viewU - 0.3f) < 2e-3f;
+        int n1 = g_testFrames;
+        HoldFrame();                                                    /* once a screen */
+        hd &= g_testFrames == n1 + 1;
+        g_holdMs = 20000;                                               /* never past HOLD_MAX_MS */
+        DriftScreenGone(); g_zoomScreens = 1; at += 3000; shim_ticks = at; t0 = at;
+        sh = DisplayStep(0.0f, at); DriftStep(sh, at);
+        g_testFrames = 0; HoldFrame();
+        hd &= shim_ticks - t0 <= HOLD_MAX_MS + 40 && shim_ticks - t0 >= HOLD_MAX_MS;
+        g_testFrames = 0; HoldFrame();                                  /* cut short by the cap: still once a screen */
+        hd &= g_testFrames == 1;
+        g_holdMs = 5000; g_lnMs[1] = 8000;                              /* the game done after the floor: settle quickly */
+        DriftScreenGone(); g_zoomScreens = 1; at += 3000; shim_ticks = at; t0 = at;
+        sh = DisplayStep(0.0f, at); DriftStep(sh, at);
+        for (int k = 0; k < 300; k++) { at += 20; shim_ticks = at; sh = DisplayStep(0.9f, at); DriftStep(sh, at); }
+        g_testFrames = 0; HoldFrame();
+        hd &= shim_ticks - at <= HOLD_SETTLE_MS + HOLD_TAIL_MS + 40 && g_planU > 0.999f;
+        g_lnMs[1] = 950; g_holdOn = 0; g_testFrames = 0;                /* off: the frame alone */
+        DriftScreenGone(); g_zoomScreens = 1; at += 3000; shim_ticks = at;
+        sh = DisplayStep(0.0f, at); DriftStep(sh, at);
+        HoldFrame();
+        hd &= g_testFrames == 1;
+        PutFloat(HOLD_BAR_VA, 0.0f);
+        /* its setup: the three calls sent to HoldFrame only when the frame and every call are as read; else none */
+        memcpy(shim_module + HOLD_FRAME_VA - 0x400000u, kHoldFrame, sizeof kHoldFrame);
+        for (int c = 0; c < 3; c++) {
+            unsigned char *cp = shim_module + kHoldCall[c] - 0x400000u;
+            unsigned rel = (unsigned)(HOLD_FRAME_VA - (kHoldCall[c] + 5));
+            cp[0] = 0xE8; memcpy(cp + 1, &rel, 4);
+        }
+        int hs = 1;
+        g_map.ok = 1; g_holdMs = 5000; g_holdOn = 0;
+        shim_module[kHoldCall[1] - 0x400000u + 2] ^= 0x10;               /* one call not as read: none changed */
+        HoldSetup();
+        hs &= !g_holdOn && LogSays("hold off: a loading phase's call");
+        shim_module[kHoldCall[1] - 0x400000u + 2] ^= 0x10;
+        HoldSetup();
+        for (int c = 0; c < 3; c++) {
+            unsigned rel; memcpy(&rel, shim_module + kHoldCall[c] - 0x400000u + 1, 4);
+            hs &= rel == (unsigned)((ULONG_PTR)HoldFrame - (ULONG_PTR)(shim_module + kHoldCall[c] - 0x400000u + 5));
+        }
+        hs &= g_holdOn && LogSays("hold on:") && g_holdFrame == (void (*)(void))(shim_module + HOLD_FRAME_VA - 0x400000u);
+        HoldSetup();                                                    /* again in the same process: ours already, kept */
+        hs &= g_holdOn;
+        shim_module[HOLD_FRAME_VA - 0x400000u + 1] ^= 1;                /* another client's frame: off */
+        HoldSetup();
+        hs &= !g_holdOn && LogSays("hold off: the game's loading frame");
+        memset(shim_module + HOLD_FRAME_VA - 0x400000u, 0, sizeof kHoldFrame);
+        for (int c = 0; c < 3; c++) memset(shim_module + kHoldCall[c] - 0x400000u, 0, 5);
+        g_holdOn = 0; g_map.ok = 0; g_holdFrame = NULL;
+        hd &= hs;
+        Check(hd, "the hold: the game done early, its frame drawn on until the plan (4.2 s) and the view landed; once a screen; never past HOLD_MAX_MS; after the floor it settles in HOLD_SETTLE_MS; off, the frame alone; set up only on the bytes as read");
+
+        /* the lessons: each kind's time to a full bar and its end freeze, kept in loadtimes.txt and read back, the newest
+         * counting half; never from a later login or a time no load takes */
+        g_dispNew = 1; DisplayStep(0.0f, 900000); DisplayStep(0.5f, 900400); DisplayStep(1.0f, 901000);
+        DisplayStep(1.0f, 902500);                                       /* the game's own freeze: 1.5 s */
+        int ln = g_fullMs == 1000 && g_endFreezeMs == 1500;
+        char lm[256];
+        for (int k = 0; k < 2; k++) g_lnMs[k] = g_lnFreeze[k] = g_lnN[k] = 0;
+        g_screenKind = 1; g_screenLogin = 0; g_screenMap = 1;
+        LearnScreen(lm);
+        ln &= g_lnMs[1] == 1000 && g_lnFreeze[1] == 1500 && g_lnN[1] == 1 && g_fullMs == 0;
+        g_fullMs = 2000; g_endFreezeMs = 500; LearnScreen(lm);
+        ln &= g_lnMs[1] == 1500 && g_lnFreeze[1] == 1000 && g_lnN[1] == 2 &&
+              LogSays("learned: this machine's later loads fill the bar in 1.50 s and then freeze 1.00 s");
+        g_fullMs = 6400; g_endFreezeMs = 2600; g_screenKind = 0; LearnScreen(lm);   /* a cold boot's first */
+        ln &= g_lnMs[0] == 6400 && g_lnFreeze[0] == 2600 && g_lnN[0] == 1;
+        for (int k = 0; k < 2; k++) g_lnMs[k] = g_lnFreeze[k] = g_lnN[k] = 0;
+        LearnLoad();
+        ln &= g_lnMs[1] == 1500 && g_lnN[1] == 2 && g_lnMs[0] == 6400 && g_lnFreeze[0] == 2600;   /* read back */
+        g_fullMs = 9000; g_screenKind = 1; g_screenLogin = 1; LearnScreen(lm);       /* a later login teaches nothing */
+        ln &= g_lnMs[1] == 1500;
+        g_fullMs = 50; g_screenLogin = 0; LearnScreen(lm);                           /* nor a time no load takes */
+        ln &= g_lnMs[1] == 1500;
+        g_screenMap = 0; g_mapShown = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
+        for (int k = 0; k < 2; k++) g_lnMs[k] = g_lnFreeze[k] = g_lnN[k] = 0;
+        Check(ln, "the lessons: each kind's time to a full bar and its end freeze, kept in loadtimes.txt and read back, the newest counting half; never from a later login or a time no load takes");
     }
     /* the overlay with the waves and the currents in the pack */
     {
