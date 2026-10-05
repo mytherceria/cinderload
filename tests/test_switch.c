@@ -2769,6 +2769,32 @@ static void ViewTests(void)
         free(small);
         Check(ok, "the view's picture decoded here: DXT1's four colours and its see-through fourth, DXT5's alpha both ways, a level smaller than a block");
     }
+    /* slice 3: palette pictures (the fire bars): indices, then 8, 4 or 1 bits of alpha; the palette B G R */
+    {
+        unsigned w = 4, h = 2, n = 1172 + 8 + 8 + 2 + 2, l0 = 16, l1 = 4, o0 = 1172, o1 = 1172 + 16;
+        unsigned char *d = calloc(1, n);
+        memcpy(d, "BLP2", 4); d[4] = 1; d[8] = 1; d[9] = 8; d[10] = 8; d[11] = 1;
+        memcpy(d + 12, &w, 4); memcpy(d + 16, &h, 4);
+        memcpy(d + 20, &o0, 4); memcpy(d + 24, &o1, 4); memcpy(d + 84, &l0, 4); memcpy(d + 88, &l1, 4);
+        d[BLP_PALETTE + 4 * 1] = 10; d[BLP_PALETTE + 4 * 1 + 1] = 20; d[BLP_PALETTE + 4 * 1 + 2] = 30;   /* colour 1: B G R */
+        d[BLP_PALETTE + 4 * 2 + 2] = 200;                                                                  /* colour 2: red */
+        for (int i = 0; i < 8; i++) { d[o0 + i] = (unsigned char)(i & 1 ? 2 : 1); d[o0 + 8 + i] = (unsigned char)(i * 30); }
+        BlpInfo b;
+        unsigned char o[32];
+        int ok = BlpParse(d, n, &b) && b.dxt == 0 && b.alpha == 8 && b.w == 4 && b.h == 2 && b.levels == 2 && b.len[0] == 16 &&
+                 b.len[1] == 4;
+        BlpPalDecode(d, &b, 0, 4, 2, o);
+        ok &= Px(o, 0, 30, 20, 10, 0) && Px(o, 1, 200, 0, 0, 30) && Px(o, 7, 200, 0, 0, 210);
+        d[9] = 1; ok &= BlpParse(d, n, &b) && b.len[0] == 8 + 1;          /* one bit: a byte for the eight */
+        d[o0 + 8] = 0x01; BlpPalDecode(d, &b, 0, 4, 2, o);
+        ok &= o[3] == 255 && o[7] == 0 && o[31] == 0;                    /* texel 0 on alone: low bit first */
+        d[9] = 4; ok &= BlpParse(d, n, &b) && b.len[0] == 8 + 4;
+        d[o0 + 8] = 0xF3; BlpPalDecode(d, &b, 0, 4, 2, o);
+        ok &= o[3] == 3 * 17 && o[7] == 255;                              /* low nibble first */
+        d[9] = 2; ok &= !BlpParse(d, n, &b);                              /* two bits: not a depth BLP2 has */
+        free(d);
+        Check(ok, "slice 3: palette pictures read (8, 4 and 1 bits of alpha, low bits first, the palette's B G R); another alpha depth refused");
+    }
     Check(TextHas("GL_ARB_multitexture GL_EXT_texture_compression_s3tc GL_EXT_bgra", "GL_EXT_texture_compression_s3tc") &&
           !TextHas("GL_EXT_texture_compression_s3tc_srgb GL_EXT_bgra", "GL_EXT_texture_compression_s3tc") &&
           !TextHas("GL_EXT_texture", "GL_EXT_texture_compression_s3tc") && !TextHas("", "GL_EXT_bgra") &&
@@ -2777,18 +2803,34 @@ static void ViewTests(void)
     {
         static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
         memcpy(g_bgUV, uv, sizeof uv);
-        g_ovOn = 0;
+        g_ovOn = 0; g_barFamNow = -1; g_barGarland = 0; g_barTallNow = 0;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
         ViewBuild(1000, 500, 0.25f, 0);
         const ViewVert *v = g_vv;
-        int ok = g_vbN == 2 && g_vb[0].tex == VT_MAP && g_vb[0].first == 0 && g_vb[0].count == 4 && g_vb[1].tex == -1 &&
-                 g_vb[1].first == 4 && g_vb[1].count == 8 && v[0].x == 0 && v[0].y == 0 && v[0].u == 0.2f && v[0].v == 0.3f &&
-                 v[2].x == 1000 && v[2].y == 500 && v[2].u == 0.6f && v[2].v == 0.7f && v[1].x == 1000 && v[1].y == 0 &&
-                 v[0].c[0] == 255 && v[0].c[3] == 255 && fabsf(v[4].y - 496) < 1e-3f && v[5].x == 1000 && v[6].y == 500 &&
-                 v[9].x == 250 && v[8].c[0] == 0xFF && v[8].c[1] == 0x7D && v[8].c[2] == 0x0A && v[8].c[3] == 0xFF;
-        ViewBuild(1000, 500, 0, 0); ok &= g_vbN == 2 && g_vb[1].count == 4;
-        ViewBuild(1000, 500, 1.5f, 0); ok &= g_vb[1].count == 8 && g_vv[9].x == 1000;
+        int ok = g_vbN == 1 && g_vb[0].tex == VT_MAP && g_vb[0].first == 0 && g_vb[0].count == 4 && v[0].x == 0 &&
+                 v[0].y == 0 && v[0].u == 0.2f && v[0].v == 0.3f && v[2].x == 1000 && v[2].y == 500 && v[2].u == 0.6f &&
+                 v[2].v == 0.7f && v[1].x == 1000 && v[1].y == 0 && v[0].c[0] == 255 && v[0].c[3] == 255;   /* no bar yet */
+        /* slice 3: the bar, the pack's own family here, the log's size (kBorderWide: the bottom 9%): its fill to the bar
+         * as shown, as the game's own strip, then the log over the whole width */
+        g_viewTex[ViewBarSlot(-1, 0)] = g_viewTex[ViewBarSlot(-1, 1)] = 1;
+        ViewBuild(1000, 500, 0.25f, 0);
+        int nf = FillStrip(0, 0, 0.09f, 0, 1, 0.25f, 0, 0, g_vfVerts, g_vfUV, g_vfColor);
+        ok &= g_vbN == 3 && g_vb[1].tex == ViewBarSlot(-1, 0) && g_vb[1].count == 4 * (nf / 2 - 1) && g_vb[2].tex == ViewBarSlot(-1, 1) &&
+              g_vb[2].count == 4;
+        const ViewVert *fq = g_vv + g_vb[1].first, *lq = fq + g_vb[1].count - 4, *bq = g_vv + g_vb[2].first;
+        ok &= fq[0].x == 0 && fabsf(fq[0].y - 455) < 1e-3f && fq[0].v == 0 && fabsf(fq[3].y - 500) < 1e-3f && fq[3].v == 1 &&
+              fq[3].x == fq[0].x && fq[2].x == fq[1].x && fq[1].x > fq[0].x && fabsf(fq[2].y - 500) < 1e-3f &&  /* round it */
+              fabsf(lq[1].x - 250) < 1e-3f && lq[1].c[3] == 0 && fq[0].c[3] == 255 &&      /* to the front, faded in at it */
+              bq[0].x == 0 && fabsf(bq[0].y - 455) < 1e-3f && bq[2].x == 1000 && bq[2].y == 500 && bq[0].u == 0 && bq[0].v == 0 &&
+              bq[2].u == 1 && bq[2].v == 1;
+        g_barTallNow = 1;                                                /* a garland's: the bottom 22% */
+        ViewBuild(1000, 500, 1.0f, 0);
+        bq = g_vv + g_vb[g_vbN - 1].first;
+        ok &= fabsf(bq[0].y - 390) < 1e-3f && fabsf(g_vv[g_vb[1].first + g_vb[1].count - 4 + 1].x - 1000) < 1e-3f;
+        g_barTallNow = 0;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-        Check(ok, "the view's frame: the world map over the whole window at the zoom's corners, top left to bottom right; the bar along the bottom to the bar as shown");
+        Check(ok, "the view's frame: the world map over the whole window at the zoom's corners, top left to bottom right; slice 3's bar, the game's own fill strip to the bar as shown and the log over the whole width, at the log's size or a garland's");
     }
     /* whose thread: a screen begins on the game's; the view's then moves the bar and the zoom, through the game's stalls */
     {
@@ -2821,7 +2863,7 @@ static void ViewTests(void)
         ok &= g_destOk && g_viewH < 0.5f;
         /* the view takes them: from here its frames (7 ms) step them, the game's frame only notes its facts */
         t += 7;
-        ok &= ViewStep(p, t, 1000, 500) && g_viewSteps == 1 && g_stepLock.held == 0 && g_vbN == 2 && g_vb[0].tex == VT_MAP;
+        ok &= ViewStep(p, t, 1000, 500) && g_viewSteps == 1 && g_stepLock.held == 0 && g_vbN >= 1 && g_vb[0].tex == VT_MAP;
         DWORD at = g_dispAt;
         float d = g_disp, h = g_viewH;
         LONG frames = g_frmCount;
@@ -2962,8 +3004,15 @@ static void ViewTests(void)
         ViewBuild(1000, 500, 0.5f, 100000);
         int order[VIEW_BATCHES], n = 0, logo = -1;
         for (int i = 0; i < g_vbN; i++) { order[n++] = g_vb[i].tex; if (g_vb[i].tex == VT_LOGO) logo = i; }
-        ok &= n >= 4 && order[0] == VT_MAP && order[1] == VT_MARKS && order[n - 1] == -1 && order[n - 2] == VT_LOGO;
+        ok &= n >= 4 && order[0] == VT_MAP && order[1] == VT_MARKS && order[n - 1] == VT_SEA && order[n - 2] == VT_LOGO;
         for (int i = 2; i < n - 2; i++) ok &= order[i] == VT_SEA || order[i] == VT_MARKS;   /* glints, ripple, badge */
+        const ViewVert *blk = g_vv + g_vb[n - 1].first;                  /* last, the log's black band under the bar */
+        ok &= g_vb[n - 1].count == 4 && blk[0].x == 0 && blk[0].y == 500 && blk[2].x == 1000 &&
+              fabsf(blk[2].y - (1 - BAR_BLACK_H) * 500) < 1e-3f;
+        g_barGarland = 1; g_bars.families = 1;                           /* a garland: no black band */
+        ViewBuild(1000, 500, 0.5f, 100010);
+        ok &= g_vb[g_vbN - 1].tex == VT_LOGO;
+        g_barGarland = 0; g_bars.families = 0;
         if (logo >= 0) {
             const ViewVert *w = g_vv + g_vb[logo].first;
             ok &= g_vb[logo].count == 4 && fabsf(w[0].x - g_logoPos[0] * 1000) < 1e-3f &&
@@ -2975,7 +3024,7 @@ static void ViewTests(void)
         for (int i = 0; i < g_vbN; i++) ok &= g_vb[i].tex != VT_LOGO;
         g_mapShown = 0; g_ovOn = 0;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
-        Check(ok, "slice 2: the view's layers in the game's order (the map, the Maelstrom, the sea's glints and marks, the logo, then the bar), the logo where the game puts it; a layer whose sheet OpenGL lacks is left out");
+        Check(ok, "slice 2: the view's layers in the game's order (the map, the Maelstrom, the sea's glints and marks, the logo, the log's black band; none under a garland), the logo where the game puts it; a layer whose sheet OpenGL lacks is left out");
     }
     /* the view's own clock (his yes, 5 Oct: "hide the jump"): steady frames keep the wall clock; after a pause behind the
      * game's burst on the card it goes on from where it stopped, then catches up a quarter faster, never past the wall */

@@ -4137,11 +4137,18 @@ static void OverlayDrawAll(void)
 /* From RevealStub at the border's entry, on the game's thread: over the garland's leaves and under the border, its
  * blooms opening and its wisps. */
 void WINAPI OverlayAfterFill(void) __attribute__((used));
+static void OverlayAfterFillAll(int f);
 void WINAPI OverlayAfterFill(void)
 {
     LONG garland = g_barGarland;
-    if (!g_ovOn || !g_mapShown || garland <= 0 || garland > g_bars.families) return;
-    int f = (int)garland - 1;
+    if (!g_ovOn || !g_mapShown || garland <= 0 || garland > g_bars.families || g_viewSteps) return;   /* (the view's: see
+                                                                                         * ViewBarBuild) */
+    int held = StepLock();
+    if (!g_viewSteps) OverlayAfterFillAll((int)garland - 1);
+    StepUnlock(held);
+}
+static void OverlayAfterFillAll(int f)
+{
     static void *bloomsTex[BAR_FAMILIES], *wispsTex[BAR_FAMILIES];
     static int bloomsTried[BAR_FAMILIES], wispsTried[BAR_FAMILIES];
     static DWORD last;
@@ -4270,6 +4277,41 @@ static float FillHeat(float d, float t, int k)
     float w = FireSin((float)((t * 2.3f + k * 1.7f) - (int)((t * 2.3f + k * 1.7f) / 6.2831853f) * 6.2831853f) * 0.25f);
     return FireClamp(b * (0.94f + 0.06f * w), 0, 1);
 }
+/* The fill as a strip for a bar from L to L + full, B to T (bottom up), at z, its front the bar as shown (0..1), at t
+ * seconds: columns from the left edge to the front, closer together near it, each a top and a bottom corner into verts
+ * (x y z), uv and colours (grey levels, alpha on top). The fire flows and cools behind its front, which fades in over
+ * REVEAL_FEATHER; a garland's leaves and flowers are laid once and never cool. Its corners (two a column). The game's
+ * frame and the view's each make their own (RevealFill, ViewBarBuild). */
+static int FillStrip(float L, float B, float T, float z, float full, float shown, float t, int garland, float *verts,
+                     float *uvs, unsigned *colors)
+{
+    float R = L + shown * full;                                     /* the front: the bar as shown */
+    float flow = garland ? 0 : t * FILL_FLOW;
+    flow -= (int)(flow / 0.5f) * 0.5f;                               /* the lava repeats every half of its texture */
+    float xs[FILL_COLUMNS];
+    int n = 0;
+    xs[n++] = L;                                                    /* columns from the left edge to the front */
+    for (int k = FILL_COLUMNS - 2; k >= 0; k--) {
+        float x = R - kFillBehind[k] * (full > 0 ? full : 1);
+        if (x > xs[n - 1] + 1e-6f) xs[n++] = x;
+    }
+    if (xs[n - 1] < R - 1e-6f && n < FILL_COLUMNS) xs[n++] = R;
+    for (int k = 0; k < n; k++) {
+        float *top = verts + 6 * k, *bottom = top + 3;
+        top[0] = xs[k]; top[1] = T; top[2] = z;
+        bottom[0] = xs[k]; bottom[1] = B; bottom[2] = z;
+        float frac = full > 0 ? (xs[k] - L) / full : 0;            /* where along the whole bar, 0..1 */
+        float u = garland ? frac : flow + 0.5f * frac;
+        uvs[4 * k] = u; uvs[4 * k + 1] = 0;
+        uvs[4 * k + 2] = u; uvs[4 * k + 3] = 1;
+        float d = full > 0 ? (R - xs[k]) / full : 0;                /* how far behind the front */
+        float a = d >= REVEAL_FEATHER ? 1.0f : d / REVEAL_FEATHER;
+        unsigned grey = garland ? 255u : (unsigned)(FillHeat(d, t, k) * 255.0f + 0.5f), alpha = (unsigned)(a * 255.0f + 0.5f);
+        colors[2 * k] = colors[2 * k + 1] = alpha << 24 | grey << 16 | grey << 8 | grey;
+    }
+    return 2 * n;
+}
+
 /* v: the game's four corners for the fill, x y z each: left bottom, front bottom, left top, front top. The front
  * drawn is the bar as shown (DisplayStep), not the game's. */
 void WINAPI RevealFill(const float *v)
@@ -4282,34 +4324,11 @@ void WINAPI RevealFill(const float *v)
     float shown = GameStep(p, GetTickCount());
     float L = v[0], B = v[1], z = v[2], T = v[7];
     if (p > 0.02f && v[3] > L) g_fillFull = (v[3] - L) / p;         /* the bar's whole width, in the same units */
-    float full = g_fillFull > 0 ? g_fillFull : 1.0f, R = L + shown * full;   /* the front: the bar as shown */
-    float t = (float)(GetTickCount() % 3600000u) / 1000.0f;
-    int garland = g_barGarland != 0;                                 /* leaves and flowers: laid once, never cooling */
-    float flow = garland ? 0 : t * FILL_FLOW;
-    flow -= (int)(flow / 0.5f) * 0.5f;                               /* the lava repeats every half of its texture */
-    float xs[FILL_COLUMNS];
-    int n = 0;
-    xs[n++] = L;                                                    /* columns from the left edge to the front */
-    for (int k = FILL_COLUMNS - 2; k >= 0; k--) {
-        float x = R - kFillBehind[k] * (full > 0 ? full : 1);
-        if (x > xs[n - 1] + 1e-6f) xs[n++] = x;
-    }
-    if (xs[n - 1] < R - 1e-6f && n < FILL_COLUMNS) xs[n++] = R;
-    for (int k = 0; k < n; k++) {
-        float *top = g_fillVerts + 6 * k, *bottom = top + 3;
-        top[0] = xs[k]; top[1] = T; top[2] = z;
-        bottom[0] = xs[k]; bottom[1] = B; bottom[2] = z;
-        float frac = full > 0 ? (xs[k] - L) / full : 0;            /* where along the whole bar, 0..1 */
-        float u = garland ? frac : flow + 0.5f * frac;
-        g_fillUV[4 * k] = u; g_fillUV[4 * k + 1] = 0;
-        g_fillUV[4 * k + 2] = u; g_fillUV[4 * k + 3] = 1;
-        float d = full > 0 ? (R - xs[k]) / full : 0;                /* how far behind the front */
-        float a = d >= REVEAL_FEATHER ? 1.0f : d / REVEAL_FEATHER;
-        unsigned grey = garland ? 255u : (unsigned)(FillHeat(d, t, k) * 255.0f + 0.5f), alpha = (unsigned)(a * 255.0f + 0.5f);
-        g_fillColor[2 * k] = g_fillColor[2 * k + 1] = alpha << 24 | grey << 16 | grey << 8 | grey;
-    }
-    for (int k = 0; k < 2 * n; k++) g_fillIndex[k] = (unsigned short)k;
-    g_fillCount = 2 * n;
+    float full = g_fillFull > 0 ? g_fillFull : 1.0f;
+    int n2 = FillStrip(L, B, T, z, full, shown, (float)(GetTickCount() % 3600000u) / 1000.0f, g_barGarland != 0, g_fillVerts,
+                       g_fillUV, g_fillColor);
+    for (int k = 0; k < n2; k++) g_fillIndex[k] = (unsigned short)k;
+    g_fillCount = n2;
 }
 
 #if defined(__i386__)
@@ -4507,25 +4526,29 @@ static int RevealBar(void)
  * here from no wider than VIEW_DECODE_MAX. Only while Data\CinderLoad\view.txt exists: delete it to turn this off. */
 #define VIEW_FADE_MS    500     /* the view fades out over this as the screen goes */
 #define VIEW_DECODE_MAX 2048    /* a driver without DXT: the picture decoded from its first level no wider than this */
-#define VIEW_BAR_TALL   0.008f  /* slice 1's plain bar: this much of the window's height, along its bottom */
 #define BLP_LEVELS      16
 typedef struct { unsigned w, h; int dxt, alpha, levels; unsigned off[BLP_LEVELS], len[BLP_LEVELS]; } BlpInfo;
+#define BLP_PALETTE 148                                         /* a palette picture's 256 colours, B G R x each */
 
-/* A BLP2 of DXT1 or DXT5 blocks (the pack's pictures, as tools/blp.py writes them), checked against its length: 1 with
+/* A BLP2 of DXT1 or DXT5 blocks (the pack's pictures, as tools/blp.py writes them) or of palette indices with 0, 1, 4 or
+ * 8 bits of alpha after them (dxt 0: the fire bars, as tools/blp_pal.py writes them), checked against its length: 1 with
  * where each level lies, from the whole picture down, as far as the file holds them whole. */
 static int BlpParse(const unsigned char *d, unsigned n, BlpInfo *b)
 {
-    if (n < 1172 || d[0] != 'B' || d[1] != 'L' || d[2] != 'P' || d[3] != '2' || Rd32(d + 4) != 1 || d[8] != 2) return 0;
-    if (d[10] == 0 && d[9] <= 1) b->dxt = 1;                     /* alpha encoding 0: DXT1 (no alpha, or one bit) */
-    else if (d[10] == 7 && d[9] == 8) b->dxt = 5;                /* 7: DXT5 */
+    if (n < 1172 || d[0] != 'B' || d[1] != 'L' || d[2] != 'P' || d[3] != '2' || Rd32(d + 4) != 1) return 0;
+    if (d[8] == 1 && (d[9] == 0 || d[9] == 1 || d[9] == 4 || d[9] == 8)) b->dxt = 0;   /* palette indices */
+    else if (d[8] == 2 && d[10] == 0 && d[9] <= 1) b->dxt = 1;   /* alpha encoding 0: DXT1 (no alpha, or one bit) */
+    else if (d[8] == 2 && d[10] == 7 && d[9] == 8) b->dxt = 5;   /* 7: DXT5 */
     else return 0;
     b->alpha = d[9];
     b->w = Rd32(d + 12); b->h = Rd32(d + 16);
-    if (b->w < 4 || b->h < 4 || b->w > 8192 || b->h > 8192 || (b->w & 3) || (b->h & 3)) return 0;
+    if (b->w < 1 || b->h < 1 || b->w > 8192 || b->h > 8192 || (b->dxt && (b->w < 4 || b->h < 4 || (b->w & 3) || (b->h & 3))))
+        return 0;
     unsigned w = b->w, h = b->h, block = b->dxt == 1 ? 8 : 16;
     b->levels = 0;
     for (int i = 0; i < BLP_LEVELS; i++) {
-        unsigned off = Rd32(d + 20 + 4 * i), len = Rd32(d + 84 + 4 * i), want = ((w + 3) / 4) * ((h + 3) / 4) * block;
+        unsigned off = Rd32(d + 20 + 4 * i), len = Rd32(d + 84 + 4 * i);
+        unsigned want = b->dxt ? ((w + 3) / 4) * ((h + 3) / 4) * block : w * h + (w * h * b->alpha + 7) / 8;
         if (!off || len < want || off > n || want > n - off) break;
         b->off[i] = off; b->len[i] = want; b->levels++;
         if (!d[11] || (w == 1 && h == 1)) break;                 /* no smaller copies, or the last one */
@@ -4578,6 +4601,18 @@ static void DxtDecode(const unsigned char *src, unsigned w, unsigned h, int dxt,
         }
 }
 
+/* Level i of a palette picture (file d, as BlpParse read it), w x h texels, into out as RGBA (4 bytes a texel). */
+static void BlpPalDecode(const unsigned char *d, const BlpInfo *b, int i, unsigned w, unsigned h, unsigned char *out)
+{
+    const unsigned char *ix = d + b->off[i], *al = ix + w * h;
+    for (unsigned p = 0; p < w * h; p++) {
+        const unsigned char *c = d + BLP_PALETTE + 4 * ix[p];
+        unsigned a = b->alpha == 8 ? al[p] : b->alpha == 4 ? (al[p >> 1] >> ((p & 1) * 4) & 15) * 17u
+                   : b->alpha == 1 ? ((al[p >> 3] >> (p & 7)) & 1) * 255u : 255u;
+        out[4 * p] = c[2]; out[4 * p + 1] = c[1]; out[4 * p + 2] = c[0]; out[4 * p + 3] = (unsigned char)a;
+    }
+}
+
 /* name is one of list's space-separated words (OpenGL's extensions). */
 static int TextHas(const char *list, const char *name)
 {
@@ -4598,7 +4633,8 @@ static int TextHas(const char *list, const char *name)
  * pixels, y down; each corner's place on its picture and its colour (RGBA). Made where the bar and the zoom move (under
  * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, each class's
  * banner; g_viewTex holds OpenGL's name for each (0 while it has none). */
-enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_ARCH, VT_COUNT = VT_ARCH + 12 };
+enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_ARCH, VT_BAR = VT_ARCH + 12,
+       VT_BLOOMS = VT_BAR + 2 * (BAR_FAMILIES + 1), VT_WISPS = VT_BLOOMS + BAR_FAMILIES, VT_COUNT = VT_WISPS + BAR_FAMILIES };
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + 8)
@@ -4684,19 +4720,73 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
         ViewStrips(VT_ARCH + (int)c, g_archPos, g_archUV, g_archCol, 1, W, H);
     }
     if (g_logoOn && g_viewTex[VT_LOGO]) { LogoBuild(); ViewStrips(VT_LOGO, g_logoPos, g_logoUV, g_logoCol, 1, W, H); }
+    LONG garland = g_barGarland;                                 /* last: the log's black, under the bar (not a garland's) */
+    if (!(garland > 0 && garland <= g_bars.families) && g_seaOn && g_viewTex[VT_SEA]) {
+        BarBlackBuild();
+        ViewStrips(VT_SEA, g_blackPos, g_blackUV, g_blackCol, 1, W, H);
+    }
+}
+
+/* ---- the bar in the view (slice 3, 5 Oct 2026) ----
+ * The screen's fire family (BarPath's, as it began; the pack's own bar when it has none), at the size BarSizeSet gave it
+ * (a garland tall, the log's otherwise): its fill revealed to the bar as shown by the game's own FillStrip, a garland's
+ * blooms and wisps over it (as OverlayAfterFill, which stands down while the view moves the view), and the log, or the
+ * garland's frame, over all. Pictures by slot: each family's fill and border (ViewBarSlot), a garland's blooms and wisps. */
+static float g_vfVerts[3 * 2 * FILL_COLUMNS], g_vfUV[2 * 2 * FILL_COLUMNS];
+static unsigned g_vfColor[2 * FILL_COLUMNS];
+static DWORD g_barViewAt;
+static LONG ViewBarFam(void)
+{
+    LONG f = g_barFamNow;
+    return f >= 0 && f < g_bars.families && g_bars.family[f].ok ? f : -1;
+}
+static int ViewBarSlot(LONG f, int border) { return VT_BAR + 2 * (f >= 0 && f < BAR_FAMILIES ? (int)f + 1 : 0) + border; }
+static void ViewBarBuild(float W, float H, float shown, DWORD now)
+{
+    LONG f = ViewBarFam(), gar = g_barGarland;
+    const unsigned char *r = g_barTallNow ? kBarTall : kBorderWide;   /* (as BarSizeSet left the game's size table) */
+    float cx = MapBits(Rd32(r)), cy = MapBits(Rd32(r + 4)), w = MapBits(Rd32(r + 8)), h = MapBits(Rd32(r + 12));
+    float L = cx - w / 2, B = cy - h / 2, T = cy + h / 2, t = (float)(now % 3600000u) / 1000.0f;
+    float dt = g_barViewAt ? (float)(LONG)(now - g_barViewAt) / 1000.0f : 0;
+    g_barViewAt = now;
+    if (dt < 0) dt = 0;
+    if (dt > 0.25f) dt = 0.25f;
+    int fill = ViewBarSlot(f, 0), border = ViewBarSlot(f, 1);
+    if (g_viewTex[fill]) {
+        int n2 = FillStrip(L, B, T, 0, w, FireClamp(shown, 0, 1), t, gar != 0, g_vfVerts, g_vfUV, g_vfColor);
+        for (int k = 0; k + 1 < n2 / 2; k++) {                  /* a quad between each two columns */
+            static const int corner[4] = { 0, 2, 3, 1 };           /* top left, top right, bottom right, bottom left */
+            ViewVert *q = ViewQuadNew(fill);
+            if (!q) break;
+            for (int j = 0; j < 4; j++) {
+                int c = 2 * k + corner[j];
+                ViewVertSet(q + j, g_vfVerts[3 * c] * W, (1 - g_vfVerts[3 * c + 1]) * H, g_vfUV[2 * c], g_vfUV[2 * c + 1],
+                            g_vfColor[c]);
+            }
+        }
+    }
+    if (g_ovOn && gar > 0 && gar <= g_bars.families) {         /* a garland: its blooms opening, its wisps */
+        int fi = (int)gar - 1;
+        if (g_bloomTab[fi].types && g_viewTex[VT_BLOOMS + fi]) {
+            BloomsBuild(fi, g_disp, now, g_zoomScreens);
+            ViewStrips(VT_BLOOMS + fi, g_bmPos, g_bmUV, g_bmCol, g_bmQuads, W, H);
+        }
+        if (g_wispTab[fi].n && g_viewTex[VT_WISPS + fi]) {
+            WispsBuild(fi, g_disp, t, dt);
+            ViewStrips(VT_WISPS + fi, g_wsPos, g_wsUV, g_wsCol, g_wsQuads, W, H);
+        }
+    }
+    if (g_viewTex[border]) ViewRect(border, L * W, (1 - T) * H, (L + w) * W, (1 - B) * H, 0, 0, 1, 1, 0xFFFFFFFFu);
 }
 
 /* W x H pixels at the view's clock now: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its
- * top left, [2], [3] its bottom right), the overlay over it, and slice 1's plain bar along the bottom, its track dark
- * and its fill the bar as shown. */
+ * top left, [2], [3] its bottom right), the overlay over it, and the bar, its front the bar as shown. */
 static void ViewBuild(float W, float H, float shown, DWORD now)
 {
     ViewListStart();
     ViewRect(VT_MAP, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
     ViewOverlayBuild(W, H, now);
-    float top = H * (1 - VIEW_BAR_TALL);
-    ViewRect(-1, 0, top, W, H, 0, 0, 0, 0, 0xFF0A0604u);
-    if (shown > 0) ViewRect(-1, 0, top, W * FireClamp(shown, 0, 1), H, 0, 0, 0, 0, 0xFFFF7D0Au);
+    ViewBarBuild(W, H, shown, now);
 }
 
 /* The view's thread, a screen up and the view not open: 1 once the game's first frame of it has begun it (seen: the
@@ -4910,8 +5000,9 @@ static int ViewTexUp(int slot, const char **why)
     int ok = 0, max = g_view.maxTex, s3tc = g_view.s3tc, first = 0;
     unsigned char *rgba = NULL;
     if (!d || !BlpParse(d, n, &b)) { *why = "it is not a BLP2 of DXT1 or DXT5 blocks whole"; goto done; }
+    if (!b.dxt) s3tc = 0;                                       /* a palette picture: decoded here, whatever the driver */
     while (first < b.levels - 1 && ((int)(b.w >> first) > max || (int)(b.h >> first) > max ||
-                                    (!s3tc && (b.w >> first) > VIEW_DECODE_MAX)))
+                                    (!s3tc && (b.w >> first) > VIEW_DECODE_MAX && b.dxt)))
         first++;
     unsigned w0 = b.w >> first, h0 = b.h >> first;
     if (!w0 || !h0 || (int)w0 > max || (int)h0 > max) { *why = "its OpenGL takes no picture that large"; goto done; }
@@ -4927,7 +5018,8 @@ static int ViewTexUp(int slot, const char **why)
         if (s3tc)
             gl.CompressedTexImage2D(GL_TEXTURE_2D_, i - first, fmt, (int)w, (int)h, 0, (int)b.len[i], d + b.off[i]);
         else {
-            DxtDecode(d + b.off[i], w, h, b.dxt, rgba);
+            if (b.dxt) DxtDecode(d + b.off[i], w, h, b.dxt, rgba);
+            else BlpPalDecode(d, &b, i, w, h, rgba);
             gl.TexImage2D(GL_TEXTURE_2D_, i - first, GL_RGBA8_, (int)w, (int)h, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, rgba);
         }
     }
@@ -4949,6 +5041,35 @@ done:
     if (rgba) HeapFree(GetProcessHeap(), 0, rgba);
     if (d) HeapFree(GetProcessHeap(), 0, d);
     return ok;
+}
+
+/* A picture of the bar's, path without .blp, read and given to OpenGL into slot the first time it is wanted; said once in
+ * the log when it cannot be (that part of the bar is then left out). */
+static unsigned char g_viewTried[VT_COUNT];
+static void ViewTexFile(int slot, const char *path)
+{
+    char p[96], m[200];
+    const char *why = "";
+    if (g_viewTex[slot] || g_viewTried[slot] || lstrlenA(path) + 5 > (int)sizeof p) return;
+    g_viewTried[slot] = 1;
+    lstrcpyA(p, path);
+    lstrcatA(p, ".blp");
+    int r = mpq_read(&kIo, "patch-~.MPQ", p, &g_view.blp[slot], &g_view.len[slot]);
+    if (r != MPQ_OK) why = mpq_error_text(r);
+    else if (ViewTexUp(slot, &why)) return;
+    wsprintfA(m, "  the view: %s was not given to OpenGL, as %s; that part of the bar is left out", p, why);
+    Log(m);
+}
+/* As a screen's view opens: its bar's pictures (its family's, a garland's blooms and wisps), each the first time. */
+static void ViewBarTextures(void)
+{
+    LONG f = ViewBarFam(), g = g_barGarland;
+    ViewTexFile(ViewBarSlot(f, 0), f >= 0 ? g_bars.family[f].fill : kBarFillPath);
+    ViewTexFile(ViewBarSlot(f, 1), f >= 0 ? g_bars.family[f].border : kBarBorderPath);
+    if (g > 0 && g <= g_bars.families) {
+        if (g_bloomTab[g - 1].types) ViewTexFile(VT_BLOOMS + (int)g - 1, g_bars.family[g - 1].blooms);
+        if (g_wispTab[g - 1].n) ViewTexFile(VT_WISPS + (int)g - 1, g_bars.family[g - 1].wisps);
+    }
 }
 
 /* The window's own alpha (a layered window's): 255 whole. 0 when the system will not do it. */
@@ -5043,6 +5164,7 @@ static int ViewOpen(const char **why)
         wsprintfA(m, "  the view's overlay: %d of its %d sheets given to OpenGL", given, sheets);
         Log(m);
     }
+    ViewBarTextures();
     g_view.w = w; g_view.h = h;
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
     return 1;
