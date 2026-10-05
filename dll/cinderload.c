@@ -4364,8 +4364,7 @@ static int RevealBar(void)
  * while a big add-on file runs or the world finishes, nothing the game draws can move. The way out is a renderer of our
  * own: for each loading screen this opens a borderless window over the game window's client area, owned by it (so it
  * stays above the game only, and goes when it is minimised; never topmost over his other windows), that never takes
- * the focus or a click, with its own Direct3D 9 device (the game's own d3d9.dll) on its own thread, presenting at the
- * screen's refresh. The proof draws a dark field, a bar from the game's progress, and a marker sweeping across once
+ * the focus or a click, drawn with OpenGL (never Direct3D: see below) on its own thread, at the screen's refresh. The proof draws a dark field, a bar from the game's progress, and a marker sweeping across once
  * every 2 s that keeps moving whatever the game does; the log says, per screen, its frames and its longest gap, beside
  * the game's own (the fire's lines). For his first look (4 Oct, night) it is a BAND below the arrival (VIEW_BAND_*), so
  * one video shows the game's map stopping where the game stalls while the band's marker carries on, and as the screen
@@ -4374,12 +4373,63 @@ static int RevealBar(void)
  * is logged once and the view stays off for the session; the game's own drawing is never touched. */
 #ifdef __i386__
 #include <d3d9.h>
+/* ITS DRAWING IS OPENGL, NOT DIRECT3D (4 Oct 2026, 22:23, his first launch of the proof: a critical error). Mods such as
+ * comfyfog hook Direct3D 9 by patching the device's function table, and that table is shared by every device the
+ * game's d3d9.dll makes, ours included: our device's calls ran through comfyfog's hooks, and the game's next frame
+ * called a null pointer inside comfyfog. OpenGL (opengl32.dll, GDI's pixel formats) is a different library that no
+ * Direct3D mod touches; it is loaded by name at run time, so the DLL's own imports stay kernel32 and user32. */
+#define GL_COLOR_BUFFER_BIT_ 0x4000
+#define GL_QUADS_            0x0007
+#define GL_PROJECTION_       0x1701
+#define GL_MODELVIEW_        0x1700
+#define GL_DEPTH_TEST_       0x0B71
+#define GL_TEXTURE_2D_       0x0DE1
+static struct {
+    HMODULE lib, gdi;
+    HGLRC (WINAPI *CreateContext)(HDC);
+    BOOL (WINAPI *MakeCurrent)(HDC, HGLRC);
+    PROC (WINAPI *GetProc)(LPCSTR);
+    void (WINAPI *Viewport)(int, int, int, int);
+    void (WINAPI *ClearColor)(float, float, float, float);
+    void (WINAPI *Clear)(unsigned);
+    void (WINAPI *MatrixMode)(unsigned);
+    void (WINAPI *LoadIdentity)(void);
+    void (WINAPI *Ortho)(double, double, double, double, double, double);
+    void (WINAPI *Disable)(unsigned);
+    void (WINAPI *Begin)(unsigned);
+    void (WINAPI *End)(void);
+    void (WINAPI *Color4ub)(unsigned char, unsigned char, unsigned char, unsigned char);
+    void (WINAPI *Vertex2f)(float, float);
+    int (WINAPI *ChoosePF)(HDC, const PIXELFORMATDESCRIPTOR *);
+    BOOL (WINAPI *SetPF)(HDC, int, const PIXELFORMATDESCRIPTOR *);
+    BOOL (WINAPI *Swap)(HDC);
+} gl;
 static HINSTANCE g_inst;
 static struct {
-    HWND win; IDirect3D9 *d3d; IDirect3DDevice9 *dev; int w, h;
+    HWND win; HDC dc; HGLRC rc; int w, h;
     DWORD since, last, gap, frames; float fill;
 } g_view;
-typedef struct { float x, y, z, rhw; DWORD c; } ViewVert;
+
+/* opengl32.dll and gdi32.dll's few calls: 1 when every one is there. */
+static int GlLoad(void)
+{
+    if (gl.Swap) return 1;
+    gl.lib = LoadLibraryA("opengl32.dll");
+    gl.gdi = LoadLibraryA("gdi32.dll");
+    if (!gl.lib || !gl.gdi) return 0;
+#define GLP(f, m, n) (*(FARPROC *)&gl.f = GetProcAddress(m, n))
+    if (!GLP(CreateContext, gl.lib, "wglCreateContext") || !GLP(MakeCurrent, gl.lib, "wglMakeCurrent") ||
+        !GLP(GetProc, gl.lib, "wglGetProcAddress") || !GLP(Viewport, gl.lib, "glViewport") ||
+        !GLP(ClearColor, gl.lib, "glClearColor") || !GLP(Clear, gl.lib, "glClear") ||
+        !GLP(MatrixMode, gl.lib, "glMatrixMode") || !GLP(LoadIdentity, gl.lib, "glLoadIdentity") ||
+        !GLP(Ortho, gl.lib, "glOrtho") || !GLP(Disable, gl.lib, "glDisable") || !GLP(Begin, gl.lib, "glBegin") ||
+        !GLP(End, gl.lib, "glEnd") || !GLP(Color4ub, gl.lib, "glColor4ub") || !GLP(Vertex2f, gl.lib, "glVertex2f") ||
+        !GLP(ChoosePF, gl.gdi, "ChoosePixelFormat") || !GLP(SetPF, gl.gdi, "SetPixelFormat") ||
+        !GLP(Swap, gl.gdi, "SwapBuffers"))
+        return gl.Swap = NULL, 0;
+#undef GLP
+    return 1;
+}
 
 #define VIEW_BAND_TOP   62     /* percent of the game window's height: where the proof's band begins */
 #define VIEW_BAND_TALL  10     /* and how tall it is (below the arrival, above the bar) */
@@ -4436,6 +4486,7 @@ static int ViewOpen(const char **why)
         unsigned char *z = (unsigned char *)&wc;
         for (unsigned i = 0; i < sizeof wc; i++) z[i] = 0;
         wc.cbSize = sizeof wc; wc.lpfnWndProc = ViewProc; wc.hInstance = g_inst; wc.lpszClassName = "CinderView";
+        wc.style = CS_OWNDC;                             /* OpenGL's: one device context for the window's life */
         if (!RegisterClassExA(&wc)) { *why = "its window class could not be made"; return 0; }
         registered = 1;
     }
@@ -4446,55 +4497,49 @@ static int ViewOpen(const char **why)
         SetWindowPos(g_view.win, NULL, o.x, o.y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
     if (!g_view.win) { *why = "its window could not be made"; return 0; }
     ViewOpaque();                                        /* whole again after the last screen's fade */
-    if (!g_view.d3d) {
-        typedef IDirect3D9 *(WINAPI *Create9)(UINT);
-        HMODULE m = LoadLibraryA("d3d9.dll");
-        Create9 c = m ? (Create9)(void *)GetProcAddress(m, "Direct3DCreate9") : NULL;
-        g_view.d3d = c ? c(D3D_SDK_VERSION) : NULL;
-        if (!g_view.d3d) { *why = "the game's d3d9.dll would not make Direct3D 9"; return 0; }
+    if (!g_view.rc) {                                    /* once: the window's pixel format and an OpenGL context */
+        if (!GlLoad()) { *why = "opengl32.dll or gdi32.dll is missing a call it needs"; return 0; }
+        g_view.dc = GetDC(g_view.win);
+        PIXELFORMATDESCRIPTOR pf;
+        unsigned char *z = (unsigned char *)&pf;
+        for (unsigned i = 0; i < sizeof pf; i++) z[i] = 0;
+        pf.nSize = sizeof pf; pf.nVersion = 1; pf.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+        pf.iPixelType = PFD_TYPE_RGBA; pf.cColorBits = 32; pf.iLayerType = PFD_MAIN_PLANE;
+        int n = g_view.dc ? gl.ChoosePF(g_view.dc, &pf) : 0;
+        if (!n || !gl.SetPF(g_view.dc, n, &pf)) { *why = "its window would not take an OpenGL pixel format"; return 0; }
+        g_view.rc = gl.CreateContext(g_view.dc);
+        if (!g_view.rc || !gl.MakeCurrent(g_view.dc, g_view.rc)) { g_view.rc = NULL; *why = "its OpenGL context could not be made"; return 0; }
+        BOOL (WINAPI *interval)(int) = NULL;                /* at the screen's refresh, as the game's own frames */
+        *(PROC *)&interval = gl.GetProc("wglSwapIntervalEXT");
+        if (interval) interval(1);
     }
-    if (g_view.dev && (w != g_view.w || h != g_view.h)) { IDirect3DDevice9_Release(g_view.dev); g_view.dev = NULL; }
-    if (!g_view.dev) {
-        D3DPRESENT_PARAMETERS pp;
-        unsigned char *z = (unsigned char *)&pp;
-        for (unsigned i = 0; i < sizeof pp; i++) z[i] = 0;
-        pp.Windowed = TRUE; pp.SwapEffect = D3DSWAPEFFECT_DISCARD; pp.BackBufferFormat = D3DFMT_X8R8G8B8;
-        pp.BackBufferWidth = (UINT)w; pp.BackBufferHeight = (UINT)h; pp.BackBufferCount = 1; pp.hDeviceWindow = g_view.win;
-        pp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
-        if (FAILED(IDirect3D9_CreateDevice(g_view.d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, g_view.win,
-                                           D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MULTITHREADED | D3DCREATE_FPU_PRESERVE,
-                                           &pp, &g_view.dev)) || !g_view.dev) {
-            g_view.dev = NULL;
-            *why = "its Direct3D 9 device could not be made";
-            return 0;
-        }
-        g_view.w = w; g_view.h = h;
-    }
+    g_view.w = w; g_view.h = h;
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
     return 1;
 }
 static void ViewQuad(float x0, float y0, float x1, float y1, DWORD c)
 {
-    ViewVert v[4] = { { x0, y0, 0, 1, c }, { x1, y0, 0, 1, c }, { x0, y1, 0, 1, c }, { x1, y1, 0, 1, c } };
-    IDirect3DDevice9_DrawPrimitiveUP(g_view.dev, D3DPT_TRIANGLESTRIP, 2, v, sizeof v[0]);
+    gl.Color4ub((unsigned char)(c >> 16), (unsigned char)(c >> 8), (unsigned char)c, (unsigned char)(c >> 24));
+    gl.Vertex2f(x0, y0); gl.Vertex2f(x1, y0); gl.Vertex2f(x1, y1); gl.Vertex2f(x0, y1);
 }
-/* One frame of the proof: 0 when the device is lost (the view then stays off). */
+/* One frame of the proof: 0 when it could not be shown (the view then stays off). */
 static int ViewFrame(const unsigned char *base, DWORD now)
 {
     float p = *(volatile const float *)(base + FIRE_PROGRESS_RVA);
     if (p > g_view.fill && p <= 1.0f) g_view.fill = p;      /* the game writes 0 first, then the sum: keep the largest */
     float W = (float)g_view.w, H = (float)g_view.h, s = (float)((now - g_view.since) % 2000) / 2000.0f;
-    IDirect3DDevice9_Clear(g_view.dev, 0, NULL, D3DCLEAR_TARGET, 0xFF0B1A2Eu, 1.0f, 0);
-    if (SUCCEEDED(IDirect3DDevice9_BeginScene(g_view.dev))) {
-        IDirect3DDevice9_SetFVF(g_view.dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
-        IDirect3DDevice9_SetRenderState(g_view.dev, D3DRS_LIGHTING, FALSE);
-        IDirect3DDevice9_SetRenderState(g_view.dev, D3DRS_CULLMODE, D3DCULL_NONE);
-        ViewQuad(0, H * 0.91f, W, H, 0xFF000000u);                                   /* the band under the bar */
-        ViewQuad(0, H * 0.93f, W * g_view.fill, H * 0.98f, 0xFFFF7D0Au);             /* the bar, the game's progress */
-        ViewQuad(W * s - H * 0.01f, H * 0.42f, W * s + H * 0.01f, H * 0.58f, 0xFFFFFFFFu);   /* the marker: never stops */
-        IDirect3DDevice9_EndScene(g_view.dev);
-    }
-    return SUCCEEDED(IDirect3DDevice9_Present(g_view.dev, NULL, NULL, NULL, NULL));
+    gl.Viewport(0, 0, g_view.w, g_view.h);
+    gl.ClearColor(0x0B / 255.0f, 0x1A / 255.0f, 0x2E / 255.0f, 1);
+    gl.Clear(GL_COLOR_BUFFER_BIT_);
+    gl.MatrixMode(GL_PROJECTION_); gl.LoadIdentity(); gl.Ortho(0, W, H, 0, -1, 1);   /* pixels, y down */
+    gl.MatrixMode(GL_MODELVIEW_); gl.LoadIdentity();
+    gl.Disable(GL_DEPTH_TEST_); gl.Disable(GL_TEXTURE_2D_);
+    gl.Begin(GL_QUADS_);
+    ViewQuad(0, H * 0.80f, W, H, 0xFF000000u);                                       /* the band under the bar */
+    ViewQuad(0, H * 0.84f, W * g_view.fill, H * 0.96f, 0xFFFF7D0Au);                 /* the bar, the game's progress */
+    ViewQuad(W * s - H * 0.05f, H * 0.20f, W * s + H * 0.05f, H * 0.70f, 0xFFFFFFFFu);   /* the marker: never stops */
+    gl.End();
+    return gl.Swap(g_view.dc) != 0;
 }
 static DWORD WINAPI ViewThread(LPVOID arg)
 {
@@ -4532,7 +4577,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         }
         if (screen) {
             if (!ViewFrame(base, now)) {
-                Log("view off for this session: its device was lost");
+                Log("view off for this session: its OpenGL frame could not be shown");
                 ShowWindow(g_view.win, SW_HIDE);
                 return 0;
             }
@@ -4564,7 +4609,7 @@ static void ViewStart(void)
     HANDLE t = CreateThread(NULL, 0, ViewThread, (LPVOID)base, 0, NULL);
     if (!t) { Log("view off: its thread could not be started"); return; }
     CloseHandle(t);
-    Log("view on (the proof): its own window and Direct3D device over the game while a loading screen shows "
+    Log("view on (the proof): its own window, drawn with OpenGL on its own thread, over the game while a loading screen shows "
         "(Data\\CinderLoad\\view.txt; delete it to turn this off)");
 }
 #else
