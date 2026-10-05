@@ -813,6 +813,7 @@ static void FireClose(void)
 #define BAR_SHOWN_MAX 160              /* the longest about 115: its fire, the class, "the world map from halfway in ...", resets */
 static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
+static volatile LONG g_destKnownPct = -1, g_destKnownWay;       /* the arrival: the bar when it became known, and how */
 static void OverlayStart(void);
 static void BadgeLog(char *m);           /* the marks' (below): where a map screen's class came from, into the log */
 static volatile LONG g_screenWatch;      /* 1 once the fire's worker watches for screens ending */
@@ -1268,6 +1269,14 @@ static int BarFamily(const BarTable *t)
 #define MAP_DEST_Y_VA   0x882690   /* float: y there */
 #define MAP_TAU         0.15f      /* seconds: how smoothly the view follows, so a late position glides in */
 #define MAP_BAR_TAU     0.15f      /* seconds: how closely the zoom follows the bar (a quick load is over in a second) */
+/* Every screen after the session's first (his rule, 4 Oct 2026, the later loads taking 3 to 5 s: "start halfway to the
+ * spot the character is loading to (from the initial maelstrom/dead center of the map starting position)" and "speed up
+ * the zoom by half"): the view starts LATER_START of the way in (the zoom's steps) with its middle LATER_MIDDLE of the
+ * way from the world's middle to the arrival, set there at once when the arrival is known from the start, and the zoom
+ * runs LATER_SPEED times as fast as the pace allows. */
+#define LATER_START     0.5f
+#define LATER_MIDDLE    0.5f
+#define LATER_SPEED     1.5f
 #define MAP_ENTS        96         /* dungeon, raid and battleground entrances map.txt may list */
 /* map.txt's "ent <map id> <continent> <x> <y>" lines (hex; x and y float bits, world yards): where each instance's
  * entrance lies on the world map (4 Oct 2026, his rule: "no separate log in screens for being in a dungeon or raid,
@@ -1483,6 +1492,14 @@ static void BarShownSince(char *out, int cap)
         int x10 = h > 0.001f ? (int)(5.0f / h + 0.5f) : 0;            /* 0.5 / h, in tenths */
         wsprintfA(z, ", the world map%s, ending %d.%dx in", g_zoomHalf ? " from halfway in" : "", x10 / 10, x10 % 10);
         BarCat(out, cap, z);
+        static const char *const way[6] = { "", "its entrance", "the game's, written during it", "the character list's",
+                                            "the game's as it stood", "the game's, written before it" };
+        LONG kp = g_destKnownPct, kw = g_destKnownWay;
+        if (kp < 0) BarCat(out, cap, ", the arrival never known");
+        else {
+            wsprintfA(z, ", the arrival known at %ld%% (%s)", (long)kp, kw >= 1 && kw <= 5 ? way[kw] : "?");
+            BarCat(out, cap, z);
+        }
         if (g_driftResets) { wsprintfA(z, ", %ld resets mid-screen", (long)g_driftResets); BarCat(out, cap, z); }
     }
     LONG w = g_wallPick;
@@ -1978,6 +1995,8 @@ static float MapLn(float x)
 #define CHAR_X          0x44
 #define CHAR_Y          0x48
 static unsigned g_destSnap[3];                                  /* the game's arrival as this screen began */
+static volatile LONG g_destEnd[3], g_destEndOk;                 /* the game's arrival as the last screen ended */
+static int g_destWay;                                           /* how MapDest knew it (the screen's log line) */
 static int g_destMap = -1;
 static float g_destWX, g_destWY;                                /* the arrival in world yards, once known */
 static int g_classSure;                                         /* the character list's code is all there (below) */
@@ -2019,18 +2038,29 @@ static int MapDest(float *du, float *dv, float *hEnd, float p)
     unsigned id, dm, xb, yb, e, c;
     float ex, ey;
     if (!ClientWord(BAR_MAP_VA, &id)) return 0;
+    g_destWay = 1;
     if (id > 1)                                      /* a dungeon, raid or battleground: its entrance, from the start */
         return MapEntrance(id, &c, &ex, &ey) && MapPlace(c, ex, ey, du, dv, hEnd);
     if (!g_map.m[id].ok) return 0;
     int game = ClientWord(MAP_DEST_MAP_VA, &dm) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb);
     int fresh = game && (dm != g_destSnap[0] || xb != g_destSnap[1] || yb != g_destSnap[2]);
-    if (fresh && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd)) return 1;
+    /* the game wrote it before this screen began: it differs from where the last screen left it (a later load's
+     * NEW_WORLD; a login's stale place is still the last screen's, so it never counts this way) */
+    int moved = game && g_destEndOk && (dm != (unsigned)g_destEnd[0] || xb != (unsigned)g_destEnd[1] ||
+                                        yb != (unsigned)g_destEnd[2]);
+    if ((fresh || moved) && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd)) {
+        g_destWay = fresh ? 2 : 5;
+        return 1;
+    }
     if ((e = CharEntry()) != 0) {                                    /* a login: the list's own place */
         const unsigned char *m = ClientAt(e + CHAR_MAP), *x = ClientAt(e + CHAR_X), *y = ClientAt(e + CHAR_Y);
         if (m && x && y && Readable(m, 4) && Readable(x, 4) && Readable(y, 4) && *(volatile const unsigned *)m == id &&
-            MapPlace(id, MapBits(*(volatile const unsigned *)x), MapBits(*(volatile const unsigned *)y), du, dv, hEnd))
+            MapPlace(id, MapBits(*(volatile const unsigned *)x), MapBits(*(volatile const unsigned *)y), du, dv, hEnd)) {
+            g_destWay = 3;
             return 1;
+        }
     }
+    g_destWay = 4;
     return game && p >= 0.5f && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd);
 }
 
@@ -2154,6 +2184,12 @@ static void DriftScreenGone(void)
 {
     static const float whole[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
     for (int i = 0; i < 8; i++) g_bgUV[i] = whole[i];
+    unsigned dm, xb, yb;                                          /* where this screen left the game's arrival */
+    if (ClientWord(MAP_DEST_MAP_VA, &dm) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb)) {
+        InterlockedExchange(&g_destEnd[0], (LONG)dm); InterlockedExchange(&g_destEnd[1], (LONG)xb);
+        InterlockedExchange(&g_destEnd[2], (LONG)yb); InterlockedExchange(&g_destEndOk, 1);
+    } else
+        InterlockedExchange(&g_destEndOk, 0);
     InterlockedExchange(&g_driftNew, 1);
     InterlockedExchange(&g_dispNew, 1);
 }
@@ -2179,6 +2215,7 @@ static void DriftStep(float p, DWORD now)
         g_viewU = g_viewV = g_viewH = 0.5f;
         g_destOk = 0;
         g_destMap = -1;
+        InterlockedExchange(&g_destKnownPct, -1);
         ArrivalSnap();
         InterlockedExchange(&g_zoomHalf, g_zoomScreens > 0);
         if (g_mapShown && g_map.ok) g_zoomScreens++;
@@ -2190,7 +2227,8 @@ static void DriftStep(float p, DWORD now)
     if (dt > DISP_GAP_MAX) dt = DISP_GAP_MAX;                       /* as the bar: a pause counts whole, up to a limit */
     int zoom = g_mapShown && g_map.ok;
     float step = (p - g_drift) * (float)(1.0 - FireExp(-(double)dt / (zoom ? MAP_BAR_TAU : DRIFT_TAU)));
-    if (zoom && step > dt / g_map.pace) step = dt / g_map.pace;     /* the speed limit: never quicker than pace */
+    float pace = g_zoomHalf ? g_map.pace / LATER_SPEED : g_map.pace;
+    if (zoom && step > dt / pace) step = dt / pace;                 /* the speed limit: never quicker than pace */
     g_drift += step;
     float e = zoom ? 1 - (1 - g_drift) * (1 - g_drift)              /* the zoom: done early, then resting on them */
                    : g_drift * g_drift * (3 - 2 * g_drift);         /* the drift: eased in and out */
@@ -2198,20 +2236,31 @@ static void DriftStep(float p, DWORD now)
     if (zoom) {
         float du, dv, hEnd;
         h = 0.5f;
+        int snap = 0;
         if (MapDest(&du, &dv, &hEnd, p)) {                         /* once known, kept for the screen */
-            if (!g_destOk) g_destSince = now;
+            if (!g_destOk) {
+                g_destSince = now;
+                InterlockedExchange(&g_destKnownPct, (LONG)(p * 100 + 0.5f));
+                InterlockedExchange(&g_destKnownWay, g_destWay);
+                snap = g_zoomHalf && g_drift < 0.05f;              /* a later screen, known from the start: begin there */
+            }
             g_destOk = 1; g_destU = du; g_destV = dv; g_destH = hEnd;
         } else if (g_destOk) {
             du = g_destU; dv = g_destV; hEnd = g_destH;
         }
         if (g_destOk) {
-            if (g_zoomHalf) e = 0.5f + 0.5f * e;                    /* after the first: from halfway in */
+            if (g_zoomHalf) e = LATER_START + (1 - LATER_START) * e; /* after the first: from LATER_START in */
             h = 0.5f * (float)FireExp((double)(e * MapLn(hEnd / 0.5f)));
             float k = (0.5f - h) / (0.5f - hEnd);                   /* how far the zoom has come */
+            if (g_zoomHalf) {                                       /* ... its middle from LATER_MIDDLE of the way */
+                float h0 = 0.5f * (float)FireExp((double)(LATER_START * MapLn(hEnd / 0.5f)));
+                float k0 = (0.5f - h0) / (0.5f - hEnd);
+                k = k0 < 0.999f ? LATER_MIDDLE + (1 - LATER_MIDDLE) * FireClamp((k - k0) / (1 - k0), 0, 1) : 1;
+            }
             cu = 0.5f + (du - 0.5f) * k;
             cv = 0.5f + (dv - 0.5f) * k;
         }
-        float a = (float)(1.0 - FireExp(-(double)dt / MAP_TAU));
+        float a = snap ? 1.0f : (float)(1.0 - FireExp(-(double)dt / MAP_TAU));
         g_viewU += (cu - g_viewU) * a;
         g_viewV += (cv - g_viewV) * a;
         g_viewH += (h - g_viewH) * a;
@@ -2421,8 +2470,10 @@ static void GlintsBuild(float t)
  *   the Maelstrom: a whirlpool in the middle of the Great Sea, in the world's own place and size, turning once in
  *                  MAEL_TURN s the way that draws the eye inward, the swells within SWIRL_REACH of its radius bent
  *                  into its swirl; far out only, fading with the sea
- *   the ripple: RIPPLE_RINGS rings opening slowly from where you arrive, each over RIPPLE_S, at a steady size on screen,
- *               appearing over RIPPLE_IN once the arrival is known; far out only, fading with the sea */
+ *   the ripple: RIPPLE_RINGS rings opening from where you arrive, each over RIPPLE_S, at a steady size on screen,
+ *               appearing over RIPPLE_IN once the arrival is known, and kept all the way in (his ask, 4 Oct: "should
+ *               keep going as it zooms in, to draw the eye, maybe even be more ostentatious because the class icon is
+ *               pretty small on such a huge continent": wider, quicker, more rings, brighter, never faded out) */
 #define MARKS_PATH    "Interface\\Glues\\LoadingScreens\\CinderMarks.blp"
 #define MARKS_SHEET   512.0f
 #define MARKS_SPRITES 32
@@ -2430,9 +2481,9 @@ static void GlintsBuild(float t)
 #define MAEL_TURN     36.0f
 #define SWIRL_REACH   2.6f
 #define SWIRL_TWIST   2.2f     /* radians, at its middle */
-#define RIPPLE_RINGS  3
-#define RIPPLE_S      3.0f
-#define RIPPLE_PX     110.0f   /* a ring at its widest, its radius on a 2160-tall screen */
+#define RIPPLE_RINGS  4
+#define RIPPLE_S      2.4f
+#define RIPPLE_PX     240.0f   /* a ring at its widest, its radius on a 2160-tall screen (110 before his ask) */
 #define RIPPLE_IN     0.5f
 static struct { unsigned short x0, y0, x1, y1; unsigned char ok; } g_mark[MARKS_SPRITES];
 static struct { int ok; float u, v, r; } g_mael;
@@ -2531,15 +2582,14 @@ static void SwirlAt(float *x, float *v, float asp)
 static void RippleBuild(float t, DWORD now)
 {
     g_mkQuads = 0;
-    float fade = SeaFade((g_bgUV[2] - g_bgUV[0]) * 0.5f);
-    if (!g_destOk || fade <= 0.01f) return;
+    if (!g_destOk) return;
     float sx, sy, appear = FireClamp((float)(now - g_destSince) / (RIPPLE_IN * 1000.0f), 0, 1);
     ViewToScreen(g_destU, g_destV, &sx, &sy);
     for (int k = 0; k < RIPPLE_RINGS; k++) {
         float ph = t / RIPPLE_S + (float)k / RIPPLE_RINGS;
         ph -= (float)(int)ph;
-        float px = RIPPLE_PX * (0.12f + 0.88f * ph), a = (1 - ph) * (float)FireExp(0.6 * MapLn(1 - ph + 1e-6f));
-        a *= FireClamp(ph / 0.08f, 0, 1) * fade * appear;
+        float px = RIPPLE_PX * (0.12f + 0.88f * ph), a = (1 - ph) * (float)FireExp(0.2 * MapLn(1 - ph + 1e-6f));
+        a *= FireClamp(ph / 0.08f, 0, 1) * appear;
         MarkPut(0, sx, sy, px / 2160.0f, 0, a);                       /* the ring's size steady on any screen height */
     }
 }

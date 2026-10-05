@@ -60,7 +60,7 @@ static void Fresh(const char *name)
     for (int i = 0; i < CLASS_CODE; i++) memcpy(shim_module + kClassCode[i].rva, kClassCode[i].bytes, (size_t)kClassCode[i].n);
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
-    g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0;
+    g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
     g_walls.count = 0;
     g_wallPick = 0;
@@ -1857,7 +1857,7 @@ static void LiveTests(void)
         RippleBuild(1.0f, 50000);
         int rp = g_mkQuads == 0;
         g_destOk = 1; g_destU = 0.3f; g_destV = 0.6f; g_destSince = 50000 - 2000;
-        RippleBuild(1.3f, 50000);                                       /* (at 1.0 s the third ring is just being born, unseen) */
+        RippleBuild(1.5f, 50000);                                       /* (no ring being born at 1.5 s: phases 1/8 apart) */
         rp &= g_mkQuads == RIPPLE_RINGS;
         float lastR = 0, lastA = 2;
         int ordered = 1;
@@ -1872,15 +1872,18 @@ static void LiveTests(void)
         }
         rp &= ordered;
         g_destSince = 50000 - 100;                                       /* known a tenth of a second ago: faint yet */
-        RippleBuild(1.3f, 50000);
+        RippleBuild(1.5f, 50000);
         int faint = 1;
         for (int q = 0; q < g_mkQuads; q++) faint &= (g_mkCol[q ? q * 6 : 0] >> 24) < 60;
         rp &= faint;
-        g_bgUV[0] = g_bgUV[4] = 0.2f; g_bgUV[2] = g_bgUV[6] = 0.4f;
-        RippleBuild(1.3f, 50000);
-        rp &= g_mkQuads == 0;
+        g_destSince = 50000 - 2000;                                      /* his ask, 4 Oct: it keeps going as the view closes in */
+        g_bgUV[0] = g_bgUV[4] = 0.29f; g_bgUV[2] = g_bgUV[6] = 0.31f;
+        RippleBuild(1.5f, 50000);
+        int near = g_mkQuads == RIPPLE_RINGS, bright = 0;
+        for (int q = 0; q < g_mkQuads; q++) bright |= (g_mkCol[q ? q * 6 : 0] >> 24) > 150;
+        rp &= near && bright && RIPPLE_PX >= 200;
         g_destOk = 0; g_mael.ok = 0; g_seaW = 0;
-        Check(rp, "the ripple: none before the arrival is known; then rings at it, square, the wider the fainter, faint at first, none close in");
+        Check(rp, "the ripple: none before the arrival is known; then rings at it, square, the wider the fainter, faint at first, still there and bright close in");
     }
 
     /* the badge: the class read from the character list (a mage, the second of three), kept when the list goes, a bad
@@ -2322,6 +2325,28 @@ static void LiveTests(void)
         int hw = g_zoomHalf && g_viewH < hFirst && g_viewH <= half * 1.02f;
         g_mapShown = 0; g_zoomScreens = 0; g_zoomHalf = 0;
         Check(hw, "the session's first map screen zooms from the whole world; a later one from halfway in");
+
+        /* his rule, 4 Oct (later loads take 3 to 5 s): a later screen whose arrival the game wrote before it began
+         * starts at once halfway in, its middle halfway from the world's middle to the arrival, no glide from the whole
+         * world; its zoom runs LATER_SPEED times as fast; a login's stale place (as the last screen left it) never counts */
+        g_mapShown = 1;
+        Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, -5000.0f); PutFloat(MAP_DEST_Y_VA, 10000.0f);
+        DriftScreenGone();                                              /* the last screen left the arrival here */
+        PutFloat(MAP_DEST_Y_VA, 15000.0f);                              /* NEW_WORLD first: u = 0.5 - 2e-5 * 15000 = 0.2 */
+        g_zoomScreens = 1; at += 3000; DriftStep(0.0f, at);
+        float h0 = 0.5f * powf(hEnd / 0.5f, LATER_START);
+        int lt = g_zoomHalf && g_destOk && g_destKnownWay == 5 && g_destKnownPct == 0 && fabsf(g_viewH - h0) < 1e-4f &&
+                 fabsf(g_viewU - (0.5f + (0.2f - 0.5f) * LATER_MIDDLE)) < 1e-4f &&
+                 fabsf(g_viewV - (0.5f + (0.6f - 0.5f) * LATER_MIDDLE)) < 1e-4f;
+        for (int i = 0; i < 50; i++) { at += 20; DriftStep(1.0f, at); } /* a second at a full bar: the pace, 1.5 times */
+        lt &= fabsf(g_drift - LATER_SPEED / g_map.pace) < 0.01f && LATER_SPEED > 1.4f;
+        for (int i = 0; i < 400; i++) { at += 20; DriftStep(1.0f, at); }
+        lt &= fabsf(g_viewH - hEnd) < 2e-3f && fabsf(g_viewU - 0.2f) < 2e-3f;   /* and it still lands on the arrival */
+        DriftScreenGone();                                              /* this one ends where it arrived */
+        g_zoomScreens = 1; at += 3000; DriftStep(0.0f, at);             /* the next, the game's arrival unchanged */
+        lt &= !g_destOk && g_viewH > 0.49f && g_destKnownPct == -1;
+        g_mapShown = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
+        Check(lt, "a later screen: the arrival written before it counts at once; it starts halfway in, its middle halfway there, no glide; the zoom 1.5 times as fast and still landing; an unchanged arrival does not count");
     }
     /* the overlay with the waves and the currents in the pack */
     {
