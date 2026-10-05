@@ -822,6 +822,8 @@ static void OverlayStart(void);
 static void BadgeLog(char *m);           /* the marks' (below): where a map screen's class came from, into the log */
 static volatile LONG g_screenWatch;      /* 1 once the fire's worker watches for screens ending */
 static volatile LONG g_dispNew = 1;      /* the bar as shown: the next frame begins a new screen */
+static volatile LONG g_viewOn, g_viewSteps, g_gameSeq;   /* the view (below): on; its thread moves the bar and the zoom
+                                                          * now; the game's loading frames drawn */
 static volatile LONG g_frmCount, g_frmGap, g_frmGapFrom, g_frmGapTo, g_frmDips, g_frmShown;   /* this screen's, for the log */
 #define HITCH_KEEP 6
 static volatile LONG g_hitchN, g_hitchMs[HITCH_KEEP], g_hitchPct[HITCH_KEEP];   /* gaps between frames over HITCH_MS */
@@ -2255,11 +2257,37 @@ static unsigned CharEntry(void)
     return list + picked * CHAR_SIZE;
 }
 
+/* The picked character's place in the character list (its map; x and y as float bits): 1 while the list holds it, read
+ * there and kept. Only the game's thread reads the list: the game frees it during a login's load, and a read from the
+ * view's thread could meet that memory as it goes, so the view's thread (g_viewSteps: it is the one stepping) has what
+ * the game's last frame read (GameFacts keeps it each frame while the view is on). */
+static volatile LONG g_charKept[4];                             /* 1 when kept, its map, x, y */
+static int CharRead(unsigned *m, unsigned *x, unsigned *y)
+{
+    unsigned e = CharEntry();
+    const unsigned char *pm = e ? ClientAt(e + CHAR_MAP) : 0, *px = e ? ClientAt(e + CHAR_X) : 0, *py = e ? ClientAt(e + CHAR_Y) : 0;
+    int ok = pm && px && py && Readable(pm, 4) && Readable(px, 4) && Readable(py, 4);
+    if (ok) {
+        *m = *(volatile const unsigned *)pm; *x = *(volatile const unsigned *)px; *y = *(volatile const unsigned *)py;
+        InterlockedExchange(&g_charKept[1], (LONG)*m); InterlockedExchange(&g_charKept[2], (LONG)*x);
+        InterlockedExchange(&g_charKept[3], (LONG)*y);
+    }
+    InterlockedExchange(&g_charKept[0], ok);
+    return ok;
+}
+static int CharPlace(unsigned *m, unsigned *x, unsigned *y)
+{
+    if (!g_viewSteps) return CharRead(m, x, y);
+    if (!g_charKept[0]) return 0;
+    *m = (unsigned)g_charKept[1]; *x = (unsigned)g_charKept[2]; *y = (unsigned)g_charKept[3];
+    return 1;
+}
+
 /* Where the player arrives, on the world map: 1 with its u, v and the view's half size there; 0 while it is not
  * known (see above). p: the bar so far. */
 static int MapDest(float *du, float *dv, float *hEnd, float p)
 {
-    unsigned id, dm, xb, yb, e, c;
+    unsigned id, dm, xb, yb, e, c, xb2, yb2;
     float ex, ey;
     if (!ClientWord(BAR_MAP_VA, &id)) return 0;
     g_destWay = 1;
@@ -2276,13 +2304,9 @@ static int MapDest(float *du, float *dv, float *hEnd, float p)
         g_destWay = fresh ? 2 : 5;
         return 1;
     }
-    if ((e = CharEntry()) != 0) {                                    /* a login: the list's own place */
-        const unsigned char *m = ClientAt(e + CHAR_MAP), *x = ClientAt(e + CHAR_X), *y = ClientAt(e + CHAR_Y);
-        if (m && x && y && Readable(m, 4) && Readable(x, 4) && Readable(y, 4) && *(volatile const unsigned *)m == id &&
-            MapPlace(id, MapBits(*(volatile const unsigned *)x), MapBits(*(volatile const unsigned *)y), du, dv, hEnd)) {
-            g_destWay = 3;
-            return 1;
-        }
+    if (CharPlace(&e, &xb2, &yb2) && e == id && MapPlace(id, MapBits(xb2), MapBits(yb2), du, dv, hEnd)) {
+        g_destWay = 3;                                               /* a login: the list's own place */
+        return 1;
     }
     g_destWay = 4;
     return game && p >= 0.5f && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd);
@@ -2313,6 +2337,8 @@ static volatile LONG g_driftNew = 1;                            /* the next fram
                                * this much only. */
 static float g_disp, g_dispV, g_dispRate, g_dispMax, g_fillFull;
 static DWORD g_dispAt, g_dispStill;                            /* ms of frames on, the game's bar unmoved, so far */
+static DWORD g_gameAt;                                         /* the game's last loading frame (GameFacts) */
+static float g_gameMax;                                        /* the game's bar, its highest this screen */
 #define HITCH_MS 120              /* a gap between frames this long or more is a hitch (4 Oct: he saw stutters at 20, 30,
                                    * 50, 55, 60, 75 and 80%; the log said only where the longest pause was) */
 #define STALL_MS 300              /* the game's bar unmoved this long while frames still come is a stall */
@@ -2326,14 +2352,39 @@ static void HitchKeep(volatile LONG *n, volatile LONG *ms, volatile LONG *pct, L
     if (len > ms[least]) { InterlockedExchange(&ms[least], len); InterlockedExchange(&pct[least], at); }
 }
 
-/* The game's thread only: the bar as shown for the game's p (0..1) at now. */
-static float DisplayStep(float p, DWORD now)
+/* ---- whose thread moves the bar and the zoom (4 Oct 2026, option 1: the view, below) ----
+ * Without the view, the game's thread does, in each loading frame it draws, as it always did (DisplayStep, DriftStep).
+ * While the view shows, the view's own thread does, at its own frames, so a frame the game cannot draw never stops them;
+ * the game's thread then only notes what its own frames alone can tell (GameFacts) and draws its frame, hidden under the
+ * view, from the view's numbers. A screen always begins on the game's thread, at its first frame: the music's fade and
+ * the blur's release are the game's own calls and its device's, and only that frame knows the bar is this screen's (the
+ * view's thread waits for it, and never moves them while a new screen is due). g_stepLock keeps the two threads from
+ * moving them at once, and is only taken while the view is on (g_viewOn, set once, at start). */
+static float g_viewShown;                                       /* the bar as shown at the view's last frame */
+static CRITICAL_SECTION g_stepLock;
+static int StepLock(void) { if (!g_viewOn) return 0; EnterCriticalSection(&g_stepLock); return 1; }
+static void StepUnlock(int held) { if (held) LeaveCriticalSection(&g_stepLock); }
+/* now for a step of the bar and the zoom, never before the last one: each thread reads its clock before it takes the
+ * lock, so the other may have stepped since with a later one (the view's own window opening takes a moment, too), and a
+ * step back in time would read as a pause of 49 days: the bar and the zoom would leap DISP_GAP_MAX's worth at once. */
+static DWORD StepNow(DWORD now)
 {
-    DWORD gap = g_dispAt ? now - g_dispAt : 0;
-    int fallback = !g_screenWatch && g_dispAt && gap > 1000 && p < 0.1f && g_dispMax > 0.5f;
-    if (InterlockedExchange(&g_dispNew, 0) || !g_dispAt || fallback) {
-        g_disp = g_dispMax = p;
+    if (g_dispAt && (LONG)(now - g_dispAt) < 0) now = g_dispAt;
+    if (g_driftAt && (LONG)(now - g_driftAt) < 0) now = g_driftAt;
+    return now;
+}
+
+/* The game's thread, each loading frame it draws: a new screen's start, and what only its own frames can tell (how many,
+ * the pauses between them and where, the time to a full bar, the freeze at its end). */
+static void GameFacts(float p, DWORD now)
+{
+    DWORD gap = g_gameAt ? now - g_gameAt : 0;
+    int fallback = !g_screenWatch && g_gameAt && gap > 1000 && p < 0.1f && g_gameMax > 0.5f;
+    if (InterlockedExchange(&g_dispNew, 0) || !g_gameAt || fallback) {
+        InterlockedExchange(&g_viewSteps, 0);                         /* (the view takes them back after this frame) */
+        g_disp = g_dispMax = g_gameMax = p;
         g_dispV = g_dispRate = 0;
+        g_dispAt = now;                                               /* the bar as shown starts here, without a step */
         InterlockedExchange(&g_frmCount, 0); InterlockedExchange(&g_frmGap, 0); InterlockedExchange(&g_frmDips, 0);
         InterlockedExchange(&g_hitchN, 0); InterlockedExchange(&g_stallN, 0);
         for (int i = 0; i < HITCH_KEEP; i++) {
@@ -2356,30 +2407,41 @@ static float DisplayStep(float p, DWORD now)
         LONG plan = full > floor ? full : floor;
         g_planEndAt = now + (DWORD)(plan > 300 ? plan : 300);
     }
+    InterlockedExchange(&g_gameSeq, g_gameSeq + 1);                   /* the game thread is these counts' only writer */
+    if (g_viewOn) { unsigned m, x, y; CharRead(&m, &x, &y); }       /* the character list's place, for the view's */
     g_loadFrame = 1;                                                  /* this frame is a loading screen's (the present) */
     if (p >= 0.999f && !g_fullMs)                                     /* the game's bar full: the time it took */
         InterlockedExchange(&g_fullMs, now - g_scrStartAt > 0 ? (LONG)(now - g_scrStartAt) : 1);
-    if (g_dispMax >= 0.999f && gap >= HITCH_MS && (LONG)gap > g_endFreezeMs)   /* the game's own freeze once it is done */
+    if (g_gameMax >= 0.999f && gap >= HITCH_MS && (LONG)gap > g_endFreezeMs)   /* the game's own freeze once it is done */
         InterlockedExchange(&g_endFreezeMs, (LONG)gap);
+    InterlockedExchange(&g_frmCount, g_frmCount + 1);
+    if (gap > (DWORD)g_frmGap) {
+        InterlockedExchange(&g_frmGap, (LONG)gap);
+        InterlockedExchange(&g_frmGapFrom, (LONG)(g_gameMax * 100 + 0.5f));
+        InterlockedExchange(&g_frmGapTo, (LONG)(p * 100 + 0.5f));
+    }
+    if (p < g_gameMax - 0.2f) InterlockedExchange(&g_frmDips, g_frmDips + 1);
+    if (gap >= HITCH_MS) HitchKeep(&g_hitchN, g_hitchMs, g_hitchPct, (LONG)gap, (LONG)(g_gameMax * 100 + 0.5f));
+    if (gap < HITCH_MS) g_dispStill += gap;                           /* a hitch is not a stall: only drawn time counts */
+    if (p > g_gameMax) {                                              /* the game's bar moves: was it still a while? */
+        if (g_dispStill >= STALL_MS)
+            HitchKeep(&g_stallN, g_stallMs, g_stallPct, (LONG)g_dispStill, (LONG)(g_gameMax * 100 + 0.5f));
+        g_dispStill = 0;
+        g_gameMax = p;
+    }
+    g_gameAt = now;
+}
+
+/* The thread that moves the bar (the game's, or the view's while it shows): the bar as shown for the game's p (0..1) at
+ * now, a step on from the last. */
+static float BarStep(float p, DWORD now)
+{
+    DWORD gap = g_dispAt ? now - g_dispAt : 0;
     /* the plan's bar: on to 1 by g_planEndAt, through any pause (time does not stop for one) */
     g_timed = g_holdMs > 0 && g_mapShown && g_map.ok;
     if (gap > 0) {
         LONG left = (LONG)(g_planEndAt - now);
         g_planU = left <= 0 ? 1 : g_planU + (1 - g_planU) * FireClamp((float)gap / (float)(left + (LONG)gap), 0, 1);
-    }
-    InterlockedExchange(&g_frmCount, g_frmCount + 1);                 /* the game thread is these counts' only writer */
-    if (gap > (DWORD)g_frmGap) {
-        InterlockedExchange(&g_frmGap, (LONG)gap);
-        InterlockedExchange(&g_frmGapFrom, (LONG)(g_dispMax * 100 + 0.5f));
-        InterlockedExchange(&g_frmGapTo, (LONG)(p * 100 + 0.5f));
-    }
-    if (p < g_dispMax - 0.2f) InterlockedExchange(&g_frmDips, g_frmDips + 1);
-    if (gap >= HITCH_MS) HitchKeep(&g_hitchN, g_hitchMs, g_hitchPct, (LONG)gap, (LONG)(g_dispMax * 100 + 0.5f));
-    if (gap < HITCH_MS) g_dispStill += gap;                           /* a hitch is not a stall: only drawn time counts */
-    if (p > g_dispMax) {                                              /* the game's bar moves: was it still a while? */
-        if (g_dispStill >= STALL_MS)
-            HitchKeep(&g_stallN, g_stallMs, g_stallPct, (LONG)g_dispStill, (LONG)(g_dispMax * 100 + 0.5f));
-        g_dispStill = 0;
     }
     g_dispAt = now;
     float dt = (float)gap / 1000.0f;
@@ -2403,6 +2465,14 @@ static float DisplayStep(float p, DWORD now)
     float shown = g_timed && g_planU < g_disp ? g_planU : g_disp;    /* on the plan: never ahead of it, nor of the game */
     InterlockedExchange(&g_frmShown, (LONG)(shown * 100 + 0.5f));
     return shown;
+}
+
+/* Its frame's facts and the bar as shown, as each loading frame did before the view: the tests' way in (GameStep, below,
+ * is the game's). */
+__attribute__((unused)) static float DisplayStep(float p, DWORD now)
+{
+    GameFacts(p, now);
+    return BarStep(p, now);
 }
 
 /* The worker, as a screen ends: its hitches and stalls, longest kept, in the bar's order (m: 220 bytes of room). */
@@ -2436,6 +2506,7 @@ static float g_settleU, g_settleV, g_settleH;                   /* ... from the 
 static void DriftScreenGone(void)
 {
     static const float whole[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
+    int held = StepLock();                                        /* (the view's thread may be finishing a step) */
     for (int i = 0; i < 8; i++) g_bgUV[i] = whole[i];
     unsigned dm, xb, yb;                                          /* where this screen left the game's arrival */
     if (ClientWord(MAP_DEST_MAP_VA, &dm) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb)) {
@@ -2445,13 +2516,14 @@ static void DriftScreenGone(void)
         InterlockedExchange(&g_destEndOk, 0);
     InterlockedExchange(&g_driftNew, 1);
     InterlockedExchange(&g_dispNew, 1);
+    StepUnlock(held);
 }
 
-/* The game's thread only. p: the bar, 0..1. A new screen (no frame for a second, or another map) starts again; within
- * a screen the bar only goes up (4 Oct 2026: it dips for a frame at the very end, and the view used to jump back out
- * to the whole world). With the world map: from the whole world, the view zooms evenly (in steps of the same ratio)
- * onto where the player arrives, its middle following the zoom, the approach done by about 90% of the bar so the end
- * of it rests on them. Otherwise: the picture drifts in. */
+/* The thread that moves the zoom (see GameStep), a new screen always the game's. p: the bar, 0..1. A new screen (no
+ * frame for a second, or another map) starts again; within a screen the bar only goes up (4 Oct 2026: it dips for a
+ * frame at the very end, and the view used to jump back out to the whole world). With the world map: from the whole
+ * world, the view zooms evenly (in steps of the same ratio) onto where the player arrives, its middle following the
+ * zoom, the approach done by about 90% of the bar so the end of it rests on them. Otherwise: the picture drifts in. */
 static void DriftStep(float p, DWORD now)
 {
     /* A new screen: the worker says so (it watches the loading screen's layer), or, only if there is no worker, the
@@ -2548,6 +2620,24 @@ static void DriftStep(float p, DWORD now)
     g_bgUV[4] = u0; g_bgUV[5] = vt; g_bgUV[6] = u1; g_bgUV[7] = vt;
 }
 
+/* The game's thread, each loading frame (RevealFill): its facts, then the bar as shown with the zoom moved on, unless
+ * the view's thread is moving them: then the view's numbers, for the game's own frame under it. */
+static float GameStep(float p, DWORD now)
+{
+    int held = StepLock();
+    GameFacts(p, now);
+    float shown;
+    if (g_viewSteps)
+        shown = g_viewShown;
+    else {
+        now = StepNow(now);
+        shown = BarStep(p, now);
+        if (g_driftOn) DriftStep(shown, now);
+    }
+    StepUnlock(held);
+    return shown;
+}
+
 /* ---- the hold (his five-second floor, 4 Oct 2026; see HOLD_MS) ----
  * Read from his WoW.exe: the game draws a loading frame only as a phase reports progress. Three setters (VA 0x407F70,
  * 0x407FA0, 0x407FD0) store their phase and call 0x406900, one loading frame (0x406920 works out the bar into
@@ -2570,6 +2660,7 @@ static void HoldFrame(void)
     unsigned bits;
     if (!g_holdOn || !g_timed || g_holdDone || !ClientWord(HOLD_BAR_VA, &bits) || !(MapBits(bits) >= 0.999f)) return;
     g_holdDone = 1;
+    int held = StepLock();                                           /* the view's thread may be moving the view */
     DWORD now = GetTickCount(), start = now;
     LONG blur = g_blurOn && g_blurMs > 0 ? g_blurMs : 0;             /* the ending, inside the floor */
     LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, floor = g_holdMs - fz - blur;
@@ -2590,7 +2681,7 @@ static void HoldFrame(void)
         g_settleU = g_viewU; g_settleV = g_viewV; g_settleH = g_viewH;
     }
     if ((LONG)(endAt - now) <= 0) {
-        if (!blur) return;                                                        /* met already: no hold */
+        if (!blur) { StepUnlock(held); return; }                                  /* met already: no hold */
         endAt = now;                                                              /* (but the ending still plays) */
     }
     g_planEndAt = endAt;
@@ -2599,6 +2690,7 @@ static void HoldFrame(void)
         g_blurTo = endAt + (DWORD)blur;
     }
     DWORD stopAt = endAt + (DWORD)(blur > HOLD_TAIL_MS ? blur : HOLD_TAIL_MS);
+    StepUnlock(held);                                             /* never held through the frames: the view goes on */
     for (int f = 0; f < HOLD_FRAMES && (LONG)(stopAt - now) > 0 && now - start < HOLD_MAX_MS; f++) {
         Sleep(4);
         g_holdFrame();
@@ -4146,9 +4238,7 @@ void WINAPI RevealFill(const float *v)
     if (ClientWord(0x882BE4, &bits)) { union { unsigned u; float f; } c; c.u = bits; p = c.f; }
     if (!(p >= 0)) p = 0;
     if (p > 1) p = 1;
-    DWORD now = GetTickCount();
-    float shown = DisplayStep(p, now);
-    if (g_driftOn) DriftStep(shown, now);
+    float shown = GameStep(p, GetTickCount());
     float L = v[0], B = v[1], z = v[2], T = v[7];
     if (p > 0.02f && v[3] > L) g_fillFull = (v[3] - L) / p;         /* the bar's whole width, in the same units */
     float full = g_fillFull > 0 ? g_fillFull : 1.0f, R = L + shown * full;   /* the front: the bar as shown */
@@ -4358,19 +4448,162 @@ static int RevealBar(void)
     return 1;
 }
 
-/* ---- the view: CinderLoad's own window over the game while a loading screen shows (4 Oct 2026; piece 1, the proof) ----
+/* ---- the view: CinderLoad's own window over the game while a world map screen shows (4 Oct 2026, option 1) ----
  * His ask (4 Oct): "I don't want the stutter of other add-ons and stuff loading to cause the map to stutter." The game
  * draws a loading frame only when a phase reports progress (0x406900, from the three setters at 0x407F70/A0/D0), so
- * while a big add-on file runs or the world finishes, nothing the game draws can move. The way out is a renderer of our
- * own: for each loading screen this opens a borderless window over the game window's client area, owned by it (so it
- * stays above the game only, and goes when it is minimised; never topmost over his other windows), that never takes
- * the focus or a click, drawn with OpenGL (never Direct3D: see below) on its own thread, at the screen's refresh. The proof draws a dark field, a bar from the game's progress, and a marker sweeping across once
- * every 2 s that keeps moving whatever the game does; the log says, per screen, its frames and its longest gap, beside
- * the game's own (the fire's lines). For his first look (4 Oct, night) it is a BAND below the arrival (VIEW_BAND_*), so
- * one video shows the game's map stopping where the game stalls while the band's marker carries on, and as the screen
- * goes it fades out over VIEW_FADE_MS on its window's own alpha: whether a window of ours can dissolve into the world on
- * his system. Only while Data\CinderLoad\view.txt exists: delete it to turn this off. Any failure
- * is logged once and the view stays off for the session; the game's own drawing is never touched. */
+ * while a big add-on file runs or the world finishes, nothing the game draws can move. The view is a renderer of our
+ * own: for each world map screen it opens a borderless window over the game window's whole client area, owned by it (so
+ * it stays above the game only, and goes when it is minimised; never topmost over his other windows), that never takes
+ * the focus or a click, drawn with OpenGL (never Direct3D: see below) on its own thread at the screen's refresh. While it
+ * shows, its thread moves the bar and the zoom (GameStep, above), so the game's stalls never stop them. The game's own
+ * frame goes on being drawn under it, the fallback: any failure is logged once, the view stays off for the session, and
+ * the game's frames are what shows, as before. As the screen goes, the view fades out over VIEW_FADE_MS on its window's
+ * own alpha, the world coming up through it.
+ * The proof (4 Oct, 22:28, his game): a band of it drew 1,328 frames in 9 s, the longest gap 110 ms, while the game's map
+ * froze 1.74 s. Slice 1 (this): the world map, zoomed, over the whole window, and a plain bar along its bottom; the
+ * overlays, the fire and the ending's blur follow. Its picture is the pack's own CinderMap.blp, read with our MPQ reader
+ * as the game starts, given to OpenGL as the DXT blocks it is made of (GL_EXT_texture_compression_s3tc), else decoded
+ * here from no wider than VIEW_DECODE_MAX. Only while Data\CinderLoad\view.txt exists: delete it to turn this off. */
+#define VIEW_FADE_MS    500     /* the view fades out over this as the screen goes */
+#define VIEW_DECODE_MAX 2048    /* a driver without DXT: the picture decoded from its first level no wider than this */
+#define VIEW_BAR_TALL   0.008f  /* slice 1's plain bar: this much of the window's height, along its bottom */
+#define BLP_LEVELS      16
+typedef struct { unsigned w, h; int dxt, alpha, levels; unsigned off[BLP_LEVELS], len[BLP_LEVELS]; } BlpInfo;
+
+/* A BLP2 of DXT1 or DXT5 blocks (the pack's pictures, as tools/blp.py writes them), checked against its length: 1 with
+ * where each level lies, from the whole picture down, as far as the file holds them whole. */
+static int BlpParse(const unsigned char *d, unsigned n, BlpInfo *b)
+{
+    if (n < 1172 || d[0] != 'B' || d[1] != 'L' || d[2] != 'P' || d[3] != '2' || Rd32(d + 4) != 1 || d[8] != 2) return 0;
+    if (d[10] == 0 && d[9] <= 1) b->dxt = 1;                     /* alpha encoding 0: DXT1 (no alpha, or one bit) */
+    else if (d[10] == 7 && d[9] == 8) b->dxt = 5;                /* 7: DXT5 */
+    else return 0;
+    b->alpha = d[9];
+    b->w = Rd32(d + 12); b->h = Rd32(d + 16);
+    if (b->w < 4 || b->h < 4 || b->w > 8192 || b->h > 8192 || (b->w & 3) || (b->h & 3)) return 0;
+    unsigned w = b->w, h = b->h, block = b->dxt == 1 ? 8 : 16;
+    b->levels = 0;
+    for (int i = 0; i < BLP_LEVELS; i++) {
+        unsigned off = Rd32(d + 20 + 4 * i), len = Rd32(d + 84 + 4 * i), want = ((w + 3) / 4) * ((h + 3) / 4) * block;
+        if (!off || len < want || off > n || want > n - off) break;
+        b->off[i] = off; b->len[i] = want; b->levels++;
+        if (!d[11] || (w == 1 && h == 1)) break;                 /* no smaller copies, or the last one */
+        w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
+    }
+    return b->levels > 0;
+}
+
+static void Dxt565(unsigned c, unsigned char *rgb)
+{
+    unsigned r = c >> 11 & 31, g = c >> 5 & 63, b = c & 31;
+    rgb[0] = (unsigned char)(r << 3 | r >> 2); rgb[1] = (unsigned char)(g << 2 | g >> 4); rgb[2] = (unsigned char)(b << 3 | b >> 2);
+}
+/* One level of DXT1 or DXT5 blocks, w x h texels, into out as RGBA (4 bytes a texel): for a driver without DXT. */
+static void DxtDecode(const unsigned char *src, unsigned w, unsigned h, int dxt, unsigned char *out)
+{
+    unsigned bw = (w + 3) / 4, bh = (h + 3) / 4, size = dxt == 1 ? 8 : 16;
+    for (unsigned by = 0; by < bh; by++)
+        for (unsigned bx = 0; bx < bw; bx++) {
+            const unsigned char *k = src + (by * bw + bx) * size, *c = dxt == 1 ? k : k + 8;
+            unsigned c0 = c[0] | c[1] << 8, c1 = c[2] | c[3] << 8, four = dxt == 5 || c0 > c1;
+            unsigned char pal[4][4], a[8];
+            Dxt565(c0, pal[0]); Dxt565(c1, pal[1]);
+            for (int j = 0; j < 3; j++) {
+                pal[2][j] = (unsigned char)(four ? (2 * pal[0][j] + pal[1][j]) / 3 : (pal[0][j] + pal[1][j]) / 2);
+                pal[3][j] = (unsigned char)(four ? (pal[0][j] + 2 * pal[1][j]) / 3 : 0);
+            }
+            pal[0][3] = pal[1][3] = pal[2][3] = 255;
+            pal[3][3] = four ? 255 : 0;                          /* DXT1's three colours: the fourth is see-through */
+            unsigned lo = 0, hi = 0;                             /* DXT5's alpha: 3 bits a texel, 8 texels a half */
+            if (dxt == 5) {
+                a[0] = k[0]; a[1] = k[1];
+                if (a[0] > a[1])
+                    for (int i = 1; i < 7; i++) a[i + 1] = (unsigned char)(((7 - i) * a[0] + i * a[1]) / 7);
+                else {
+                    for (int i = 1; i < 5; i++) a[i + 1] = (unsigned char)(((5 - i) * a[0] + i * a[1]) / 5);
+                    a[6] = 0; a[7] = 255;
+                }
+                lo = k[2] | k[3] << 8 | (unsigned)k[4] << 16; hi = k[5] | k[6] << 8 | (unsigned)k[7] << 16;
+            }
+            for (unsigned y = 0; y < 4; y++)
+                for (unsigned x = 0; x < 4; x++) {
+                    unsigned tx = bx * 4 + x, ty = by * 4 + y, i = 4 * y + x;
+                    if (tx >= w || ty >= h) continue;
+                    unsigned char *o = out + (ty * w + tx) * 4;
+                    const unsigned char *p = pal[c[4 + y] >> (2 * x) & 3];
+                    o[0] = p[0]; o[1] = p[1]; o[2] = p[2];
+                    o[3] = dxt == 5 ? a[(i < 8 ? lo >> (3 * i) : hi >> (3 * (i - 8))) & 7] : p[3];
+                }
+        }
+}
+
+/* name is one of list's space-separated words (OpenGL's extensions). */
+static int TextHas(const char *list, const char *name)
+{
+    int n = lstrlenA(name);
+    for (const char *p = list; *p;) {
+        while (*p == ' ') p++;
+        const char *e = p;
+        while (*e && *e != ' ') e++;
+        int i = 0;
+        if (e - p == n) while (i < n && p[i] == name[i]) i++;
+        if (n && i == n) return 1;
+        p = e;
+    }
+    return 0;
+}
+
+/* A frame of the view, as the quads it draws (pixels, y down; tex 1: the world map, at its picture's u, v). Made where the
+ * bar and the zoom move (under g_stepLock), drawn after; kept for the fade. */
+#define VIEW_QUADS 4
+typedef struct { int tex; float x0, y0, x1, y1, u0, v0, u1, v1; DWORD c; } ViewItem;
+static struct { int n; ViewItem q[VIEW_QUADS]; } g_vl;
+static void ViewPut(int tex, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, DWORD c)
+{
+    if (g_vl.n >= VIEW_QUADS) return;
+    ViewItem *q = &g_vl.q[g_vl.n++];
+    q->tex = tex; q->x0 = x0; q->y0 = y0; q->x1 = x1; q->y1 = y1; q->u0 = u0; q->v0 = v0; q->u1 = u1; q->v1 = v1; q->c = c;
+}
+/* W x H pixels: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its top left, [2], [3] its
+ * bottom right), and slice 1's plain bar, its track dark and its fill the bar as shown. */
+static void ViewBuild(float W, float H, float shown)
+{
+    g_vl.n = 0;
+    ViewPut(1, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
+    float top = H * (1 - VIEW_BAR_TALL);
+    ViewPut(0, 0, top, W, H, 0, 0, 0, 0, 0xFF0A0604u);
+    if (shown > 0) ViewPut(0, 0, top, W * FireClamp(shown, 0, 1), H, 0, 0, 0, 0, 0xFFFF7D0Au);
+}
+
+/* The view's thread, a screen up and the view not open: 1 once the game's first frame of it has begun it (seen: the
+ * game's frame count while no screen was up), with *ours 1 when it is the view's to draw (a world map screen). */
+static int ViewReady(LONG seen, int *ours)
+{
+    int held = StepLock();
+    int ready = g_gameSeq != seen && !g_dispNew && !g_driftNew;
+    *ours = g_screenWatch && g_driftOn && g_screenMap;
+    StepUnlock(held);
+    return ready;
+}
+/* The view's thread, each of its frames: the bar and the zoom a step on for the game's bar p at now, and the frame's
+ * quads for W x H; never while the game's thread is to begin a screen (0: nothing moved, the last quads stand). */
+static int ViewStep(float p, DWORD now, float W, float H)
+{
+    if (!(p >= 0)) p = 0;
+    if (p > 1) p = 1;
+    int held = StepLock(), ok = !g_dispNew && !g_driftNew;
+    if (ok) {
+        InterlockedExchange(&g_viewSteps, 1);
+        now = StepNow(now);
+        float s = BarStep(p, now);
+        if (g_driftOn) DriftStep(s, now);
+        g_viewShown = s;
+        ViewBuild(W, H, s);
+    }
+    StepUnlock(held);
+    return ok;
+}
+
 #ifdef __i386__
 #include <d3d9.h>
 /* ITS DRAWING IS OPENGL, NOT DIRECT3D (4 Oct 2026, 22:23, his first launch of the proof: a critical error). Mods such as
@@ -4378,12 +4611,30 @@ static int RevealBar(void)
  * game's d3d9.dll makes, ours included: our device's calls ran through comfyfog's hooks, and the game's next frame
  * called a null pointer inside comfyfog. OpenGL (opengl32.dll, GDI's pixel formats) is a different library that no
  * Direct3D mod touches; it is loaded by name at run time, so the DLL's own imports stay kernel32 and user32. */
-#define GL_COLOR_BUFFER_BIT_ 0x4000
-#define GL_QUADS_            0x0007
-#define GL_PROJECTION_       0x1701
-#define GL_MODELVIEW_        0x1700
-#define GL_DEPTH_TEST_       0x0B71
-#define GL_TEXTURE_2D_       0x0DE1
+#define GL_COLOR_BUFFER_BIT_     0x4000
+#define GL_QUADS_                0x0007
+#define GL_PROJECTION_           0x1701
+#define GL_MODELVIEW_            0x1700
+#define GL_DEPTH_TEST_           0x0B71
+#define GL_BLEND_                0x0BE2
+#define GL_TEXTURE_2D_           0x0DE1
+#define GL_EXTENSIONS_           0x1F03
+#define GL_MAX_TEXTURE_SIZE_     0x0D33
+#define GL_UNPACK_ALIGNMENT_     0x0CF5
+#define GL_TEXTURE_MAG_FILTER_   0x2800
+#define GL_TEXTURE_MIN_FILTER_   0x2801
+#define GL_TEXTURE_WRAP_S_       0x2802
+#define GL_TEXTURE_WRAP_T_       0x2803
+#define GL_TEXTURE_MAX_LEVEL_    0x813D
+#define GL_CLAMP_TO_EDGE_        0x812F
+#define GL_LINEAR_               0x2601
+#define GL_LINEAR_MIPMAP_LINEAR_ 0x2703
+#define GL_RGBA_                 0x1908
+#define GL_RGBA8_                0x8058
+#define GL_UNSIGNED_BYTE_        0x1401
+#define GL_DXT1_RGB_             0x83F0
+#define GL_DXT1_RGBA_            0x83F1
+#define GL_DXT5_RGBA_            0x83F3
 static struct {
     HMODULE lib, gdi;
     HGLRC (WINAPI *CreateContext)(HDC);
@@ -4395,19 +4646,32 @@ static struct {
     void (WINAPI *MatrixMode)(unsigned);
     void (WINAPI *LoadIdentity)(void);
     void (WINAPI *Ortho)(double, double, double, double, double, double);
+    void (WINAPI *Enable)(unsigned);
     void (WINAPI *Disable)(unsigned);
     void (WINAPI *Begin)(unsigned);
     void (WINAPI *End)(void);
     void (WINAPI *Color4ub)(unsigned char, unsigned char, unsigned char, unsigned char);
+    void (WINAPI *TexCoord2f)(float, float);
     void (WINAPI *Vertex2f)(float, float);
+    void (WINAPI *GenTextures)(int, unsigned *);
+    void (WINAPI *BindTexture)(unsigned, unsigned);
+    void (WINAPI *TexParameteri)(unsigned, unsigned, int);
+    void (WINAPI *TexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (WINAPI *PixelStorei)(unsigned, int);
+    const unsigned char *(WINAPI *GetString)(unsigned);
+    void (WINAPI *GetIntegerv)(unsigned, int *);
+    unsigned (WINAPI *GetError)(void);
+    void (WINAPI *CompressedTexImage2D)(unsigned, int, unsigned, int, int, int, int, const void *);   /* 1.3: by name */
     int (WINAPI *ChoosePF)(HDC, const PIXELFORMATDESCRIPTOR *);
     BOOL (WINAPI *SetPF)(HDC, int, const PIXELFORMATDESCRIPTOR *);
     BOOL (WINAPI *Swap)(HDC);
 } gl;
 static HINSTANCE g_inst;
 static struct {
-    HWND win; HDC dc; HGLRC rc; int w, h;
-    DWORD since, last, gap, frames; float fill;
+    HWND win; HDC dc; HGLRC rc; int w, h, vsync;
+    unsigned tex;
+    unsigned char *blp; unsigned blpLen;                        /* the picture's file, until OpenGL has it */
+    DWORD since, last, gap, frames;
 } g_view;
 
 /* opengl32.dll and gdi32.dll's few calls: 1 when every one is there. */
@@ -4422,20 +4686,81 @@ static int GlLoad(void)
         !GLP(GetProc, gl.lib, "wglGetProcAddress") || !GLP(Viewport, gl.lib, "glViewport") ||
         !GLP(ClearColor, gl.lib, "glClearColor") || !GLP(Clear, gl.lib, "glClear") ||
         !GLP(MatrixMode, gl.lib, "glMatrixMode") || !GLP(LoadIdentity, gl.lib, "glLoadIdentity") ||
-        !GLP(Ortho, gl.lib, "glOrtho") || !GLP(Disable, gl.lib, "glDisable") || !GLP(Begin, gl.lib, "glBegin") ||
-        !GLP(End, gl.lib, "glEnd") || !GLP(Color4ub, gl.lib, "glColor4ub") || !GLP(Vertex2f, gl.lib, "glVertex2f") ||
+        !GLP(Ortho, gl.lib, "glOrtho") || !GLP(Enable, gl.lib, "glEnable") || !GLP(Disable, gl.lib, "glDisable") ||
+        !GLP(Begin, gl.lib, "glBegin") || !GLP(End, gl.lib, "glEnd") || !GLP(Color4ub, gl.lib, "glColor4ub") ||
+        !GLP(TexCoord2f, gl.lib, "glTexCoord2f") || !GLP(Vertex2f, gl.lib, "glVertex2f") ||
+        !GLP(GenTextures, gl.lib, "glGenTextures") || !GLP(BindTexture, gl.lib, "glBindTexture") ||
+        !GLP(TexParameteri, gl.lib, "glTexParameteri") || !GLP(TexImage2D, gl.lib, "glTexImage2D") ||
+        !GLP(PixelStorei, gl.lib, "glPixelStorei") || !GLP(GetString, gl.lib, "glGetString") ||
+        !GLP(GetIntegerv, gl.lib, "glGetIntegerv") || !GLP(GetError, gl.lib, "glGetError") ||
         !GLP(ChoosePF, gl.gdi, "ChoosePixelFormat") || !GLP(SetPF, gl.gdi, "SetPixelFormat") ||
         !GLP(Swap, gl.gdi, "SwapBuffers"))
         return gl.Swap = NULL, 0;
 #undef GLP
     return 1;
 }
+/* A call past OpenGL 1.1, by name, once a context is current: NULL when the driver has none (some say so with 1, 2, 3
+ * or -1). */
+static PROC GlExt(const char *name)
+{
+    PROC f = gl.GetProc(name);
+    ULONG_PTR v = (ULONG_PTR)f;
+    return v > 3 && v != (ULONG_PTR)-1 ? f : NULL;
+}
 
-#define VIEW_BAND_TOP   62     /* percent of the game window's height: where the proof's band begins */
-#define VIEW_BAND_TALL  10     /* and how tall it is (below the arrival, above the bar) */
-#define VIEW_FADE_MS    500    /* the band fades out over this as the screen goes (the world's dissolve, to be) */
+/* The world map's picture, given to OpenGL once a context is current: 1 when it took it. why: what failed, for the log. */
+static int ViewTexture(const char **why)
+{
+    BlpInfo b;
+    char m[200];
+    if (!BlpParse(g_view.blp, g_view.blpLen, &b)) { *why = "CinderMap.blp is not a BLP2 of DXT1 or DXT5 blocks whole"; return 0; }
+    int max = 0, s3tc = 0;
+    gl.GetIntegerv(GL_MAX_TEXTURE_SIZE_, &max);
+    const char *ext = (const char *)gl.GetString(GL_EXTENSIONS_);
+    if (ext && TextHas(ext, "GL_EXT_texture_compression_s3tc")) {
+        *(PROC *)&gl.CompressedTexImage2D = GlExt("glCompressedTexImage2D");
+        if (!gl.CompressedTexImage2D) *(PROC *)&gl.CompressedTexImage2D = GlExt("glCompressedTexImage2DARB");
+        s3tc = gl.CompressedTexImage2D != NULL;
+    }
+    int first = 0;
+    while (first < b.levels - 1 && ((int)(b.w >> first) > max || (int)(b.h >> first) > max ||
+                                    (!s3tc && (b.w >> first) > VIEW_DECODE_MAX)))
+        first++;
+    unsigned w0 = b.w >> first, h0 = b.h >> first;
+    if (!w0 || !h0 || (int)w0 > max || (int)h0 > max) { *why = "its OpenGL takes no picture that large"; return 0; }
+    unsigned char *rgba = s3tc ? NULL : (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w0 * h0 * 4);
+    if (!s3tc && !rgba) { *why = "no memory to decode its picture"; return 0; }
+    while (gl.GetError()) {}
+    gl.GenTextures(1, &g_view.tex);
+    gl.BindTexture(GL_TEXTURE_2D_, g_view.tex);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    unsigned fmt = b.dxt == 5 ? GL_DXT5_RGBA_ : b.alpha ? GL_DXT1_RGBA_ : GL_DXT1_RGB_;
+    for (int i = first; i < b.levels; i++) {
+        unsigned w = b.w >> i ? b.w >> i : 1, h = b.h >> i ? b.h >> i : 1;
+        if (s3tc)
+            gl.CompressedTexImage2D(GL_TEXTURE_2D_, i - first, fmt, (int)w, (int)h, 0, (int)b.len[i], g_view.blp + b.off[i]);
+        else {
+            DxtDecode(g_view.blp + b.off[i], w, h, b.dxt, rgba);
+            gl.TexImage2D(GL_TEXTURE_2D_, i - first, GL_RGBA8_, (int)w, (int)h, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, rgba);
+        }
+    }
+    if (rgba) HeapFree(GetProcessHeap(), 0, rgba);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, b.levels - 1 - first);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, b.levels - first > 1 ? GL_LINEAR_MIPMAP_LINEAR_ : GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    if (gl.GetError()) { *why = "its OpenGL would not take the world map's picture"; return 0; }
+    HeapFree(GetProcessHeap(), 0, g_view.blp);
+    g_view.blp = NULL;
+    wsprintfA(m, "  the view's picture: CinderMap.blp, %u x %u in %d levels, %s%s", w0, h0, b.levels - first,
+              s3tc ? "its DXT blocks as they are" : "decoded here (its OpenGL has no DXT)",
+              g_view.vsync ? ", at the screen's refresh" : ", paced by the clock (no vsync)");
+    Log(m);
+    return 1;
+}
 
-/* The window's own alpha (a layered window's): 255 whole. 0 when the system will not do it (the log says, once). */
+/* The window's own alpha (a layered window's): 255 whole. 0 when the system will not do it. */
 static int ViewAlpha(BYTE a)
 {
     LONG ex = GetWindowLongA(g_view.win, GWL_EXSTYLE);
@@ -4466,20 +4791,19 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM w, LPARAM l)
     if (m == WM_NCHITTEST) return HTTRANSPARENT;
     return DefWindowProcA(h, m, w, l);
 }
-/* Our window over the game window's client area, and the device on it: 1 when both are there and shown. why: what
+/* Our window over the game window's whole client area, its OpenGL context and the world map's picture: 1 when all are
+ * there and the window shows; -1 not for this screen (the game's window minimised, say); 0 not at all. why: what
  * failed, for the log. */
 static int ViewOpen(const char **why)
 {
     HWND game = NULL;
     EnumWindows(ViewFind, (LPARAM)&game);
-    if (!game) { *why = "the game's window was not found"; return 0; }
+    if (!game) { *why = "the game's window was not found"; return -1; }
     RECT r;
     POINT o = { 0, 0 };
-    if (!GetClientRect(game, &r) || !ClientToScreen(game, &o)) { *why = "the game window's size could not be read"; return 0; }
+    if (!GetClientRect(game, &r) || !ClientToScreen(game, &o)) { *why = "the game window's size could not be read"; return -1; }
     int w = r.right - r.left, h = r.bottom - r.top;
-    if (w < 64 || h < 64) { *why = "the game's window is minimised or too small"; return 0; }
-    o.y += h * VIEW_BAND_TOP / 100;                      /* the proof: a band, the game's own screen above and below */
-    h = h * VIEW_BAND_TALL / 100;
+    if (w < 64 || h < 64) { *why = "the game's window is minimised or too small"; return -1; }
     static int registered;
     if (!registered) {
         WNDCLASSEXA wc;
@@ -4510,86 +4834,133 @@ static int ViewOpen(const char **why)
         g_view.rc = gl.CreateContext(g_view.dc);
         if (!g_view.rc || !gl.MakeCurrent(g_view.dc, g_view.rc)) { g_view.rc = NULL; *why = "its OpenGL context could not be made"; return 0; }
         BOOL (WINAPI *interval)(int) = NULL;                /* at the screen's refresh, as the game's own frames */
-        *(PROC *)&interval = gl.GetProc("wglSwapIntervalEXT");
-        if (interval) interval(1);
+        *(PROC *)&interval = GlExt("wglSwapIntervalEXT");
+        g_view.vsync = interval && interval(1);
     }
+    if (!g_view.tex && !ViewTexture(why)) return 0;
     g_view.w = w; g_view.h = h;
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
     return 1;
 }
-static void ViewQuad(float x0, float y0, float x1, float y1, DWORD c)
+/* g_vl, drawn and shown: 0 when it could not be (the view then goes). */
+static int ViewFrame(void)
 {
-    gl.Color4ub((unsigned char)(c >> 16), (unsigned char)(c >> 8), (unsigned char)c, (unsigned char)(c >> 24));
-    gl.Vertex2f(x0, y0); gl.Vertex2f(x1, y0); gl.Vertex2f(x1, y1); gl.Vertex2f(x0, y1);
-}
-/* One frame of the proof: 0 when it could not be shown (the view then stays off). */
-static int ViewFrame(const unsigned char *base, DWORD now)
-{
-    float p = *(volatile const float *)(base + FIRE_PROGRESS_RVA);
-    if (p > g_view.fill && p <= 1.0f) g_view.fill = p;      /* the game writes 0 first, then the sum: keep the largest */
-    float W = (float)g_view.w, H = (float)g_view.h, s = (float)((now - g_view.since) % 2000) / 2000.0f;
     gl.Viewport(0, 0, g_view.w, g_view.h);
-    gl.ClearColor(0x0B / 255.0f, 0x1A / 255.0f, 0x2E / 255.0f, 1);
+    gl.ClearColor(0, 0, 0, 1);
     gl.Clear(GL_COLOR_BUFFER_BIT_);
-    gl.MatrixMode(GL_PROJECTION_); gl.LoadIdentity(); gl.Ortho(0, W, H, 0, -1, 1);   /* pixels, y down */
+    gl.MatrixMode(GL_PROJECTION_); gl.LoadIdentity(); gl.Ortho(0, g_view.w, g_view.h, 0, -1, 1);   /* pixels, y down */
     gl.MatrixMode(GL_MODELVIEW_); gl.LoadIdentity();
-    gl.Disable(GL_DEPTH_TEST_); gl.Disable(GL_TEXTURE_2D_);
-    gl.Begin(GL_QUADS_);
-    ViewQuad(0, H * 0.80f, W, H, 0xFF000000u);                                       /* the band under the bar */
-    ViewQuad(0, H * 0.84f, W * g_view.fill, H * 0.96f, 0xFFFF7D0Au);                 /* the bar, the game's progress */
-    ViewQuad(W * s - H * 0.05f, H * 0.20f, W * s + H * 0.05f, H * 0.70f, 0xFFFFFFFFu);   /* the marker: never stops */
-    gl.End();
+    gl.Disable(GL_DEPTH_TEST_); gl.Disable(GL_BLEND_);
+    for (int i = 0; i < g_vl.n; i++) {
+        const ViewItem *q = &g_vl.q[i];
+        if (q->tex) { gl.Enable(GL_TEXTURE_2D_); gl.BindTexture(GL_TEXTURE_2D_, g_view.tex); }
+        else gl.Disable(GL_TEXTURE_2D_);
+        gl.Color4ub((unsigned char)(q->c >> 16), (unsigned char)(q->c >> 8), (unsigned char)q->c, (unsigned char)(q->c >> 24));
+        gl.Begin(GL_QUADS_);
+        gl.TexCoord2f(q->u0, q->v0); gl.Vertex2f(q->x0, q->y0);
+        gl.TexCoord2f(q->u1, q->v0); gl.Vertex2f(q->x1, q->y0);
+        gl.TexCoord2f(q->u1, q->v1); gl.Vertex2f(q->x1, q->y1);
+        gl.TexCoord2f(q->u0, q->v1); gl.Vertex2f(q->x0, q->y1);
+        gl.End();
+    }
     return gl.Swap(g_view.dc) != 0;
+}
+/* GetTickCount, between its ticks too: on Windows it moves in steps of about 16 ms, too coarse for a view drawn 144 times
+ * a second; QueryPerformanceCounter fills them in, never past the next tick, so it never runs ahead of the game's clock. */
+static DWORD ViewNow(void)
+{
+    static DWORD tick, last, perMs;
+    static LARGE_INTEGER at;
+    LARGE_INTEGER q;
+    DWORD t = GetTickCount(), now = t;
+    if (!perMs) {
+        LARGE_INTEGER f;
+        perMs = QueryPerformanceFrequency(&f) && !f.HighPart && f.LowPart >= 1000 ? f.LowPart / 1000 : 0xFFFFFFFFu;
+    }
+    if (perMs != 0xFFFFFFFFu && QueryPerformanceCounter(&q)) {
+        if (t != tick) { tick = t; at = q; }
+        else { DWORD d = (q.LowPart - at.LowPart) / perMs; now = t + (d < 15 ? d : 15); }
+    }
+    if ((LONG)(now - last) < 0) now = last;
+    last = now;
+    return now;
+}
+/* The view gone for the session: the game's thread moves the bar and the zoom again from its next frame. */
+static DWORD ViewOff(const char *why)
+{
+    char m[200];
+    int held = StepLock();
+    InterlockedExchange(&g_viewSteps, 0);
+    StepUnlock(held);
+    if (g_view.win) ShowWindow(g_view.win, SW_HIDE);
+    if (g_view.blp) { HeapFree(GetProcessHeap(), 0, g_view.blp); g_view.blp = NULL; }
+    wsprintfA(m, "view off for this session: %s", why);
+    Log(m);
+    return 0;
 }
 static DWORD WINAPI ViewThread(LPVOID arg)
 {
     const unsigned char *base = (const unsigned char *)arg;
-    int showing = 0, fadeOk = 1;
-    DWORD fadeAt = 0;
     char m[200];
+    int r = mpq_read(&kIo, "patch-~.MPQ", MAP_PATH, &g_view.blp, &g_view.blpLen);
+    if (r != MPQ_OK) {
+        wsprintfA(m, "its picture could not be read from Data\\patch-~.MPQ (%s)", mpq_error_text(r));
+        return ViewOff(m);
+    }
+    int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
+    LONG seen = g_gameSeq;
+    DWORD fadeAt = 0;
     for (;;) {
         MSG msg;
         while (g_view.win && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
         int screen = *(volatile const unsigned int *)(base + FIRE_LAYER_RVA) != 0;
-        DWORD now = GetTickCount();
-        if (fadeAt && screen) { fadeAt = 0; ViewOpaque(); }  /* a new screen in the middle of the fade: whole again */
-        if (fadeAt) {                                       /* the screen has gone: fade out, still moving, then hide */
+        DWORD now = ViewNow();
+        if (!screen) { seen = g_gameSeq; skip = 0; }
+        if (fadeAt && screen) { fadeAt = 0; ShowWindow(g_view.win, SW_HIDE); }   /* a new screen mid-fade: afresh */
+        if (fadeAt) {                                       /* the screen has gone: fade out on its last frame, then hide */
             LONG t = (LONG)(now - fadeAt);
             if (t < VIEW_FADE_MS && fadeOk) {
                 fadeOk = ViewAlpha((BYTE)(255 - 255 * t / VIEW_FADE_MS));
                 if (!fadeOk) Log("  the view's fade: the system would not set its window's alpha, so it just goes");
-                if (fadeOk && ViewFrame(base, now)) { Sleep(1); continue; }
+                if (fadeOk && ViewFrame()) { if (!g_view.vsync) Sleep(4); continue; }
             }
             ShowWindow(g_view.win, SW_HIDE);
             fadeAt = 0;
             continue;
         }
-        if (screen && !showing) {
+        if (screen && !showing && !skip) {
+            int ours = 0;
+            if (!ViewReady(seen, &ours)) { Sleep(1); continue; }
+            if (!ours) { skip = 1; continue; }              /* not a world map screen: the game's own, as ever */
             const char *why = "";
-            if (!ViewOpen(&why)) {
-                wsprintfA(m, "view off for this session: %s", why);
-                Log(m);
-                if (g_view.win) ShowWindow(g_view.win, SW_HIDE);
-                return 0;
+            int open = ViewOpen(&why);
+            if (open < 0) {                                 /* not this screen: the game's own, as ever */
+                if (skips++ < 8) { wsprintfA(m, "  the view: not this screen, as %s", why); Log(m); }
+                skip = 1;
+                continue;
             }
-            showing = 1;
-            g_view.since = g_view.last = now; g_view.gap = 0; g_view.frames = 0; g_view.fill = 0;
+            if (!open) return ViewOff(why);
+            showing = 1; built = 0;
+            g_view.since = g_view.last = now; g_view.gap = 0; g_view.frames = 0;
         }
-        if (screen) {
-            if (!ViewFrame(base, now)) {
-                Log("view off for this session: its OpenGL frame could not be shown");
-                ShowWindow(g_view.win, SW_HIDE);
-                return 0;
-            }
-            DWORD t = GetTickCount();
+        if (screen && showing) {
+            float p = *(volatile const float *)(base + FIRE_PROGRESS_RVA);
+            if (ViewStep(p, ViewNow(), (float)g_view.w, (float)g_view.h)) built = 1;   /* (now: the open took a moment) */
+            if (!built) { Sleep(1); continue; }              /* (this screen's first quads not made yet) */
+            if (!ViewFrame()) return ViewOff("its OpenGL frame could not be shown");
+            if (!g_view.vsync) Sleep(4);
+            DWORD t = ViewNow();
             if (t - g_view.last > g_view.gap) g_view.gap = t - g_view.last;
             g_view.last = t;
             g_view.frames++;
             continue;
         }
-        if (showing) {
-            fadeAt = now;                                   /* hidden once the fade is over (above) */
+        if (showing) {                                      /* the screen has gone */
+            int held = StepLock();
+            InterlockedExchange(&g_viewSteps, 0);
+            StepUnlock(held);
             showing = 0;
+            fadeAt = now ? now : 1;                         /* hidden once the fade is over (above) */
             DWORD ms = now - g_view.since;
             wsprintfA(m, "  the view: %lu frames of its own in %lu.%lu s (%lu a second), its longest gap %lu ms",
                       (unsigned long)g_view.frames, (unsigned long)(ms / 1000), (unsigned long)(ms % 1000 / 100),
@@ -4599,18 +4970,21 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         Sleep(5);
     }
 }
-/* At start: the view's thread, only while Data\CinderLoad\view.txt exists. */
+/* At start: the view's thread, only while Data\CinderLoad\view.txt exists and the pack's world map zoom is on. */
 static void ViewStart(void)
 {
     char flag[MAX_PATH];
     const unsigned char *base = (const unsigned char *)GetModuleHandleA(NULL);
     if (!Join(flag, g_dir, "Data\\CinderLoad\\view.txt") || GetFileAttributesA(flag) == INVALID_FILE_ATTRIBUTES) return;
     if (!Readable(base + FIRE_LAYER_RVA, 8)) { Log("view off: the loading screen's numbers could not be read"); return; }
+    if (!g_map.ok || !g_driftOn) { Log("view off: it draws the world map's zoom, and that is not on"); return; }
+    InitializeCriticalSection(&g_stepLock);
+    InterlockedExchange(&g_viewOn, 1);                     /* before any loading frame: the game's thread locks from now */
     HANDLE t = CreateThread(NULL, 0, ViewThread, (LPVOID)base, 0, NULL);
-    if (!t) { Log("view off: its thread could not be started"); return; }
+    if (!t) { InterlockedExchange(&g_viewOn, 0); Log("view off: its thread could not be started"); return; }
     CloseHandle(t);
-    Log("view on (the proof): its own window, drawn with OpenGL on its own thread, over the game while a loading screen shows "
-        "(Data\\CinderLoad\\view.txt; delete it to turn this off)");
+    Log("view on: on world map screens, its own window over the game, drawn with OpenGL on its own thread, which moves "
+        "the bar and the zoom while it shows (Data\\CinderLoad\\view.txt; delete it to turn this off)");
 }
 #else
 static void ViewStart(void) {}

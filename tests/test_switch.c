@@ -60,7 +60,7 @@ static void Fresh(const char *name)
     for (int i = 0; i < CLASS_CODE; i++) memcpy(shim_module + kClassCode[i].rva, kClassCode[i].bytes, (size_t)kClassCode[i].n);
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
-    g_dispNew = 1; g_dispAt = 0; g_fillFull = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
+    g_dispNew = 1; g_dispAt = 0; g_gameAt = 0; g_fillFull = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
     for (int k = 0; k < 2; k++) g_lnMs[k] = g_lnFreeze[k] = g_lnN[k] = 0;
     g_fullMs = 0; g_endFreezeMs = 0; g_screenLogin = 0; g_screenMap = 0; g_zoomStart = 0; g_holdOn = 0; g_holdMs = HOLD_MS; g_timed = 0; g_blurOn = 0; g_blurUsed = 0; g_blurFrom = g_blurTo = 0; g_dissolveAt = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
@@ -2700,6 +2700,204 @@ static void LiveTests(void)
     Check(lowEnd && short4 && one, "map.txt: an end under 100 yards or a line short of its four numbers is not used; a good line is");
 }
 
+/* ---- the view (option 1, slice 1, 4 Oct 2026): its picture, its frame, and whose thread moves the bar and the zoom ---- */
+/* A BLP2 of w x h DXT blocks, levels of them (each filled with its level's number + 1), mips its flag for smaller ones */
+static unsigned char *BlpMake(unsigned w, unsigned h, int dxt, int levels, int mips, unsigned *len)
+{
+    unsigned block = dxt == 1 ? 8 : 16, total = 1172, sizes[16], lw = w, lh = h;
+    for (int i = 0; i < levels; i++) {
+        sizes[i] = ((lw + 3) / 4) * ((lh + 3) / 4) * block; total += sizes[i];
+        lw = lw > 1 ? lw / 2 : 1; lh = lh > 1 ? lh / 2 : 1;
+    }
+    unsigned char *d = calloc(1, total);
+    memcpy(d, "BLP2", 4); d[4] = 1; d[8] = 2; d[9] = dxt == 5 ? 8 : 0; d[10] = dxt == 5 ? 7 : 0; d[11] = (unsigned char)mips;
+    memcpy(d + 12, &w, 4); memcpy(d + 16, &h, 4);
+    unsigned at = 1172;
+    for (int i = 0; i < levels; i++) {
+        memcpy(d + 20 + 4 * i, &at, 4); memcpy(d + 84 + 4 * i, &sizes[i], 4);
+        memset(d + at, i + 1, sizes[i]); at += sizes[i];
+    }
+    *len = total;
+    return d;
+}
+static int Px(const unsigned char *o, int i, int r, int g, int b, int a)
+{
+    return o[4 * i] == r && o[4 * i + 1] == g && o[4 * i + 2] == b && o[4 * i + 3] == a;
+}
+static void ViewTests(void)
+{
+    /* the picture's file: every level found and checked against the file's length, from the whole picture down */
+    {
+        unsigned n;
+        BlpInfo b;
+        unsigned char *d = BlpMake(16, 8, 1, 5, 1, &n);
+        int ok = BlpParse(d, n, &b) && b.w == 16 && b.h == 8 && b.dxt == 1 && b.alpha == 0 && b.levels == 5 &&
+                 b.off[0] == 1172 && b.len[0] == 64 && b.off[1] == 1172 + 64 && b.len[1] == 16 && b.len[4] == 8 &&
+                 b.off[4] + b.len[4] == n;
+        ok &= BlpParse(d, n - 1, &b) && b.levels == 4;                  /* cut short: the last level not whole, so not used */
+        d[11] = 0; ok &= BlpParse(d, n, &b) && b.levels == 1;           /* no smaller copies: the picture alone */
+        d[11] = 1; d[10] = 1; ok &= !BlpParse(d, n, &b);                 /* DXT3: not one it reads */
+        d[10] = 0; d[3] = '1'; ok &= !BlpParse(d, n, &b);                /* BLP1 */
+        d[3] = '2'; ok &= !BlpParse(d, 1000, &b);                        /* no room for its header */
+        unsigned past = n; memcpy(d + 20, &past, 4); ok &= !BlpParse(d, n, &b);   /* its first level past the end */
+        free(d);
+        d = BlpMake(6, 8, 1, 1, 0, &n); ok &= !BlpParse(d, n, &b); free(d);   /* not whole blocks */
+        d = BlpMake(8, 8, 5, 4, 1, &n);
+        ok &= BlpParse(d, n, &b) && b.dxt == 5 && b.alpha == 8 && b.levels == 4 && b.len[0] == 64 && b.len[3] == 16;
+        free(d);
+        Check(ok, "the view's picture: a BLP2's DXT1 or DXT5 levels found and checked against its length; anything else refused");
+    }
+    /* decoded here for a driver without DXT: the four colours, DXT1's see-through, DXT5's alpha, a level under a block */
+    {
+        unsigned char k[16] = { 0x00, 0xF8, 0x1F, 0x00, 0xE4, 0, 0, 0 }, o[16 * 4];
+        DxtDecode(k, 4, 4, 1, o);
+        int ok = Px(o, 0, 255, 0, 0, 255) && Px(o, 1, 0, 0, 255, 255) && Px(o, 2, 170, 0, 85, 255) && Px(o, 3, 85, 0, 170, 255) &&
+                 Px(o, 4, 255, 0, 0, 255);
+        unsigned char k3[8] = { 0x1F, 0x00, 0x00, 0xF8, 0xE4, 0, 0, 0 };   /* c0 < c1: three colours and see-through */
+        DxtDecode(k3, 4, 4, 1, o);
+        ok &= Px(o, 0, 0, 0, 255, 255) && Px(o, 2, 127, 0, 127, 255) && Px(o, 3, 0, 0, 0, 0);
+        unsigned char k5[16] = { 255, 0, 0x88, 0, 0, 56, 0, 0, 0x00, 0xF8, 0x1F, 0x00, 0, 0, 0, 0 };
+        DxtDecode(k5, 4, 4, 5, o);
+        ok &= o[3] == 255 && o[7] == 0 && o[11] == 218 && o[9 * 4 + 3] == 36 && o[15 * 4 + 3] == 255 && Px(o, 1, 255, 0, 0, 0);
+        k5[0] = 0; k5[1] = 255; k5[5] = 7 << 3 | 0; k5[2] = 6 << 3; k5[3] = 0;   /* a0 <= a1: six steps, then 0 and 255 */
+        DxtDecode(k5, 4, 4, 5, o);
+        ok &= o[1 * 4 + 3] == 0 && o[9 * 4 + 3] == 255 && o[3] == 0;
+        unsigned char *small = malloc(2 * 2 * 4);                        /* a 2 x 2 level: four texels, nothing past them */
+        DxtDecode(k, 2, 2, 1, small);
+        ok &= Px(small, 0, 255, 0, 0, 255) && Px(small, 1, 0, 0, 255, 255) && Px(small, 2, 255, 0, 0, 255);
+        free(small);
+        Check(ok, "the view's picture decoded here: DXT1's four colours and its see-through fourth, DXT5's alpha both ways, a level smaller than a block");
+    }
+    Check(TextHas("GL_ARB_multitexture GL_EXT_texture_compression_s3tc GL_EXT_bgra", "GL_EXT_texture_compression_s3tc") &&
+          !TextHas("GL_EXT_texture_compression_s3tc_srgb GL_EXT_bgra", "GL_EXT_texture_compression_s3tc") &&
+          !TextHas("GL_EXT_texture", "GL_EXT_texture_compression_s3tc") && !TextHas("", "GL_EXT_bgra") &&
+          TextHas("  GL_EXT_bgra ", "GL_EXT_bgra"), "OpenGL's extensions: a whole word only");
+    /* its frame: the world map over the whole window at the zoom's own corners, the plain bar along the bottom */
+    {
+        static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
+        memcpy(g_bgUV, uv, sizeof uv);
+        ViewBuild(1000, 500, 0.25f);
+        const ViewItem *q = g_vl.q;
+        int ok = g_vl.n == 3 && q[0].tex == 1 && q[0].x0 == 0 && q[0].y0 == 0 && q[0].x1 == 1000 && q[0].y1 == 500 &&
+                 q[0].u0 == 0.2f && q[0].v0 == 0.3f && q[0].u1 == 0.6f && q[0].v1 == 0.7f && q[0].c == 0xFFFFFFFFu &&
+                 !q[1].tex && q[1].x0 == 0 && q[1].x1 == 1000 && fabsf(q[1].y0 - 496) < 1e-3f && q[1].y1 == 500 &&
+                 !q[2].tex && q[2].x1 == 250 && q[2].y0 == q[1].y0;
+        ViewBuild(1000, 500, 0); ok &= g_vl.n == 2;
+        ViewBuild(1000, 500, 1.5f); ok &= g_vl.n == 3 && g_vl.q[2].x1 == 1000;
+        memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+        Check(ok, "the view's frame: the world map over the whole window at the zoom's corners, top left to bottom right; the bar along the bottom to the bar as shown");
+    }
+    /* whose thread: a screen begins on the game's; the view's then moves the bar and the zoom, through the game's stalls */
+    {
+        Fresh("view-steps");
+        g_mapShown = 1;
+        { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+        Poke(BAR_MAP_VA, 0);
+        Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, -5000.0f); PutFloat(MAP_DEST_Y_VA, 10000.0f);
+        g_classSure = 0; g_holdMs = 0; g_driftOn = 1; g_screenWatch = 1;
+        InitializeCriticalSection(&g_stepLock);
+        g_viewOn = 1;
+        DriftScreenGone();                                               /* the last screen ended; its view had moved them */
+        int ok = g_stepLock.held == 0 && g_dispNew && g_driftNew;
+        g_viewSteps = 1;
+        DWORD t = 2000000;
+        LONG seen = g_gameSeq;
+        int ours = 0;
+        ok &= !ViewReady(seen, &ours);                                   /* up, but the game has not drawn it yet */
+        ok &= !ViewStep(0.9f, t, 1000, 500) && g_dispNew && g_driftNew;  /* and the view never begins it */
+        PutFloat(MAP_DEST_Y_VA, 15000.0f);                               /* NEW_WORLD, during this screen: u 0.2 */
+        float s = GameStep(0.0f, t);                                     /* the game's first frame begins it */
+        ok &= g_viewSteps == 0 && !g_dispNew && !g_driftNew && s == 0 && g_frmCount == 1 && g_loadFrame == 1 &&
+              g_gameSeq == seen + 1 && g_stepLock.held == 0 && g_screenMap == 1;
+        ok &= ViewReady(seen, &ours) && ours;
+        g_screenMap = 0; ViewReady(seen, &ours); ok &= !ours; g_screenMap = 1;   /* not the world map: not the view's */
+        LONG now = g_gameSeq;                                            /* a screen the worker never saw begin: */
+        ok &= !ViewReady(now, &ours);                                    /* still the game's first frame first */
+        for (int i = 0; i < 25; i++) { t += 20; GameStep(0.02f * i, t); }   /* half a second of the game's frames */
+        float p = 0.48f;
+        ok &= g_destOk && g_viewH < 0.5f;
+        /* the view takes them: from here its frames (7 ms) step them, the game's frame only notes its facts */
+        t += 7;
+        ok &= ViewStep(p, t, 1000, 500) && g_viewSteps == 1 && g_stepLock.held == 0 && g_vl.n == 3;
+        DWORD at = g_dispAt;
+        float d = g_disp, h = g_viewH;
+        LONG frames = g_frmCount;
+        t += 3;
+        s = GameStep(p, t);
+        ok &= s == g_viewShown && g_dispAt == at && g_disp == d && g_viewH == h && g_frmCount == frames + 1 && g_stepLock.held == 0;
+        /* each thread reads its clock before the lock: a view step stamped before the game's last one is no pause of 49
+         * days (it was a leap of three quarters of a second, at once) */
+        g_viewSteps = 0; GameStep(p, t + 4);                             /* (as if the game had stepped last, at t + 4) */
+        float d0 = g_disp, h0 = g_viewH, dr = g_drift;
+        ok &= ViewStep(p, t + 1, 1000, 500) && g_disp == d0 && fabsf(g_viewH - h0) < 1e-6f && g_drift == dr && g_dispAt == t + 4;
+        t += 4;
+        /* the game stalls 0.6 s (a big add-on file): no frame of its own, its bar where it was; the view's go on, every
+         * one of them a step closer, the bar never more than DISP_LEAD past the game's */
+        DWORD stall = t;
+        int moving = 1, steps = 0;
+        float lastH = g_viewH, lastU = g_viewU, most = 0;
+        while (t - stall < 600) {
+            t += 7;
+            ViewStep(p, t, 1000, 500);
+            if (t - stall <= 300) moving &= g_viewH < lastH && g_viewU != lastU;
+            lastH = g_viewH; lastU = g_viewU;
+            if (g_viewShown > most) most = g_viewShown;
+            steps++;
+        }
+        ok &= moving && steps > 80 && most <= p + DISP_LEAD + 1e-5f && most > p;
+        t += 7;
+        GameStep(0.55f, t);                                              /* the game's next frame: its own hitch, logged */
+        ok &= g_hitchN == 1 && g_hitchMs[0] + g_hitchMs[1] + g_hitchMs[2] + g_hitchMs[3] + g_hitchMs[4] + g_hitchMs[5] >= 600 &&
+              g_viewSteps == 1;
+        /* the hold, with the view on: its numbers set under the lock, never held through its frames */
+        g_holdMs = 5000; g_map.ok = 1; g_lnMs[1] = 950; g_lnFreeze[1] = 800; g_lnN[1] = 3;
+        t += 7; ViewStep(1.0f, t, 1000, 500);                            /* (the plan's on: timed) */
+        PutFloat(HOLD_BAR_VA, 1.0f);
+        g_holdFrame = TestHoldFrame; g_holdOn = 1; g_testFrames = 0; shim_ticks = t;
+        HoldFrame();
+        ok &= g_testFrames > 1 && g_stepLock.held == 0 && g_settleTo != 0;
+        PutFloat(HOLD_BAR_VA, 0.0f); g_holdOn = 0; g_lnN[1] = 0; g_holdMs = HOLD_MS;
+        /* the screen ends: the next begins on the game's thread again */
+        DriftScreenGone();
+        ok &= !ViewStep(0.2f, t + 7, 1000, 500) && g_stepLock.held == 0;
+        GameStep(0.0f, t + 3000);
+        ok &= g_viewSteps == 0 && !g_dispNew && g_stepLock.held == 0;
+        g_viewOn = 0; g_viewSteps = 0; g_mapShown = 0; g_driftOn = 0; g_screenWatch = 0; g_zoomScreens = 0; g_destEndOk = 0;
+        Check(ok, "the view: a screen begins on the game's first frame, never on the view's; then the view's frames move the bar and the zoom, every one of them through a 0.6 s stall of the game's, the game's frames only noting their facts; the lock always let go");
+    }
+    /* the character list: only the game's thread reads it (the game frees it during a login's load); the view's thread
+     * has the place the game's last frame read there */
+    {
+        Fresh("view-charlist");
+        g_mapShown = 1;
+        { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+        Poke(BAR_MAP_VA, 0);
+        Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, 0); PutFloat(MAP_DEST_Y_VA, 0);   /* nothing written yet */
+        Poke(CHAR_COUNT_VA, 2); Poke(CHAR_LIST_VA, 0x8B0000); Poke(CHAR_PICKED_VA, 1);
+        unsigned e = 0x8B0000 + 0x120;
+        Poke(e + 0x38, 0); PutFloat(e + 0x44, -5000); PutFloat(e + 0x48, 10000);
+        g_classSure = 1; g_driftOn = 1; g_screenWatch = 1; g_holdMs = 0;
+        InitializeCriticalSection(&g_stepLock);
+        g_viewOn = 1;
+        DWORD t = 3000000;
+        GameStep(0, t);                                                  /* a login's first frame: the list's place */
+        int ok = g_destOk && fabsf(g_destU - 0.3f) < 1e-4f && fabsf(g_destV - 0.6f) < 1e-4f && g_charKept[0] == 1;
+        ok &= ViewStep(0.1f, t + 7, 100, 100) && fabsf(g_destU - 0.3f) < 1e-4f;
+        PutFloat(e + 0x44, -2500); PutFloat(e + 0x48, 5000);             /* the list changes under it */
+        ViewStep(0.1f, t + 14, 100, 100);
+        ok &= fabsf(g_destU - 0.3f) < 1e-4f;                             /* the view's thread never read it */
+        GameStep(0.1f, t + 20);                                          /* the game's frame reads it, and keeps it */
+        ViewStep(0.1f, t + 27, 100, 100);
+        ok &= fabsf(g_destU - 0.4f) < 1e-4f && fabsf(g_destV - 0.55f) < 1e-4f;
+        Poke(CHAR_COUNT_VA, 0);                                          /* the list gone */
+        GameStep(0.1f, t + 40);
+        ViewStep(0.1f, t + 47, 100, 100);
+        ok &= g_charKept[0] == 0 && g_destOk && fabsf(g_destU - 0.4f) < 1e-4f && g_stepLock.held == 0;
+        g_viewOn = 0; g_viewSteps = 0; g_mapShown = 0; g_driftOn = 0; g_screenWatch = 0; g_classSure = 0; g_zoomScreens = 0;
+        Check(ok, "the view: the character list read on the game's thread only, its place kept for the view's; the view takes what the game's last frame read, and keeps the arrival once the list is gone");
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -2835,6 +3033,7 @@ int main(int argc, char **argv)
     FireTests();
     FireBarTests();
     LiveTests();
+    ViewTests();
     if (argc > 2) {
         FireBarRealClient(argv[2]);
         FireRealClient(argv[2]);
