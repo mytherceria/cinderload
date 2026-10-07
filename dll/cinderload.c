@@ -3666,9 +3666,9 @@ static void LabelsBuild(void)
  * and a diamond at its centre, the blade's light in its channel; "all the way against the bottom of the screen") ----
  * CinderBar.blp (DXT5) and CinderLoad\bar.txt: `sheet <w> <h>`, each piece `<left|rail|centre|right> <x0> <y0> <x1>
  * <y1>` on it, `band <top> <bottom>` (the rail's metal, top to bottom) and `channel <top> <bottom>` (the open channel),
- * rows of the pieces; `ends <left> <right>`, where the channel opens inside the left cap and closes inside the right one,
- * columns of those caps (his call, 7 Oct: the blade stops "inside the metal" at both ends; without the line, at the caps'
- * inner edges). Laid end to end across the window at one scale: the caps at its edges, the diamond at its centre,
+ * rows of the pieces; `ends <left> <right>`, the back walls of the caps' cups (columns of those caps), where the fill
+ * starts and stops under the metal (his calls, 7 Oct: the blade stops "inside the metal" at both ends, and "should be
+ * filled in until it hits the metal"; without the line, at the caps' inner edges). Laid end to end across the window at one scale: the caps at its edges, the diamond at its centre,
  * the rail repeated between; the rail band FRAME_BAND of the window tall, its bottom on the window's (what hangs below,
  * the caps' lower prongs and the diamond's point, is past the edge). Over the blade, so its light shows only in the
  * channel and spills past the metal; the channel's lips lit in the class's colour where the blade has reached. Without
@@ -4586,7 +4586,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1);            /* the channel the frame holds it in, end to end */
     /* the light (his calls on his reference, 7 Oct: "a more uniform fill", "darker towards the edges and lighter white
      * towards the middle ... the light is more fully in the middle"; "no black area at the beginning or ending"): a
-     * smooth fill the whole height of its channel, its ends rounded like a pill inside the metal; deeper in the class's
+     * smooth fill the whole height of its channel, filled right up to the metal at both ends, its moving tip rounded; deeper in the class's
      * colour at its top and bottom edges and toward the bar's ends, near white along its centre and in its middle; the
      * light breathing slowly so it is never quite still */
     float t = (float)(now % 3600000u) / 1000.0f, hc = ch, g = SABER_GLOW * H;
@@ -4601,8 +4601,8 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     if (shown > 0)
         for (; b <= n; b++) {
             float x = b < n && fx0 + b * cw < front ? fx0 + b * cw : front;
-            float k1 = FireClamp((front - x) / round, 0, 1), k2 = FireClamp((x - fx0) / round, 0, 1), k = k1 < k2 ? k1 : k2;
-            float shape = SaberSqrt(k * (2 - k)), hx = (x - xc) / (span * 0.5f);   /* a round end; how near the middle */
+            float k = shown >= 1 ? 1 : FireClamp((front - x) / round, 0, 1);   /* the tip rounded; its ends square, */
+            float shape = SaberSqrt(k * (2 - k)), hx = (x - xc) / (span * 0.5f);   /* under the metal; how near the middle */
             hx = 1 - hx * hx;
             g_sbX[b] = x;
             g_sbCore[0][b] = g_sbCore[1][b] = hc * shape;
@@ -4610,7 +4610,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             g_sbMid[b] = hx > 0 ? hx : 0;
             if (x >= front) { b++; break; }
         }
-    FrameChannel(fx0 + round, fx1 - round, cy, ch);                 /* the dark channel, under the blade's full height */
+    FrameChannel(fx0, fx1, cy, ch);                                 /* the dark channel, cup to cup */
     /* the glow, added: a narrow bright one and a wide faint one beyond the core's edge, above and below */
     for (int k = 0; k + 1 < b; k++)
         for (int s = 0; s < 2; s++) {
@@ -4624,8 +4624,8 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             }
         }
     /* the way still to go, then the fill: two quads a column (its top half and its bottom), each corner its own light */
-    if (front < fx1 - round) {
-        float x[4] = { front, fx1 - round, fx1 - round, front }, y[4] = { cy - hc * 0.4f, cy - hc * 0.4f, cy + hc * 0.4f, cy + hc * 0.4f };
+    if (front < fx1) {
+        float x[4] = { front, fx1, fx1, front }, y[4] = { cy - hc * 0.4f, cy - hc * 0.4f, cy + hc * 0.4f, cy + hc * 0.4f };
         DWORD c[4] = { SABER_TRACK, SABER_TRACK, SABER_TRACK, SABER_TRACK };
         SaberPut(-1, 0, x, y, c, NULL);
     }

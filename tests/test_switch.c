@@ -2873,9 +2873,9 @@ static void ViewTests(void)
         const ViewVert *chq = g_vv + g_vb[1].first, *trq = chq + 4;
         float rnd = ch * 1.2f;
         ok = g_vbN == 3 && g_vb[1].tex == -1 && !g_vb[1].add && g_vb[1].count == 8 && g_vb[2].tex == VT_FRAME && !g_vb[2].add &&
-             Near(chq[0].x, x0 + rnd, 1e-3) && Near(chq[1].x, x1 - rnd, 1e-3) && Near(chq[0].y, cy - ch, 1e-3) && Near(chq[2].y, cy + ch, 1e-3) &&
-             Near(trq[0].x, x0, 1e-3) && Near(trq[1].x, x1 - rnd, 1e-3) && trq[0].c[3] == 0x5A && trq[0].c[0] == 0 && Near((trq[0].y + trq[3].y) / 2, cy, 1e-3);
-        Check(ok, "the blade, nothing loaded: its dark channel only under where the blade runs full height (no black at the ends, his call) and the way to go a faint dark line along it, in its frame");
+             Near(chq[0].x, x0, 1e-3) && Near(chq[1].x, x1, 1e-3) && Near(chq[0].y, cy - ch, 1e-3) && Near(chq[2].y, cy + ch, 1e-3) &&
+             Near(trq[0].x, x0, 1e-3) && Near(trq[1].x, x1, 1e-3) && trq[0].c[3] == 0x5A && trq[0].c[0] == 0 && Near((trq[0].y + trq[3].y) / 2, cy, 1e-3);
+        Check(ok, "the blade, nothing loaded: its dark channel from cup to cup (the caps' back walls) and the way to go a faint dark line along it, in its frame");
         /* the frame's pieces: a cap at each edge, the diamond at the centre, the rail repeated between with no gap, all
          * at one scale, their tops at the frame's top */
         const ViewVert *fr = g_vv + g_vb[2].first;
@@ -2907,7 +2907,7 @@ static void ViewTests(void)
         float front = x0 + 0.25f * span;
         ok &= cols > 30 && g_vb[CO].count == 4 * (1 + 2 * cols) && g_vb[GL].count == 16 * cols;
         const ViewVert *tr = g_vv + g_vb[CO].first, *co = tr + 4, *last = co + 8 * (cols - 1);
-        ok &= Near(tr[0].x, front, 1e-3) && Near(tr[1].x, x1 - rnd, 1e-3) && Near((tr[0].y + tr[3].y) / 2, cy, 1e-3);   /* to go */
+        ok &= Near(tr[0].x, front, 1e-3) && Near(tr[1].x, x1, 1e-3) && Near((tr[0].y + tr[3].y) / 2, cy, 1e-3);   /* to go */
         ok &= Near(co[0].x, x0, 1e-3) && Near(last[1].x, front, 1e-3) && last[2].x == last[1].x;          /* cap to tip */
 #define NEAR(c, r, g, b) (abs((c)[0] - (r)) <= 1 && abs((c)[1] - (g)) <= 1 && abs((c)[2] - (b)) <= 1)
         int body = 1, lit = 1;
@@ -2929,10 +2929,11 @@ static void ViewTests(void)
         lit &= fabsf((tip[0].x + tip[1].x) / 2 - front) < 1e-3f && fabsf((tip[0].y + tip[2].y) / 2 - cy) < 1e-3f;
         lit &= Near(lip[0].x, x0, 1e-3) && Near(lip[1].x, front, 1e-3) && NEAR(lip[3].c, 181, 157, 255) && lip[3].c[3] > 150 && lip[0].c[3] == 0 &&
                Near(lip[3].y, cy - ch + 500 / 1440.0f, 1e-3) && lip[4 + 0].y > cy;                  /* the lips, lit */
-        /* its foot: rounded off inside the left cap, as its tip is, not cut square at the screen's edge */
-        float foot0 = co[0].y, mid = co[8 * (cols / 2)].y;
-        ok &= Near(foot0, cy, 1e-3) && Near(mid, cy - ch, 1e-3);
-        Check(ok && body, "the blade, a quarter loaded: its glow added, the way to go a dark line from the tip toward the right cap, the fill SOLID and SMOOTH the whole height of its channel (his calls, 7 Oct), paler along its centre line, from inside the left cap (its foot rounded) to the tip in columns that join");
+        /* its foot: full height right up to the back of the left cap's cup (the metal shapes it: his call, "filled in
+         * until it hits the metal"); only its moving tip is rounded */
+        float foot0 = co[0].y, mid = co[8 * (cols / 2)].y, tipy = last[1].y;
+        ok &= Near(foot0, cy - ch, 1e-3) && Near(mid, cy - ch, 1e-3) && Near(tipy, cy, 1e-3);
+        Check(ok && body, "the blade, a quarter loaded: its glow added, the way to go a dark line from the tip to the right cap, the fill SOLID and SMOOTH the whole height of its channel (his calls, 7 Oct), paler along its centre line, from the back of the left cap's cup (square, under the metal) to its rounded tip in columns that join");
         Check(lit, "the blade's colour: a warlock's purple glow, richer than Blizzard's pale text colour, fading out from the fill, the tip flaring at the bar as shown, the frame's lips lit to the tip");
         /* the light fullest in the middle of the bar (his reference): whiter along the centre line there, deeper toward
          * the ends, the fill's top and bottom edges deeper still */
@@ -2974,8 +2975,8 @@ static void ViewTests(void)
         cols = g_vb[CO].count / 8;
         const ViewVert *endq = g_vv + g_vb[CO].first + 8 * (cols - 1);
         ok = g_vbN == 6 && g_vb[CO].count == 8 * cols && Near(g_vv[g_vb[CO].first].x, x0, 1e-3) && g_vb[LIPS].count == 8 &&
-             Near(endq[1].x, x1, 1e-3) && Near(endq[1].y, cy, 1e-3) && g_vv[g_vb[CO].first].c[3] == 247 && cols == (int)(span / SABER_COL_PX);
-        Check(ok, "the blade full: the core from cap to cap, both ends rounded inside the metal, nothing still to go, no tip");
+             Near(endq[1].x, x1, 1e-3) && Near(endq[1].y, cy - ch, 1e-3) && g_vv[g_vb[CO].first].c[3] == 247 && cols == (int)(span / SABER_COL_PX);
+        Check(ok, "the blade full: the fill from cup to cup, full height right up to the metal at both ends (no dead space: his call), nothing still to go, no tip");
         /* the logo on it at the centre, its halfway mark, standing on the bottom of the screen: over the tip, grey before
          * the tip reaches it, lit after */
         g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2; g_logo.tu0 = 0.1f; g_logo.tv0 = 0.2f; g_logo.tu1 = 0.9f; g_logo.tv1 = 0.8f;
