@@ -22,8 +22,8 @@
  * A Data\patch-~.MPQ that is not ours (not the size Data\CinderLoad\installed.txt recorded when we put it there,
  * and none of our archives) is left alone, and the switch stays off. Each start adds a line or two to Logs\CinderLoad.log.
  *
- * While a loading screen shows, the bar burns with a sound: the game's own fire loops, read from the player's client
- * archives, panned after the fill's front (fire.h, and "the fire sound" below). It is played through the client's
+ * While a loading screen shows it plays a sound made of the game's own, read from the player's client archives: the
+ * recipe Data\CinderLoad\sound.txt names (fire.h, kSounds, and "the sound" below). It is played through the client's
  * own fmod.dll from a thread of ours that only reads the client's memory; nothing in the client is changed for it.
  *
  * The bar's fire takes the colour of the character's class where the pack has one for it, else the picture's (orange,
@@ -428,7 +428,7 @@ static void TakeOutAfterAll(void)
     Log("switch off, so our loading screens were taken out again: the game's own");
 }
 
-/* ---- the fire sound ----
+/* ---- the sound (the fire's until 7 Oct 2026; its names kept) ----
  * Read from WoW.exe (1.12.1, build 5875) on 2 Oct 2026:
  * - The loading screen is a layer the client keeps at VA 0x882BE0: made when a loading screen begins (RVA 0x6800),
  *   released and set to 0 when it ends (RVA 0x7E80), and the client's own "is a loading screen up?" (RVA 0x7E70) is
@@ -443,8 +443,8 @@ static void TakeOutAfterAll(void)
  *
  * A thread of ours reads those three numbers every 20 ms; nothing in the client is hooked or changed for the sound.
  * While a loading screen shows it plays one stereo stream through the client's fmod.dll (FMOD 3.75), a stream FMOD
- * asks us to fill (FSOUND_Stream_Create): every sample is mixed here (fire.h), from loops built once from the client's
- * own sound files, so the equal-power pan does not depend on how FMOD pans. The thread calls FMOD only to start the
+ * asks us to fill (FSOUND_Stream_Create): every sample is mixed here (fire.h), from the screen's recipe, built from the
+ * client's own sound files as it comes up (again only when it changes), so the pan does not depend on how FMOD pans. The thread calls FMOD only to start the
  * stream as a loading screen comes up and to close it once it has faded out after the screen has gone, and only while
  * the client's sound engine is up: with the sound off in the game, or the engine closed, it makes no FMOD call at all.
  * FMOD's own master volume (the game's Master Volume) applies to it as to every sound the game plays. */
@@ -540,18 +540,116 @@ static struct {
     FireFill fill;
     void *stream;
     int channel, playing, built, screens, complaints;
-    DWORD since, gone;
+    DWORD since, gone, upAt;           /* upAt: when a screen came up with the class not yet known (0: none waiting) */
     float reached;
     int steps;                         /* times the bar moved this screen, as seen every FIRE_POLL_MS: the zoom idea's
                                           question is how often the game redraws a loading screen, which it does
                                           when the bar moves, so this is a lower bound on that */
 } g_fire;
 
-/* The classes' own sounds (fire.h, "a class's own sound"): each family's table, its loops once built, which one plays. */
-static SndSpec g_sndSpec[SND_FAMILIES];
-static SndSet g_snd[SND_FAMILIES];
-static int g_sndHas[SND_FAMILIES];
-static volatile LONG g_sndFam = -1;                  /* the family whose sound plays this screen, -1 the fire */
+/* ---- the sound's recipes (7 Oct 2026, his ask: rig up every candidate so he can audition them on real loads and pick)
+ * Each is a few of the game's own sounds (fire.h, "a recipe"). Data\CinderLoad\sound.txt says which plays: its first
+ * word, one of
+ *   hum       the blade's: the troll force field's 100 Hz hum, a buzz rising, sparks crackling faster as it fills
+ *   hearth    the Hearthstone's own: its channel whir (the client's spell 8690), stretched and looped, the cast and the
+ *             Astral Recall whoosh as the bar lands
+ *   portal    an instance portal's hum, a crystal portal and Zul'Gurub's rising over it, the mage's Teleport at the end
+ *   class     the character's class's own (below)
+ *   cycle     the next of hum, hearth, portal, class at each loading screen (Data\CinderLoad\sound-cycle.txt counts)
+ *   classes   the next of the nine classes' at each loading screen, whoever is playing
+ *   warrior, paladin, hunter, rogue, priest, shaman, mage, warlock, druid: that class's, whoever is playing
+ * No file, or a word it does not know: hum. Read as each screen comes up, so a change needs no restart. */
+static const char *const kClassName[12];             /* (the classes' names and the character's class: below) */
+static volatile LONG g_class;
+#define SOUND_FILE  "Data\\CinderLoad\\sound.txt"
+#define SOUND_CYCLE "Data\\CinderLoad\\sound-cycle.txt"
+enum { SOUND_HUM, SOUND_HEARTH, SOUND_PORTAL, SOUND_CLASS0 };          /* SOUND_CLASS0 + class: that class's */
+static const struct { const char *name, *text; } kSounds[] = {
+    { "hum",
+      "level 1.24\nsweep 0.6\n"
+      "loop bed 1.0 0 0.6 Sound\\Doodad\\G_VooDooTrollForceFieldClosedLoop.wav\n"
+      "loop swell 0.45 0.15 0.85 Sound\\Creature\\ArcaneGolem\\ArcaneGolemLoop.wav\n"
+      "loop motion 0.3 0 0 Sound\\Doodad\\Sizzle.wav\n"
+      "spark 0.5 0 1 Sound\\Doodad\\GnomeRoboArmStandFidget01Sparks.wav\n"
+      "stinger 0.6 0 Sound\\Spells\\ShootWandLaunchLightning.wav\n" },
+    { "hearth",
+      "level 1.33\n"
+      "loop bed 1.0 0 0.8 x0.8 Sound\\Spells\\PreCastNatureMagicHigh.wav\n"
+      "loop swell 0.55 0.3 0.9 x0.8 Sound\\Spells\\PreCastNatureMagicMedium.wav\n"
+      "stinger 0.6 0.9 Sound\\Spells\\Cast\\NatureCast.wav\n"
+      "stinger 1.0 0.96 Sound\\Spells\\AstralRecall.wav\n" },
+    { "portal",
+      "level 1.02\n"
+      "loop bed 1.0 0 0.7 Sound\\Doodad\\InstancePortalLoop.wav\n"
+      "loop swell 0.6 0.3 0.95 Sound\\Creature\\CrystalPortal\\CrystalPortalLoop.wav\n"
+      "loop swell 0.4 0.55 1 Sound\\Doodad\\ZulGurubPortalLoop.wav\n"
+      "stinger 0.9 0.95 Sound\\Spells\\Teleport.wav\n" },
+    { "none", "" },                                                      /* (class 0: no class's own) */
+    { "warrior",
+      "level 0.9\n"
+      "loop bed 1.0 0 0.8 Sound\\Doodad\\TrollDrumLoop1.wav\n"
+      "loop swell 0.5 0.4 0.95 Sound\\Spells\\WhirlwindLoop.wav\n"
+      "stinger 0.7 0 Sound\\Spells\\BattleShout.wav\n"
+      "stinger 0.9 0.95 Sound\\Spells\\Spell_WA_Revamp_Battleroar_01.wav\n" },
+    { "paladin",
+      "level 0.88\n"
+      "loop bed 1.0 0 0.8 Sound\\Spells\\Missile\\HolyMissileLoop.wav\n"
+      "loop swell 0.6 0.35 0.95 Sound\\Spells\\PreCastHolyMagicLow.wav\n"
+      "stinger 0.6 0 Sound\\Spells\\SealofMight.wav\n"
+      "stinger 0.9 0.95 Sound\\Spells\\DivineShield.wav\n" },
+    { "hunter",
+      "level 2.8\n"
+      "loop bed 1.0 0 0.8 Sound\\Ambience\\ZoneAmbience\\JungleDay.wav\n"
+      "loop swell 0.8 0.4 0.95 Sound\\Spells\\PreCastNatureMagicLow.wav\n"
+      "stinger 0.3 0 Sound\\Spells\\AspectofThePack.wav\n"
+      "stinger 0.35 0.95 Sound\\Spells\\AspectofTheHawk.wav\n" },
+    { "rogue",
+      "level 0.8\n"
+      "loop bed 1.0 0 0.8 x0.75 Sound\\Spells\\Missile\\ShadowMissileLoop.wav\n"
+      "loop swell 0.6 0.35 0.95 Sound\\Spells\\PreCastShadowMagicLow.wav\n"
+      "stinger 0.7 0 Sound\\Spells\\Stealth.wav\n"
+      "stinger 0.9 0.95 Sound\\Spells\\Vanish.wav\n" },
+    { "priest",
+      "level 1.55\n"
+      "loop bed 1.0 0 0.8 Sound\\Spells\\PreCastHolyMagicMedium.wav\n"
+      "loop swell 0.6 0.35 0.95 Sound\\Spells\\PreCastHolyMagicHigh.wav\n"
+      "spark 0.45 0.1 1 Sound\\Spells\\PrayerofHealing.wav\n"
+      "stinger 0.6 0 Sound\\Spells\\Renew.wav\n"
+      "stinger 0.8 0.95 Sound\\Spells\\DirectDamage\\HolyImpactDDLow.wav\n" },
+    { "none", "" },                                                      /* (class 6: none in 1.12) */
+    { "shaman",
+      "level 1.22\n"
+      "loop bed 1.0 0 0.8 Sound\\Creature\\ElementalAir\\AirElementalLoop.wav\n"
+      "loop swell 0.5 0.35 0.95 Sound\\Creature\\ElementalEarth\\ElementalEarthLoop.wav\n"
+      "spark 0.45 0.2 1 Sound\\Spells\\LightningShieldImpact.wav\n"
+      "stinger 0.9 0.95 Sound\\Spells\\CallLightning.wav\n" },
+    { "mage",
+      "level 1.4\n"
+      "loop bed 1.0 0 0.8 Sound\\Spells\\PreCastFrostMagicLow.wav\n"
+      "loop swell 0.55 0.35 0.95 Sound\\Spells\\PreCastMageLow.wav\n"
+      "spark 0.4 0.2 1 Sound\\Spells\\ArcaneMissileImpact1a.wav\n"
+      "stinger 0.9 0.95 Sound\\Spells\\ArcaneExplosion.wav\n" },
+    { "warlock",
+      "level 0.8\n"
+      "loop bed 1.0 0 0.8 x0.8 Sound\\Spells\\Missile\\FireMissileLoop.wav\n"
+      "loop swell 0.6 0.3 0.95 Sound\\Spells\\LifeDrainLoop.wav\n"
+      "spark 0.5 0.1 1 x0.9 Sound\\Spells\\Immolate.wav\n"
+      "stinger 0.6 0 Sound\\Spells\\DemonArmor.wav\n"
+      "stinger 0.9 0.95 Sound\\spells\\SoulShatter_Cast.wav\n" },
+    { "none", "" },                                                      /* (class 10: none in 1.12) */
+    { "druid",
+      "level 1.6\n"
+      "loop bed 1.0 0 0.8 Sound\\Spells\\Missile\\NAtureMissileLoop.wav\n"
+      "loop swell 0.6 0.35 0.95 Sound\\Doodad\\MoonWellLightLoop.wav\n"
+      "stinger 0.35 0 Sound\\Spells\\Rejuvenation.wav\n"
+      "stinger 0.5 0.95 Sound\\Spells\\StarFireImpact.wav\n" },
+};
+#define SOUNDS ((int)(sizeof kSounds / sizeof kSounds[0]))
+static SndSpec g_sndSpec;                            /* the recipe built: its lines, its sounds, which it is */
+static SndSet g_snd;
+static int g_sndNow = -1, g_sndRate;
+static unsigned g_sndBad;                            /* recipes that could not be made this session (a bit each) */
+static unsigned g_sndCycle;                          /* the cycle's next, as sound-cycle.txt last said or this session moved it */
 static volatile LONG g_barFamNow = -1;               /* BarPath's: the screen's fire family, -1 the pack's orange */
 
 static signed char WINAPI FireCallback(void *stream, void *buff, int len, void *user)
@@ -559,11 +657,9 @@ static signed char WINAPI FireCallback(void *stream, void *buff, int len, void *
     (void)stream; (void)user;
     union { LONG bits; float f; } fill;
     fill.bits = g_fire.fillBits;
-    int frames = len > 0 ? len / 4 : 0;
-    LONG fam = g_sndFam;
-    int on = fam >= 0 && fam < SND_FAMILIES && g_snd[fam].n
-                 ? SndRender(&g_fire.mix, &g_snd[fam], &g_sndSpec[fam], (int)g_fire.gate, fill.f, (short *)buff, frames)
-                 : FireRender(&g_fire.mix, (int)g_fire.gate, fill.f, (short *)buff, frames);
+    int frames = len > 0 ? len / 4 : 0, on = 0;
+    if (g_snd.n) on = SndRender(&g_fire.mix, &g_snd, &g_sndSpec, (int)g_fire.gate, fill.f, (short *)buff, frames);
+    else for (int i = 0; i < frames * 4; i++) ((unsigned char *)buff)[i] = 0;
     for (int i = frames * 4; i < len; i++) ((unsigned char *)buff)[i] = 0;
     InterlockedExchange(&g_fire.quiet, !on);
     return 1;
@@ -610,54 +706,49 @@ static unsigned long long IoSize(void *ctx, void *fh)
 static void IoClose(void *ctx, void *fh) { (void)ctx; CloseHandle((HANDLE)fh); }
 static const mpq_io kIo = { IoAlloc, IoRelease, IoOpen, IoReadAt, IoSize, IoClose, NULL };
 
-/* The archives the loops are read from, the one the client lets win first: the six are the original files in the
- * client's sound.MPQ, and UndeadFireLarge the newer one in its patch.MPQ, as in the mock. A pack in a patch-?.MPQ that
- * changes a campfire's sound changes the campfire, not this fire: the sound stays the one that was approved. */
-static const char *const kFireArchives[] = { "patch.MPQ", "sound.MPQ" };
-#define FIRE_ARCHIVES ((int)(sizeof kFireArchives / sizeof kFireArchives[0]))
-
-static void FireFree(void)
+static void SoundFree(void)
 {
-    for (int i = 0; i < FIRE_LOOPS; i++) {
-        if (g_fire.mix.loop[i]) HeapFree(GetProcessHeap(), 0, g_fire.mix.loop[i]);
-        g_fire.mix.loop[i] = NULL;
-        g_fire.mix.len[i] = 0;
-    }
-    for (int f = 0; f < SND_FAMILIES; f++) {
-        for (int i = 0; i < SND_LOOPS; i++) {
-            if (g_snd[f].loop[i]) HeapFree(GetProcessHeap(), 0, g_snd[f].loop[i]);
-            g_snd[f].loop[i] = NULL; g_snd[f].len[i] = 0;
+    float **all[3] = { g_snd.loop, g_snd.spark, g_snd.sting };
+    int counts[3] = { SND_LOOPS, SND_SPARKS, SND_STINGS };
+    for (int k = 0; k < 3; k++)
+        for (int i = 0; i < counts[k]; i++) {
+            if (all[k][i]) HeapFree(GetProcessHeap(), 0, all[k][i]);
+            all[k][i] = NULL;
         }
-        if (g_snd[f].sting) HeapFree(GetProcessHeap(), 0, g_snd[f].sting);
-        g_snd[f].sting = NULL; g_snd[f].stingLen = 0; g_snd[f].n = 0;
-    }
+    g_snd.n = 0;
+    g_sndNow = -1;
 }
 
-/* One of a class's sounds at the mixer's rate, from the client's own files (the newest copy across its archives): a
- * loop (seamed as the fire's) or the stinger (whole). NULL, and why, when it cannot be had. */
-static float *SndLoad(const char *path, int rate, int loop, unsigned *outLen, const char **why)
+/* One of a recipe's sounds at the mixer's rate, from the client's own files (the newest copy across its archives, in
+ * the order the client lets them win; a zero-length stub is passed over), played at speed (0.8: slower and lower): a
+ * loop (seamed) or a one-shot (whole). NULL, and why, when it cannot be had. */
+static float *SndLoad(const char *path, int rate, float speed, int loop, unsigned *outLen, const char **why)
 {
-    static const char *const kArch[] = { "patch-9.MPQ", "patch-8.MPQ", "patch-7.MPQ", "patch-6.MPQ", "patch-5.MPQ", "patch-4.MPQ",
-                                         "patch-3.MPQ", "patch-2.MPQ", "patch.MPQ", "sound.MPQ" };
+    static const char kOrder[] = "ZYXWVUTSRQPONMLKJIHGFEDCBA98765432";
+    char arch[16];
     *why = "in none of the client's archives";
-    for (int a = 0; a < (int)(sizeof kArch / sizeof kArch[0]); a++) {
+    for (int a = 0; a <= (int)sizeof kOrder - 1 + 1; a++) {
+        if (a < (int)sizeof kOrder - 1) { lstrcpyA(arch, "patch-?.MPQ"); arch[6] = kOrder[a]; }
+        else lstrcpyA(arch, a == (int)sizeof kOrder - 1 ? "patch.MPQ" : "sound.MPQ");
         unsigned char *wav = NULL;
         unsigned len = 0, frames = 0;
-        int r = mpq_read(&kIo, kArch[a], path, &wav, &len), srate = 0, channels = 0;
+        int r = mpq_read(&kIo, arch, path, &wav, &len), srate = 0, channels = 0;
         const unsigned char *data = NULL;
         if (r == MPQ_E_NOT_FOUND || r == MPQ_E_NO_ARCHIVE || r == MPQ_E_EMPTY) continue;
         if (r != MPQ_OK) { *why = "unreadable"; continue; }
         float *src = NULL, *out = NULL;
         unsigned n = 0;
+        int from = 0;
         if (!FireWavInfo(wav, len, &srate, &channels, &data, &frames)) *why = "not a 16-bit PCM sound";
         else {
+            from = (int)(srate * speed + 0.5f);                        /* read as if it were made at this rate */
             if (frames > (unsigned)srate * SND_MAX_S) frames = (unsigned)srate * SND_MAX_S;
             if (!(src = HeapAlloc(GetProcessHeap(), 0, frames * sizeof(float))) ||
-                !(out = HeapAlloc(GetProcessHeap(), 0, (FireResampledLength(frames, srate, rate) + 1) * sizeof(float))))
+                !(out = HeapAlloc(GetProcessHeap(), 0, (FireResampledLength(frames, from, rate) + 1) * sizeof(float))))
                 *why = "out of memory";
             else {
                 FireWavRead(data, channels, frames, src);
-                n = loop ? FireMakeLoop(src, frames, srate, rate, 0, out) : SndOneShot(src, frames, srate, rate, out);
+                n = loop ? FireMakeLoop(src, frames, from, rate, 0, out) : SndOneShot(src, frames, from, rate, out);
                 if (!n) *why = "too short";
             }
         }
@@ -665,92 +756,92 @@ static float *SndLoad(const char *path, int rate, int loop, unsigned *outLen, co
         HeapFree(GetProcessHeap(), 0, wav);
         if (n) { *outLen = n; return out; }
         if (out) HeapFree(GetProcessHeap(), 0, out);
-        return NULL;                                   /* the newest copy decides, as for the fire */
+        return NULL;                                   /* the newest copy decides */
     }
     return NULL;
 }
-/* Every family's own sound, at the mixer's rate. */
-static void SndBuildAll(int rate)
+
+/* Recipe k's sounds at the mixer's rate, from the client's own files, in place of the last's. Only while no stream is
+ * open. 1 when at least one of its loops could be made (a missing sound is logged and the rest play). */
+static int SoundBuild(int k, int rate)
 {
     char m[300];
-    for (int f = 0; f < SND_FAMILIES; f++) {
-        if (!g_sndHas[f]) continue;
-        int made = 0;
-        const char *why = "";
-        for (int i = 0; i < g_sndSpec[f].n; i++) {
-            g_snd[f].loop[i] = SndLoad(g_sndSpec[f].l[i].path, rate, 1, &g_snd[f].len[i], &why);
-            if (g_snd[f].loop[i]) made++;
-            else { wsprintfA(m, "sound: %s is %s, so it plays without it", g_sndSpec[f].l[i].path, why); Log(m); }
-        }
-        g_snd[f].n = made ? g_sndSpec[f].n : 0;
-        if (g_sndSpec[f].sting) {
-            g_snd[f].sting = SndLoad(g_sndSpec[f].stingPath, rate, 0, &g_snd[f].stingLen, &why);
-            if (!g_snd[f].sting) { wsprintfA(m, "sound: its stinger %s is %s", g_sndSpec[f].stingPath, why); Log(m); }
-        }
-        wsprintfA(m, "sound: a family's own (%d of %d loops%s) made from the client's own files", made, g_sndSpec[f].n,
-                  g_snd[f].sting ? ", and its stinger" : "");
-        Log(m);
+    DWORD t0 = GetTickCount();
+    SoundFree();
+    FireSetRate(&g_fire.mix, rate);
+    g_sndRate = rate;
+    if (k < 0 || k >= SOUNDS || !SndParse(&g_sndSpec, kSounds[k].text, (unsigned)lstrlenA(kSounds[k].text))) return 0;
+    int made = 0, extra = 0, wanted = g_sndSpec.sparks + g_sndSpec.stings;
+    const char *why = "";
+    for (int i = 0; i < g_sndSpec.n; i++) {
+        g_snd.loop[i] = SndLoad(g_sndSpec.l[i].path, rate, g_sndSpec.l[i].speed, 1, &g_snd.len[i], &why);
+        if (g_snd.loop[i]) made++;
+        else { wsprintfA(m, "sound: %s's %s is %s, so it plays without it", kSounds[k].name, g_sndSpec.l[i].path, why); Log(m); }
     }
+    for (int i = 0; i < g_sndSpec.sparks + g_sndSpec.stings; i++) {
+        int spark = i < g_sndSpec.sparks, j = spark ? i : i - g_sndSpec.sparks;
+        SndLayer *y = spark ? &g_sndSpec.spark[j] : &g_sndSpec.sting[j];
+        float **buf = spark ? &g_snd.spark[j] : &g_snd.sting[j];
+        unsigned *n = spark ? &g_snd.sparkLen[j] : &g_snd.stingLen[j];
+        *buf = SndLoad(y->path, rate, y->speed, 0, n, &why);
+        if (*buf) extra++;
+        else { wsprintfA(m, "sound: %s's %s is %s, so it plays without it", kSounds[k].name, y->path, why); Log(m); }
+    }
+    g_snd.n = made ? g_sndSpec.n : 0;
+    SndReset(&g_snd);
+    if (made) g_sndNow = k;
+    else g_sndBad |= 1u << k;
+    wsprintfA(m, "sound: %s made from the client's own files (%d of %d loops, %d of %d sparks and stingers) at %d Hz in %lu ms",
+              kSounds[k].name, made, g_sndSpec.n, extra, wanted, rate, (unsigned long)(GetTickCount() - t0));
+    if (!made) wsprintfA(m, "sound off for now: none of %s's loops could be made from the client's files", kSounds[k].name);
+    Log(m);
+    return made > 0;
 }
 
-/* The six loops at the mixer's rate, from the client's own files. Only while no stream is open. 1 when at least one
- * could be made (a missing one is logged and the rest play), 0 when none. */
-static int FireBuild(int rate)
+/* Which recipe sound.txt says for a screen of class cls (0: not known): advance 1 as a screen comes up (the cycle moves
+ * on and is kept), 0 to look ahead. *word gets what the file said, for the log. */
+static int SoundPick(unsigned cls, int advance, const char **word)
 {
-    char m[400];
-    int made = 0;
-    FireFree();
-    FireSetRate(&g_fire.mix, rate);
-    for (int i = 0; i < FIRE_LOOPS; i++) {
-        const char *file = kFireLoops[i].path, *why = "in none of the client's archives";
-        for (const char *p = kFireLoops[i].path; *p; p++)
-            if (*p == '\\') file = p + 1;
-        for (int a = 0; !g_fire.mix.loop[i] && a < FIRE_ARCHIVES; a++) {
-            const char *name = kFireArchives[a];
-            unsigned char *wav = NULL;
-            unsigned len = 0, frames = 0;
-            int r = mpq_read(&kIo, name, kFireLoops[i].path, &wav, &len), srate = 0, channels = 0;
-            const unsigned char *data = NULL;
-            if (r == MPQ_E_NOT_FOUND || r == MPQ_E_NO_ARCHIVE || r == MPQ_E_EMPTY) continue;
-            if (r != MPQ_OK) {
-                wsprintfA(m, "fire sound: %s in %s could not be read (%s); trying older copies", file, name, mpq_error_text(r));
-                Log(m);
-                continue;
-            }
-            float *src = NULL, *out = NULL;
-            unsigned period = 0;
-            if (!FireWavInfo(wav, len, &srate, &channels, &data, &frames)) why = "not a 16-bit PCM sound";
-            else if (!(src = HeapAlloc(GetProcessHeap(), 0, frames * sizeof(float))) ||
-                     !(out = HeapAlloc(GetProcessHeap(), 0, (FireResampledLength(frames, srate, rate) + 1) * sizeof(float))))
-                why = "out of memory";
-            else {
-                FireWavRead(data, channels, frames, src);
-                period = FireMakeLoop(src, frames, srate, rate, kFireLoops[i].offset * (rate / 100) / (FIRE_MOCK_RATE / 100), out);
-                if (!period) why = "too short to loop";
-            }
-            if (src) HeapFree(GetProcessHeap(), 0, src);
-            HeapFree(GetProcessHeap(), 0, wav);
-            if (period) {
-                g_fire.mix.loop[i] = out;
-                g_fire.mix.len[i] = period;
-                made++;
-            } else {
-                if (out) HeapFree(GetProcessHeap(), 0, out);
-                wsprintfA(m, "fire sound: %s in %s is %s; trying older copies", file, name, why);
-                Log(m);
-                why = "in no archive as a sound it can use";
-            }
-        }
-        if (!g_fire.mix.loop[i]) {
-            wsprintfA(m, "fire sound: %s is %s, so the fire plays without it", file, why);
-            Log(m);
-        }
+    static const char *const kModes[] = { "hum", "hearth", "portal", "class", "cycle", "classes" };
+    char path[MAX_PATH], *t = NULL;
+    int mode = 0;
+    *word = "hum";
+    if (g_dir[0] && Join(path, g_dir, SOUND_FILE) && (t = ReadText(path, 256))) {
+        int n = 0, i = 0, found = -1;
+        while (t[n] && t[n] != '\r' && t[n] != '\n') n++;            /* its first line */
+        for (int k = 0; k < 6 && found < 0; k++) if (SndWord(t, n, (i = 0, &i), kModes[k])) found = k;
+        for (int c = 1; c < 12 && found < 0; c++)
+            if (kClassName[c][0] != '?' && SndWord(t, n, (i = 0, &i), kClassName[c])) found = 100 + c;
+        if (found >= 0) { mode = found; *word = found >= 100 ? kClassName[found - 100] : kModes[found]; }
+        HeapFree(GetProcessHeap(), 0, t);
     }
-    if (made) wsprintfA(m, "fire sound: %d of %d loops made from the client's own files, at %d Hz", made, FIRE_LOOPS, rate);
-    else wsprintfA(m, "fire sound off: none of its %d loops could be made from the client's files", FIRE_LOOPS);
-    Log(m);
-    SndBuildAll(rate);
-    return made > 0;
+    if (mode >= 100) return SOUND_CLASS0 + mode - 100;
+    if (mode <= 2) return mode;
+    unsigned at = g_sndCycle;
+    int k;
+    if (mode == 3) k = cls > 0 && cls < 12 && kClassName[cls][0] != '?' ? SOUND_CLASS0 + (int)cls : SOUND_HUM;
+    else if (mode == 4) k = at % 4 == 3 ? (cls > 0 && cls < 12 && kClassName[cls][0] != '?' ? SOUND_CLASS0 + (int)cls : SOUND_HUM)
+                                        : (int)(at % 4);
+    else {
+        static const unsigned char kNine[9] = { 1, 2, 3, 4, 5, 7, 8, 9, 11 };
+        k = SOUND_CLASS0 + kNine[at % 9];
+    }
+    if (advance && mode >= 4) {
+        char text[16];
+        g_sndCycle = at + 1;
+        wsprintfA(text, "%u\r\n", g_sndCycle);
+        if (g_dir[0] && Join(path, g_dir, SOUND_CYCLE)) WriteText(path, text);
+    }
+    return k;
+}
+/* At start: where the cycle had got to (sound-cycle.txt), so each session goes on from the last. */
+static void SoundCycleLoad(void)
+{
+    char path[MAX_PATH], *t;
+    g_sndCycle = 0;
+    if (!g_dir[0] || !Join(path, g_dir, SOUND_CYCLE) || !(t = ReadText(path, 64))) return;
+    for (const char *p = t; *p >= '0' && *p <= '9' && g_sndCycle < 100000000u; p++) g_sndCycle = g_sndCycle * 10 + (unsigned)(*p - '0');
+    HeapFree(GetProcessHeap(), 0, t);
 }
 
 static int FireRate(void)
@@ -764,10 +855,7 @@ static int FireRate(void)
 static int FireOpen(float fill)
 {
     char m[160];
-    int rate = FireRate();
-    if (g_fire.built && rate != g_fire.mix.rate) g_fire.built = 0;      /* the engine was restarted at another rate */
-    if (!g_fire.built) g_fire.built = FireBuild(rate) ? 1 : -1;
-    if (g_fire.built < 0) return 0;
+    if (!g_snd.n) return 0;                                            /* (FireStep built the screen's recipe) */
     FireReset(&g_fire.mix);
     FireFillStart(&g_fire.fill, fill);
     FirePublish(g_fire.fill.fill);
@@ -777,7 +865,7 @@ static int FireOpen(float fill)
                                g_fire.mix.rate, NULL);
     if (!st) {
         if (g_fire.complaints++ >= 3) return 0;
-        wsprintfA(m, "fire sound: the sound engine would not make the stream (FMOD error %d); trying at the next screen",
+        wsprintfA(m, "sound: the sound engine would not make the stream (FMOD error %d); trying at the next screen",
                   F.GetError ? F.GetError() : -1);
         Log(m);
         return 0;
@@ -787,7 +875,7 @@ static int FireOpen(float fill)
     int ch = F.Stream_PlayEx(FSOUND_FREE, st, NULL, 1);
     if (ch < 0) {
         F.Stream_Close(st);
-        if (g_fire.complaints++ < 3) Log("fire sound: no free sound channel; trying at the next screen");
+        if (g_fire.complaints++ < 3) Log("sound: no free sound channel; trying at the next screen");
         return 0;
     }
     if (F.SetPriority) F.SetPriority(ch, FIRE_PRIORITY);
@@ -832,16 +920,6 @@ static volatile LONG g_hitchN, g_hitchMs[HITCH_KEEP], g_hitchPct[HITCH_KEEP];   
 static volatile LONG g_stallN, g_stallMs[HITCH_KEEP], g_stallPct[HITCH_KEEP];   /* the bar still over STALL_MS, frames on */
 static void HitchLog(char *m);           /* the bar as shown's (below): this screen's hitches and stalls, into the log */
 
-/* The sound for the screen coming up: its family's own, if the pack gave it one, else the fire. A change resets it. */
-static void SndChoose(void)
-{
-    LONG f = g_barFamNow, want = f >= 0 && f < SND_FAMILIES && g_sndHas[f] && g_snd[f].n ? f : -1;
-    if (want != g_sndFam) {
-        if (want >= 0) SndReset(&g_snd[want]);
-        InterlockedExchange(&g_sndFam, want);
-    }
-}
-
 /* One look at the client, every FIRE_POLL_MS. */
 static void FireStep(DWORD now)
 {
@@ -853,15 +931,38 @@ static void FireStep(DWORD now)
     if (!g_screenWatch) InterlockedExchange(&g_screenWatch, 1);   /* screens ending are watched for from now on */
 
     if (!up) {                                   /* the engine is closed: it took our stream with it, so no call */
-        if (g_fire.stream) Log("fire sound: the game closed its sound engine; the stream went with it");
+        if (g_fire.stream) Log("sound: the game closed its sound engine; the stream went with it");
         g_fire.stream = NULL;
         g_fire.channel = -1;
         g_fire.playing = 0;
         return;
     }
-    if (!g_fire.built && !screen)                /* made once the engine is up, before the first loading screen */
-        g_fire.built = FireBuild(FireRate()) ? 1 : -1;
+    if (!g_fire.built && !screen) {              /* the next screen's recipe made once the engine is up, before it comes */
+        const char *word;
+        g_fire.built = SoundBuild(SoundPick((unsigned)g_class, 0, &word), FireRate()) ? 1 : -1;
+    }
     if (screen && !g_fire.playing) {             /* a loading screen has come up, or come back while fading */
+        LONG cls = g_class;
+        const char *word;
+        if (cls <= 0 && SoundPick(1, 0, &word) != SoundPick(2, 0, &word) &&   /* the pick is the class's, and the class */
+            (!g_fire.upAt || now - g_fire.upAt < 400)) {                     /* can come a moment after the screen */
+            if (!g_fire.upAt) g_fire.upAt = now ? now : 1;
+            return;
+        }
+        g_fire.upAt = 0;
+        int k = SoundPick(cls > 0 ? (unsigned)cls : 0, 1, &word), rate = FireRate();
+        if (k != g_sndNow || rate != g_sndRate) {
+            if (g_fire.stream) FireClose();      /* never rebuilt under a stream that is playing it */
+            if ((g_sndBad >> k & 1) || !SoundBuild(k, rate)) {
+                g_fire.playing = -1;             /* silent this screen */
+                return;
+            }
+        }
+        if (g_fire.screens < FIRE_SCREEN_LOGS) {
+            wsprintfA(m, "sound: %s for this screen (Data\\CinderLoad\\sound.txt: %s)", kSounds[k].name, word);
+            Log(m);
+        }
+        SndReset(&g_snd);
         if (!g_fire.stream && !FireOpen(read)) {
             g_fire.playing = -1;                 /* not this screen */
             return;
@@ -871,7 +972,6 @@ static void FireStep(DWORD now)
             FirePublish(g_fire.fill.fill);
             InterlockedExchange(&g_fire.gate, 1);
         }
-        SndChoose();
         g_fire.playing = 1;
         g_fire.since = now;
         g_fire.reached = g_fire.fill.fill;
@@ -879,7 +979,6 @@ static void FireStep(DWORD now)
         return;
     }
     if (screen && g_fire.playing > 0) {
-        if (now - g_fire.since < 400) SndChoose();   /* the bar's textures (so its family) can come a moment after */
         float fill = FireFillRead(&g_fire.fill, read);
         FirePublish(fill);
         if (fill > g_fire.reached) { g_fire.reached = fill; g_fire.steps++; }
@@ -891,8 +990,9 @@ static void FireStep(DWORD now)
             DWORD ms = now - g_fire.since;
             char bar[BAR_SHOWN_MAX];
             BarShownSince(bar, (int)sizeof bar);
-            wsprintfA(m, "loading screen: the fire burned for %lu.%lu s, the bar reached %d%% in %d steps%s", ms / 1000,
-                      ms % 1000 / 100, (int)(g_fire.reached * 100 + 0.5f), g_fire.steps, bar);
+            wsprintfA(m, "loading screen: its sound (%s) played for %lu.%lu s, the bar reached %d%% in %d steps%s",
+                      g_sndNow >= 0 ? kSounds[g_sndNow].name : "none", ms / 1000, ms % 1000 / 100,
+                      (int)(g_fire.reached * 100 + 0.5f), g_fire.steps, bar);
             Log(m);
             BadgeLog(m);
             if (g_frmCount > 0) {
@@ -920,7 +1020,7 @@ static DWORD WINAPI FireThread(LPVOID arg)
     (void)arg;
     for (int tries = 0; !FireResolve(); tries++) {
         if (tries == 30) {
-            Log("fire sound off: the game's fmod.dll is not there or lacks the calls it needs");
+            Log("sound off: the game's fmod.dll is not there or lacks the calls it needs");
             return 0;
         }
         Sleep(1000);
@@ -928,7 +1028,7 @@ static DWORD WINAPI FireThread(LPVOID arg)
     float v = F.GetVersion();
     if (v < 3.7f || v >= 3.8f) {                 /* the stream callback's form is FMOD 3.7's */
         char m[120];
-        wsprintfA(m, "fire sound off: the game's fmod.dll is version %d.%02d, not the 3.7x this was made for",
+        wsprintfA(m, "sound off: the game's fmod.dll is version %d.%02d, not the 3.7x this was made for",
                   (int)v, (int)(v * 100 + 0.5f) % 100);
         Log(m);
         return 0;
@@ -947,7 +1047,7 @@ static void FireStart(void)
     int bad = FireCodeDiffers(base);
     char m[300];
     if (bad >= 0) {
-        int len = wsprintfA(m, "fire sound off: other bytes at RVA 0x%lX (%s) than in the client it was made for, so no "
+        int len = wsprintfA(m, "sound off: other bytes at RVA 0x%lX (%s) than in the client it was made for, so no "
                             "sound; there:", (unsigned long)kFireCode[bad].rva, kFireCode[bad].what);
         if (Readable(base + kFireCode[bad].rva, kFireCode[bad].n))
             for (int i = 0; i < kFireCode[bad].n; i++)
@@ -956,18 +1056,19 @@ static void FireStart(void)
         return;
     }
     if (!Readable(base + FIRE_LAYER_RVA, 8) || !Readable(base + FIRE_SOUNDUP_RVA, 1)) {
-        Log("fire sound off: the loading screen's numbers could not be read");
+        Log("sound off: the loading screen's numbers could not be read");
         return;
     }
     g_fire.base = base;
     g_fire.channel = -1;
     HANDLE t = CreateThread(NULL, 0, FireThread, NULL, 0, NULL);
     if (!t) {
-        Log("fire sound off: its thread could not be started");
+        Log("sound off: its thread could not be started");
         return;
     }
     CloseHandle(t);
-    Log("fire sound on: the bar will burn while loading screens show");
+    SoundCycleLoad();
+    Log("sound on: each loading screen plays the recipe Data\\CinderLoad\\sound.txt names (the hum when it names none)");
 }
 
 /* ---- the fire bar ----
@@ -2054,23 +2155,6 @@ static int FireBar(void)
               have ? haveList : "none", miss ? missList : "none");
     Log(m);
     GarlandSetup(m);
-    for (int f = 0; f < g_bars.families && f < SND_FAMILIES; f++) {   /* each family's own sound, if the pack has one */
-        char table[64];
-        unsigned char *text = NULL;
-        unsigned len = 0;
-        lstrcpyA(table, "CinderLoad\\sound-");
-        lstrcatA(table, g_bars.family[f].name);
-        lstrcatA(table, ".txt");
-        g_sndHas[f] = 0;
-        if (g_bars.family[f].ok && mpq_read(&kIoSmall, "patch-~.MPQ", table, &text, &len) == MPQ_OK && text && len < 8192)
-            g_sndHas[f] = SndParse(&g_sndSpec[f], (const char *)text, len);
-        if (text) HeapFree(GetProcessHeap(), 0, text);
-        if (g_sndHas[f]) {
-            wsprintfA(m, "sound: %s has its own (%d layers%s), building to its peak instead of the fire's", g_bars.family[f].name,
-                      g_sndSpec[f].n, g_sndSpec[f].sting ? " and a stinger" : "");
-            Log(m);
-        }
-    }
     if (!have) {
         Log("fire bar off: no family bars.txt names has both its textures in the pack");
         return 0;
@@ -4663,7 +4747,7 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
 #define SABER_COLS_MAX 1024       /* and at the most this many */
 #define SABER_SPARKS   14         /* sparks thrown back off its tip */
-#define SABER_QUADS    (7 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1)
+#define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1)
 #define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS)
 #define VIEW_BATCHES   32
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
@@ -4747,15 +4831,15 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
 
 /* ---- the blade (6 Oct 2026, his design: "one really nice bar") ----
  * One loading bar for every class, the same size for all, only its colour the class's: edge to edge along the bottom of
- * the screen, unstable like the Darksaber (his reference, The Mandalorian): a dark core whose edges crackle with the
- * class's light, a glow that flickers and throws jagged flares, a hot tip with sparks coming off it as it runs, and the
- * way still to go a faint dark line. The RavenCraft logo sits on it at the centre, its halfway mark, and lights in the
+ * the screen, unstable like the Darksaber (his reference, The Mandalorian): a SOLID core of the class's light (his call,
+ * 7 Oct: "solid fill not hollow"), brightest along its centre, whose edges crackle, a glow that flickers and throws
+ * flares, a hot tip with sparks coming off it as it runs, and the way still to go a faint dark line. The RavenCraft logo sits on it at the centre, its halfway mark, and lights in the
  * class's colour as the tip reaches it. Drawn by the view only (the game's own frame under it keeps the pack's bar: the
  * fallback). Plain quads, a column every SABER_COL_PX pixels with their corners shared (the edges run on unbroken), and
  * the soft spark (VT_SPARK) for the tip, the sparks and the logo's light; the light is added, the core drawn over. Sizes
  * are of the window's height, so the blade is the same on every shape of screen. */
 #define SABER_CY     0.05f         /* its centre line, up from the bottom */
-#define SABER_CORE   0.012f        /* its dark core, top to bottom */
+#define SABER_CORE   0.012f        /* its core, top to bottom */
 #define SABER_GLOW   0.024f        /* its glow beyond the core's edge, as it usually reaches (a flare goes further) */
 #define SABER_LOGO_H 0.085f        /* the logo on it, tall */
 #define SABER_TRACK  0x5A000000u   /* the way still to go: a faint dark line, a little thinner than the core */
@@ -4844,7 +4928,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
 {
     LONG cl = g_class;
     unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0], rgb = SaberVivid(base);
-    unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), coreRgb = SaberMix(base, 0, 0.88f);
+    unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), midRgb = SaberMix(rgb, 0xFFFFFF, 0.45f);
     float t = (float)(now % 3600000u) / 1000.0f, cy = (1 - SABER_CY) * H, hc = SABER_CORE / 2 * H, g = SABER_GLOW * H;
     float front = FireClamp(shown, 0, 1) * W, line = H / 1440.0f, round = hc * 2.5f;
     int n = (int)(W / SABER_COL_PX);
@@ -4878,17 +4962,21 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
                 SaberPut(-1, 1, x, y, c, NULL);
             }
         }
-    /* the way still to go, then the dark core over the glow's inner edge */
+    /* the way still to go, then the core over the glow's inner edge: solid, the class's light at its edges, paler along
+     * its centre line (two quads a column, the top half and the bottom) */
     if (front < W) {
         float x[4] = { front, W, W, front }, y[4] = { cy - hc * 0.55f, cy - hc * 0.55f, cy + hc * 0.55f, cy + hc * 0.55f };
         DWORD c[4] = { SABER_TRACK, SABER_TRACK, SABER_TRACK, SABER_TRACK };
         SaberPut(-1, 0, x, y, c, NULL);
     }
+    DWORD edgeC = SaberArgb(rgb, 0.96f), midC = SaberArgb(midRgb, 0.96f);
     for (int k = 0; k + 1 < b; k++) {
         float x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
-        float y[4] = { cy - g_sbCore[0][k], cy - g_sbCore[0][k + 1], cy + g_sbCore[1][k + 1], cy + g_sbCore[1][k] };
-        DWORD c[4] = { SaberArgb(coreRgb, 0.94f), SaberArgb(coreRgb, 0.94f), SaberArgb(coreRgb, 0.94f), SaberArgb(coreRgb, 0.94f) };
-        SaberPut(-1, 0, x, y, c, NULL);
+        float yt[4] = { cy - g_sbCore[0][k], cy - g_sbCore[0][k + 1], cy, cy };
+        float yb[4] = { cy, cy, cy + g_sbCore[1][k + 1], cy + g_sbCore[1][k] };
+        DWORD ct[4] = { edgeC, edgeC, midC, midC }, cb[4] = { midC, midC, edgeC, edgeC };
+        SaberPut(-1, 0, x, yt, ct, NULL);
+        SaberPut(-1, 0, x, yb, cb, NULL);
     }
     /* the hot edge, added over the core's: a thin line of near white, brighter where it burns hotter */
     for (int k = 0; k + 1 < b; k++)

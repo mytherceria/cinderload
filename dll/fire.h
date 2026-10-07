@@ -1,21 +1,16 @@
-/* The loading bar's fire sound, the part of CinderLoad.dll kept free of Windows and FMOD calls so it can be tested on
- * its own (tests/test_switch.c). Included once, by cinderload.c.
+/* The loading screen's sound, the part of CinderLoad.dll kept free of Windows and FMOD calls so it can be tested on its
+ * own (tests/test_switch.c). Included once, by cinderload.c.
  *
- * The sound is the mock approved by ear on 2 Oct 2026 (make_fire_audio.py, loading-bar-fire-80-20.mp4), rebuilt
- * from the same six loops of the game's own (read out of the player's client at run time; none is shipped):
- *   the bed, always there:  CampFireLargeLoop 1.0, UndeadCampfireLArge 0.55, AlterOfKingsFireLoop 0.45, LavaPoolLoop 0.18,
- *                           at 0.85 to 1.15 as the fill goes from 0 to a third;
- *   the crackle, the surge: UndeadFireLarge 0.8, TorchFireLoop 0.5, as loud as the fill is moving: 0 while it stalls,
- *                           1 at a quarter of the bar a second, at most 1.2;
- * each loop resampled to the mixer's rate, started at the mock's offset into it and looped with a 0.12 s crossfade.
- * The mono mix is panned EQUAL-POWER after the fill's front: 0.295 at an empty bar, 0.705 at a full one (80% left and
- * 20% right by loudness at the start, the other way round at the end), gliding with a 0.3 s time constant so a jump
- * in the bar does not snap the sound across. It fades in over 0.4 s as a loading screen comes up and out over 0.4 s
- * when it goes.
- *
- * One change from the mock, made for the game: the mock took the crackle from how fast its smooth fill curve moved.
- * The game's bar moves in steps, and is read every 20 ms, so here it is taken from how fast the GLIDING front moves,
- * which a step sets moving and which, on a smooth fill, moves as the fill does.
+ * 7 Oct 2026: the crackling fire that went with the fire bar is gone (his call: "clear out ... the old cinderload
+ * crackling fire sound"), and with it the druid's own; the blade's sound is one of several recipes he auditions on real
+ * loads (cinderload.c, kSounds). Each recipe is a few of the game's own sounds, read out of the player's client at run
+ * time (none is shipped), each resampled to the mixer's rate and looped with a 0.12 s crossfade, then:
+ *   a bed, there from the start and rising with the fill; a swell, silent until its start and whole by its end; motion,
+ *   as loud as the bar is moving; sparks, one-shots fired now and then, more often as the bar fills (the blade is
+ *   unstable); up to three stingers, each played once as the fill passes its mark (0: as the screen begins).
+ * A sound can be stretched (played slower, so lower) or sped up. The mix is centred, or follows the bar's front from
+ * left to right by as much as the recipe's sweep (1: the old fire's 80/20, equal power). It fades in over 0.4 s as a
+ * loading screen comes up and out over 0.4 s when it goes; the front glides after the bar with a 0.3 s time constant.
  */
 #ifndef CINDERLOAD_FIRE_H
 #define CINDERLOAD_FIRE_H
@@ -30,20 +25,7 @@
 #define FIRE_FADE_IN_S  0.40f
 #define FIRE_FADE_OUT_S 0.40f
 #define FIRE_XFADE_S    0.12f    /* each loop's seam */
-#define FIRE_LEVEL      2.12f    /* the mock's own scale: its mix brought to a peak of 0.8 (2.1198 for these six files) */
-#define FIRE_MOCK_RATE  44100    /* the rate the mock's offsets are counted at */
 #define FIRE_MAX_FRAMES (1 << 21) /* a source over this many frames is not one of these loops */
-
-enum { FIRE_BED, FIRE_CRACKLE };
-#define FIRE_LOOPS 6
-static const struct { const char *path; float gain; int layer; int offset; } kFireLoops[FIRE_LOOPS] = {
-    { "Sound\\Doodad\\CampFireLargeLoop.wav",     1.00f, FIRE_BED,     0     },
-    { "Sound\\Doodad\\UndeadCampfireLArge.wav",   0.55f, FIRE_BED,     30000 },
-    { "Sound\\Doodad\\AlterOfKingsFireLoop.wav",  0.45f, FIRE_BED,     51000 },
-    { "Sound\\Ambience\\Water\\LavaPoolLoop.wav", 0.18f, FIRE_BED,     90000 },
-    { "Sound\\Doodad\\UndeadFireLarge.wav",       0.80f, FIRE_CRACKLE, 20000 },
-    { "Sound\\Doodad\\TorchFireLoop.wav",         0.50f, FIRE_CRACKLE, 70000 },
-};
 
 /* ---- a little arithmetic, with no C runtime ---- */
 #define FIRE_HALF_PI 1.57079632679489662f
@@ -68,19 +50,11 @@ static float FireCos(float x)
     return 1 - x2 / 2 * (1 - x2 / 12 * (1 - x2 / 30 * (1 - x2 / 56 * (1 - x2 / 90 * (1 - x2 / 132 * (1 - x2 / 182))))));
 }
 
-/* The equal-power gains for a fill of 0..1: pan = 0.295 + 0.41 * fill, left = cos(pan * pi/2), right = sin(pan * pi/2),
- * so left^2 + right^2 is always 1 and only the balance moves. */
+/* Where the old fire's pan sat for a fill of 0..1: 0.295 + 0.41 * fill, equal power (left = cos(pan * pi/2), right =
+ * sin(pan * pi/2)); a recipe's sweep takes as much of it as it asks for. */
 static float FirePan(float fill) { return FIRE_PAN_FROM + (FIRE_PAN_TO - FIRE_PAN_FROM) * FireClamp(fill, 0, 1); }
-static void FireGains(float fill, float *left, float *right)
-{
-    float a = FirePan(fill) * FIRE_HALF_PI;
-    *left = FireCos(a);
-    *right = FireSin(a);
-}
 
-/* The bed's level for a fill: 0.85 empty, rising to 1.15 by a third of the bar. */
-static float FireBedLevel(float fill) { return 0.85f + 0.3f * FireClamp(fill * 3, 0, 1); }
-/* The crackle's level for a smoothed speed of the front, in bars a second. */
+/* The motion's level for a smoothed speed of the front, in bars a second. */
 static float FireCrackleLevel(float speed) { return FireClamp(speed / FIRE_MOVE_FULL, 0, FIRE_MOVE_MAX); }
 
 /* ---- the source files ---- */
@@ -164,11 +138,9 @@ static unsigned FireMakeLoop(const float *src, unsigned frames, int from, int to
     return n - xf;
 }
 
-/* ---- the mixer ---- */
+/* ---- the mixer: what every recipe shares (the glide after the bar, its speed, the fades) ---- */
 typedef struct {
     int rate;                                  /* frames a second, the stream's */
-    float *loop[FIRE_LOOPS];                   /* one period each, or NULL when that file could not be had */
-    unsigned len[FIRE_LOOPS], pos[FIRE_LOOPS];
     float kGlide, kMove, stepIn, stepOut;      /* per frame */
     float front, last, speed, env;             /* the gliding fill, its last value, its smoothed speed, the fade */
 } FireMix;
@@ -182,70 +154,40 @@ static void FireSetRate(FireMix *m, int rate)
     m->stepIn = 1.0f / (FIRE_FADE_IN_S * rate);
     m->stepOut = 1.0f / (FIRE_FADE_OUT_S * rate);
 }
-static void FireReset(FireMix *m)
-{
-    m->front = m->last = m->speed = m->env = 0;
-    for (int i = 0; i < FIRE_LOOPS; i++)
-        m->pos[i] = 0;
-}
+static void FireReset(FireMix *m) { m->front = m->last = m->speed = m->env = 0; }
 
-/* frames of 16-bit stereo into out. gate: a loading screen is showing; fill: how far its bar is, 0..1. Returns 1 while
- * there is still something to hear (the fade not yet at zero). */
-static int FireRender(FireMix *m, int gate, float fill, short *out, int frames)
-{
-    fill = FireClamp(fill, 0, 1);
-    for (int f = 0; f < frames; f++) {
-        if (gate && m->env <= 0) { m->front = m->last = fill; m->speed = 0; }   /* a new screen: start at its fill */
-        m->env = FireClamp(m->env + (gate ? m->stepIn : -m->stepOut), 0, 1);
-        m->front += (fill - m->front) * m->kGlide;
-        float speed = (m->front - m->last) * (float)m->rate;
-        m->last = m->front;
-        m->speed += ((speed < FIRE_MOVE_CAP ? speed : FIRE_MOVE_CAP) - m->speed) * m->kMove;
-        float bed = 0, crackle = 0;
-        for (int i = 0; i < FIRE_LOOPS; i++) {
-            if (!m->loop[i]) continue;
-            float v = m->loop[i][m->pos[i]] * kFireLoops[i].gain;
-            if (++m->pos[i] >= m->len[i]) m->pos[i] = 0;
-            if (kFireLoops[i].layer == FIRE_BED) bed += v; else crackle += v;
-        }
-        float mono = (bed * FireBedLevel(fill) + crackle * FireCrackleLevel(m->speed)) * FIRE_LEVEL * m->env, l, r;
-        FireGains(m->front, &l, &r);
-        float sl = FireClamp(mono * l * 32767.0f, -32767.0f, 32767.0f), sr = FireClamp(mono * r * 32767.0f, -32767.0f, 32767.0f);
-        out[2 * f] = (short)sl;
-        out[2 * f + 1] = (short)sr;
-    }
-    return m->env > 0 || gate;
-}
-
-/* ---- a class's own sound (4 Oct 2026, his rule: "a sound that fits with the class design ... it should feel like it's
- * building towards a crescendo as the bar loads"; the fire's left-to-right sweep is not needed) ----
- * A family whose pack carries CinderLoad\sound-<family>.txt plays it instead of the fire while its bar shows:
- *   level <x>                          the mix's scale (the art kit's preview brought to a peak of 0.8)
- *   loop <bed|swell|motion> <gain> <from> <to> <path>
+/* ---- a recipe ----
+ * Its lines (the built-in recipes in cinderload.c are written this way; a bad line is skipped):
+ *   level <x>                                        the mix's scale
+ *   sweep <x>                                        0 centred .. 1 the old fire's full left-to-right sweep
+ *   loop <bed|swell|motion> <gain> <from> <to> [x<speed>] <path>
  *       bed: there from the start at 0.55 of its gain, rising to all of it as the fill goes from <from> to <to>;
- *       swell: silent until <from>, all of it by <to> (an S curve between); motion: as loud as the bar is moving,
- *       the fire's crackle measure
- *   stinger <gain> <at> <path>         played once, whole, as the fill passes <at>: the crescendo's peak
- * Centred: the same in both ears. The same fade, glide and motion as the fire's (FireMix). Paths are the client's own
- * files, read and built as the fire's are; none is shipped. */
+ *       swell: silent until <from>, all of it by <to> (an S curve between); motion: as loud as the bar is moving
+ *   spark <gain> <from> <to> [x<speed>] <path>       a one-shot fired every 2.4 s or so at <from>, every half second by
+ *                                                    <to>, each wait a little longer or shorter than the last
+ *   stinger <gain> <at> [x<speed>] <path>            played once, whole, as the fill passes <at> (0: as it begins)
+ * x<speed>: 0.8 plays the sound at 80% speed (longer and lower), 1.25 faster; 0.25 to 4. Paths are the client's own. */
 #define SND_LOOPS 6
-#define SND_FAMILIES 16          /* as BAR_FAMILIES: a set per fire family */
-#define SND_MAX_S 30             /* a loop's source is cut to this many seconds (the forest's 77 s is 13 MB at 44.1 kHz) */
+#define SND_SPARKS 2
+#define SND_STINGS 3
+#define SND_MAX_S 30             /* a loop's source is cut to this many seconds (a 77 s ambience is 13 MB at 44.1 kHz) */
 #define SND_PATH  120
+#define SND_SPARK_SLOW 2.4f      /* seconds between sparks at a recipe's <from> */
+#define SND_SPARK_FAST 0.5f      /* and by its <to> */
 enum { SND_BED, SND_SWELL, SND_MOTION };
+typedef struct { int kind; float gain, from, to, speed; char path[SND_PATH]; } SndLayer;
 typedef struct {
-    int n, sting;                                   /* loops listed; a stinger listed */
-    float level, stingGain, stingAt;
-    struct { int kind; float gain, from, to; char path[SND_PATH]; } l[SND_LOOPS];
-    char stingPath[SND_PATH];
+    int n, sparks, stings;                          /* loops, sparks and stingers listed */
+    float level, sweep;
+    SndLayer l[SND_LOOPS], spark[SND_SPARKS], sting[SND_STINGS];   /* a stinger's <at> is its from */
 } SndSpec;
 typedef struct {
-    int n;
-    float *loop[SND_LOOPS];
-    unsigned len[SND_LOOPS], pos[SND_LOOPS];
-    float *sting;
-    unsigned stingLen, stingPos;
-    int stingState;                                 /* 0 waiting, 1 playing, 2 played */
+    int n;                                          /* loops made (0: nothing to play) */
+    float *loop[SND_LOOPS], *spark[SND_SPARKS], *sting[SND_STINGS];
+    unsigned len[SND_LOOPS], pos[SND_LOOPS], sparkLen[SND_SPARKS], sparkPos[SND_SPARKS], stingLen[SND_STINGS],
+             stingPos[SND_STINGS], seed;
+    int sparkOn[SND_SPARKS], stingState[SND_STINGS];   /* a spark sounding; a stinger 0 waiting, 1 playing, 2 played */
+    float sparkWait[SND_SPARKS];                    /* seconds to the next spark */
 } SndSet;
 
 /* A decimal number ("0.55", "1", ".9") at s[*at] after spaces: 1 with it in *out. */
@@ -285,7 +227,19 @@ static int SndRest(const char *s, int n, int at, char *out)
     out[n - at] = 0;
     return 1;
 }
-/* CinderLoad\sound-<family>.txt into sp: 1 when it has a level and at least one loop. Bad lines are skipped. */
+/* An optional x<speed> at s[*at] after spaces (default 1): 0 when one is there but out of 0.25 to 4. */
+static int SndSpeed(const char *s, int n, int *at, float *speed)
+{
+    int i = *at;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    *speed = 1;
+    if (i + 1 >= n || (s[i] | 0x20) != 'x' || !((s[i + 1] >= '0' && s[i + 1] <= '9') || s[i + 1] == '.')) return 1;
+    i++;
+    if (!SndNum(s, n, &i, speed) || *speed < 0.25f || *speed > 4) return 0;
+    *at = i;
+    return 1;
+}
+/* A recipe's text into sp: 1 when it has a level and at least one loop. Bad lines are skipped. */
 static int SndParse(SndSpec *sp, const char *t, unsigned len)
 {
     unsigned char *z = (unsigned char *)sp;
@@ -295,19 +249,32 @@ static int SndParse(SndSpec *sp, const char *t, unsigned len)
         while (end < len && t[end] != '\n') end++;
         const char *l = t + at;
         int n = (int)(end - at), i = 0;
-        float a, b, c;
+        float a, b, c, x;
         if (SndWord(l, n, &i, "level") && SndNum(l, n, &i, &a) && a > 0 && a < 100) sp->level = a;
+        else if ((i = 0, SndWord(l, n, &i, "sweep")) && SndNum(l, n, &i, &a) && a <= 1) sp->sweep = a;
         else if ((i = 0, SndWord(l, n, &i, "loop")) && sp->n < SND_LOOPS) {
             int kind = SndWord(l, n, &i, "bed") ? SND_BED : SndWord(l, n, &i, "swell") ? SND_SWELL :
                        SndWord(l, n, &i, "motion") ? SND_MOTION : -1;
+            SndLayer *y = &sp->l[sp->n];
             if (kind >= 0 && SndNum(l, n, &i, &a) && SndNum(l, n, &i, &b) && SndNum(l, n, &i, &c) && a <= 4 && b <= 1 && c <= 1 &&
-                SndRest(l, n, i, sp->l[sp->n].path)) {
-                sp->l[sp->n].kind = kind; sp->l[sp->n].gain = a; sp->l[sp->n].from = b; sp->l[sp->n].to = c;
+                SndSpeed(l, n, &i, &x) && SndRest(l, n, i, y->path)) {
+                y->kind = kind; y->gain = a; y->from = b; y->to = c; y->speed = x;
                 sp->n++;
             }
-        } else if ((i = 0, SndWord(l, n, &i, "stinger")) && SndNum(l, n, &i, &a) && SndNum(l, n, &i, &b) && a <= 4 &&
-                   b <= 1 && SndRest(l, n, i, sp->stingPath)) {
-            sp->sting = 1; sp->stingGain = a; sp->stingAt = b;
+        } else if ((i = 0, SndWord(l, n, &i, "spark")) && sp->sparks < SND_SPARKS) {
+            SndLayer *y = &sp->spark[sp->sparks];
+            if (SndNum(l, n, &i, &a) && SndNum(l, n, &i, &b) && SndNum(l, n, &i, &c) && a <= 4 && b <= 1 && c <= 1 &&
+                SndSpeed(l, n, &i, &x) && SndRest(l, n, i, y->path)) {
+                y->gain = a; y->from = b; y->to = c; y->speed = x;
+                sp->sparks++;
+            }
+        } else if ((i = 0, SndWord(l, n, &i, "stinger")) && sp->stings < SND_STINGS) {
+            SndLayer *y = &sp->sting[sp->stings];
+            if (SndNum(l, n, &i, &a) && SndNum(l, n, &i, &b) && a <= 4 && b <= 1 && SndSpeed(l, n, &i, &x) &&
+                SndRest(l, n, i, y->path)) {
+                y->gain = a; y->from = b; y->speed = x;
+                sp->stings++;
+            }
         }
         at = end + 1;
     }
@@ -336,16 +303,28 @@ static float SndSmooth(float e0, float e1, float x)
 static void SndReset(SndSet *s)
 {
     for (int i = 0; i < SND_LOOPS; i++) s->pos[i] = 0;
-    s->stingPos = 0;
-    s->stingState = 0;
+    for (int i = 0; i < SND_SPARKS; i++) { s->sparkOn[i] = 0; s->sparkPos[i] = 0; s->sparkWait[i] = 0.3f + 0.4f * i; }
+    for (int i = 0; i < SND_STINGS; i++) { s->stingPos[i] = 0; s->stingState[i] = 0; }
+    s->seed = 0x2545F491u;
 }
-/* As FireRender, for a class's sound: the same gate, fade, glide and motion (in m), its layers by the fill, the stinger
- * once, centred. */
+/* 0 to 1, the next of the sparks' own sequence (each wait a little different, the same every time for a test). */
+static float SndRand(SndSet *s) { s->seed = s->seed * 1664525u + 1013904223u; return (float)(s->seed >> 8) / 16777216.0f; }
+/* A gentle limit: as it was up to 0.8, then bending ever closer to 1 and never reaching it, so a stinger landing on a
+ * loud bed rounds off instead of clipping. */
+static float SndLimit(float x)
+{
+    float a = x < 0 ? -x : x;
+    if (a > 0.8f) { float d = (a - 0.8f) / 0.2f; a = 0.8f + 0.2f * d / (1 + d); }
+    return x < 0 ? -a : a;
+}
+/* frames of 16-bit stereo into out from a recipe's sounds. gate: a loading screen is showing; fill: how far its bar is,
+ * 0..1. Returns 1 while there is still something to hear (the fade not yet at zero). */
 static int SndRender(FireMix *m, SndSet *s, const SndSpec *sp, int gate, float fill, short *out, int frames)
 {
     fill = FireClamp(fill, 0, 1);
+    float perFrame = 1.0f / (float)(m->rate > 0 ? m->rate : 44100);
     for (int f = 0; f < frames; f++) {
-        if (gate && m->env <= 0) { m->front = m->last = fill; m->speed = 0; }
+        if (gate && m->env <= 0) { m->front = m->last = fill; m->speed = 0; }   /* a new screen: start at its fill */
         m->env = FireClamp(m->env + (gate ? m->stepIn : -m->stepOut), 0, 1);
         m->front += (fill - m->front) * m->kGlide;
         float speed = (m->front - m->last) * (float)m->rate;
@@ -361,15 +340,33 @@ static int SndRender(FireMix *m, SndSet *s, const SndSpec *sp, int gate, float f
             else lvl = FireCrackleLevel(m->speed);
             sum += v * lvl;
         }
-        if (s->sting && gate && s->stingState == 0 && fill >= sp->stingAt) { s->stingState = 1; s->stingPos = 0; }
-        if (s->stingState == 1) {
-            sum += s->sting[s->stingPos] * sp->stingGain;
-            if (++s->stingPos >= s->stingLen) s->stingState = 2;
+        for (int i = 0; i < sp->sparks && i < SND_SPARKS; i++) {        /* now and then, more often as the bar fills */
+            if (!s->spark[i]) continue;
+            if (gate && !s->sparkOn[i] && (s->sparkWait[i] -= perFrame) <= 0) {
+                float every = SND_SPARK_SLOW + (SND_SPARK_FAST - SND_SPARK_SLOW) * SndSmooth(sp->spark[i].from, sp->spark[i].to, fill);
+                s->sparkOn[i] = 1; s->sparkPos[i] = 0;
+                s->sparkWait[i] = every * (0.6f + 0.8f * SndRand(s));
+            }
+            if (s->sparkOn[i]) {
+                sum += s->spark[i][s->sparkPos[i]] * sp->spark[i].gain;
+                if (++s->sparkPos[i] >= s->sparkLen[i]) s->sparkOn[i] = 0;
+            }
         }
-        float mono = sum * sp->level * m->env * 0.70710678f;
-        short v = (short)FireClamp(mono * 32767.0f, -32767.0f, 32767.0f);
-        out[2 * f] = v;
-        out[2 * f + 1] = v;
+        for (int i = 0; i < sp->stings && i < SND_STINGS; i++) {        /* each once, as the fill passes its mark */
+            if (!s->sting[i]) continue;
+            if (gate && s->stingState[i] == 0 && fill >= sp->sting[i].from) { s->stingState[i] = 1; s->stingPos[i] = 0; }
+            if (s->stingState[i] == 1) {
+                sum += s->sting[i][s->stingPos[i]] * sp->sting[i].gain;
+                if (++s->stingPos[i] >= s->stingLen[i]) s->stingState[i] = 2;
+            }
+        }
+        float mono = sum * sp->level * m->env, l = 0.70710678f, r = 0.70710678f;
+        if (sp->sweep > 0) {                                            /* following the front, by as much as the sweep */
+            float a = (0.5f + (FirePan(m->front) - 0.5f) * sp->sweep) * FIRE_HALF_PI;
+            l = FireCos(a); r = FireSin(a);
+        }
+        out[2 * f] = (short)(SndLimit(mono * l) * 32767.0f);
+        out[2 * f + 1] = (short)(SndLimit(mono * r) * 32767.0f);
     }
     return m->env > 0 || gate;
 }

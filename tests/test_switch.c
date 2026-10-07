@@ -13,6 +13,9 @@
 static const float kWholeUV[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };   /* the whole picture: corners 0,0 1,0 0,1 1,1 */
 #include <stdio.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <ctype.h>
+#include <strings.h>
 
 char shim_gamedir[512];
 unsigned char shim_module[SHIM_MODULE_SIZE];
@@ -150,15 +153,21 @@ static void Client(unsigned layer, float progress, int soundUp)
 }
 static float Published(void) { union { LONG bits; float f; } v; v.bits = g_fire.fillBits; return v.f; }
 
-/* A loop that is a constant: what a mixer test hears is then only the levels, the pan and the fade. */
+/* A recipe of one loop that is a constant (a bed, or motion): what a mixer test hears is then only the levels, the pan
+ * and the fade. */
 static float g_dc[64];
-static void DcMix(FireMix *m, int rate, int which, float value)
+static SndSpec g_dcSpec;
+static SndSet g_dcSet;
+static void DcMix(FireMix *m, int rate, int motion, float value, float sweep)
 {
     memset(m, 0, sizeof *m);
     FireSetRate(m, rate);
     for (int i = 0; i < 64; i++) g_dc[i] = value;
-    m->loop[which] = g_dc;
-    m->len[which] = 64;
+    const char *r = motion ? "level 1\nloop motion 1 0 0 Sound\\a.wav\n" : "level 1\nloop bed 1 1 1 Sound\\a.wav\n";
+    SndParse(&g_dcSpec, r, (unsigned)strlen(r));
+    g_dcSpec.sweep = sweep;
+    memset(&g_dcSet, 0, sizeof g_dcSet);
+    g_dcSet.loop[0] = g_dc; g_dcSet.len[0] = 64; g_dcSet.n = 1;
 }
 static short g_pcm[2 * 48000];
 /* frames rendered at one gate and fill; the last frame's left and right */
@@ -166,7 +175,7 @@ static void Run(FireMix *m, int gate, float fill, int frames, int *l, int *r)
 {
     while (frames > 0) {
         int n = frames < 48000 ? frames : 48000;
-        FireRender(m, gate, fill, g_pcm, n);
+        SndRender(m, &g_dcSet, &g_dcSpec, gate, fill, g_pcm, n);
         frames -= n;
         if (l) *l = g_pcm[2 * n - 2];
         if (r) *r = g_pcm[2 * n - 1];
@@ -191,24 +200,11 @@ static size_t Wav(unsigned char *out, int format, int channels, int bits, int ra
 
 static void FireTests(void)
 {
-    float l, r;
     int il, ir;
 
-    /* the pan curve: equal power, 80/20 by loudness at both ends */
+    /* the sweep: the old fire's pan curve, equal power, 80/20 by loudness at both ends at a sweep of 1 */
     Check(Near(FirePan(0), 0.295, 1e-6) && Near(FirePan(1), 0.705, 1e-6) && Near(FirePan(0.5f), 0.5, 1e-6) &&
           Near(FirePan(-1), 0.295, 1e-6) && Near(FirePan(2), 0.705, 1e-6), "pan: 0.295 at an empty bar, 0.705 at a full one");
-    int power = 1;
-    for (int i = 0; i <= 20; i++) {
-        FireGains(i / 20.0f, &l, &r);
-        power &= Near(l * l + r * r, 1, 1e-5);
-    }
-    Check(power, "pan: equal power, left^2 + right^2 = 1 all the way along");
-    FireGains(0, &l, &r);
-    int ends = Near(l * l, 0.80, 0.002);
-    FireGains(1, &l, &r);
-    ends &= Near(r * r, 0.80, 0.002);
-    FireGains(0.5f, &l, &r);
-    Check(ends && Near(l, r, 1e-6), "pan: 80% of the loudness left at the start, 80% right at the end, even halfway");
     double worst = 0;
     for (int i = 0; i <= 1000; i++) {
         double x = i * (M_PI / 2) / 1000;
@@ -219,7 +215,7 @@ static void FireTests(void)
 
     /* the glide: a jump in the bar moves the sound over about a third of a second, never at once */
     FireMix m;
-    DcMix(&m, 1000, 0, 0.1f);
+    DcMix(&m, 1000, 0, 0.1f, 1);
     Run(&m, 1, 0, 10, NULL, NULL);
     Run(&m, 1, 1, 1, NULL, NULL);
     float first = m.front;
@@ -228,20 +224,24 @@ static void FireTests(void)
     Run(&m, 1, 1, 50, NULL, NULL);
     Check(first < 0.005f && Near(at300, 1 - exp(-1), 0.01) && Near(m.front, 1 - exp(-0.35 / 0.3), 0.01),
           "glide: one frame after a jump the front has hardly moved; 63% at 0.3 s, 69% at 0.35 s");
-    DcMix(&m, 1000, 0, 0.1f);
+    DcMix(&m, 1000, 0, 0.1f, 1);
     Run(&m, 1, 0, 1000, &il, &ir);
     double startRight = (double)ir * ir / ((double)il * il + (double)ir * ir);
     Run(&m, 1, 1, 3000, &il, &ir);
     double endRight = (double)ir * ir / ((double)il * il + (double)ir * ir);
-    Check(Near(startRight, 0.2, 0.002) && Near(endRight, 0.8, 0.002), "glide: the sound itself goes from 20% right to 80% right");
-    DcMix(&m, 1000, 0, 0.1f);
+    Check(Near(startRight, 0.2, 0.002) && Near(endRight, 0.8, 0.002), "sweep 1: the sound goes from 20% right to 80% right with the bar");
+    DcMix(&m, 1000, 0, 0.1f, 0.5f);
+    Run(&m, 1, 1, 3000, &il, &ir);
+    double halfRight = (double)ir * ir / ((double)il * il + (double)ir * ir);
+    DcMix(&m, 1000, 0, 0.1f, 0);
+    Run(&m, 1, 1, 3000, &il, &ir);
+    Check(halfRight > 0.6 && halfRight < 0.7 && il == ir, "sweep: a half sweep goes half as far; none, and the sound stays centred");
+    DcMix(&m, 1000, 0, 0.1f, 1);
     Run(&m, 1, 0.7f, 1, NULL, NULL);
     Check(Near(m.front, 0.7, 1e-6), "glide: a screen starts where its bar is, with no sweep across");
 
-    /* the crackle: loud while the fill moves, soft while it stalls */
-    Check(Near(FireBedLevel(0), 0.85, 1e-6) && Near(FireBedLevel(1 / 3.0f), 1.15, 1e-5) && Near(FireBedLevel(1), 1.15, 1e-6),
-          "bed: 0.85 at an empty bar, 1.15 from a third on");
-    DcMix(&m, 1000, 4, 0.1f);                               /* UndeadFireLarge alone: the crackle */
+    /* motion: loud while the fill moves, soft while it stalls */
+    DcMix(&m, 1000, 1, 0.1f, 0);
     Run(&m, 1, 0, 500, NULL, NULL);
     for (int step = 0; step < 100; step++) Run(&m, 1, step * 0.005f, 20, NULL, NULL);   /* 0.25 a second, in 20 ms steps */
     float moving = FireCrackleLevel(m.speed);
@@ -251,28 +251,35 @@ static void FireTests(void)
     float stalled = FireCrackleLevel(m.speed);
     double loudStalled = sqrt((double)il * il + (double)ir * ir);
     Check(Near(moving, 1, 0.1) && stalled < 0.02f && loudMoving > 20 * loudStalled,
-          "crackle: at a quarter of the bar a second it is at 1; two seconds of stall and it has all but gone");
-    DcMix(&m, 1000, 4, 0.1f);
+          "motion: at a quarter of the bar a second it is at 1; two seconds of stall and it has all but gone");
+    DcMix(&m, 1000, 1, 0.1f, 0);
     Run(&m, 1, 0, 100, NULL, NULL);
     float peak = 0;
     for (int i = 0; i < 2000; i++) {
         Run(&m, 1, 1, 1, NULL, NULL);
         if (m.speed > peak) peak = m.speed;
     }
-    Check(peak <= FIRE_MOVE_CAP + 1e-6f && FireCrackleLevel(10) == FIRE_MOVE_MAX, "crackle: a leap of the whole bar is held to its cap");
+    Check(peak <= FIRE_MOVE_CAP + 1e-6f && FireCrackleLevel(10) == FIRE_MOVE_MAX, "motion: a leap of the whole bar is held to its cap");
 
     /* the fades */
-    DcMix(&m, 1000, 0, 0.1f);
+    DcMix(&m, 1000, 0, 0.1f, 0);
     Run(&m, 1, 0.5f, 200, NULL, NULL);
     float half = m.env;
     Run(&m, 1, 0.5f, 200, NULL, NULL);
     float full = m.env;
     Run(&m, 0, 0.5f, 200, NULL, NULL);
     float out = m.env;
-    int going = FireRender(&m, 0, 0.5f, g_pcm, 199);
-    int quiet = !FireRender(&m, 0, 0.5f, g_pcm, 10) && g_pcm[18] == 0 && g_pcm[19] == 0;
+    int going = SndRender(&m, &g_dcSet, &g_dcSpec, 0, 0.5f, g_pcm, 199);
+    int quiet = !SndRender(&m, &g_dcSet, &g_dcSpec, 0, 0.5f, g_pcm, 10) && g_pcm[18] == 0 && g_pcm[19] == 0;
     Check(Near(half, 0.5, 0.01) && Near(full, 1, 1e-6) && Near(out, 0.5, 0.01) && going && quiet,
           "fades: in over 0.4 s as a screen comes up, out over 0.4 s when it goes, then silence");
+    /* the limit: as it was up to 0.8, then bending toward 1 and never past it, so a loud moment rounds off */
+    int lim = SndLimit(0.5f) == 0.5f && SndLimit(-0.8f) == -0.8f && SndLimit(0.9f) > 0.8f && SndLimit(0.9f) < 0.9f &&
+              SndLimit(5) < 1 && SndLimit(5) > SndLimit(2) && SndLimit(-5) > -1 && SndLimit(-5) == -SndLimit(5);
+    DcMix(&m, 1000, 0, 3.0f, 0);
+    Run(&m, 1, 1, 1000, &il, &ir);
+    Check(lim && il > 0.9f * 32767 * 0.70710678f && il < 32767 && il == ir,
+          "limit: up to 0.8 untouched, past it bent toward 1; a mix three times too loud stays below full scale, never wrapping");
 
     /* the fill the worker passes on */
     FireFill ff;
@@ -302,29 +309,36 @@ static void FireTests(void)
     Check(FireResampledLength(66152, 22050, 44100) == 132304 && FireResampledLength(66152, 22050, 48000) == 144004,
           "loop: as many frames at the mixer's rate as the mock's resampler makes");
 
-    /* a class's own sound (his rule, 4 Oct): its table read carefully; a bed rising with the fill, a swell silent until
-     * its start and whole by its end, the stinger once as the fill passes its mark, centred, the fade the fire's */
+    /* a recipe (7 Oct): its lines read carefully; a bed rising with the fill, a swell silent until its start and whole by
+     * its end, stingers once each as the fill passes their marks (one at 0 as it begins), sparks more often as it fills */
     {
-        static const char tab[] = "# druid\nlevel 0.8632\nloop bed 0.950 0.000 1.000 Sound\\Ambience\\ZoneAmbience\\EnchangedForestDay.wav\n"
-            "loop swell 0.550 0.150 0.600 Sound\\Doodad\\MoonWellLightLoop.wav\r\nloop swell 0.700 0.450 0.950 Sound\\Creature\\Whisp\\WispLoop01.wav\n"
-            "loop motion 0.350 0.000 0.000 Sound\\Spells\\Missile\\NAtureMissileLoop.wav\nloop hum 1 0 1 Sound\\x.wav\n"
-            "loop bed 9 0 1 Sound\\y.wav\nstinger 0.900 0.970 Sound\\Spells\\Tranquility.wav\n";
+        static const char tab[] = "# a recipe\nlevel 0.8632\nsweep 0.6\nloop bed 0.950 0.000 1.000 Sound\\Ambience\\a.wav\n"
+            "loop swell 0.550 0.150 0.600 x0.8 Sound\\Doodad\\MoonWellLightLoop.wav\r\nloop swell 0.700 0.450 0.950 X1.25 Sound\\b.wav\n"
+            "loop motion 0.350 0.000 0.000 Sound\\Spells\\c.wav\nloop hum 1 0 1 Sound\\x.wav\nloop bed 1 0 1 x9 Sound\\y.wav\n"
+            "loop bed 9 0 1 Sound\\y.wav\nspark 0.5 0 1 Sound\\s.wav\nstinger 0.6 0 Sound\\Spells\\Start.wav\n"
+            "stinger 0.900 0.970 Sound\\Spells\\Tranquility.wav\nstinger 1 0.5 Sound\\t3.wav\nstinger 1 0.6 Sound\\t4.wav\n";
         static SndSpec sp;
-        int ok = SndParse(&sp, tab, sizeof tab - 1) && sp.n == 4 && sp.sting && Near(sp.level, 0.8632, 1e-4) &&
-                 sp.l[0].kind == SND_BED && sp.l[1].kind == SND_SWELL && sp.l[3].kind == SND_MOTION && Near(sp.l[1].from, 0.15, 1e-6) &&
-                 Near(sp.l[2].to, 0.95, 1e-6) && !strcmp(sp.l[1].path, "Sound\\Doodad\\MoonWellLightLoop.wav") &&
-                 !strcmp(sp.stingPath, "Sound\\Spells\\Tranquility.wav") && Near(sp.stingAt, 0.97, 1e-6);
+        int ok = SndParse(&sp, tab, sizeof tab - 1) && sp.n == 4 && sp.stings == 3 && sp.sparks == 1 && Near(sp.level, 0.8632, 1e-4) &&
+                 Near(sp.sweep, 0.6, 1e-6) && sp.l[0].kind == SND_BED && sp.l[1].kind == SND_SWELL && sp.l[3].kind == SND_MOTION &&
+                 Near(sp.l[1].from, 0.15, 1e-6) && Near(sp.l[1].speed, 0.8, 1e-6) && Near(sp.l[2].speed, 1.25, 1e-6) &&
+                 Near(sp.l[0].speed, 1, 0) && Near(sp.l[2].to, 0.95, 1e-6) && !strcmp(sp.l[1].path, "Sound\\Doodad\\MoonWellLightLoop.wav") &&
+                 !strcmp(sp.sting[1].path, "Sound\\Spells\\Tranquility.wav") && Near(sp.sting[1].from, 0.97, 1e-6) &&
+                 sp.sting[0].from == 0 && !strcmp(sp.spark[0].path, "Sound\\s.wav");
         ok &= !SndParse(&sp, "loop bed 1 0 1 Sound\\a.wav\n", 27);                      /* no level: none */
-        Check(ok, "class sound: its table read (CRLF, comments; an unknown kind and a gain over 4 skipped); no level, no sound");
+        Check(ok, "recipe: its lines read (CRLF, comments, a speed; an unknown kind, a speed out of range, a gain over 4 and a fourth stinger skipped); no level, no sound");
 
-        static float one[100], sting[50];
+        static float one[100], sting[50], spk[20];
         for (int i = 0; i < 100; i++) one[i] = 1;
         for (int i = 0; i < 50; i++) sting[i] = 1;
+        for (int i = 0; i < 20; i++) spk[i] = 1;
         static SndSet st;
         memset(&st, 0, sizeof st);
         SndParse(&sp, tab, sizeof tab - 1);
+        sp.sweep = 0; sp.sparks = 0; sp.stings = 2;
+        sp.sting[0].from = 0.99f;                                                  /* (both stingers late, for the bed) */
         for (int i = 0; i < 4; i++) { st.loop[i] = one; st.len[i] = 100; }
-        st.n = 4; st.sting = sting; st.stingLen = 50;
+        st.n = 4; st.sting[0] = st.sting[1] = sting; st.stingLen[0] = st.stingLen[1] = 50;
+        SndReset(&st);
         FireMix mx;
         memset(&mx, 0, sizeof mx);
         FireSetRate(&mx, 1000);
@@ -335,19 +349,35 @@ static void FireTests(void)
         int centred = pcm[2 * 49] == pcm[2 * 49 + 1];
         for (int k = 0; k < 12; k++) SndRender(&mx, &st, &sp, 1, 0.1f, pcm, 400);   /* the glide settled: still again */
         float at10 = pcm[2 * 399] / 32767.0f;
-        /* at 0: the bed at 0.55 of 0.95, nothing else; at 0.1 (once still again): the bed a little up, the swells silent */
         float want0 = 0.95f * 0.55f * 0.8632f * 0.70710678f;
         float bed10 = 0.55f + 0.45f * SndSmooth(0, 1, 0.1f), want10 = 0.95f * bed10 * 0.8632f * 0.70710678f;
-        ok = centred && Near(at0, want0, 2e-4) && Near(at10, want10, 2e-3) && st.stingState == 0;
+        ok = centred && Near(at0, want0, 2e-4) && Near(at10, want10, 2e-3) && st.stingState[1] == 0;
         SndRender(&mx, &st, &sp, 1, 0.97f, pcm, 1);                                 /* the mark: the stinger starts */
-        int playing = st.stingState == 1;
+        int playing = st.stingState[1] == 1 && st.stingState[0] == 0;
         SndRender(&mx, &st, &sp, 1, 0.98f, pcm, 60);
-        int played = st.stingState == 2;
+        int played = st.stingState[1] == 2;
         SndRender(&mx, &st, &sp, 1, 0.99f, pcm, 60);
-        ok &= playing && played && st.stingState == 2;                              /* once */
+        ok &= playing && played && st.stingState[1] == 2 && st.stingState[0] >= 1;   /* each once, each at its own mark */
         SndReset(&st);
-        ok &= st.stingState == 0 && st.pos[0] == 0;
-        Check(ok, "class sound: the bed at 0.55 rising, the swells silent before their start, the stinger once at its mark, centred");
+        ok &= st.stingState[0] == 0 && st.stingState[1] == 0 && st.pos[0] == 0;
+        Check(ok, "recipe: the bed at 0.55 rising, the swells silent before their start, each stinger once at its own mark, centred");
+
+        sp.sting[0].from = 0;                                                      /* a stinger at 0: as the screen begins */
+        SndReset(&st);
+        mx.env = 0;
+        SndRender(&mx, &st, &sp, 1, 0.0f, pcm, 1);
+        int begun = st.stingState[0] == 1;
+        /* sparks: ten seconds at an empty bar, then ten at a full one */
+        sp.stings = 0; sp.sparks = 1; sp.spark[0].from = 0.2f; sp.spark[0].to = 0.8f;
+        st.spark[0] = spk; st.sparkLen[0] = 20;
+        SndReset(&st);
+        int slow = 0, fast = 0;
+        for (int k = 0; k < 10000; k++) { int was = st.sparkOn[0]; SndRender(&mx, &st, &sp, 1, 0.0f, pcm, 1); slow += !was && st.sparkOn[0]; }
+        for (int k = 0; k < 10000; k++) { int was = st.sparkOn[0]; SndRender(&mx, &st, &sp, 1, 1.0f, pcm, 1); fast += !was && st.sparkOn[0]; }
+        int closed = 0;
+        for (int k = 0; k < 3000; k++) { int was = st.sparkOn[0]; SndRender(&mx, &st, &sp, 0, 1.0f, pcm, 1); closed += !was && st.sparkOn[0]; }
+        Check(begun && slow >= 3 && slow <= 7 && fast >= 14 && fast <= 30 && closed == 0,
+              "recipe: a stinger at 0 plays as the screen begins; sparks every 2.4 s or so at an empty bar, every half second at a full one, none once it has gone");
     }
     Check(FireMakeLoop(src, 200, 1000, 1000, 0, loop) == 0, "loop: one too short to cross-fade is refused");
 
@@ -376,7 +406,7 @@ static void FireTests(void)
     Fresh("fire-on");
     Put(UW, "AAAA"); Put("WTF/Config.wtf", RES("5120x2160"));
     Start();
-    Check(shim_threads == 1 && LogSays("fire sound on") && On() && BarWide(), "the client's bytes all there: the fire's thread starts");
+    Check(shim_threads == 1 && LogSays("sound on:") && On() && BarWide(), "the client's bytes all there: the fire's thread starts");
     int silent = 1;
     for (int i = 0; i < FIRE_CODE_COUNT; i++) {
         Fresh("fire-other");
@@ -396,7 +426,8 @@ static void FireTests(void)
     memset(&g_fire, 0, sizeof g_fire);
     g_fire.base = shim_module;
     g_fire.channel = -1;
-    DcMix(&g_fire.mix, 8000, 0, 0.1f);
+    DcMix(&g_fire.mix, 8000, 0, 0.1f, 0);
+    g_sndSpec = g_dcSpec; g_snd = g_dcSet; g_sndNow = SOUND_HUM; g_sndRate = 8000; g_sndBad = 0;   /* the hum, made */
     g_fire.built = 1;
     shim_ticks = 1000;
     Client(0x1234, 0.1f, 0);
@@ -421,8 +452,8 @@ static void FireTests(void)
     signed char more = g_cb(&g_streamTag, buf, (int)sizeof buf, NULL);
     Check(more == 1 && buf[2 * FIRE_BLOCK_FRAMES - 2] != 0 && !g_fire.quiet, "FMOD asks for sound: it gets the fire, fading in");
     Client(0, 0.6f, 1); FireStep(shim_ticks += 20);
-    Check(g_fire.gate == 0 && g_fire.stream && !g_calls[0] && LogSays("the fire burned for") && LogSays("the bar reached 60%"),
-          "the screen goes: the fire fades out, and the log says how long it burned");
+    Check(g_fire.gate == 0 && g_fire.stream && !g_calls[0] && LogSays("its sound (hum) played for") && LogSays("the bar reached 60%"),
+          "the screen goes: the sound fades out, and the log says which played and for how long");
     for (int i = 0; i < 5; i++) g_cb(&g_streamTag, buf, (int)sizeof buf, NULL);
     FireStep(shim_ticks += 20);
     Check(!strcmp(g_calls, "unreserve stop close ") && !g_fire.stream && g_fire.quiet, "faded out: the stream closed, the channel given back");
@@ -455,14 +486,67 @@ static void FireTests(void)
     GameDir();                                              /* the log goes to this folder */
     FakeFmod();
     memset(&g_fire, 0, sizeof g_fire);
+    memset(&g_snd, 0, sizeof g_snd); g_sndNow = -1; g_sndBad = 0; g_sndCycle = 0;
     g_fire.base = shim_module;
     g_fire.channel = -1;
     Client(0x1234, 0.1f, 1);
     FireStep(shim_ticks += 20);
     Client(0x1234, 0.2f, 1);
     FireStep(shim_ticks += 20);
-    Check(!g_calls[0] && g_fire.built == -1 && LogSays("none of its 6 loops"),
-          "the client's fire sounds are not to be had: logged once, no FMOD call, the screens as ever");
+    Check(!g_calls[0] && g_fire.playing == -1 && LogSays("none of hum's loops") && g_sndBad == 1u << SOUND_HUM,
+          "the client's sounds are not to be had: logged once, no FMOD call, the screens as ever");
+    g_snd.n = 0; g_sndNow = -1; g_sndBad = 0;
+
+    /* the recipes he auditions (7 Oct): every one reads, with the client's own paths; sound.txt picks, and the cycles move
+     * on a screen at a time, kept across sessions */
+    int recipes = 1, named = 0;
+    for (int k = 0; k < SOUNDS; k++) {
+        if (!kSounds[k].text[0]) continue;
+        static SndSpec rs;
+        named++;
+        recipes &= SndParse(&rs, kSounds[k].text, (unsigned)strlen(kSounds[k].text)) && rs.n >= 2 && rs.level > 0;
+        for (int i = 0; i < rs.n; i++) recipes &= !strncmp(rs.l[i].path, "Sound\\", 6);
+        if (k >= SOUND_CLASS0) recipes &= !strcmp(kSounds[k].name, kClassName[k - SOUND_CLASS0]);
+    }
+    Check(recipes && named == 12, "the recipes: the hum, the Hearthstone, the portal and the nine classes', each two loops or more of the client's own");
+    Fresh("sound-pick");
+    GameDir();
+    g_sndCycle = 0;
+    const char *w;
+    int pk = SoundPick(9, 1, &w) == SOUND_HUM && !strcmp(w, "hum");                 /* no file: the hum */
+    Put("Data/CinderLoad/sound.txt", "portal\r\n");
+    pk &= SoundPick(9, 1, &w) == SOUND_PORTAL;
+    Put("Data/CinderLoad/sound.txt", "HEARTH  # the Hearthstone\n");
+    pk &= SoundPick(9, 1, &w) == SOUND_HEARTH && !strcmp(w, "hearth");
+    Put("Data/CinderLoad/sound.txt", "class");
+    pk &= SoundPick(9, 1, &w) == SOUND_CLASS0 + 9 && SoundPick(0, 1, &w) == SOUND_HUM;   /* a warlock's; no class: the hum */
+    Put("Data/CinderLoad/sound.txt", "warlock\n");
+    pk &= SoundPick(3, 1, &w) == SOUND_CLASS0 + 9 && !strcmp(w, "warlock");              /* that class's, whoever plays */
+    Put("Data/CinderLoad/sound.txt", "fire\n");
+    pk &= SoundPick(9, 1, &w) == SOUND_HUM && g_sndCycle == 0;                          /* a word it does not know */
+    Check(pk, "sound.txt: none, or a word it does not know, is the hum; portal, hearth (any case), class (the character's), or a class by name");
+    Put("Data/CinderLoad/sound.txt", "cycle\n");
+    int seq[6];
+    for (int i = 0; i < 6; i++) seq[i] = SoundPick(9, 1, &w);
+    int look = SoundPick(9, 0, &w), cyc = seq[0] == SOUND_HUM && seq[1] == SOUND_HEARTH && seq[2] == SOUND_PORTAL &&
+               seq[3] == SOUND_CLASS0 + 9 && seq[4] == SOUND_HUM && seq[5] == SOUND_HEARTH && look == SOUND_PORTAL &&
+               SoundPick(9, 0, &w) == SOUND_PORTAL && g_sndCycle == 6;
+    char ct[1024] = "";
+    FILE *cf = fopen((snprintf(ct, sizeof ct, "%sData/CinderLoad/sound-cycle.txt", shim_gamedir), ct), "rb");
+    int six = 0;
+    if (cf) { six = fgetc(cf) == '6'; fclose(cf); }
+    g_sndCycle = 0;
+    SoundCycleLoad();
+    cyc &= six && g_sndCycle == 6 && SoundPick(9, 1, &w) == SOUND_PORTAL;                 /* the next session goes on */
+    Check(cyc, "sound.txt cycle: hum, hearth, portal, the class's, round again, a screen at a time; looking ahead moves nothing; kept across sessions");
+    Put("Data/CinderLoad/sound.txt", "classes\n");
+    g_sndCycle = 0;
+    unsigned seen = 0;
+    for (int i = 0; i < 9; i++) seen |= 1u << (SoundPick(1, 1, &w) - SOUND_CLASS0);
+    Check(seen == (1u << 1 | 1u << 2 | 1u << 3 | 1u << 4 | 1u << 5 | 1u << 7 | 1u << 8 | 1u << 9 | 1u << 11) &&
+          SoundPick(1, 1, &w) == SOUND_CLASS0 + 1, "sound.txt classes: all nine classes' in nine screens, whoever plays, then round again");
+    remove(ct);
+    g_sndCycle = 0;
 }
 
 /* ---- the fire bar ---- */
@@ -606,7 +690,7 @@ static void FireBarTests(void)
           Same(shim_module + BAR_LOAD_RVA, kBarLoad, BAR_REL_AT) && shim_module[0x6896] == 0x89,
           "fire bar on: the rel32 at RVA 0x6891 is stub - (RVA 0x6891 + 5 + base), the E8 and every other byte kept");
     Check(g_barLoader == shim_module + 0x49D90, "the stub goes on to the game's loader, VA 0x449D90");
-    Check(On() && BarWide() && shim_threads == 1 && LogSays("fire sound on"), "the screens, the bar's size and the fire sound as ever");
+    Check(On() && BarWide() && shim_threads == 1 && LogSays("sound on:"), "the screens, the bar's size and the fire sound as ever");
     Check(LogSays("bars.txt names 4 screens, and a default for the rest, 0 lines skipped") &&
           LogSays("families in the pack: fel, aqua, arcane; named but not in it (their screens keep the pack's orange): orange"),
           "the log says what bars.txt named and which families the pack carries");
@@ -691,7 +775,7 @@ static void FireBarTests(void)
         int callKept = kBarCode[i].rva == BAR_LOAD_RVA ? Same(shim_module + BAR_LOAD_RVA, kBarLoad, (int)sizeof kBarLoad - 1)
                                                        : CallStock();
         stock &= callKept && !g_barsOn && LogSays(words) && LogSays(there) && On() && BarWide() && shim_threads == 1 &&
-                 LogSays("fire sound on");
+                 LogSays("sound on:");
         if (!(callKept && LogSays(words))) printf("  (place %d)\n", i);
     }
     Check(stock, "any one of the seven places changed: the call left alone, the log names it and its bytes; screens, bar, sound as ever");
@@ -1159,72 +1243,71 @@ static void FireRealClient(const char *client)
     Fresh("fire-real");
     GameDir();                                              /* the log goes to this folder */
     char from[1024], to[1024];
-    const char *arch[] = { "patch.MPQ", "sound.MPQ" };
-    for (int i = 0; i < 2; i++) {
-        snprintf(from, sizeof from, "%s/Data/%s", client, arch[i]);
-        snprintf(to, sizeof to, "%sData/%s", shim_gamedir, arch[i]);
-        if (symlink(from, to)) { printf("FAIL: could not link %s\n", from); fails++; return; }
+    DIR *dd = NULL;
+    snprintf(from, sizeof from, "%s/Data", client);
+    if (!(dd = opendir(from))) { printf("FAIL: could not read %s\n", from); fails++; return; }
+    for (struct dirent *de; (de = readdir(dd));) {          /* every archive, named as the DLL asks for it */
+        size_t nl = strlen(de->d_name);
+        if (nl < 5 || strcasecmp(de->d_name + nl - 4, ".mpq")) continue;
+        char name[256];
+        snprintf(name, sizeof name, "%.*s.MPQ", (int)(nl - 4), de->d_name);
+        if (!strncasecmp(name, "patch-", 6) && name[6]) name[6] = (char)toupper((unsigned char)name[6]);
+        snprintf(from, sizeof from, "%s/Data/%s", client, de->d_name);
+        snprintf(to, sizeof to, "%sData/%s", shim_gamedir, name);
+        if (symlink(from, to)) { printf("FAIL: could not link %s\n", from); fails++; closedir(dd); return; }
     }
-    memset(&g_fire, 0, sizeof g_fire);
-    int built = FireBuild(44100), all = 1;
-    for (int i = 0; i < FIRE_LOOPS; i++) all &= g_fire.mix.loop[i] != NULL;
-    Check(built && all && LogSays("6 of 6 loops"), "a real client: all six loops made from its own files");
-    if (!all) return;
-    FireReset(&g_fire.mix);
-    int total = (int)(12.5 * 44100), pollFrames = 882, done = 0;
+    closedir(dd);
+    /* every recipe, from this client's own files, over the timeline: all its sounds made, it builds, it never clips;
+     * each written out for listening (sound-<name>.wav), with its loudness to set the recipes' levels against */
     static short pcm[2 * 12 * 44100 + 2 * 44100];
-    short peak = 0;
-    for (int poll = 0; done < total; poll++) {
-        float t = poll * 0.02f, fill = 0;
-        for (int k = 0; k + 1 < 10; k++)
-            if (t >= keys[k][0] && t <= keys[k + 1][0]) fill = keys[k][1] + (keys[k + 1][1] - keys[k][1]) * (t - keys[k][0]) / (keys[k + 1][0] - keys[k][0]);
-        int n = total - done < pollFrames ? total - done : pollFrames;
-        FireRender(&g_fire.mix, t < 11.6f, fill, pcm + 2 * done, n);
-        done += n;
-    }
-    for (int i = 0; i < 2 * total; i++) if (abs(pcm[i]) > peak) peak = (short)abs(pcm[i]);
-    Check(peak > 8000 && peak < 32767, "a real client: the timeline is loud as the mock and never clips");
-    char path[1024];
-    snprintf(path, sizeof path, "%s/fire-timeline.wav", g_root);
     static unsigned char out[sizeof pcm + 64];
-    size_t len = Wav(out, 1, 2, 16, 44100, pcm, total);
-    FILE *f = fopen(path, "wb");
-    if (f) { fwrite(out, 1, len, f); fclose(f); printf("wrote %s (peak %d)\n", path, peak); }
-
-    /* the druid's own sound (his rule, 4 Oct), from the same client's files, over the same timeline: it builds */
-    static const char tab[] = "level 0.8632\nloop bed 0.950 0.000 1.000 Sound\\Ambience\\ZoneAmbience\\EnchangedForestDay.wav\n"
-        "loop swell 0.550 0.150 0.600 Sound\\Doodad\\MoonWellLightLoop.wav\nloop swell 0.700 0.450 0.950 Sound\\Creature\\Whisp\\WispLoop01.wav\n"
-        "loop motion 0.350 0.000 0.000 Sound\\Spells\\Missile\\NAtureMissileLoop.wav\nstinger 0.900 0.970 Sound\\Spells\\Tranquility.wav\n";
-    memset(g_sndHas, 0, sizeof g_sndHas);
-    g_sndHas[0] = SndParse(&g_sndSpec[0], tab, sizeof tab - 1);
-    SndBuildAll(44100);
-    int built4 = g_snd[0].n == 4 && g_snd[0].sting && LogSays("4 of 4 loops, and its stinger");
-    Check(built4, "a real client: the druid's four loops and its stinger made from its own files");
-    if (!built4) return;
-    FireReset(&g_fire.mix);
-    SndReset(&g_snd[0]);
-    done = 0;
-    for (int poll = 0; done < total; poll++) {
-        float t = poll * 0.02f, fill = 0;
-        for (int k = 0; k + 1 < 10; k++)
-            if (t >= keys[k][0] && t <= keys[k + 1][0]) fill = keys[k][1] + (keys[k + 1][1] - keys[k][1]) * (t - keys[k][0]) / (keys[k + 1][0] - keys[k][0]);
-        int n = total - done < pollFrames ? total - done : pollFrames;
-        SndRender(&g_fire.mix, &g_snd[0], &g_sndSpec[0], t < 11.6f, fill, pcm + 2 * done, n);
-        done += n;
+    int total = (int)(12.5 * 44100), pollFrames = 882, all = 1, builds = 1, clean = 1;
+    for (int k = 0; k < SOUNDS; k++) {
+        if (!kSounds[k].text[0]) continue;
+        memset(&g_fire, 0, sizeof g_fire);
+        g_sndBad = 0;
+        int made = SoundBuild(k, 44100), want = g_sndSpec.n, extra = g_sndSpec.sparks + g_sndSpec.stings, have = 0;
+        for (int i = 0; i < g_sndSpec.n; i++) have += g_snd.loop[i] != NULL;
+        for (int i = 0; i < g_sndSpec.sparks; i++) have += g_snd.spark[i] != NULL;
+        for (int i = 0; i < g_sndSpec.stings; i++) have += g_snd.sting[i] != NULL;
+        if (!made || have != want + extra) { printf("FAIL: recipe %s: %d of %d sounds made\n", kSounds[k].name, have, want + extra); all = 0; continue; }
+        FireReset(&g_fire.mix);
+        SndReset(&g_snd);
+        int done = 0;
+        for (int poll = 0; done < total; poll++) {
+            float t = poll * 0.02f, fill = 0;
+            for (int q = 0; q + 1 < 10; q++)
+                if (t >= keys[q][0] && t <= keys[q + 1][0]) fill = keys[q][1] + (keys[q + 1][1] - keys[q][1]) * (t - keys[q][0]) / (keys[q + 1][0] - keys[q][0]);
+            int n = total - done < pollFrames ? total - done : pollFrames;
+            SndRender(&g_fire.mix, &g_snd, &g_sndSpec, t < 11.6f, fill, pcm + 2 * done, n);
+            done += n;
+        }
+        double early = 0, late = 0;
+        int peak = 0;
+        for (int i = 1 * 44100; i < 3 * 44100; i++) early += (double)pcm[2 * i] * pcm[2 * i] + (double)pcm[2 * i + 1] * pcm[2 * i + 1];
+        for (int i = 8 * 44100; i < 11 * 44100; i++) late += (double)pcm[2 * i] * pcm[2 * i] + (double)pcm[2 * i + 1] * pcm[2 * i + 1];
+        for (int i = 0; i < 2 * total; i++) if (abs(pcm[i]) > peak) peak = abs(pcm[i]);
+        double rmsLate = sqrt(late / (2.0 * 3 * 44100)) / 32767;
+        builds &= late / 3 > early / 2;                                  /* its last stretch louder than its start */
+        clean &= peak < 32767;
+        printf("sound %-8s rms(8-11 s) %.3f, peak %.3f, last stretch %.1f times the start in power\n", kSounds[k].name, rmsLate,
+               peak / 32767.0, early > 0 ? (late / 3) / (early / 2) : 0);
+        char path[1024];
+        snprintf(path, sizeof path, "%s/sound-%s.wav", g_root, kSounds[k].name);
+        size_t len = Wav(out, 1, 2, 16, 44100, pcm, total);
+        FILE *f = fopen(path, "wb");
+        if (f) { fwrite(out, 1, len, f); fclose(f); }
     }
-    double early = 0, late = 0;
-    int centred = 1;
-    peak = 0;
-    for (int i = 1 * 44100; i < 3 * 44100; i++) early += (double)pcm[2 * i] * pcm[2 * i];
-    for (int i = 9 * 44100; i < 11 * 44100; i++) late += (double)pcm[2 * i] * pcm[2 * i];
-    for (int i = 0; i < total; i++) { centred &= pcm[2 * i] == pcm[2 * i + 1]; if (abs(pcm[2 * i]) > peak) peak = (short)abs(pcm[2 * i]); }
-    Check(late > early * 20 && centred && peak < 32767 && g_snd[0].stingState >= 1,
-          "a real client: the druid's sound builds (its last seconds far louder than its first), centred, never clips, Tranquility begun");
-    printf("druid: seconds 9-11 are %.1f times seconds 1-3 in power\n", early > 0 ? late / early : 0);
-    snprintf(path, sizeof path, "%s/druid-timeline.wav", g_root);
-    len = Wav(out, 1, 2, 16, 44100, pcm, total);
-    f = fopen(path, "wb");
-    if (f) { fwrite(out, 1, len, f); fclose(f); printf("wrote %s (peak %d)\n", path, peak); }
+    const char *why;
+    unsigned at1 = 0, at08 = 0;
+    float *s1 = SndLoad("Sound\\Spells\\PreCastNatureMagicHigh.wav", 44100, 1, 0, &at1, &why);
+    float *s08 = SndLoad("Sound\\Spells\\PreCastNatureMagicHigh.wav", 44100, 0.8f, 0, &at08, &why);
+    Check(s1 && s08 && Near((double)at08 / at1, 1.25, 0.001), "a real client: a sound at x0.8 lasts a quarter longer (the Hearthstone's whir, stretched)");
+    if (s1) HeapFree(GetProcessHeap(), 0, s1);
+    if (s08) HeapFree(GetProcessHeap(), 0, s08);
+    SoundFree();
+    Check(all, "a real client: every recipe's every sound made from its own files");
+    Check(builds && clean, "a real client: every recipe builds as the bar fills (its last stretch louder than its start) and never clips");
 }
 
 /* ---- tonight's three: the fire revealed with a soft, live front, and the continents' wallpapers ---- */
@@ -2880,28 +2963,30 @@ static void ViewTests(void)
         ViewBuild(1000, 500, 0.25f, 1234);
         ok = g_vbN == 5 && g_vb[1].tex == -1 && g_vb[1].add && g_vb[2].tex == -1 && !g_vb[2].add && g_vb[3].tex == -1 &&
              g_vb[3].add && g_vb[4].tex == VT_SPARK && g_vb[4].add && g_vb[4].count == 4 * (2 + SABER_SPARKS);
-        int cols = g_vb[2].count / 4 - 1;
-        ok &= cols > 30 && g_vb[1].count == 16 * cols && g_vb[3].count == 8 * cols;
-        const ViewVert *tr = g_vv + g_vb[2].first, *co = tr + 4, *last = co + 4 * (cols - 1);
+        int cols = (g_vb[2].count / 4 - 1) / 2;                          /* the way to go, then two quads a column */
+        ok &= cols > 30 && g_vb[2].count == 4 * (1 + 2 * cols) && g_vb[1].count == 16 * cols && g_vb[3].count == 8 * cols;
+        const ViewVert *tr = g_vv + g_vb[2].first, *co = tr + 4, *last = co + 8 * (cols - 1);
         ok &= tr[0].x == 250 && tr[1].x == 1000 && fabsf((tr[0].y + tr[3].y) / 2 - cy) < 1e-3f;      /* the way to go */
         ok &= co[0].x == 0 && last[1].x == 250 && last[2].x == 250;                                  /* edge to the tip */
+#define NEAR(c, r, g, b) (abs((c)[0] - (r)) <= 1 && abs((c)[1] - (g)) <= 1 && abs((c)[2] - (b)) <= 1)
         int body = 1, lit = 1;
         for (int k = 0; k < cols; k++) {
-            const ViewVert *q = co + 4 * k;
-            body &= q[3].x == q[0].x && q[2].x == q[1].x && q[1].x > q[0].x;                    /* round it, left to right */
+            const ViewVert *q = co + 8 * k, *lo = q + 4;                  /* its top half and its bottom half */
+            body &= q[3].x == q[0].x && q[2].x == q[1].x && q[1].x > q[0].x && lo[0].x == q[0].x && lo[1].x == q[1].x;
+            body &= q[2].y == cy && q[3].y == cy && lo[0].y == cy && lo[1].y == cy;                /* meeting on the line */
             if (q[1].x <= 250 - hc * 2.5f)
-                body &= q[0].y < cy - 0.6f * hc && q[0].y > cy - 1.3f * hc && q[3].y > cy + 0.6f * hc && q[3].y < cy + 1.3f * hc;
-            body &= q[0].c[0] == 18 && q[0].c[1] == 16 && q[0].c[2] == 24 && q[0].c[3] == 240;       /* the warlock's, dark */
-            if (k + 1 < cols) body &= co[4 * (k + 1)].x == q[1].x;                                   /* unbroken */
+                body &= q[0].y < cy - 0.6f * hc && q[0].y > cy - 1.3f * hc && lo[3].y > cy + 0.6f * hc && lo[3].y < cy + 1.3f * hc;
+            body &= NEAR(q[0].c, 132, 91, 255) && q[0].c[3] == 245 && NEAR(lo[3].c, 132, 91, 255) &&   /* solid: the */
+                    NEAR(q[3].c, 187, 165, 255) && q[3].c[3] == 245 && NEAR(lo[0].c, 187, 165, 255);  /* class's light */
+            if (k + 1 < cols) body &= co[8 * (k + 1)].x == q[1].x;                                   /* unbroken */
         }
         const ViewVert *gl0 = g_vv + g_vb[1].first, *hot = g_vv + g_vb[3].first, *tip = g_vv + g_vb[4].first;
-#define NEAR(c, r, g, b) (abs((c)[0] - (r)) <= 1 && abs((c)[1] - (g)) <= 1 && abs((c)[2] - (b)) <= 1)
         lit &= NEAR(gl0[0].c, 132, 91, 255) && gl0[0].c[3] == 0 && gl0[3].c[3] > 100 &&      /* a richer purple than */
                gl0[0].y < gl0[3].y && fabsf(gl0[3].y - co[0].y) < 1e-3f;                     /* Blizzard's pale one */
         lit &= NEAR(hot[0].c, 181, 157, 255);                                                   /* the edge, paler */
         lit &= fabsf((tip[0].x + tip[1].x) / 2 - 250) < 1e-3f && fabsf((tip[0].y + tip[2].y) / 2 - cy) < 1e-3f;
-        Check(ok && body, "the blade, a quarter loaded: its glow added, the way to go a dark line from the tip to the far edge, the dark core from the screen's left edge to the tip in columns that join, on its centre line");
-        Check(lit, "the blade's colour: a warlock's purple glow, richer than Blizzard's pale text colour, fading out from the core, the core that purple almost black, a paler edge, the tip flaring at the bar as shown");
+        Check(ok && body, "the blade, a quarter loaded: its glow added, the way to go a dark line from the tip to the far edge, the core SOLID in the class's light (his call, 7 Oct), paler along its centre line, from the screen's left edge to the tip in columns that join");
+        Check(lit, "the blade's colour: a warlock's purple glow, richer than Blizzard's pale text colour, fading out from the core, a paler edge, the tip flaring at the bar as shown");
         Check(SaberVivid(0xFFFFFF) == 0xFFFFFF && SaberVivid(0x0070DE) == 0x0081FF && SaberVivid(0xFF7D0A) == 0xFF7B06,
               "a class's light keeps its hue: a priest's stays white, a shaman's blue and a druid's orange only brighten");
         /* the same blade for every class, only its colour: a hunter's at the same moment */
@@ -2919,18 +3004,21 @@ static void ViewTests(void)
         static float reach[VIEW_QUADS_MAX];
         for (int q = 0; q < g_vb[1].count / 4; q++) reach[q] = pos[2 * (g_vb[1].first + 4 * q) + 1] - pos[2 * (g_vb[1].first + 4 * q + 3) + 1];
         ViewBuild(1000, 500, 0.25f, 1234 + 16);
-        int edge = 0, glow = 0, steady = g_vb[2].count / 4 - 1 == cols;
-        for (int k = 1; k <= cols; k++) edge += fabsf(g_vv[g_vb[2].first + 4 * k].y - pos[2 * (g_vb[2].first + 4 * k) + 1]) > 0.05f;
+        int edge = 0, glow = 0, steady = (g_vb[2].count / 4 - 1) / 2 == cols;
+        for (int k = 0; k < cols; k++) {
+            int at = g_vb[2].first + 4 + 8 * k;                          /* each column's top edge */
+            edge += fabsf(g_vv[at].y - pos[2 * at + 1]) > 0.05f;
+        }
         for (int q = 0; q < g_vb[1].count / 4; q++)
             glow += fabsf(g_vv[g_vb[1].first + 4 * q].y - g_vv[g_vb[1].first + 4 * q + 3].y - reach[q]) > 0.01f;
-        steady &= g_vv[g_vb[2].first + 4].x == 0 && g_vv[g_vb[2].first + 4 * cols + 1].x == 250;
+        steady &= g_vv[g_vb[2].first + 4].x == 0 && g_vv[g_vb[2].first + 4 + 8 * (cols - 1) + 1].x == 250;
         Check(edge > cols / 4 && glow > g_vb[1].count / 8 && steady, "the blade is unstable: its core's edge never sits still and its glow's reach flickers from one frame to the next, its body still reaching from the edge to the tip");
         /* full: edge to edge, no way to go, no tip */
         ViewBuild(1000, 500, 1.0f, 2000);
-        cols = g_vb[2].count / 4;
-        ok = g_vbN == 4 && g_vv[g_vb[2].first].x == 0 && g_vv[g_vb[2].first + 4 * (cols - 1) + 1].x == 1000 &&
-             g_vv[g_vb[2].first].c[3] == 240 && cols == 1000 / SABER_COL_PX;
-        Check(ok, "the blade full: the dark core edge to edge, nothing still to go, no tip");
+        cols = g_vb[2].count / 8;
+        ok = g_vbN == 4 && g_vb[2].count == 8 * cols && g_vv[g_vb[2].first].x == 0 &&
+             g_vv[g_vb[2].first + 8 * (cols - 1) + 1].x == 1000 && g_vv[g_vb[2].first].c[3] == 245 && cols == 1000 / SABER_COL_PX;
+        Check(ok, "the blade full: the core edge to edge, nothing still to go, no tip");
         /* the logo on it at the centre, its halfway mark: over the tip, grey before the tip reaches it, lit after */
         g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2; g_logo.tu0 = 0.1f; g_logo.tv0 = 0.2f; g_logo.tu1 = 0.9f; g_logo.tv1 = 0.8f;
         g_viewTex[VT_LOGO] = 1;
