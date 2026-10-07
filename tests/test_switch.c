@@ -64,7 +64,7 @@ static void Fresh(const char *name)
     for (int i = 0; i < CLASS_CODE; i++) memcpy(shim_module + kClassCode[i].rva, kClassCode[i].bytes, (size_t)kClassCode[i].n);
     for (int i = 0; i < MARKS_SPRITES; i++) g_mark[i].ok = 0;
     g_driftOn = 0; g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_mapShown = 0; g_map.ok = 0; g_driftNew = 1; g_destOk = 0;
-    g_dispNew = 1; g_dispAt = 0; g_gameAt = 0; g_fillFull = 0; g_fillShown = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
+    g_dispNew = 1; g_dispAt = 0; g_gameAt = 0; g_fillFull = 0; g_screenWatch = 0; g_zoomScreens = 0; g_zoomHalf = 0; g_destEndOk = 0;
     for (int k = 0; k < 2; k++) g_lnMs[k] = g_lnFreeze[k] = g_lnN[k] = 0;
     g_fullMs = 0; g_endFreezeMs = 0; g_screenLogin = 0; g_screenMap = 0; g_zoomStart = 0; g_holdOn = 0; g_holdMs = HOLD_MS; g_timed = 0; g_blurOn = 0; g_blurUsed = 0; g_blurFrom = g_blurTo = 0; g_dissolveAt = 0;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);  /* 0,1 1,1 0,0 1,0, as at start */
@@ -857,9 +857,8 @@ static void FireBarTests(void)
               "a bars.txt with no class lines: nothing said about classes, the pictures' fires as before");
     }
 
-    /* the garland (his druid bar, 4 Oct): "style <family> garland" in bars.txt; with its backing in the pack, the class
-     * that takes that family gets the tall bar (the banner's mirror), its fill laid once and never cooling, the
-     * backing and the wisps; any other class the log's size again */
+    /* a pack made for the garland (retired 7 Oct 2026): its "style <family> garland" lines are skipped like any other
+     * line that is not two words, and the druid's family burns as any fire does, at the log's size */
     {
         static const char bars[] = "default fel\nclassdruid druid\nclasshunter fel\nstyle druid garland\nstyle fel bonfire\n";
         static const char wt[] = "# wisps\ns 0 0 0 160 160\ns 1 162 0 418 96\ns 4 164 162 260 356\ns 5 262 162 298 198\n"
@@ -881,116 +880,23 @@ static void FireBarTests(void)
             if (!strcmp(g_bars.family[f].name, "druid")) fd = f;
             if (!strcmp(g_bars.family[f].name, "fel")) ff = f;
         }
-        int gl = fd >= 0 && ff >= 0 && g_bars.family[fd].garland && !g_bars.family[ff].garland && g_barSizeOurs &&
-                 g_bars.skipped == 1 && LogSays("fire bar: druid grows as a garland") && LogSays("(its backing in the pack; 6 wisp sprites; 4 kinds of flower opening in 8 frames)");
-        Check(gl, "garland: bars.txt's style line read (a style other than garland skipped), its backing found, its wisps' table read (bad lines left out)");
-
+        int gl = fd >= 0 && ff >= 0 && g_bars.family[fd].ok && g_bars.family[ff].ok && g_bars.skipped == 2 &&
+                 LogSays("2 lines skipped") && !LogSays("garland");
         unsigned char *fill = shim_module + BAR_FILL_RVA, *border = shim_module + BAR_BORDER_RVA;
         Poke(CHAR_COUNT_VA, 2); Poke(CHAR_LIST_VA, 0x8A0000); Poke(CHAR_PICKED_VA, 0);
         shim_module[0x8A0000 - 0x400000 + 0 * 0x120 + 0x101] = 11;       /* a druid, a hunter */
         shim_module[0x8A0000 - 0x400000 + 1 * 0x120 + 0x101] = 3;
-        const char *p = ForMap(36);
-        gl = !strcmp(p, TEX "Loading-BarFill-druid") && g_barGarland == fd + 1 && Same(fill, kBarTall, 16) && Same(border, kBarTall, 16);
-        /* its fill: laid once across the bar (u = how far along), full brightness behind the soft front */
-        float vf[12] = { 0, 0, 0, 0.5f, 0, 0, 0, 0.18f, 0, 0.5f, 0.18f, 0 };   /* the game's front at its 50% */
-        { float h = 0.5f; unsigned u; memcpy(&u, &h, 4); Poke(0x882BE4, u); }
-        g_dispNew = 1;
-        for (int i = 0; i < 40; i++) { shim_ticks += 20; RevealFill(vf); }
-        int flat = g_fillCount >= 4;
-        for (int k = 0; k + 1 < g_fillCount / 2; k++) {
-            float x = g_fillVerts[6 * k];
-            flat &= fabsf(g_fillUV[4 * k] - x) < 1e-4f && (g_fillColor[2 * k] & 0xFFFFFFu) == 0xFFFFFFu;
-        }
-        gl &= flat;
-        Poke(CHAR_PICKED_VA, 1);                                           /* the hunter: fel, a fire, the log's size */
-        p = ForMap(36);
-        gl &= !strcmp(p, TEX "Loading-BarFill-fel") && g_barGarland == 0 && Same(fill, kBorderWide, 16) && Same(border, kBorderWide, 16);
-        Check(gl, "garland: the druid's bar tall (the banner's mirror), its fill laid once and never cooling; the hunter's fire the log's size again");
+        gl &= !strcmp(ForMap(36), TEX "Loading-BarFill-druid") && Same(fill, kBorderWide, 16) && Same(border, kBorderWide, 16);
+        Poke(CHAR_PICKED_VA, 1);                                           /* the hunter: fel, the log's size */
+        gl &= !strcmp(ForMap(36), TEX "Loading-BarFill-fel") && Same(fill, kBorderWide, 16) && Same(border, kBorderWide, 16);
+        Check(gl, "a pack made for the garland: its style lines skipped, the druid's bar its family's fire at the log's size, as the hunter's");
 
-        /* the arch's curve: full height at the edges, a third of it at the centre, the banner's own */
-        int cv = fabsf(GarlandThick(0) - ARCH_H) < 1e-3f && fabsf(GarlandThick(1) - ARCH_H) < 1e-3f &&
-                 fabsf(GarlandThick(0.5f) - ARCH_H / 3) < 1e-3f && GarlandThick(0.25f) > GarlandThick(0.4f);
-        /* the wisps: spawned from just behind the moving front, inside the arch; the front's own wisp, trail and aura */
-        g_scrW = 5120; g_scrH = 2160;
-        memset(g_wisp, 0, sizeof g_wisp); g_wispFront = -1; g_wispCredit = 0;
-        float fr = 0.3f;
-        for (int i = 0; i < 30; i++) { fr += 0.004f; WispsBuild(fd, fr, i * 0.033f, 0.033f); }
-        int live = 0, inside = 1;
-        for (int i = 0; i < WISP_MAX; i++) if (g_wisp[i].live) {
-            live++;
-            inside &= g_wisp[i].x <= fr + 1e-4f && g_wisp[i].x >= 0 && g_wisp[i].y >= 0 && g_wisp[i].y <= GarlandThick(g_wisp[i].x) + 0.06f;
-        }
-        cv &= live >= 8 && inside && g_wsQuads <= live + 3 + WISP_ZIPS * WISP_ZIP_TAIL && g_wsQuads >= 3 + WISP_ZIPS * WISP_ZIP_TAIL;   /* a twinkle at its dimmest draws nothing */
-        /* the zipping ones stay near the front and inside the arch */
-        for (int q = live; q < g_wsQuads; q++) {
-            int c0 = q ? q * 6 : 0;
-            float zx = (g_wsPos[c0 * 3] + g_wsPos[(c0 + 1) * 3]) / 2, zy = (g_wsPos[c0 * 3 + 1] + g_wsPos[(c0 + 2) * 3 + 1]) / 2;
-            cv &= fabsf(zx - fr) < 0.05f && zy > -0.02f && zy < GarlandThick(fr) + 0.04f;
-        }
-        WispsBuild(fd, 1.0f, 2.0f, 0.033f);                                 /* the bar full: no front's own three */
-        int after = 0;
-        for (int i = 0; i < WISP_MAX; i++) after += g_wisp[i].live;
-        cv &= g_wsQuads <= after;
-        /* his ask: sparkles keep coming across the whole grown bar, full or not */
-        memset(g_wisp, 0, sizeof g_wisp);
-        for (int i = 0; i < 60; i++) WispsBuild(fd, 1.0f, 3.0f + i * 0.033f, 0.033f);
-        int left = 0, right = 0;
-        for (int i = 0; i < WISP_MAX; i++) if (g_wisp[i].live) { if (g_wisp[i].x < 0.5f) left++; else right++; }
-        cv &= left >= 3 && right >= 3;
-        Check(cv, "garland: the arch the banner's curve; wisps rising from just behind the front, inside it, the front's own three on top; none new once full");
-        /* the blooms (his v2 note): the same places every screen, inside the arch; each opens once the front reaches it,
-         * bud to full bloom over BLOOM_OPEN_S, growing as it opens; one the front leapt past is open at once; a new
-         * screen closes them all; a sheet that does not fit makes none */
-        {
-            BloomsBuild(fd, 0.0f, 100000, 1);
-            int bm = g_bmQuads == 0 && g_bloomTab[fd].cell == 128 && g_bloomTab[fd].types == 4 && g_bloomTab[fd].frames == 8;
-            int in = 1, kinds[4] = { 0 };
-            for (int i = 0; i < BLOOM_MAX; i++) {
-                in &= g_bloom[i].y > 0 && g_bloom[i].y < GarlandThick(g_bloom[i].x) && g_bloom[i].x > 0 && g_bloom[i].x < 1;
-                float th = GarlandThick(g_bloom[i].x);                  /* his v5 note: 10-15% lower than v4's places */
-                in &= g_bloom[i].y <= th * 0.8f - 0.10f * (th + 85.0f / 2160.0f) + 1e-6f && g_bloom[i].y >= th * 0.1f - 1e-6f;
-                if (g_bloom[i].type >= 0 && g_bloom[i].type < 4) kinds[g_bloom[i].type]++;
-            }
-            bm &= in && kinds[0] > kinds[1] && kinds[1] && kinds[2] && kinds[3];          /* orange most, every kind used */
-            BloomsBuild(fd, 0.30f, 100000, 1);                                            /* the front at 30%: a leap */
-            int open = 0;
-            for (int i = 0; i < BLOOM_MAX; i++) open += g_bloom[i].on;
-            bm &= open > 10 && open < 25;
-            for (int i = 0; i < BLOOM_MAX; i++) bm &= g_bloom[i].on == (g_bloom[i].x <= 0.30f);
-            for (int i = 0; i < BLOOM_MAX; i++)                                          /* far behind: open already */
-                if (g_bloom[i].on) bm &= g_bloom[i].x < 0.05f ? g_bloom[i].t0 == 100000 - 1000
-                                                              : (g_bloom[i].x > 0.29f ? g_bloom[i].t0 > 100000 - 100 : 1);
-            BloomsBuild(fd, 0.32f, 100050, 1);                                            /* just reached: a bud, small */
-            int j = -1;
-            for (int i = 0; i < BLOOM_MAX && j < 0; i++) if (g_bloom[i].x > 0.30f && g_bloom[i].x <= 0.32f) j = i;
-            if (j >= 0) {
-                BloomsBuild(fd, 0.32f, g_bloom[j].t0, 1);
-                int q = 0;
-                for (int i = 0; i < j; i++) q += g_bloom[i].on;                           /* bloom j's quad */
-                float u0 = g_bmUV[(q ? q * 6 - 2 + 2 : 0) * 2];
-                float h0 = g_bmPos[((q ? q * 6 : 0) + 2) * 3 + 1] - g_bmPos[(q ? q * 6 : 0) * 3 + 1];
-                BloomsBuild(fd, 0.32f, g_bloom[j].t0 + 1000, 1);                          /* a second on: fully open */
-                float u1 = g_bmUV[(q ? q * 6 - 2 + 2 : 0) * 2];
-                float h1 = g_bmPos[((q ? q * 6 : 0) + 2) * 3 + 1] - g_bmPos[(q ? q * 6 : 0) * 3 + 1];
-                bm &= u0 == 0 && fabsf(u1 - 7 * 128 / 1024.0f) < 1e-6f && h1 > h0 * 1.7f;
-            } else bm = 0;
-            BloomsBuild(fd, 0.0f, 101000, 2);                                              /* a new screen */
-            int still = 0;
-            for (int i = 0; i < BLOOM_MAX; i++) still += g_bloom[i].on;
-            bm &= still == 0;
-            BloomsParse(fd, "cell 256\ntypes 5\nframes 8\n", 26);                         /* 5 x 256 > 1024: none */
-            bm &= g_bloomTab[fd].types == 0;
-            Check(bm, "garland: blooms inside the arch, mostly orange; open once the front reaches them, bud to bloom and growing; a leap opens them at once; a new screen closes them; a sheet too big none");
-        }
         /* his teleports (5 Oct, Moonglade and the hearth back): a later load the game fills in a third of a second, its
-         * bar then on the plan's 4.2 s, and the flowers were already open across the bottom while the leaves still grew
-         * in. They open as the fill's front reaches them, left to right, on the game's frame (RevealFill keeps the bar
-         * as shown for OverlayAfterFill) and on the view's alike, and the wisps ride that front */
+         * bar then on the plan's 4.2 s. The fill's front is the bar as shown on the game's frame (RevealFill), and on the
+         * view's the blade's tip rides it */
         {
-            BloomsParse(fd, "cell 128\ntypes 4\nframes 8\n", 26);
             Poke(CHAR_PICKED_VA, 0);                                        /* the druid again */
             ForMap(36);
-            int lt = g_barGarland == fd + 1 && g_bloomTab[fd].types == 4;
             g_mapShown = 1;
             { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
             g_map.ok = 1;
@@ -1009,16 +915,14 @@ static void FireBarTests(void)
                 vg[3] = vg[9] = h;
                 shim_ticks += 20; RevealFill(vg);
             }
-            lt &= g_disp == 1.0f && g_fillShown > 0.15f && g_fillShown < 0.35f &&      /* the game's full, the bar as shown not */
-                  fabsf(g_fillVerts[6 * (g_fillCount / 2 - 1)] - g_fillShown) < 1e-4f;  /* the fill's own front */
-            /* the view's frames (7 ms), the next teleport: the garland is retired there (his call, 6 Oct 2026: one bar for
-             * every class), so the view grows no flowers and draws the blade, its tip at the bar as shown */
+            float front = g_fillVerts[6 * (g_fillCount / 2 - 1)];          /* the fill's own front */
+            int lt = g_disp == 1.0f && front > 0.15f && front < 0.35f;      /* the game's full, the bar as shown not */
+            /* the view's frames (7 ms), the next teleport: one bar for every class (his call, 6 Oct 2026), the blade, its
+             * tip at the bar as shown */
             InitializeCriticalSection(&g_stepLock);
             g_viewOn = 1; g_ovOn = 1;
             for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
             g_viewTex[VT_SPARK] = 1;
-            int openBefore = 0;
-            for (int i = 0; i < BLOOM_MAX; i++) openBefore += g_bloom[i].on;
             DriftScreenGone();
             { float h = 0; unsigned u; memcpy(&u, &h, 4); Poke(0x882BE4, u); }
             DWORD t = shim_ticks + 3000;
@@ -1027,16 +931,15 @@ static void FireBarTests(void)
                 t += 7;
                 ViewStep(k * 7 < 300 ? k * 7 / 300.0f : 1.0f, t, 5120, 2160);
             }
-            int openAfter = 0, foreign = 0, tipAt = -1;
-            for (int i = 0; i < BLOOM_MAX; i++) openAfter += g_bloom[i].on;
+            int foreign = 0, tipAt = -1;
             for (int i = 1; i < g_vbN; i++) foreign += g_vb[i].tex != -1 && g_vb[i].tex != VT_SPARK;
             for (int i = 1; i < g_vbN; i++) if (g_vb[i].tex == VT_SPARK && g_vb[i].add && tipAt < 0) tipAt = g_vb[i].first;
-            lt &= g_viewSteps == 1 && g_disp == 1.0f && g_viewShown > 0.15f && g_viewShown < 0.35f && openAfter == openBefore &&
-                  foreign == 0 && tipAt >= 0 && fabsf((g_vv[tipAt].x + g_vv[tipAt + 1].x) / 2 - g_viewShown * 5120) < 0.5f;
+            lt &= g_viewSteps == 1 && g_disp == 1.0f && g_viewShown > 0.15f && g_viewShown < 0.35f && foreign == 0 && tipAt >= 0 &&
+                  fabsf((g_vv[tipAt].x + g_vv[tipAt + 1].x) / 2 - g_viewShown * 5120) < 0.5f;
             g_viewOn = 0; g_viewSteps = 0; g_ovOn = 0; g_mapShown = 0; g_map.ok = 0; g_driftOn = 0; g_screenWatch = 0;
             g_zoomScreens = 0; g_destEndOk = 0; g_holdMs = HOLD_MS; g_lnN[1] = 0;
             for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
-            Check(lt, "garland, his teleports: a later load the game fills in 0.3 s, its bar on the plan's 4.2 s: the game's frame opens the flowers only as its fill's front reaches them; the view (the garland retired there, 6 Oct) opens none and draws the blade, its tip at the bar as shown");
+            Check(lt, "his teleports: a later load the game fills in 0.3 s, its bar on the plan's 4.2 s: the game's frame draws its fill's front at the bar as shown; the view draws the blade alone, its tip at the bar as shown");
         }
     }
 
@@ -1404,7 +1307,6 @@ static void PackLive(int reveal, int walls)
         names[n] = "CinderLoad\\map.txt"; data[n++] = mapTxt;
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderMap.blp"; data[n++] = "BLP2map";
     }
-    if (reveal & 8192) { names[n] = "Interface\\Glues\\LoadingScreens\\CinderArch-druid.blp"; data[n++] = "BLP2arch"; }
     if (walls) {
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall01.blp"; data[n++] = "BLP2wall1";
         names[n] = "Interface\\Glues\\LoadingScreens\\CinderWall02.blp"; data[n++] = "BLP2wall2";
@@ -1713,25 +1615,6 @@ static void LiveTests(void)
         rd &= g_map.ents == MAP_ENTS;
         Check(rd, "map.txt's entrances: an id over 1, continent 0 or 1, a place inside the world, a later line winning, no more than MAP_ENTS");
         g_map.ok = 0; g_map.ents = 0;
-    }
-
-    /* the class banner (his design, 4 Oct): one per class the pack carries, the full width, ARCH_H tall at the top */
-    {
-        Fresh("banner");
-        PackLive(1 | 4 | 8 | 4096 | 8192, 0);
-        Start();
-        char path[80];
-        int bn = g_archOn && g_archHas[11] && !g_archHas[3] && !g_archHas[2] && LogSays("banner: the class banners in the pack: druid") &&
-                 ArchPath(11, path) && !strcmp(path, "Interface\\Glues\\LoadingScreens\\CinderArch-druid") && !ArchPath(6, path) &&
-                 !ArchPath(0, path) && !ArchPath(12, path);
-        ArchBuild();
-        bn &= g_archPos[0] == 0 && g_archPos[1] == 1 - ARCH_H && g_archPos[3] == 1 && g_archPos[3 * 3 + 1] == 1 &&
-              fabsf(g_archUV[1] - 311.0f / 512.0f) < 1e-6f && g_archUV[3 * 2 + 1] == 0 && g_archCol[0] == 0xFFFFFFFFu;
-        Check(bn, "the class banner: found per class in the pack (druid here), its path, one quad the full width and ARCH_H tall at the top");
-        Fresh("banner-none");
-        PackLive(1 | 4 | 8 | 4096, 0);
-        Start();
-        Check(!g_archOn && !LogSays("banner:"), "no banner in the pack: none drawn, nothing said");
     }
 
     /* the wallpapers */
@@ -3268,8 +3151,8 @@ static void ViewTests(void)
         ViewBuild(1000, 500, 0.5f, 100000);
         int order[VIEW_BATCHES], n = 0, logo = -1;
         for (int i = 0; i < g_vbN; i++) { order[n++] = g_vb[i].tex; if (g_vb[i].tex == VT_LOGO) logo = i; }
-        /* the map, the overlay's layers, then the blade (its glow, its core, its edge) and the logo on it, last: no class
-         * banner across the top and no black band along the bottom (his call, 6 Oct 2026: the map gets the screen) */
+        /* the map, the overlay's layers, then the blade (its channel, glow, core, edge and steel) and the logo on it, last:
+         * nothing across the top and no black band along the bottom (his call, 6 Oct 2026: the map gets the screen) */
         ok &= n >= 8 && order[0] == VT_MAP && order[1] == VT_MARKS && logo == n - 1;
         for (int i = n - 6; i <= n - 2; i++) ok &= order[i] == -1 && g_vb[i].add == ((n - 1 - i) % 2 == 0);   /* channel, glow, */
         for (int i = 2; i < n - 6; i++) ok &= order[i] == VT_SEA || order[i] == VT_MARKS;   /* core, edge, steel; overlay */
@@ -3285,7 +3168,7 @@ static void ViewTests(void)
         for (int i = 0; i < g_vbN; i++) ok &= g_vb[i].tex != VT_LOGO;
         g_mapShown = 0; g_ovOn = 0;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
-        Check(ok, "slice 2, 6 Oct: the view's layers in the game's order (the map, the Maelstrom, the sea's glints and marks), then the blade and the RavenCraft logo on it at the centre; no class banner, no black band; a layer whose sheet OpenGL lacks is left out");
+        Check(ok, "slice 2, 6 Oct: the view's layers in the game's order (the map, the Maelstrom, the sea's glints and marks), then the blade and the RavenCraft logo on it at the centre; nothing across the top, no black band; a layer whose sheet OpenGL lacks is left out");
     }
     /* the view's own clock (his yes, 5 Oct: "hide the jump"): steady frames keep the wall clock; after a pause behind the
      * game's burst on the card it goes on from where it stopped, then catches up a quarter faster, never past the wall */
