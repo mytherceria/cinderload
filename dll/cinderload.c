@@ -3662,6 +3662,58 @@ static void LabelsBuild(void)
     g_lblQuads = q;
 }
 
+/* ---- the blade's frame (7 Oct 2026, his pick: "a stretched out version of this bar", a dark metal frame with spiked caps
+ * and a diamond at its centre, the blade's light in its channel; "all the way against the bottom of the screen") ----
+ * CinderBar.blp (DXT5) and CinderLoad\bar.txt: `sheet <w> <h>`, each piece `<left|rail|centre|right> <x0> <y0> <x1>
+ * <y1>` on it, `band <top> <bottom>` (the rail's metal, top to bottom) and `channel <top> <bottom>` (the open channel),
+ * rows of the pieces. Laid end to end across the window at one scale: the caps at its edges, the diamond at its centre,
+ * the rail repeated between; the rail band FRAME_BAND of the window tall, its bottom on the window's (what hangs below,
+ * the caps' lower prongs and the diamond's point, is past the edge). Over the blade, so its light shows only in the
+ * channel and spills past the metal; the channel's lips lit in the class's colour where the blade has reached. Without
+ * the frame, the blade runs in a channel of the same size, flush with the bottom. */
+#define FRAME_PATH  "Interface\\Glues\\LoadingScreens\\CinderBar.blp"
+#define FRAME_BAND  0.066f         /* the rail band, of the window's height */
+#define FRAME_TILES 256            /* rail pieces at the most (a 32:9 window at the smallest scale wants about 190) */
+enum { FR_LEFT, FR_RAIL, FR_CENTRE, FR_RIGHT, FR_PIECES };
+static struct { int ok, sw, sh, r[FR_PIECES][4], band[2], chan[2]; } g_frame;
+static int g_frameOn;
+static void FrameParse(const char *s, unsigned len)
+{
+    static const char *const kName[FR_PIECES] = { "left", "rail", "centre", "right" };
+    int have = 0;
+    g_frame.ok = 0; g_frame.sw = g_frame.sh = 0;
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && s[end] != '\n') end++;
+        const char *l = s + at;
+        int n = (int)(end - at), i = 0, v[4], k = 0;
+        if (SndWord(l, n, &i, "sheet")) {
+            if (LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) && v[0] > 0 && v[1] > 0 && v[0] <= 4096 && v[1] <= 4096) {
+                g_frame.sw = v[0]; g_frame.sh = v[1]; have |= 1 << 4;
+            }
+        } else if ((i = 0, SndWord(l, n, &i, "band")) || (i = 0, SndWord(l, n, &i, "channel"))) {
+            int ch = l[i - 1] == 'l';                                /* (the word read was "channel") */
+            if (LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) && v[0] >= 0 && v[1] > v[0]) {
+                int *d = ch ? g_frame.chan : g_frame.band;
+                d[0] = v[0]; d[1] = v[1]; have |= 1 << (ch ? 6 : 5);
+            }
+        } else
+            for (int p = 0; p < FR_PIECES; p++)
+                if ((i = 0, SndWord(l, n, &i, kName[p]))) {
+                    while (k < 4 && LblInt(l, n, &i, &v[k])) k++;
+                    if (k == 4 && v[2] > v[0] && v[3] > v[1] && v[0] >= 0 && v[1] >= 0) {
+                        for (int q = 0; q < 4; q++) g_frame.r[p][q] = v[q];
+                        have |= 1 << p;
+                    }
+                    break;
+                }
+        at = end + 1;
+    }
+    int fits = 1;
+    for (int p = 0; p < FR_PIECES; p++)
+        fits &= g_frame.r[p][2] <= g_frame.sw && g_frame.r[p][3] <= g_frame.sh && g_frame.band[1] <= g_frame.r[p][3] - g_frame.r[p][1];
+    g_frame.ok = have == 0x7F && fits && g_frame.chan[0] >= g_frame.band[0] && g_frame.chan[1] <= g_frame.band[1];
+}
 /* ---- the RavenCraft logo (4 Oct 2026, his ask: "so that people know that it's Ravencraft") ----
  * CinderLogo.blp (DXT5) and CinderLoad\logo.txt: `logo <sheet w> <sheet h> <x0> <y0> <x1> <y1>`, the logo's rectangle
  * on its sheet. His picks: the old wide raven over RAVENCRAFT, without its 1.18.1 plaque, fixed at the top centre of
@@ -3844,7 +3896,7 @@ static void OverlayDrawAll(void)
 /* At start, with the world map on: the overlay, when its calls are where they should be and its picture is in the pack. */
 static void OverlayStart(void)
 {
-    g_ovOn = g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = 0;
+    g_ovOn = g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = g_frameOn = 0;
     if (!g_map.ok || !g_barLoader) return;
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSea")) {
         unsigned char *data = NULL;
@@ -3868,6 +3920,14 @@ static void OverlayStart(void)
             LogoParse((const char *)text, len);
         if (text) HeapFree(GetProcessHeap(), 0, text);
         g_logoOn = g_logo.ok;
+    }
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderBar")) {         /* the blade's frame (the view's) */
+        unsigned char *text = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\bar.txt", &text, &len) == MPQ_OK && text)
+            FrameParse((const char *)text, len);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        g_frameOn = g_frame.ok;
     }
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderMarks")) {
         unsigned char *text = NULL;
@@ -4274,13 +4334,13 @@ static int TextHas(const char *list, const char *name)
  * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, the blade's
  * soft spark (made here, not read); g_viewTex holds OpenGL's name for each (0 while it has none). A batch is drawn
  * over what is under it, or added to it (add: light, the blade's glow). */
-enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_SPARK, VT_COUNT };
+enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SPARK, VT_COUNT };
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
 #define SABER_COLS_MAX 1024       /* and at the most this many */
 #define SABER_SPARKS   14         /* sparks thrown back off its tip */
-#define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 72)   /* (the last its housing's: HOUSE_QUADS) */
+#define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 256 + 3 + 3)   /* (the frame's: FRAME_TILES and the rest) */
 #define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS)
 #define VIEW_BATCHES   32
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
@@ -4371,10 +4431,10 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
  * fallback). Plain quads, a column every SABER_COL_PX pixels with their corners shared (the edges run on unbroken), and
  * the soft spark (VT_SPARK) for the tip, the sparks and the logo's light; the light is added, the core drawn over. Sizes
  * are of the window's height, so the blade is the same on every shape of screen. */
-#define SABER_CY     0.05f         /* its centre line, up from the bottom */
-#define SABER_CORE   0.012f        /* its core, top to bottom */
+#define SABER_FILL   0.78f         /* its core's half height, of its channel's (the edge's jitter stays inside) */
 #define SABER_GLOW   0.024f        /* its glow beyond the core's edge, as it usually reaches (a flare goes further) */
-#define SABER_LOGO_H 0.085f        /* the logo on it, tall */
+#define SABER_LOGO_H 0.085f        /* the logo on it, tall, */
+#define SABER_LOGO_FOOT 0.004f     /* and its foot this far up from the bottom of the window */
 #define SABER_TRACK  0x5A000000u   /* the way still to go: a faint dark line, a little thinner than the core */
 /* The classes' colours, 0xRRGGBB: the game's own (Blizzard's), the shaman's the TBC blue RavenCraft uses (his call,
  * 5 Oct); a character whose class the badge does not know gets CinderLoad's ember. */
@@ -4420,14 +4480,13 @@ static float SaberNoise(float x, float t, unsigned seed)
     float lo = a + (b - a) * ax, hi = c + (d - c) * ax;
     return lo + (hi - lo) * at;
 }
-/* The blade at column place k (columns from the left, fractions between), t seconds, above (side 0) or below (1), for a
- * window H tall, in pixels: how far its core reaches from the centre line (*core), how far its glow then reaches
+/* The blade at column place k (columns from the left, fractions between), t seconds, above (side 0) or below (1), its
+ * core's half height hc and its glow's reach g, in pixels: how far its core reaches from the centre line (*core), how far its glow then reaches
  * (*glow), and how hot its edge burns (*hot, 0 to 1). Slow swelling, a fast edge that never sits still, a glow whose
  * reach flickers, and now and then a jagged flare. */
-static void SaberEdge(float k, float t, int side, float H, float *core, float *glow, float *hot)
+static void SaberEdge(float k, float t, int side, float hc, float g, float *core, float *glow, float *hot)
 {
     unsigned s = (unsigned)side * 4;
-    float hc = SABER_CORE / 2 * H, g = SABER_GLOW * H;
     float swell = SaberNoise(k * 0.03f, t * 0.8f, s + 1) - 0.5f;
     float jitter = SaberNoise(k * 0.45f, t * 26, s + 2) - 0.5f;
     float crackle = SaberNoise(k * 0.22f, t * 17, s + 3);
@@ -4454,133 +4513,61 @@ static void SaberGlowAt(float x, float y, float rx, float ry, DWORD argb)
     DWORD c[4] = { argb, argb, argb, argb };
     SaberPut(VT_SPARK, 1, xs, ys, c, NULL);
 }
-/* ---- the blade's housing (7 Oct 2026, his reference: a frosty glowing bar "with a metal looking border around it") ----
- * Steel, lit from above: a rail along the top of the blade and one along the bottom, edge to edge, each a dark outline,
- * a bright bevel, a body darkening downward and a dark lip at the channel the blade runs in; at each end a guard, taller
- * than the rails and tapering into them, like a hilt's; rivets along the rails and on the guards. Drawn before the
- * blade, so the blade's light falls on it. Sizes of the window's height, as the blade's. */
-#define HOUSE_CHANNEL 0.0075f      /* the channel's half height: the core's and a little room */
-#define HOUSE_RAIL    0.0062f      /* each rail's height */
-#define HOUSE_GUARD   0.011f       /* how far a guard rises past the rails */
-#define HOUSE_GUARD_W 0.018f       /* a guard's width at its full height (of the window's width), */
-#define HOUSE_TAPER_W 0.022f       /* and how far it then tapers into the rails */
-#define HOUSE_RIVETS  8            /* rivets along each rail */
-#define HOUSE_QUADS   (1 + 2 * 4 + 2 * 2 * 2 * 2 + 2 * 2 * HOUSE_RIVETS + 2 * 4)
-typedef char house_fits_the_list[HOUSE_QUADS <= 72 ? 1 : -1];
-/* A quad of plain colour, its top two corners one colour and its bottom two another (x0, x1 its left and right; the top
- * and bottom edges each given at the left and the right, so a guard's slope is one quad). */
-static void HouseBand(float x0, float x1, float ytl, float ytr, float ybl, float ybr, DWORD top, DWORD bottom)
+/* (the frame's table and its parser are with the logo's, above: FrameParse) */
+/* Where the bar sits in a W x H window: its pieces' scale (*s, 0 with no frame) and top, the channel's centre line and
+ * half height. */
+static void FrameLayout(float H, float *s, float *top, float *cy, float *ch)
 {
-    float x[4] = { x0, x1, x1, x0 }, y[4] = { ytl, ytr, ybr, ybl };
-    DWORD c[4] = { top, top, bottom, bottom };
+    if (g_frameOn && g_frame.ok && g_viewTex[VT_FRAME]) {
+        *s = FRAME_BAND * H / (float)(g_frame.band[1] - g_frame.band[0]);
+        *top = H - (float)g_frame.band[1] * *s;
+        *cy = *top + (float)(g_frame.chan[0] + g_frame.chan[1]) * 0.5f * *s;
+        *ch = (float)(g_frame.chan[1] - g_frame.chan[0]) * 0.5f * *s;
+    } else {
+        *s = 0; *top = H - FRAME_BAND * H;
+        *cy = H - FRAME_BAND * H * 0.5f; *ch = FRAME_BAND * H * 0.27f;
+    }
+}
+/* Piece p from x0 to x1 at scale s, its top at top; cut, when x1 falls short of its width, at the same place on the sheet. */
+static void FramePiece(int p, float x0, float x1, float s, float top)
+{
+    const int *r = g_frame.r[p];
+    float w = (float)(r[2] - r[0]) * s, u0 = (float)r[0] / (float)g_frame.sw, u1 = (float)r[2] / (float)g_frame.sw;
+    if (x1 < x0 + w) u1 = u0 + (u1 - u0) * (x1 - x0) / w;
+    ViewRect(VT_FRAME, x0, top, x1, top + (float)(r[3] - r[1]) * s, u0, (float)r[1] / (float)g_frame.sh, u1,
+             (float)r[3] / (float)g_frame.sh, 0xFFFFFFFFu);
+}
+/* The frame over a W-wide window: the caps, the diamond, the rail repeated between (each run cut where it meets). */
+static void FrameBuild(float W, float s, float top)
+{
+    float wl = (float)(g_frame.r[FR_LEFT][2] - g_frame.r[FR_LEFT][0]) * s, wr = (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0]) * s;
+    float wc = (float)(g_frame.r[FR_CENTRE][2] - g_frame.r[FR_CENTRE][0]) * s, wt = (float)(g_frame.r[FR_RAIL][2] - g_frame.r[FR_RAIL][0]) * s;
+    float cx = (W - wc) / 2, run[2][2] = { { wl, cx }, { cx + wc, W - wr } };
+    int tiles = 0;
+    for (int k = 0; k < 2; k++)
+        for (float x = run[k][0]; x < run[k][1] - 0.01f && tiles < FRAME_TILES; x += wt, tiles++)
+            FramePiece(FR_RAIL, x, x + wt < run[k][1] ? x + wt : run[k][1], s, top);
+    FramePiece(FR_LEFT, 0, wl, s, top);
+    FramePiece(FR_CENTRE, cx, cx + wc, s, top);
+    FramePiece(FR_RIGHT, W - wr, W, s, top);
+}
+/* The channel, dark, under the blade. */
+static void FrameChannel(float W, float cy, float ch)
+{
+    float x[4] = { 0, W, W, 0 }, y[4] = { cy - ch, cy - ch, cy + ch, cy + ch };
+    DWORD c[4] = { 0xE6050A0Fu, 0xE6050A0Fu, 0xE6050A0Fu, 0xE6050A0Fu };
     SaberPut(-1, 0, x, y, c, NULL);
 }
-/* A rail from x0 to x1, its outer edge at yo and its channel edge at yi (above the blade: yo < yi; below: yo > yi). */
-static void HouseRail(float x0, float x1, float yo, float yi, float px)
+/* The channel's lips lit by the blade (added, over the metal) from the left edge to x1, in its light rgb. */
+static void FrameLips(float x1, float cy, float ch, float line, unsigned rgb)
 {
-    float d = yi > yo ? 1.0f : -1.0f, h = (yi - yo) * d;
-    float yb = yo + d * px * 1.5f, yh = yb + d * px * 2.0f, yl = yi - d * px * 2.0f;
-    if (h < px * 6) return;
-    if (d > 0) {                                                    /* the top rail: its bevel catches the light */
-        HouseBand(x0, x1, yo, yo, yb, yb, 0xFF0D1014u, 0xFF0D1014u);
-        HouseBand(x0, x1, yb, yb, yh, yh, 0xFFD8E2EAu, 0xFFA9B4BFu);
-        HouseBand(x0, x1, yh, yh, yl, yl, 0xFF7D8894u, 0xFF3E4650u);
-        HouseBand(x0, x1, yl, yl, yi, yi, 0xFF14181Du, 0xFF14181Du);
-    } else {                                                        /* the bottom rail: in the blade's shadow above */
-        HouseBand(x0, x1, yi, yi, yl, yl, 0xFF14181Du, 0xFF14181Du);
-        HouseBand(x0, x1, yl, yl, yh, yh, 0xFF5A646Fu, 0xFF2D333Au);
-        HouseBand(x0, x1, yh, yh, yb, yb, 0xFF9AA5B0u, 0xFF6E7884u);
-        HouseBand(x0, x1, yb, yb, yo, yo, 0xFF0D1014u, 0xFF0D1014u);
-    }
-}
-/* A quad of four corners each its own colour (round it from the top left). */
-static void HousePoly(const float *x, const float *y, DWORD a, DWORD b, DWORD c, DWORD d)
-{
-    DWORD k[4] = { a, b, c, d };
-    SaberPut(-1, 0, x, y, k, NULL);
-}
-/* A guard at one end, side -1 the left (from the window's edge inward) or 1 the right: wings swept up and down from the
- * rails to points past them, like a hilt's crossguard seen from the side, steel lit from above, a dark outline round it.
- * Its four corners at a time: the window's edge, the wing's point, where it meets the rail, the centre line. */
-static void HouseGuard(float W, float H, float cy, int side, float px)
-{
-    float tall = (HOUSE_CHANNEL + HOUSE_RAIL + HOUSE_GUARD) * H, rail = (HOUSE_CHANNEL + HOUSE_RAIL) * H;
-    float e = side < 0 ? 0 : W, s = side < 0 ? 1.0f : -1.0f, g = HOUSE_GUARD_W * W, tp = HOUSE_TAPER_W * W;
-    for (int pass = 0; pass < 2; pass++) {                          /* the outline, then the steel inside it */
-        float o = pass ? px * 1.5f : 0;
-        float x0 = e + s * o, xp = e + s * g * 0.35f, xr = e + s * (g + tp - o * 2);
-        for (int half = 0; half < 2; half++) {                      /* the upper wing, then the lower */
-            float d = half ? 1.0f : -1.0f, yEdge = cy + d * (tall * 0.6f - o), yPt = cy + d * (tall - o * 1.6f);
-            float yRail = cy + d * (rail - o);
-            DWORD lit = pass == 0 ? 0xFF0D1014u : half ? 0xFF4B545Eu : 0xFFC4CED8u;
-            DWORD dim = pass == 0 ? 0xFF0D1014u : half ? 0xFF22282Eu : 0xFF6A7480u;
-            DWORD out = half ? dim : lit, in = half ? lit : dim;       /* (lit at the top of each wing) */
-            float xa[4] = { x0, xp, xp, x0 }, ya[4] = { yEdge, yPt, cy, cy };
-            float xb[4] = { xp, xr, xr, xp }, yb[4] = { yPt, yRail, cy, cy };
-            if (side > 0) {                                         /* (round it from the top left either way) */
-                float t0 = xa[0]; xa[0] = xa[1]; xa[1] = t0; t0 = xa[2]; xa[2] = xa[3]; xa[3] = t0;
-                t0 = ya[0]; ya[0] = ya[1]; ya[1] = t0; t0 = ya[2]; ya[2] = ya[3]; ya[3] = t0;
-                t0 = xb[0]; xb[0] = xb[1]; xb[1] = t0; t0 = xb[2]; xb[2] = xb[3]; xb[3] = t0;
-                t0 = yb[0]; yb[0] = yb[1]; yb[1] = t0; t0 = yb[2]; yb[2] = yb[3]; yb[3] = t0;
-            }
-            if (half) {                                             /* the lower wing: its centre line on top */
-                float t1;
-                t1 = ya[0]; ya[0] = ya[3]; ya[3] = t1; t1 = ya[1]; ya[1] = ya[2]; ya[2] = t1;
-                t1 = yb[0]; yb[0] = yb[3]; yb[3] = t1; t1 = yb[1]; yb[1] = yb[2]; yb[2] = t1;
-            }
-            DWORD ca = half ? in : out, cb = half ? out : in;           /* the outer edge's colour, the centre line's */
-            HousePoly(xa, ya, half ? cb : ca, half ? cb : ca, half ? ca : cb, half ? ca : cb);
-            HousePoly(xb, yb, half ? cb : ca, half ? cb : ca, half ? ca : cb, half ? ca : cb);
-        }
-    }
-}
-/* A rivet at x, y: a dark round head and the light's glint on it (the spark, drawn over, not added). */
-static void HouseRivet(float x, float y, float r)
-{
-    float xs[4] = { x - r, x + r, x + r, x - r }, ys[4] = { y - r, y - r, y + r, y + r };
-    DWORD c[4] = { 0xF0262C33u, 0xF0262C33u, 0xF0262C33u, 0xF0262C33u };
-    SaberPut(VT_SPARK, 0, xs, ys, c, NULL);
-    float g = r * 0.45f, gx = x - r * 0.3f, gy = y - r * 0.3f;
-    float xg[4] = { gx - g, gx + g, gx + g, gx - g }, yg[4] = { gy - g, gy - g, gy + g, gy + g };
-    DWORD w[4] = { 0xC8E8EEF3u, 0xC8E8EEF3u, 0xC8E8EEF3u, 0xC8E8EEF3u };
-    SaberPut(VT_SPARK, 0, xg, yg, w, NULL);
-}
-/* The housing's channel, dark, under the blade (for a W x H window, on the blade's centre line cy). */
-static void HouseChannel(float W, float H, float cy)
-{
-    float ch = HOUSE_CHANNEL * H;
-    HouseBand(0, W, cy - ch, cy - ch, cy + ch, cy + ch, 0xE6050A0Fu, 0xE6050A0Fu);
-}
-/* Its steel, over the blade: the light spills out past the rails; a gem of the class's light (rgb) in each guard. */
-static void HouseBuild(float W, float H, float cy, unsigned rgb)
-{
-    float px = H / 1440.0f, ch = HOUSE_CHANNEL * H, rh = HOUSE_RAIL * H;
-    HouseRail(0, W, cy - ch - rh, cy - ch, px);
-    HouseRail(0, W, cy + ch + rh, cy + ch, px);
-    HouseGuard(W, H, cy, -1, px);
-    HouseGuard(W, H, cy, 1, px);
-    if (!g_viewTex[VT_SPARK]) return;
-    float r = rh * 0.32f, span = W * (1 - 2 * (HOUSE_GUARD_W + HOUSE_TAPER_W));
-    for (int i = 0; i < HOUSE_RIVETS; i++) {
-        float x = W * (HOUSE_GUARD_W + HOUSE_TAPER_W) + span * (i + 0.5f) / HOUSE_RIVETS;
-        if (x > W * 0.44f && x < W * 0.56f) continue;                  /* (under the logo) */
-        HouseRivet(x, cy - ch - rh * 0.5f, r);
-        HouseRivet(x, cy + ch + rh * 0.5f, r);
-    }
-    float gx = HOUSE_GUARD_W * W * 0.42f, gr = (ch + rh) * 0.9f;
-    HouseRivet(gx, cy, gr);                                         /* the guards' gems, set dark (lit in HouseGems) */
-    HouseRivet(W - gx, cy, gr);
-    (void)rgb;
-}
-/* The gems' light, added with the blade's (after its tip, in the same batch). */
-static void HouseGems(float W, float H, float cy, unsigned rgb)
-{
-    if (!g_viewTex[VT_SPARK]) return;
-    float gx = HOUSE_GUARD_W * W * 0.42f, gr = (HOUSE_CHANNEL + HOUSE_RAIL) * H * 0.9f;
     for (int s = 0; s < 2; s++) {
-        float x = s ? W - gx : gx;
-        SaberGlowAt(x, cy, gr * 0.85f, gr * 0.85f, SaberArgb(rgb, 0.95f));
-        SaberGlowAt(x, cy, gr * 0.35f, gr * 0.35f, SaberArgb(0xFFFFFF, 0.8f));
+        float d = s ? 1.0f : -1.0f, e = cy + d * ch;
+        float x[4] = { 0, x1, x1, 0 }, y[4] = { e + d * line * 3, e + d * line * 3, e - d * line, e - d * line };
+        DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, 0.65f), SaberArgb(rgb, 0.65f) };
+        if (s) { float t; t = y[0]; y[0] = y[3]; y[3] = t; t = y[1]; y[1] = y[2]; y[2] = t;
+                 DWORD u = c[0]; c[0] = c[3]; c[3] = u; u = c[1]; c[1] = c[2]; c[2] = u; }
+        SaberPut(-1, 1, x, y, c, NULL);
     }
 }
 
@@ -4592,7 +4579,9 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     LONG cl = g_class;
     unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0], rgb = SaberVivid(base);
     unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), midRgb = SaberMix(rgb, 0xFFFFFF, 0.45f);
-    float t = (float)(now % 3600000u) / 1000.0f, cy = (1 - SABER_CY) * H, hc = SABER_CORE / 2 * H, g = SABER_GLOW * H;
+    float fs, ftop, cy, ch;
+    FrameLayout(H, &fs, &ftop, &cy, &ch);                           /* the channel the frame holds it in */
+    float t = (float)(now % 3600000u) / 1000.0f, hc = ch * SABER_FILL, g = SABER_GLOW * H;
     float front = FireClamp(shown, 0, 1) * W, line = H / 1440.0f, round = hc * 2.5f;
     int n = (int)(W / SABER_COL_PX);
     if (n < 16) n = 16;
@@ -4607,12 +4596,12 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             tip = 1 - (1 - tip) * (1 - tip);
             g_sbX[b] = x;
             for (int s = 0; s < 2; s++) {
-                SaberEdge(x / cw, t, s, H, &g_sbCore[s][b], &g_sbGlow[s][b], &g_sbHot[s][b]);
+                SaberEdge(x / cw, t, s, hc, g, &g_sbCore[s][b], &g_sbGlow[s][b], &g_sbHot[s][b]);
                 g_sbCore[s][b] *= tip; g_sbGlow[s][b] *= tip;
             }
             if (x >= front) { b++; break; }
         }
-    HouseChannel(W, H, cy);                                         /* the dark channel the blade runs in */
+    FrameChannel(W, cy, ch);                                        /* the dark channel the blade runs in */
     /* the glow, added: a narrow bright one and a wide faint one beyond the core's edge, above and below */
     for (int k = 0; k + 1 < b; k++)
         for (int s = 0; s < 2; s++) {
@@ -4653,7 +4642,8 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
                            SaberArgb(hotRgb, g_sbHot[s][k + 1]), SaberArgb(hotRgb, g_sbHot[s][k]) };
             SaberPut(-1, 1, x, y, c, NULL);
         }
-    HouseBuild(W, H, cy, rgb);                                      /* the steel over it, the light spilling past */
+    if (fs > 0) FrameBuild(W, fs, ftop);                            /* the frame over it, the light spilling past */
+    if (front > 0) FrameLips(front, cy, ch, line, hotRgb);           /* its lips lit where the blade has reached */
     /* the tip, flaring and throwing sparks back as it runs (none once the blade is whole) */
     if (g_viewTex[VT_SPARK] && front > 0 && shown < 1) {
         float flick = 0.75f + 0.25f * SaberNoise(0, t * 23, 9);
@@ -4670,19 +4660,19 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             SaberGlowAt(sx, sy, r, r, SaberArgb(hotRgb, 0.9f * (1 - age)));
         }
     }
-    HouseGems(W, H, cy, rgb);
-    /* the logo on it at the centre, its halfway mark: lit in the class's colour as the tip reaches it */
+    /* the logo on it at the centre, its halfway mark, standing on the bottom of the window (the bar is flush with it):
+     * lit in the class's colour as the tip reaches it */
     if (g_logoOn && g_logo.ok && g_viewTex[VT_LOGO]) {
         float lh = SABER_LOGO_H * H, lw = lh * g_logo.aspect;
         if (lw > LOGO_W * W) { lh *= LOGO_W * W / lw; lw = LOGO_W * W; }
-        float lx = W / 2, lit = FireClamp((shown - 0.47f) / 0.06f, 0, 1);
+        float lx = W / 2, ly = H - SABER_LOGO_FOOT * H - lh / 2, lit = FireClamp((shown - 0.47f) / 0.06f, 0, 1);
         if (lit > 0 && g_viewTex[VT_SPARK]) {
             float flick = 0.85f + 0.15f * SaberNoise(0, t * 9, 10);
-            SaberGlowAt(lx, cy, lw * 0.85f, lh * 0.9f, SaberArgb(rgb, 0.55f * lit * flick));
-            SaberGlowAt(lx, cy, lw * 0.5f, lh * 0.45f, SaberArgb(hotRgb, 0.35f * lit));
+            SaberGlowAt(lx, ly, lw * 0.85f, lh * 0.9f, SaberArgb(rgb, 0.55f * lit * flick));
+            SaberGlowAt(lx, ly, lw * 0.5f, lh * 0.45f, SaberArgb(hotRgb, 0.35f * lit));
         }
         unsigned grey = 210 + (unsigned)(int)(45 * lit);
-        ViewRect(VT_LOGO, lx - lw / 2, cy - lh / 2, lx + lw / 2, cy + lh / 2, g_logo.tu0, g_logo.tv0, g_logo.tu1, g_logo.tv1,
+        ViewRect(VT_LOGO, lx - lw / 2, ly - lh / 2, lx + lw / 2, ly + lh / 2, g_logo.tu0, g_logo.tv0, g_logo.tu1, g_logo.tv1,
                  0xFF000000u | grey << 16 | grey << 8 | grey);
     }
 }
@@ -5181,7 +5171,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         static const struct { int slot, *on; const char *path; } kSheets[] = {
             { VT_SEA, &g_seaOn, SEA_PATH }, { VT_MARKS, &g_marksOn, MARKS_PATH }, { VT_WAVES, &g_wavesOn, WAVES_PATH },
             { VT_FLOW, &g_flowOn, FLOW_PATH }, { VT_GLOW, &g_glowOn, GLOW_PATH }, { VT_LABELS, &g_lblOn, LABELS_PATH },
-            { VT_LOGO, &g_logoOn, LOGO_PATH } };
+            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH } };
         for (unsigned i = 0; i < sizeof kSheets / sizeof kSheets[0]; i++)
             if (*kSheets[i].on) mpq_read(&kIo, "patch-~.MPQ", kSheets[i].path, &g_view.blp[kSheets[i].slot], &g_view.len[kSheets[i].slot]);
     }

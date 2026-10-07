@@ -2823,13 +2823,14 @@ static void ViewTests(void)
           TextHas("  GL_EXT_bgra ", "GL_EXT_bgra"), "OpenGL's extensions: a whole word only");
     /* its frame: the world map over the whole window at the zoom's own corners, then the blade along the bottom (6 Oct
      * 2026, his design: one bar for every class, the same size, only its colour the class's, unstable like the Darksaber,
-     * the logo on it as its halfway mark; 7 Oct: solid, and in a steel housing). The blade's batches, in order: the
-     * channel, the glow (added), the core (and the way to go), the hot edge (added), the steel, the rivets and gems set in
-     * it (the spark, drawn over), the light (the spark, added: the tip, its sparks, the gems' light, the logo's), the logo */
+     * the logo on it as its halfway mark; 7 Oct: solid, in the dark metal frame of his reference, flush with the bottom
+     * of the screen). The blade's batches, in order: the channel, the glow (added), the core (and the way to go), the hot
+     * edge (added), the frame, the lips' light (added), the light (the spark, added: the tip, its sparks, the logo's), the
+     * logo */
     {
         static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
         memcpy(g_bgUV, uv, sizeof uv);
-        g_ovOn = 0; g_logoOn = 0; g_class = 0;
+        g_ovOn = 0; g_logoOn = 0; g_class = 0; g_frameOn = 0;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
         ViewBuild(1000, 500, 0.0f, 0);
         const ViewVert *v = g_vv;
@@ -2837,27 +2838,68 @@ static void ViewTests(void)
                  v[0].u == 0.2f && v[0].v == 0.3f && v[2].x == 1000 && v[2].y == 500 && v[2].u == 0.6f && v[2].v == 0.7f &&
                  v[1].x == 1000 && v[1].y == 0 && v[0].c[0] == 255 && v[0].c[3] == 255;
         Check(ok, "the view's frame: the world map over the whole window at the zoom's corners, top left to bottom right");
-        float cy = (1 - SABER_CY) * 500, hc = SABER_CORE / 2 * 500, ch = HOUSE_CHANNEL * 500, rh = HOUSE_RAIL * 500;
-        Check(fabsf(cy - 475) < 1e-3f && hc > 2 && hc < 3.5f && ch > hc * 1.24f, "the blade's place: its centre line 5% up from the bottom of the screen, its core about a hundredth of the screen tall, its channel room for its edge to move in");
-        /* nothing loaded yet: the dark channel, the way to go a faint dark line along it, and the steel (all drawn over:
-         * one batch) */
+        /* the frame's table: its sheet, four pieces, the rail band and the channel; a bad one is no frame */
+        static const char bar[] = "# the frame\nsheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\r\ncentre 236 0 336 180\n"
+                                  "right 340 0 470 180\nband 33 123\nchannel 56 101\nhum 1 2 3 4\n";
+        FrameParse(bar, sizeof bar - 1);
+        int parsed = g_frame.ok && g_frame.sw == 1024 && g_frame.r[FR_RAIL][0] == 136 && g_frame.r[FR_RIGHT][2] == 470 &&
+                     g_frame.band[1] == 123 && g_frame.chan[0] == 56;
+        static const char noRight[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nband 33 123\nchannel 56 101\n";
+        static const char offSheet[] = "sheet 256 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\n";
+        static const char outside[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 20 101\n";
+        FrameParse(noRight, sizeof noRight - 1);
+        parsed &= !g_frame.ok;                                            /* no right cap */
+        FrameParse(offSheet, sizeof offSheet - 1);
+        parsed &= !g_frame.ok;                                            /* a piece off its sheet */
+        FrameParse(outside, sizeof outside - 1);
+        parsed &= !g_frame.ok;                                            /* a channel outside the band */
+        FrameParse(bar, sizeof bar - 1);
+        Check(parsed && g_frame.ok, "the frame's table read (CRLF, comments, an unknown line skipped); one missing a piece, with a piece off its sheet or its channel outside its band is no frame");
+        g_frameOn = 1; g_viewTex[VT_FRAME] = 1;
+        float s = FRAME_BAND * 500 / 90, top = 500 - 123 * s, cy = top + 78.5f * s, ch = 22.5f * s;
+        float fs, ftop, fcy, fch;
+        FrameLayout(500, &fs, &ftop, &fcy, &fch);
+        Check(Near(fs, s, 1e-5) && Near(ftop, top, 1e-3) && Near(fcy, cy, 1e-3) && Near(fch, ch, 1e-3) && Near(ftop + 123 * fs, 500, 1e-3) &&
+              Near(90 * fs, FRAME_BAND * 500, 1e-3), "the frame's place: its rail band a fifteenth of the screen tall, its bottom ON the bottom of the screen (his call: no gap), the channel the blade runs in where the table says");
+        /* nothing loaded yet: the dark channel and the way to go, then the frame over them */
+        ViewBuild(1000, 500, 0.0f, 0);
         const ViewVert *chq = g_vv + g_vb[1].first, *trq = chq + 4;
-        ok = g_vbN == 2 && g_vb[1].tex == -1 && !g_vb[1].add && g_vb[1].count == 4 * (1 + 1 + 24) && chq[0].x == 0 && chq[1].x == 1000 &&
-             fabsf(chq[0].y - (cy - ch)) < 1e-3f && fabsf(chq[2].y - (cy + ch)) < 1e-3f && trq[0].x == 0 && trq[1].x == 1000 &&
-             trq[0].c[3] == 0x5A && trq[0].c[0] == 0 && fabsf((trq[0].y + trq[3].y) / 2 - cy) < 1e-3f && trq[3].y - trq[0].y < 2 * hc;
-        Check(ok, "the blade, nothing loaded: its dark channel and the way to go a faint dark line edge to edge on its centre line, in its steel");
+        ok = g_vbN == 3 && g_vb[1].tex == -1 && !g_vb[1].add && g_vb[1].count == 8 && g_vb[2].tex == VT_FRAME && !g_vb[2].add &&
+             chq[0].x == 0 && chq[1].x == 1000 && Near(chq[0].y, cy - ch, 1e-3) && Near(chq[2].y, cy + ch, 1e-3) && trq[0].x == 0 &&
+             trq[1].x == 1000 && trq[0].c[3] == 0x5A && trq[0].c[0] == 0 && Near((trq[0].y + trq[3].y) / 2, cy, 1e-3);
+        Check(ok, "the blade, nothing loaded: its dark channel and the way to go a faint dark line edge to edge on its centre line, in its frame");
+        /* the frame's pieces: a cap at each edge, the diamond at the centre, the rail repeated between with no gap, all
+         * at one scale, their tops at the frame's top */
+        const ViewVert *fr = g_vv + g_vb[2].first;
+        int nq = g_vb[2].count / 4, tiles = nq - 3, edges = 1, ends = 0;
+        float wl = 132 * s, wr = 130 * s, wc = 100 * s, wt = 96 * s, cx = (1000 - wc) / 2, at = wl;
+        for (int q = 0; q < tiles; q++) {                                 /* the rails, left run then right */
+            const ViewVert *t2 = fr + 4 * q;
+            if (Near(t2[0].x, cx + wc, 1e-3) && q) at = cx + wc;
+            edges &= Near(t2[0].x, at, 1e-3) && Near(t2[0].y, top, 1e-3) && Near(t2[2].y, top + 180 * s, 1e-3) &&
+                     Near(t2[0].u, 136 / 1024.0, 1e-6) && t2[1].x <= (at < cx ? cx : 1000 - wr) + 1e-3f &&
+                     (t2[1].x - t2[0].x > wt - 1e-3f || Near(t2[1].u - t2[0].u, (96 / 1024.0) * (t2[1].x - t2[0].x) / wt, 1e-6));
+            at = t2[1].x;
+            ends += Near(t2[1].x, cx, 1e-3) || Near(t2[1].x, 1000 - wr, 1e-3);   /* each run reaches what it meets */
+        }
+        const ViewVert *lc = fr + 4 * tiles, *cc = lc + 4, *rc = cc + 4;
+        edges &= Near(lc[0].x, 0, 1e-6) && Near(lc[1].x, wl, 1e-3) && Near(cc[0].x, cx, 1e-3) && Near(cc[1].x, cx + wc, 1e-3) &&
+                 Near(rc[1].x, 1000, 1e-3) && Near(rc[0].x, 1000 - wr, 1e-3) && Near(rc[0].u, 340 / 1024.0, 1e-6) &&
+                 Near(rc[2].v, 180 / 256.0, 1e-6) && tiles > 6 && tiles < FRAME_TILES && ends == 2;
+        Check(edges, "the frame laid across the screen: the caps at its edges, the diamond at its centre, the rail repeated between them with no gap (each run's last piece cut where it meets), all at one scale");
         /* a quarter loaded, a warlock */
         g_class = 9; g_viewTex[VT_SPARK] = 1;
         ViewBuild(1000, 500, 0.25f, 1234);
-        enum { CH = 1, GL, CO, HOT, STEEL, RIV, LIGHT };
+        enum { CH = 1, GL, CO, HOT, FRAME, LIPS, LIGHT };
         ok = g_vbN == 8 && g_vb[CH].tex == -1 && !g_vb[CH].add && g_vb[CH].count == 4 && g_vb[GL].tex == -1 && g_vb[GL].add &&
-             g_vb[CO].tex == -1 && !g_vb[CO].add && g_vb[HOT].tex == -1 && g_vb[HOT].add && g_vb[STEEL].tex == -1 && !g_vb[STEEL].add &&
-             g_vb[RIV].tex == VT_SPARK && !g_vb[RIV].add && g_vb[LIGHT].tex == VT_SPARK && g_vb[LIGHT].add &&
-             g_vb[LIGHT].count == 4 * (2 + SABER_SPARKS + 4);
+             g_vb[CO].tex == -1 && !g_vb[CO].add && g_vb[HOT].tex == -1 && g_vb[HOT].add && g_vb[FRAME].tex == VT_FRAME &&
+             !g_vb[FRAME].add && g_vb[LIPS].tex == -1 && g_vb[LIPS].add && g_vb[LIPS].count == 8 && g_vb[LIGHT].tex == VT_SPARK &&
+             g_vb[LIGHT].add && g_vb[LIGHT].count == 4 * (2 + SABER_SPARKS);
         int cols = (g_vb[CO].count / 4 - 1) / 2;                         /* the way to go, then two quads a column */
+        float hc = ch * SABER_FILL;
         ok &= cols > 30 && g_vb[CO].count == 4 * (1 + 2 * cols) && g_vb[GL].count == 16 * cols && g_vb[HOT].count == 8 * cols;
         const ViewVert *tr = g_vv + g_vb[CO].first, *co = tr + 4, *last = co + 8 * (cols - 1);
-        ok &= tr[0].x == 250 && tr[1].x == 1000 && fabsf((tr[0].y + tr[3].y) / 2 - cy) < 1e-3f;      /* the way to go */
+        ok &= tr[0].x == 250 && tr[1].x == 1000 && Near((tr[0].y + tr[3].y) / 2, cy, 1e-3);           /* the way to go */
         ok &= co[0].x == 0 && last[1].x == 250 && last[2].x == 250;                                  /* edge to the tip */
 #define NEAR(c, r, g, b) (abs((c)[0] - (r)) <= 1 && abs((c)[1] - (g)) <= 1 && abs((c)[2] - (b)) <= 1)
         int body = 1, lit = 1;
@@ -2867,41 +2909,23 @@ static void ViewTests(void)
             body &= q[2].y == cy && q[3].y == cy && lo[0].y == cy && lo[1].y == cy;                /* meeting on the line */
             if (q[1].x <= 250 - hc * 2.5f)
                 body &= q[0].y < cy - 0.6f * hc && q[0].y > cy - 1.3f * hc && lo[3].y > cy + 0.6f * hc && lo[3].y < cy + 1.3f * hc;
-            body &= q[0].y >= cy - ch && lo[3].y <= cy + ch;                                       /* in its channel */
+            body &= q[0].y >= cy - ch - 1e-3f && lo[3].y <= cy + ch + 1e-3f;                       /* in its channel */
             body &= NEAR(q[0].c, 132, 91, 255) && q[0].c[3] == 245 && NEAR(lo[3].c, 132, 91, 255) &&   /* solid: the */
                     NEAR(q[3].c, 187, 165, 255) && q[3].c[3] == 245 && NEAR(lo[0].c, 187, 165, 255);  /* class's light */
             if (k + 1 < cols) body &= co[8 * (k + 1)].x == q[1].x;                                   /* unbroken */
         }
         const ViewVert *gl0 = g_vv + g_vb[GL].first, *hot = g_vv + g_vb[HOT].first, *tip = g_vv + g_vb[LIGHT].first;
+        const ViewVert *lip = g_vv + g_vb[LIPS].first;
         lit &= NEAR(gl0[0].c, 132, 91, 255) && gl0[0].c[3] == 0 && gl0[3].c[3] > 100 &&      /* a richer purple than */
                gl0[0].y < gl0[3].y && fabsf(gl0[3].y - co[0].y) < 1e-3f;                     /* Blizzard's pale one */
         lit &= NEAR(hot[0].c, 181, 157, 255);                                                   /* the edge, paler */
         lit &= fabsf((tip[0].x + tip[1].x) / 2 - 250) < 1e-3f && fabsf((tip[0].y + tip[2].y) / 2 - cy) < 1e-3f;
+        lit &= lip[0].x == 0 && lip[1].x == 250 && NEAR(lip[3].c, 181, 157, 255) && lip[3].c[3] > 150 && lip[0].c[3] == 0 &&
+               Near(lip[3].y, cy - ch + 500 / 1440.0f, 1e-3) && lip[4 + 0].y > cy;                  /* the lips, lit */
         Check(ok && body, "the blade, a quarter loaded: its glow added, the way to go a dark line from the tip to the far edge, the core SOLID in the class's light (his call, 7 Oct), paler along its centre line, from the screen's left edge to the tip in columns that join, inside its channel");
-        Check(lit, "the blade's colour: a warlock's purple glow, richer than Blizzard's pale text colour, fading out from the core, a paler edge, the tip flaring at the bar as shown");
+        Check(lit, "the blade's colour: a warlock's purple glow, richer than Blizzard's pale text colour, fading out from the core, a paler edge, the tip flaring at the bar as shown, the frame's lips lit to the tip");
         Check(SaberVivid(0xFFFFFF) == 0xFFFFFF && SaberVivid(0x0070DE) == 0x0081FF && SaberVivid(0xFF7D0A) == 0xFF7B06,
               "a class's light keeps its hue: a priest's stays white, a shaman's blue and a druid's orange only brighten");
-        /* the steel (his reference, 7 Oct: a glowing bar "with a metal looking border around it"): a rail above the channel
-         * and one below, edge to edge, drawn over the blade's glow so the light spills past them; a guard at each end
-         * reaching past the rails; rivets along them (none under the logo); a gem in each guard, lit in the class's light */
-        const ViewVert *st = g_vv + g_vb[STEEL].first, *gem = g_vv + g_vb[LIGHT].first + 4 * (2 + SABER_SPARKS);
-        int steel = g_vb[STEEL].count == 4 * 24 && st[0].x == 0 && st[1].x == 1000 && fabsf(st[0].y - (cy - ch - rh)) < 1e-3f &&
-                    st[0].c[0] == 0x0D && st[16 + 0].x == 0 && st[16 + 1].x == 1000;
-        float topRail = 1e9f, botRail = -1e9f, guardTop = 1e9f, guardBot = -1e9f;
-        for (int i = 0; i < 4 * 8; i++) { if (st[i].y < topRail) topRail = st[i].y; if (st[i].y > botRail) botRail = st[i].y; }
-        for (int i = 4 * 8; i < 4 * 24; i++) { if (st[i].y < guardTop) guardTop = st[i].y; if (st[i].y > guardBot) guardBot = st[i].y; }
-        steel &= fabsf(topRail - (cy - ch - rh)) < 1e-3f && fabsf(botRail - (cy + ch + rh)) < 1e-3f &&
-                 guardTop < cy - ch - rh - 1 && guardBot > cy + ch + rh + 1;
-        int rivets = g_vb[RIV].count == 4 * (2 * 2 * (HOUSE_RIVETS - 2) + 2 * 2), under = 0;
-        for (int i = 0; i < g_vb[RIV].count; i += 4) {
-            float x = (g_vv[g_vb[RIV].first + i].x + g_vv[g_vb[RIV].first + i + 1].x) / 2;
-            under += x > 440 && x < 560;
-        }
-        float gx = HOUSE_GUARD_W * 1000 * 0.42f;
-        steel &= rivets && !under && fabsf((gem[0].x + gem[1].x) / 2 - gx) < 1e-3f && fabsf((gem[8].x + gem[9].x) / 2 - (1000 - gx)) < 1e-3f &&
-                 fabsf((gem[0].y + gem[2].y) / 2 - cy) < 1e-3f && NEAR(gem[0].c, 132, 91, 255) && g_vb[STEEL].first > g_vb[HOT].first &&
-                 g_vb[CH].first < g_vb[GL].first;
-        Check(steel, "the blade's steel housing: rails above and below edge to edge over its light, a guard at each end past them, rivets along them (none under the logo), each guard's gem lit in the class's colour; its channel under it all");
         /* the same blade for every class, only its colour: a hunter's at the same moment */
         static float pos[2 * VIEW_QUADS_MAX * 4];
         int nv = g_vvN;
@@ -2910,8 +2934,8 @@ static void ViewTests(void)
         ViewBuild(1000, 500, 0.25f, 1234);
         int same = g_vvN == nv, recoloured = 0;
         for (int i = 0; i < nv && same; i++) same &= pos[2 * i] == g_vv[i].x && pos[2 * i + 1] == g_vv[i].y;
-        recoloured = NEAR(g_vv[g_vb[GL].first].c, 179, 255, 76) && NEAR(g_vv[g_vb[LIGHT].first + 4 * (2 + SABER_SPARKS)].c, 179, 255, 76);
-        Check(same && recoloured, "the blade is the same for every class, only its colour the class's (a hunter's green, every corner where the warlock's was, the gems too)");
+        recoloured = NEAR(g_vv[g_vb[GL].first].c, 179, 255, 76);
+        Check(same && recoloured, "the blade is the same for every class, only its colour the class's (a hunter's green, every corner where the warlock's was)");
         /* unstable: a sixtieth of a second on, the core's edge has moved and the glow's reach beyond it has changed; its
          * reach to the tip has not */
         static float reach[VIEW_QUADS_MAX];
@@ -2919,41 +2943,48 @@ static void ViewTests(void)
         ViewBuild(1000, 500, 0.25f, 1234 + 16);
         int edge = 0, glow = 0, steady = (g_vb[CO].count / 4 - 1) / 2 == cols;
         for (int k = 0; k < cols; k++) {
-            int at = g_vb[CO].first + 4 + 8 * k;                         /* each column's top edge */
-            edge += fabsf(g_vv[at].y - pos[2 * at + 1]) > 0.05f;
+            int a2 = g_vb[CO].first + 4 + 8 * k;                         /* each column's top edge */
+            edge += fabsf(g_vv[a2].y - pos[2 * a2 + 1]) > 0.02f;
         }
         for (int q = 0; q < g_vb[GL].count / 4; q++)
             glow += fabsf(g_vv[g_vb[GL].first + 4 * q].y - g_vv[g_vb[GL].first + 4 * q + 3].y - reach[q]) > 0.01f;
         steady &= g_vv[g_vb[CO].first + 4].x == 0 && g_vv[g_vb[CO].first + 4 + 8 * (cols - 1) + 1].x == 250;
         Check(edge > cols / 4 && glow > g_vb[GL].count / 8 && steady, "the blade is unstable: its core's edge never sits still and its glow's reach flickers from one frame to the next, its body still reaching from the edge to the tip");
-        /* full: edge to edge, no way to go, no tip (the gems still lit) */
+        /* full: edge to edge, no way to go, no tip */
         ViewBuild(1000, 500, 1.0f, 2000);
         cols = g_vb[CO].count / 8;
-        ok = g_vbN == 8 && g_vb[CO].count == 8 * cols && g_vv[g_vb[CO].first].x == 0 && g_vb[LIGHT].count == 4 * 4 &&
+        ok = g_vbN == 7 && g_vb[CO].count == 8 * cols && g_vv[g_vb[CO].first].x == 0 && g_vb[LIPS].count == 8 &&
              g_vv[g_vb[CO].first + 8 * (cols - 1) + 1].x == 1000 && g_vv[g_vb[CO].first].c[3] == 245 && cols == 1000 / SABER_COL_PX;
         Check(ok, "the blade full: the core edge to edge, nothing still to go, no tip");
-        /* the logo on it at the centre, its halfway mark: over the tip, grey before the tip reaches it, lit after */
+        /* the logo on it at the centre, its halfway mark, standing on the bottom of the screen: over the tip, grey before
+         * the tip reaches it, lit after */
         g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2; g_logo.tu0 = 0.1f; g_logo.tv0 = 0.2f; g_logo.tu1 = 0.9f; g_logo.tv1 = 0.8f;
         g_viewTex[VT_LOGO] = 1;
         ViewBuild(1000, 500, 0.25f, 3000);
         const ViewVert *lg = g_vv + g_vb[g_vbN - 1].first;
-        float lh = SABER_LOGO_H * 500;
+        float lh = SABER_LOGO_H * 500, foot = 500 - SABER_LOGO_FOOT * 500;
         ok = g_vb[g_vbN - 1].tex == VT_LOGO && !g_vb[g_vbN - 1].add && g_vb[g_vbN - 1].count == 4 && g_vb[g_vbN - 2].tex == VT_SPARK &&
-             g_vb[g_vbN - 2].count == 4 * (2 + SABER_SPARKS + 4) && fabsf(lg[0].x - (500 - lh)) < 1e-3f && fabsf(lg[2].x - (500 + lh)) < 1e-3f &&
-             fabsf(lg[0].y - (cy - lh / 2)) < 1e-3f && fabsf(lg[2].y - (cy + lh / 2)) < 1e-3f && lg[0].u == 0.1f && lg[0].v == 0.2f &&
+             g_vb[g_vbN - 2].count == 4 * (2 + SABER_SPARKS) && fabsf(lg[0].x - (500 - lh)) < 1e-3f && fabsf(lg[2].x - (500 + lh)) < 1e-3f &&
+             fabsf(lg[2].y - foot) < 1e-3f && fabsf(lg[0].y - (foot - lh)) < 1e-3f && lg[0].u == 0.1f && lg[0].v == 0.2f &&
              lg[2].u == 0.9f && lg[2].v == 0.8f && lg[0].c[0] == 210 && lg[0].c[3] == 255;
         ViewBuild(1000, 500, 0.6f, 3000);
         lg = g_vv + g_vb[g_vbN - 1].first;
         const ViewVert *aura = g_vv + g_vb[g_vbN - 2].first + g_vb[g_vbN - 2].count - 8;
-        ok &= g_vb[g_vbN - 1].tex == VT_LOGO && lg[0].c[0] == 255 && g_vb[g_vbN - 2].count == 4 * (2 + SABER_SPARKS + 4 + 2) &&
-              fabsf((aura[0].x + aura[1].x) / 2 - 500) < 1e-3f && fabsf((aura[0].y + aura[2].y) / 2 - cy) < 1e-3f &&
+        ok &= g_vb[g_vbN - 1].tex == VT_LOGO && lg[0].c[0] == 255 && g_vb[g_vbN - 2].count == 4 * (2 + SABER_SPARKS + 2) &&
+              fabsf((aura[0].x + aura[1].x) / 2 - 500) < 1e-3f && fabsf((aura[0].y + aura[2].y) / 2 - (foot - lh / 2)) < 1e-3f &&
               NEAR(aura[0].c, 179, 255, 76) && aura[0].c[3] > 0;
-        Check(ok, "the RavenCraft logo sits on the blade at the centre, its halfway mark, over the tip as it passes: grey before the tip reaches it, then white and lit behind in the class's colour");
+        Check(ok, "the RavenCraft logo stands on the bottom of the screen at the blade's centre, its halfway mark, over the tip as it passes: grey before the tip reaches it, then white and lit behind in the class's colour");
         g_viewTex[VT_SPARK] = 0;                                         /* no spark: no tip, no light, the rest as ever */
         ViewBuild(1000, 500, 0.6f, 3000);
-        ok = g_vbN == 7 && g_vb[STEEL].tex == -1 && !g_vb[STEEL].add && g_vb[6].tex == VT_LOGO;
-        Check(ok, "without its spark the blade has no tip, rivets or light, and the rest is drawn");
-        g_logoOn = 0; g_logo.ok = 0; g_class = 0;
+        ok = g_vbN == 8 && g_vb[FRAME].tex == VT_FRAME && g_vb[LIPS].add && g_vb[7].tex == VT_LOGO;
+        Check(ok, "without its spark the blade has no tip or light, and the rest is drawn");
+        g_viewTex[VT_FRAME] = 0;                                         /* no frame: a channel of its size, flush, no metal */
+        ViewBuild(1000, 500, 0.6f, 3000);
+        FrameLayout(500, &fs, &ftop, &fcy, &fch);
+        ok = fs == 0 && Near(fcy, 500 - FRAME_BAND * 500 / 2, 1e-3);
+        for (int i = 0; i < g_vbN; i++) ok &= g_vb[i].tex != VT_FRAME;
+        Check(ok, "without its frame's sheet the blade runs in a channel of the same size at the bottom, and no frame is drawn");
+        g_logoOn = 0; g_logo.ok = 0; g_class = 0; g_frameOn = 0; g_frame.ok = 0;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
     }
@@ -3153,14 +3184,13 @@ static void ViewTests(void)
         for (int i = 0; i < g_vbN; i++) { order[n++] = g_vb[i].tex; if (g_vb[i].tex == VT_LOGO) logo = i; }
         /* the map, the overlay's layers, then the blade (its channel, glow, core, edge and steel) and the logo on it, last:
          * nothing across the top and no black band along the bottom (his call, 6 Oct 2026: the map gets the screen) */
-        ok &= n >= 8 && order[0] == VT_MAP && order[1] == VT_MARKS && logo == n - 1;
-        for (int i = n - 6; i <= n - 2; i++) ok &= order[i] == -1 && g_vb[i].add == ((n - 1 - i) % 2 == 0);   /* channel, glow, */
-        for (int i = 2; i < n - 6; i++) ok &= order[i] == VT_SEA || order[i] == VT_MARKS;   /* core, edge, steel; overlay */
-        for (int i = 0; i < g_vvN; i++) ok &= !(g_vv[i].y == 0 && g_vv[i].x == 1000 && i >= 4 && i < g_vb[n - 6].first);
+        ok &= n >= 7 && order[0] == VT_MAP && order[1] == VT_MARKS && logo == n - 1;
+        for (int i = n - 5; i <= n - 2; i++) ok &= order[i] == -1 && g_vb[i].add == ((n - 1 - i) % 2 == 1);   /* channel, glow, */
+        for (int i = 2; i < n - 5; i++) ok &= order[i] == VT_SEA || order[i] == VT_MARKS;   /* core, edge; the overlay */
+        for (int i = 0; i < g_vvN; i++) ok &= !(g_vv[i].y == 0 && g_vv[i].x == 1000 && i >= 4 && i < g_vb[n - 5].first);
         if (logo >= 0) {
             const ViewVert *w = g_vv + g_vb[logo].first;
-            float cy = (1 - SABER_CY) * 500;
-            ok &= g_vb[logo].count == 4 && fabsf((w[0].x + w[2].x) / 2 - 500) < 1e-3f && fabsf((w[0].y + w[2].y) / 2 - cy) < 1e-3f &&
+            ok &= g_vb[logo].count == 4 && fabsf((w[0].x + w[2].x) / 2 - 500) < 1e-3f && fabsf(w[2].y - (500 - SABER_LOGO_FOOT * 500)) < 1e-3f &&
                   w[0].u == g_logo.tu0 && w[0].v == g_logo.tv0 && w[2].u == g_logo.tu1 && w[2].v == g_logo.tv1;
         } else ok = 0;
         g_viewTex[VT_LOGO] = 0;
