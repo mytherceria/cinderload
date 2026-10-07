@@ -927,30 +927,32 @@ static void FireBarTests(void)
             }
             lt &= g_disp == 1.0f && g_fillShown > 0.15f && g_fillShown < 0.35f &&      /* the game's full, the bar as shown not */
                   fabsf(g_fillVerts[6 * (g_fillCount / 2 - 1)] - g_fillShown) < 1e-4f;  /* the fill's own front */
-            /* the view's frames (7 ms), the next teleport: every flower open is one the front has reached, none ahead */
+            /* the view's frames (7 ms), the next teleport: the garland is retired there (his call, 6 Oct 2026: one bar for
+             * every class), so the view grows no flowers and draws the blade, its tip at the bar as shown */
             InitializeCriticalSection(&g_stepLock);
             g_viewOn = 1; g_ovOn = 1;
             for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
-            g_viewTex[VT_BLOOMS + fd] = g_viewTex[VT_WISPS + fd] = 1;
-            memset(g_wisp, 0, sizeof g_wisp); g_wispFront = -1; g_wispCredit = 0;
+            g_viewTex[VT_SPARK] = 1;
+            int openBefore = 0;
+            for (int i = 0; i < BLOOM_MAX; i++) openBefore += g_bloom[i].on;
             DriftScreenGone();
             { float h = 0; unsigned u; memcpy(&u, &h, 4); Poke(0x882BE4, u); }
             DWORD t = shim_ticks + 3000;
             GameStep(0.0f, t);                                              /* the game's first frame begins it */
-            int ahead = 0;
             for (int k = 1; k <= 145; k++) {
                 t += 7;
                 ViewStep(k * 7 < 300 ? k * 7 / 300.0f : 1.0f, t, 5120, 2160);
-                for (int i = 0; i < BLOOM_MAX; i++) ahead += g_bloom[i].on && g_bloom[i].x > g_viewShown + 1e-6f;
             }
-            int open = 0, closed = 0;
-            for (int i = 0; i < BLOOM_MAX; i++) { open += g_bloom[i].on; closed += g_bloom[i].x > g_viewShown && !g_bloom[i].on; }
-            lt &= g_viewSteps == 1 && g_disp == 1.0f && g_viewShown > 0.15f && g_viewShown < 0.35f && ahead == 0 && open >= 8 &&
-                  closed >= 40 && fabsf(g_wispFront - g_viewShown) < 1e-6f;
+            int openAfter = 0, foreign = 0, tipAt = -1;
+            for (int i = 0; i < BLOOM_MAX; i++) openAfter += g_bloom[i].on;
+            for (int i = 1; i < g_vbN; i++) foreign += g_vb[i].tex != -1 && g_vb[i].tex != VT_SPARK;
+            for (int i = 1; i < g_vbN; i++) if (g_vb[i].tex == VT_SPARK && tipAt < 0) tipAt = g_vb[i].first;
+            lt &= g_viewSteps == 1 && g_disp == 1.0f && g_viewShown > 0.15f && g_viewShown < 0.35f && openAfter == openBefore &&
+                  foreign == 0 && tipAt >= 0 && fabsf((g_vv[tipAt].x + g_vv[tipAt + 1].x) / 2 - g_viewShown * 5120) < 0.5f;
             g_viewOn = 0; g_viewSteps = 0; g_ovOn = 0; g_mapShown = 0; g_map.ok = 0; g_driftOn = 0; g_screenWatch = 0;
             g_zoomScreens = 0; g_destEndOk = 0; g_holdMs = HOLD_MS; g_lnN[1] = 0;
             for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
-            Check(lt, "garland, his teleports: a later load the game fills in 0.3 s, its bar on the plan's 4.2 s: the flowers open only as the fill's front reaches them (the game's frame and the view's), none ahead of it, and the wisps ride that front");
+            Check(lt, "garland, his teleports: a later load the game fills in 0.3 s, its bar on the plan's 4.2 s: the game's frame opens the flowers only as its fill's front reaches them; the view (the garland retired there, 6 Oct) opens none and draws the blade, its tip at the bar as shown");
         }
     }
 
@@ -2853,38 +2855,106 @@ static void ViewTests(void)
           !TextHas("GL_EXT_texture_compression_s3tc_srgb GL_EXT_bgra", "GL_EXT_texture_compression_s3tc") &&
           !TextHas("GL_EXT_texture", "GL_EXT_texture_compression_s3tc") && !TextHas("", "GL_EXT_bgra") &&
           TextHas("  GL_EXT_bgra ", "GL_EXT_bgra"), "OpenGL's extensions: a whole word only");
-    /* its frame: the world map over the whole window at the zoom's own corners, the plain bar along the bottom */
+    /* its frame: the world map over the whole window at the zoom's own corners, then the blade along the bottom (6 Oct
+     * 2026, his design: one bar for every class, the same size, only its colour the class's, unstable like the Darksaber,
+     * the logo on it as its halfway mark) */
     {
         static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
         memcpy(g_bgUV, uv, sizeof uv);
-        g_ovOn = 0; g_barFamNow = -1; g_barGarland = 0; g_barTallNow = 0;
+        g_ovOn = 0; g_logoOn = 0; g_class = 0;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
-        ViewBuild(1000, 500, 0.25f, 0);
+        ViewBuild(1000, 500, 0.0f, 0);
         const ViewVert *v = g_vv;
-        int ok = g_vbN == 1 && g_vb[0].tex == VT_MAP && g_vb[0].first == 0 && g_vb[0].count == 4 && v[0].x == 0 &&
-                 v[0].y == 0 && v[0].u == 0.2f && v[0].v == 0.3f && v[2].x == 1000 && v[2].y == 500 && v[2].u == 0.6f &&
-                 v[2].v == 0.7f && v[1].x == 1000 && v[1].y == 0 && v[0].c[0] == 255 && v[0].c[3] == 255;   /* no bar yet */
-        /* slice 3: the bar, the pack's own family here, the log's size (kBorderWide: the bottom 9%): its fill to the bar
-         * as shown, as the game's own strip, then the log over the whole width */
-        g_viewTex[ViewBarSlot(-1, 0)] = g_viewTex[ViewBarSlot(-1, 1)] = 1;
-        ViewBuild(1000, 500, 0.25f, 0);
-        int nf = FillStrip(0, 0, 0.09f, 0, 1, 0.25f, 0, 0, g_vfVerts, g_vfUV, g_vfColor);
-        ok &= g_vbN == 3 && g_vb[1].tex == ViewBarSlot(-1, 0) && g_vb[1].count == 4 * (nf / 2 - 1) && g_vb[2].tex == ViewBarSlot(-1, 1) &&
-              g_vb[2].count == 4;
-        const ViewVert *fq = g_vv + g_vb[1].first, *lq = fq + g_vb[1].count - 4, *bq = g_vv + g_vb[2].first;
-        ok &= fq[0].x == 0 && fabsf(fq[0].y - 455) < 1e-3f && fq[0].v == 0 && fabsf(fq[3].y - 500) < 1e-3f && fq[3].v == 1 &&
-              fq[3].x == fq[0].x && fq[2].x == fq[1].x && fq[1].x > fq[0].x && fabsf(fq[2].y - 500) < 1e-3f &&  /* round it */
-              fabsf(lq[1].x - 250) < 1e-3f && lq[1].c[3] == 0 && fq[0].c[3] == 255 &&      /* to the front, faded in at it */
-              bq[0].x == 0 && fabsf(bq[0].y - 455) < 1e-3f && bq[2].x == 1000 && bq[2].y == 500 && bq[0].u == 0 && bq[0].v == 0 &&
-              bq[2].u == 1 && bq[2].v == 1;
-        g_barTallNow = 1;                                                /* a garland's: the bottom 22% */
-        ViewBuild(1000, 500, 1.0f, 0);
-        bq = g_vv + g_vb[g_vbN - 1].first;
-        ok &= fabsf(bq[0].y - 390) < 1e-3f && fabsf(g_vv[g_vb[1].first + g_vb[1].count - 4 + 1].x - 1000) < 1e-3f;
-        g_barTallNow = 0;
+        int ok = g_vb[0].tex == VT_MAP && g_vb[0].first == 0 && g_vb[0].count == 4 && v[0].x == 0 && v[0].y == 0 &&
+                 v[0].u == 0.2f && v[0].v == 0.3f && v[2].x == 1000 && v[2].y == 500 && v[2].u == 0.6f && v[2].v == 0.7f &&
+                 v[1].x == 1000 && v[1].y == 0 && v[0].c[0] == 255 && v[0].c[3] == 255;
+        Check(ok, "the view's frame: the world map over the whole window at the zoom's corners, top left to bottom right");
+        float cy = (1 - SABER_CY) * 500, hc = SABER_CORE / 2 * 500;
+        Check(fabsf(cy - 475) < 1e-3f && hc > 2 && hc < 3.5f, "the blade's place: its centre line 5% up from the bottom of the screen, its core about a hundredth of the screen tall");
+        /* nothing loaded yet: only the way to go, a faint dark line the whole width, on the blade's centre line */
+        ok = g_vbN == 2 && g_vb[1].tex == -1 && !g_vb[1].add && g_vb[1].count == 4 && g_vv[4].x == 0 && g_vv[5].x == 1000 &&
+             g_vv[4].c[3] == 0x5A && g_vv[4].c[0] == 0 && fabsf((g_vv[4].y + g_vv[6].y) / 2 - cy) < 1e-3f && g_vv[6].y - g_vv[4].y < 2 * hc;
+        Check(ok, "the blade, nothing loaded: only the way to go, a faint dark line edge to edge on its centre line");
+        /* a quarter loaded, a warlock: its glow added, the way to go and the dark core, its hot edge added, the tip */
+        g_class = 9; g_viewTex[VT_SPARK] = 1;
+        ViewBuild(1000, 500, 0.25f, 1234);
+        ok = g_vbN == 5 && g_vb[1].tex == -1 && g_vb[1].add && g_vb[2].tex == -1 && !g_vb[2].add && g_vb[3].tex == -1 &&
+             g_vb[3].add && g_vb[4].tex == VT_SPARK && g_vb[4].add && g_vb[4].count == 4 * (2 + SABER_SPARKS);
+        int cols = g_vb[2].count / 4 - 1;
+        ok &= cols > 30 && g_vb[1].count == 16 * cols && g_vb[3].count == 8 * cols;
+        const ViewVert *tr = g_vv + g_vb[2].first, *co = tr + 4, *last = co + 4 * (cols - 1);
+        ok &= tr[0].x == 250 && tr[1].x == 1000 && fabsf((tr[0].y + tr[3].y) / 2 - cy) < 1e-3f;      /* the way to go */
+        ok &= co[0].x == 0 && last[1].x == 250 && last[2].x == 250;                                  /* edge to the tip */
+        int body = 1, lit = 1;
+        for (int k = 0; k < cols; k++) {
+            const ViewVert *q = co + 4 * k;
+            body &= q[3].x == q[0].x && q[2].x == q[1].x && q[1].x > q[0].x;                    /* round it, left to right */
+            if (q[1].x <= 250 - hc * 2.5f)
+                body &= q[0].y < cy - 0.6f * hc && q[0].y > cy - 1.3f * hc && q[3].y > cy + 0.6f * hc && q[3].y < cy + 1.3f * hc;
+            body &= q[0].c[0] == 18 && q[0].c[1] == 16 && q[0].c[2] == 24 && q[0].c[3] == 240;       /* the warlock's, dark */
+            if (k + 1 < cols) body &= co[4 * (k + 1)].x == q[1].x;                                   /* unbroken */
+        }
+        const ViewVert *gl0 = g_vv + g_vb[1].first, *hot = g_vv + g_vb[3].first, *tip = g_vv + g_vb[4].first;
+#define NEAR(c, r, g, b) (abs((c)[0] - (r)) <= 1 && abs((c)[1] - (g)) <= 1 && abs((c)[2] - (b)) <= 1)
+        lit &= NEAR(gl0[0].c, 132, 91, 255) && gl0[0].c[3] == 0 && gl0[3].c[3] > 100 &&      /* a richer purple than */
+               gl0[0].y < gl0[3].y && fabsf(gl0[3].y - co[0].y) < 1e-3f;                     /* Blizzard's pale one */
+        lit &= NEAR(hot[0].c, 181, 157, 255);                                                   /* the edge, paler */
+        lit &= fabsf((tip[0].x + tip[1].x) / 2 - 250) < 1e-3f && fabsf((tip[0].y + tip[2].y) / 2 - cy) < 1e-3f;
+        Check(ok && body, "the blade, a quarter loaded: its glow added, the way to go a dark line from the tip to the far edge, the dark core from the screen's left edge to the tip in columns that join, on its centre line");
+        Check(lit, "the blade's colour: a warlock's purple glow, richer than Blizzard's pale text colour, fading out from the core, the core that purple almost black, a paler edge, the tip flaring at the bar as shown");
+        Check(SaberVivid(0xFFFFFF) == 0xFFFFFF && SaberVivid(0x0070DE) == 0x0081FF && SaberVivid(0xFF7D0A) == 0xFF7B06,
+              "a class's light keeps its hue: a priest's stays white, a shaman's blue and a druid's orange only brighten");
+        /* the same blade for every class, only its colour: a hunter's at the same moment */
+        static float pos[2 * VIEW_QUADS_MAX * 4];
+        int nv = g_vvN;
+        for (int i = 0; i < nv; i++) { pos[2 * i] = g_vv[i].x; pos[2 * i + 1] = g_vv[i].y; }
+        g_class = 3;
+        ViewBuild(1000, 500, 0.25f, 1234);
+        int same = g_vvN == nv, recoloured = 0;
+        for (int i = 0; i < nv && same; i++) same &= pos[2 * i] == g_vv[i].x && pos[2 * i + 1] == g_vv[i].y;
+        recoloured = NEAR(g_vv[g_vb[1].first].c, 179, 255, 76);
+        Check(same && recoloured, "the blade is the same for every class, only its colour the class's (a hunter's green, every corner where the warlock's was)");
+        /* unstable: a sixtieth of a second on, the core's edge has moved and the glow's reach beyond it has changed; its
+         * reach to the tip has not */
+        static float reach[VIEW_QUADS_MAX];
+        for (int q = 0; q < g_vb[1].count / 4; q++) reach[q] = pos[2 * (g_vb[1].first + 4 * q) + 1] - pos[2 * (g_vb[1].first + 4 * q + 3) + 1];
+        ViewBuild(1000, 500, 0.25f, 1234 + 16);
+        int edge = 0, glow = 0, steady = g_vb[2].count / 4 - 1 == cols;
+        for (int k = 1; k <= cols; k++) edge += fabsf(g_vv[g_vb[2].first + 4 * k].y - pos[2 * (g_vb[2].first + 4 * k) + 1]) > 0.05f;
+        for (int q = 0; q < g_vb[1].count / 4; q++)
+            glow += fabsf(g_vv[g_vb[1].first + 4 * q].y - g_vv[g_vb[1].first + 4 * q + 3].y - reach[q]) > 0.01f;
+        steady &= g_vv[g_vb[2].first + 4].x == 0 && g_vv[g_vb[2].first + 4 * cols + 1].x == 250;
+        Check(edge > cols / 4 && glow > g_vb[1].count / 8 && steady, "the blade is unstable: its core's edge never sits still and its glow's reach flickers from one frame to the next, its body still reaching from the edge to the tip");
+        /* full: edge to edge, no way to go, no tip */
+        ViewBuild(1000, 500, 1.0f, 2000);
+        cols = g_vb[2].count / 4;
+        ok = g_vbN == 4 && g_vv[g_vb[2].first].x == 0 && g_vv[g_vb[2].first + 4 * (cols - 1) + 1].x == 1000 &&
+             g_vv[g_vb[2].first].c[3] == 240 && cols == 1000 / SABER_COL_PX;
+        Check(ok, "the blade full: the dark core edge to edge, nothing still to go, no tip");
+        /* the logo on it at the centre, its halfway mark: over the tip, grey before the tip reaches it, lit after */
+        g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2; g_logo.tu0 = 0.1f; g_logo.tv0 = 0.2f; g_logo.tu1 = 0.9f; g_logo.tv1 = 0.8f;
+        g_viewTex[VT_LOGO] = 1;
+        ViewBuild(1000, 500, 0.25f, 3000);
+        const ViewVert *lg = g_vv + g_vb[g_vbN - 1].first;
+        float lh = SABER_LOGO_H * 500;
+        ok = g_vb[g_vbN - 1].tex == VT_LOGO && !g_vb[g_vbN - 1].add && g_vb[g_vbN - 1].count == 4 && g_vb[g_vbN - 2].tex == VT_SPARK &&
+             g_vb[g_vbN - 2].count == 4 * (2 + SABER_SPARKS) && fabsf(lg[0].x - (500 - lh)) < 1e-3f && fabsf(lg[2].x - (500 + lh)) < 1e-3f &&
+             fabsf(lg[0].y - (cy - lh / 2)) < 1e-3f && fabsf(lg[2].y - (cy + lh / 2)) < 1e-3f && lg[0].u == 0.1f && lg[0].v == 0.2f &&
+             lg[2].u == 0.9f && lg[2].v == 0.8f && lg[0].c[0] == 210 && lg[0].c[3] == 255;
+        ViewBuild(1000, 500, 0.6f, 3000);
+        lg = g_vv + g_vb[g_vbN - 1].first;
+        const ViewVert *aura = g_vv + g_vb[g_vbN - 2].first + g_vb[g_vbN - 2].count - 8;
+        ok &= g_vb[g_vbN - 1].tex == VT_LOGO && lg[0].c[0] == 255 && g_vb[g_vbN - 2].count == 4 * (2 + SABER_SPARKS + 2) &&
+              fabsf((aura[0].x + aura[1].x) / 2 - 500) < 1e-3f && fabsf((aura[0].y + aura[2].y) / 2 - cy) < 1e-3f &&
+              NEAR(aura[0].c, 179, 255, 76) && aura[0].c[3] > 0;
+        Check(ok, "the RavenCraft logo sits on the blade at the centre, its halfway mark, over the tip as it passes: grey before the tip reaches it, then white and lit behind in the class's colour");
+        g_viewTex[VT_SPARK] = 0;                                         /* no spark: no tip, no light, the rest as ever */
+        ViewBuild(1000, 500, 0.6f, 3000);
+        ok = g_vbN == 5 && g_vb[3].tex == -1 && g_vb[4].tex == VT_LOGO;
+        Check(ok, "without its spark the blade has no tip or light on the logo, and the rest is drawn");
+        g_logoOn = 0; g_logo.ok = 0; g_class = 0;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-        Check(ok, "the view's frame: the world map over the whole window at the zoom's corners, top left to bottom right; slice 3's bar, the game's own fill strip to the bar as shown and the log over the whole width, at the log's size or a garland's");
     }
     /* whose thread: a screen begins on the game's; the view's then moves the bar and the zoom, through the game's stalls */
     {
@@ -3080,27 +3150,24 @@ static void ViewTests(void)
         ViewBuild(1000, 500, 0.5f, 100000);
         int order[VIEW_BATCHES], n = 0, logo = -1;
         for (int i = 0; i < g_vbN; i++) { order[n++] = g_vb[i].tex; if (g_vb[i].tex == VT_LOGO) logo = i; }
-        ok &= n >= 4 && order[0] == VT_MAP && order[1] == VT_MARKS && order[n - 1] == VT_SEA && order[n - 2] == VT_LOGO;
-        for (int i = 2; i < n - 2; i++) ok &= order[i] == VT_SEA || order[i] == VT_MARKS;   /* glints, ripple, badge */
-        const ViewVert *blk = g_vv + g_vb[n - 1].first;                  /* last, the log's black band under the bar */
-        ok &= g_vb[n - 1].count == 4 && blk[0].x == 0 && blk[0].y == 500 && blk[2].x == 1000 &&
-              fabsf(blk[2].y - (1 - BAR_BLACK_H) * 500) < 1e-3f;
-        g_barGarland = 1; g_bars.families = 1;                           /* a garland: no black band */
-        ViewBuild(1000, 500, 0.5f, 100010);
-        ok &= g_vb[g_vbN - 1].tex == VT_LOGO;
-        g_barGarland = 0; g_bars.families = 0;
+        /* the map, the overlay's layers, then the blade (its glow, its core, its edge) and the logo on it, last: no class
+         * banner across the top and no black band along the bottom (his call, 6 Oct 2026: the map gets the screen) */
+        ok &= n >= 6 && order[0] == VT_MAP && order[1] == VT_MARKS && logo == n - 1 && order[n - 2] == -1 && order[n - 3] == -1 &&
+              order[n - 4] == -1 && g_vb[n - 2].add && !g_vb[n - 3].add && g_vb[n - 4].add;
+        for (int i = 2; i < n - 4; i++) ok &= order[i] == VT_SEA || order[i] == VT_MARKS;   /* glints, ripple, badge */
+        for (int i = 0; i < g_vvN; i++) ok &= !(g_vv[i].y == 0 && g_vv[i].x == 1000 && i >= 4 && i < g_vb[n - 4].first);
         if (logo >= 0) {
             const ViewVert *w = g_vv + g_vb[logo].first;
-            ok &= g_vb[logo].count == 4 && fabsf(w[0].x - g_logoPos[0] * 1000) < 1e-3f &&
-                  fabsf(w[0].y - (1 - g_logoPos[1]) * 500) < 1e-3f && fabsf(w[2].x - g_logoPos[9] * 1000) < 1e-3f &&
-                  fabsf(w[2].y - (1 - g_logoPos[10]) * 500) < 1e-3f && w[2].u == g_logoUV[6] && w[2].v == g_logoUV[7];
+            float cy = (1 - SABER_CY) * 500;
+            ok &= g_vb[logo].count == 4 && fabsf((w[0].x + w[2].x) / 2 - 500) < 1e-3f && fabsf((w[0].y + w[2].y) / 2 - cy) < 1e-3f &&
+                  w[0].u == g_logo.tu0 && w[0].v == g_logo.tv0 && w[2].u == g_logo.tu1 && w[2].v == g_logo.tv1;
         } else ok = 0;
         g_viewTex[VT_LOGO] = 0;
         ViewBuild(1000, 500, 0.5f, 100020);
         for (int i = 0; i < g_vbN; i++) ok &= g_vb[i].tex != VT_LOGO;
         g_mapShown = 0; g_ovOn = 0;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
-        Check(ok, "slice 2: the view's layers in the game's order (the map, the Maelstrom, the sea's glints and marks, the logo, the log's black band; none under a garland), the logo where the game puts it; a layer whose sheet OpenGL lacks is left out");
+        Check(ok, "slice 2, 6 Oct: the view's layers in the game's order (the map, the Maelstrom, the sea's glints and marks), then the blade and the RavenCraft logo on it at the centre; no class banner, no black band; a layer whose sheet OpenGL lacks is left out");
     }
     /* the view's own clock (his yes, 5 Oct: "hide the jump"): steady frames keep the wall clock; after a pause behind the
      * game's burst on the card it goes on from where it stopped, then catches up a quarter faster, never past the wall */

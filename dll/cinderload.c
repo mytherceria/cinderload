@@ -4163,8 +4163,8 @@ static void OverlayAfterFillAll(int f);
 void WINAPI OverlayAfterFill(void)
 {
     LONG garland = g_barGarland;
-    if (!g_ovOn || !g_mapShown || garland <= 0 || garland > g_bars.families || g_viewSteps) return;   /* (the view's: see
-                                                                                         * ViewBarBuild) */
+    if (!g_ovOn || !g_mapShown || garland <= 0 || garland > g_bars.families || g_viewSteps) return;   /* (the view draws
+                                                                                         * the blade: SaberBuild) */
     int held = StepLock();
     if (!g_viewSteps) OverlayAfterFillAll((int)garland - 1);
     StepUnlock(held);
@@ -4303,7 +4303,7 @@ static float FillHeat(float d, float t, int k)
  * seconds: columns from the left edge to the front, closer together near it, each a top and a bottom corner into verts
  * (x y z), uv and colours (grey levels, alpha on top). The fire flows and cools behind its front, which fades in over
  * REVEAL_FEATHER; a garland's leaves and flowers are laid once and never cool. Its corners (two a column). The game's
- * frame and the view's each make their own (RevealFill, ViewBarBuild). */
+ * frame makes it (RevealFill); the view draws the blade instead (SaberBuild). */
 static int FillStrip(float L, float B, float T, float z, float full, float shown, float t, int garland, float *verts,
                      float *uvs, unsigned *colors)
 {
@@ -4654,27 +4654,32 @@ static int TextHas(const char *list, const char *name)
 
 /* A frame of the view, as the quads it draws, in batches by picture (the renderer's seam: the tests read the list):
  * pixels, y down; each corner's place on its picture and its colour (RGBA). Made where the bar and the zoom move (under
- * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, each class's
- * banner; g_viewTex holds OpenGL's name for each (0 while it has none). */
-enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_ARCH, VT_BAR = VT_ARCH + 12,
-       VT_BLOOMS = VT_BAR + 2 * (BAR_FAMILIES + 1), VT_WISPS = VT_BLOOMS + BAR_FAMILIES, VT_COUNT = VT_WISPS + BAR_FAMILIES };
+ * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, the blade's
+ * soft spark (made here, not read); g_viewTex holds OpenGL's name for each (0 while it has none). A batch is drawn
+ * over what is under it, or added to it (add: light, the blade's glow). */
+enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_SPARK, VT_COUNT };
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
-#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + 8)
+#define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
+#define SABER_COLS_MAX 1024       /* and at the most this many */
+#define SABER_SPARKS   14         /* sparks thrown back off its tip */
+#define SABER_QUADS    (7 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1)
+#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS)
 #define VIEW_BATCHES   32
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
-static struct { int tex, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
+static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
 static int g_vbN, g_vvN, g_vbFull;
 static void ViewListStart(void) { g_vbN = g_vvN = g_vbFull = 0; }
 
-/* Room for one more quad of picture tex: its four corners, in the last batch when that is the same picture's; NULL once
- * the list is full (that quad and every one after it left out, so nothing is drawn out of its order). */
-static ViewVert *ViewQuadNew(int tex)
+/* Room for one more quad of picture tex, added (add 1) or drawn over: its four corners, in the last batch when that is
+ * the same picture's the same way; NULL once the list is full (that quad and every one after it left out, so nothing is
+ * drawn out of its order). */
+static ViewVert *ViewQuadMode(int tex, int add)
 {
     if (g_vbFull || g_vvN + 4 > VIEW_QUADS_MAX * 4) return g_vbFull = 1, (ViewVert *)NULL;
-    if (!g_vbN || g_vb[g_vbN - 1].tex != tex) {
+    if (!g_vbN || g_vb[g_vbN - 1].tex != tex || g_vb[g_vbN - 1].add != add) {
         if (g_vbN >= VIEW_BATCHES) return g_vbFull = 1, (ViewVert *)NULL;
-        g_vb[g_vbN].tex = tex; g_vb[g_vbN].first = g_vvN; g_vb[g_vbN].count = 0;
+        g_vb[g_vbN].tex = tex; g_vb[g_vbN].add = add; g_vb[g_vbN].first = g_vvN; g_vb[g_vbN].count = 0;
         g_vbN++;
     }
     ViewVert *v = &g_vv[g_vvN];
@@ -4682,6 +4687,7 @@ static ViewVert *ViewQuadNew(int tex)
     g_vb[g_vbN - 1].count += 4;
     return v;
 }
+static ViewVert *ViewQuadNew(int tex) { return ViewQuadMode(tex, 0); }
 static void ViewVertSet(ViewVert *v, float x, float y, float u, float t, DWORD argb)
 {
     v->x = x; v->y = y; v->u = u; v->v = t;
@@ -4715,8 +4721,8 @@ static void ViewStrips(int tex, const float *pos, const float *uv, const unsigne
 /* The overlay's layers over the map (slice 2, 5 Oct 2026), in the game's own order (OverlayDraw), each made by its own
  * builder and copied into the list with its sheet. The view's thread, under g_stepLock: while it moves the view, the
  * game's frame builds none of them (OverlayDraw stands down and only reads the class, which only the game's thread
- * may). A layer whose sheet OpenGL does not have is left out. The log's black band under the bar is the bar's (slice
- * 3). now: the view's clock. */
+ * may). A layer whose sheet OpenGL does not have is left out. No class banner across the top, no black band along the
+ * bottom (his call, 6 Oct 2026: the map gets the screen); the logo is the blade's, on it (below). now: the view's clock. */
 static DWORD g_ovViewAt;
 static void ViewOverlayBuild(float W, float H, DWORD now)
 {
@@ -4737,84 +4743,204 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
     }
     if (g_lblOn && g_viewTex[VT_LABELS]) { LabelsBuild(); ViewStrips(VT_LABELS, g_lblPos, g_lblUV, g_lblCol, g_lblQuads, W, H); }
     if (g_marksOn && g_viewTex[VT_MARKS]) { BadgeBuild(now); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
-    LONG c = g_class;
-    if (g_archOn && c > 0 && c < 12 && g_archHas[c] && g_viewTex[VT_ARCH + c]) {
-        ArchBuild();
-        ViewStrips(VT_ARCH + (int)c, g_archPos, g_archUV, g_archCol, 1, W, H);
-    }
-    if (g_logoOn && g_viewTex[VT_LOGO]) { LogoBuild(); ViewStrips(VT_LOGO, g_logoPos, g_logoUV, g_logoCol, 1, W, H); }
-    LONG garland = g_barGarland;                                 /* last: the log's black, under the bar (not a garland's) */
-    if (!(garland > 0 && garland <= g_bars.families) && g_seaOn && g_viewTex[VT_SEA]) {
-        BarBlackBuild();
-        ViewStrips(VT_SEA, g_blackPos, g_blackUV, g_blackCol, 1, W, H);
-    }
 }
 
-/* ---- the bar in the view (slice 3, 5 Oct 2026) ----
- * The screen's fire family (BarPath's, as it began; the pack's own bar when it has none), at the size BarSizeSet gave it
- * (a garland tall, the log's otherwise): its fill revealed to the bar as shown by the game's own FillStrip, a garland's
- * blooms and wisps over it (as OverlayAfterFill, which stands down while the view moves the view), and the log, or the
- * garland's frame, over all. Pictures by slot: each family's fill and border (ViewBarSlot), a garland's blooms and wisps. */
-static float g_vfVerts[3 * 2 * FILL_COLUMNS], g_vfUV[2 * 2 * FILL_COLUMNS];
-static unsigned g_vfColor[2 * FILL_COLUMNS];
-static DWORD g_barViewAt;
-static LONG ViewBarFam(void)
+/* ---- the blade (6 Oct 2026, his design: "one really nice bar") ----
+ * One loading bar for every class, the same size for all, only its colour the class's: edge to edge along the bottom of
+ * the screen, unstable like the Darksaber (his reference, The Mandalorian): a dark core whose edges crackle with the
+ * class's light, a glow that flickers and throws jagged flares, a hot tip with sparks coming off it as it runs, and the
+ * way still to go a faint dark line. The RavenCraft logo sits on it at the centre, its halfway mark, and lights in the
+ * class's colour as the tip reaches it. Drawn by the view only (the game's own frame under it keeps the pack's bar: the
+ * fallback). Plain quads, a column every SABER_COL_PX pixels with their corners shared (the edges run on unbroken), and
+ * the soft spark (VT_SPARK) for the tip, the sparks and the logo's light; the light is added, the core drawn over. Sizes
+ * are of the window's height, so the blade is the same on every shape of screen. */
+#define SABER_CY     0.05f         /* its centre line, up from the bottom */
+#define SABER_CORE   0.012f        /* its dark core, top to bottom */
+#define SABER_GLOW   0.024f        /* its glow beyond the core's edge, as it usually reaches (a flare goes further) */
+#define SABER_LOGO_H 0.085f        /* the logo on it, tall */
+#define SABER_TRACK  0x5A000000u   /* the way still to go: a faint dark line, a little thinner than the core */
+/* The classes' colours, 0xRRGGBB: the game's own (Blizzard's), the shaman's the TBC blue RavenCraft uses (his call,
+ * 5 Oct); a character whose class the badge does not know gets CinderLoad's ember. */
+static const unsigned kClassColour[12] = { 0xFF8A2A, 0xC79C6E, 0xF58CBA, 0xABD473, 0xFFF569, 0xFFFFFF, 0xFF8A2A,
+                                           0x0070DE, 0x69CCF0, 0x9482C9, 0xFF8A2A, 0xFF7D0A };
+static DWORD SaberArgb(unsigned rgb, float a) { return (DWORD)(int)(FireClamp(a, 0, 1) * 255 + 0.5f) << 24 | (rgb & 0xFFFFFFu); }
+static unsigned SaberMix(unsigned rgb, unsigned to, float k)            /* rgb k of the way to to */
 {
-    LONG f = g_barFamNow;
-    return f >= 0 && f < g_bars.families && g_bars.family[f].ok ? f : -1;
+    unsigned out = 0;
+    for (int s = 0; s < 24; s += 8) {
+        float a = (float)(rgb >> s & 255), b = (float)(to >> s & 255);
+        out |= (unsigned)(int)(a + (b - a) * k + 0.5f) << s;
+    }
+    return out;
 }
-static int ViewBarSlot(LONG f, int border) { return VT_BAR + 2 * (f >= 0 && f < BAR_FAMILIES ? (int)f + 1 : 0) + border; }
-static void ViewBarBuild(float W, float H, float shown, DWORD now)
+/* A light's colour from a class's: the same hue, richer (its saturation 45% of the way to whole) and as bright as it
+ * goes. Blizzard's class colours are pale for text on dark panels; added as light they wash to white (a warlock's
+ * purple came out lavender). White stays white. */
+static unsigned SaberVivid(unsigned rgb)
 {
-    LONG f = ViewBarFam(), gar = g_barGarland;
-    const unsigned char *r = g_barTallNow ? kBarTall : kBorderWide;   /* (as BarSizeSet left the game's size table) */
-    float cx = MapBits(Rd32(r)), cy = MapBits(Rd32(r + 4)), w = MapBits(Rd32(r + 8)), h = MapBits(Rd32(r + 12));
-    float L = cx - w / 2, B = cy - h / 2, T = cy + h / 2, t = (float)(now % 3600000u) / 1000.0f;
-    float dt = g_barViewAt ? (float)(LONG)(now - g_barViewAt) / 1000.0f : 0;
-    g_barViewAt = now;
-    if (dt < 0) dt = 0;
-    if (dt > 0.25f) dt = 0.25f;
-    int fill = ViewBarSlot(f, 0), border = ViewBarSlot(f, 1);
-    if (g_viewTex[fill]) {
-        int n2 = FillStrip(L, B, T, 0, w, FireClamp(shown, 0, 1), t, gar != 0, g_vfVerts, g_vfUV, g_vfColor);
-        for (int k = 0; k + 1 < n2 / 2; k++) {                  /* a quad between each two columns */
-            static const int corner[4] = { 0, 2, 3, 1 };           /* top left, top right, bottom right, bottom left */
-            ViewVert *q = ViewQuadNew(fill);
-            if (!q) break;
-            for (int j = 0; j < 4; j++) {
-                int c = 2 * k + corner[j];
-                ViewVertSet(q + j, g_vfVerts[3 * c] * W, (1 - g_vfVerts[3 * c + 1]) * H, g_vfUV[2 * c], g_vfUV[2 * c + 1],
-                            g_vfColor[c]);
+    float c[3], hi = 0, lo = 255;
+    for (int s = 0; s < 3; s++) {
+        c[s] = (float)(rgb >> (16 - 8 * s) & 255);
+        if (c[s] > hi) hi = c[s];
+        if (c[s] < lo) lo = c[s];
+    }
+    if (hi <= 0) return 0xFFFFFF;
+    float sat = (hi - lo) / hi, k = sat > 0 ? 1 + (1 - sat) * 0.45f / sat : 1, up = 255 / hi;
+    unsigned out = 0;
+    for (int s = 0; s < 3; s++) {
+        float v = (hi - (hi - c[s]) * k) * up;
+        out |= (unsigned)(int)(FireClamp(v, 0, 255) + 0.5f) << (16 - 8 * s);
+    }
+    return out;
+}
+/* Value noise over x and t, 0 to 1, smooth between whole steps of each; seed picks the field. */
+static float SaberNoise(float x, float t, unsigned seed)
+{
+    float fx = MapFloor(x), ft = MapFloor(t), ax = x - fx, at = t - ft;
+    ax = ax * ax * (3 - 2 * ax); at = at * at * (3 - 2 * at);
+    unsigned ix = (unsigned)(int)fx + seed * 7919u, it = (unsigned)(int)ft;
+    float a = SeaRand(ix, it), b = SeaRand(ix + 1, it), c = SeaRand(ix, it + 1), d = SeaRand(ix + 1, it + 1);
+    float lo = a + (b - a) * ax, hi = c + (d - c) * ax;
+    return lo + (hi - lo) * at;
+}
+/* The blade at column place k (columns from the left, fractions between), t seconds, above (side 0) or below (1), for a
+ * window H tall, in pixels: how far its core reaches from the centre line (*core), how far its glow then reaches
+ * (*glow), and how hot its edge burns (*hot, 0 to 1). Slow swelling, a fast edge that never sits still, a glow whose
+ * reach flickers, and now and then a jagged flare. */
+static void SaberEdge(float k, float t, int side, float H, float *core, float *glow, float *hot)
+{
+    unsigned s = (unsigned)side * 4;
+    float hc = SABER_CORE / 2 * H, g = SABER_GLOW * H;
+    float swell = SaberNoise(k * 0.03f, t * 0.8f, s + 1) - 0.5f;
+    float jitter = SaberNoise(k * 0.45f, t * 26, s + 2) - 0.5f;
+    float crackle = SaberNoise(k * 0.22f, t * 17, s + 3);
+    float flare = SaberNoise(k * 0.18f, t * 11, s + 4) - 0.76f;
+    flare = flare > 0 ? flare / 0.24f : 0;
+    flare *= flare;
+    *core = hc * (1 + 0.16f * swell) + hc * 0.32f * jitter;
+    *glow = g * (0.55f + 0.5f * crackle + 0.8f * flare);
+    *hot = FireClamp(0.55f + 0.45f * crackle + flare, 0, 1);
+}
+/* A quad round from its top left: corners x, y, each its own colour (a plain quad's u, v unused). */
+static void SaberPut(int tex, int add, const float *x, const float *y, const DWORD *c, const float *uv)
+{
+    ViewVert *q = ViewQuadMode(tex, add);
+    if (!q) return;
+    static const float kWhole[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
+    if (!uv) uv = kWhole;
+    for (int j = 0; j < 4; j++) ViewVertSet(q + j, x[j], y[j], uv[2 * j], uv[2 * j + 1], c[j]);
+}
+/* The soft spark, centred on x, y, rx by ry, colour argb. */
+static void SaberGlowAt(float x, float y, float rx, float ry, DWORD argb)
+{
+    float xs[4] = { x - rx, x + rx, x + rx, x - rx }, ys[4] = { y - ry, y - ry, y + ry, y + ry };
+    DWORD c[4] = { argb, argb, argb, argb };
+    SaberPut(VT_SPARK, 1, xs, ys, c, NULL);
+}
+static float g_sbCore[2][SABER_COLS_MAX + 1], g_sbGlow[2][SABER_COLS_MAX + 1], g_sbHot[2][SABER_COLS_MAX + 1];
+static float g_sbX[SABER_COLS_MAX + 1];
+/* The blade for a W x H window, its tip at the bar as shown, at the view's clock now. */
+static void SaberBuild(float W, float H, float shown, DWORD now)
+{
+    LONG cl = g_class;
+    unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0], rgb = SaberVivid(base);
+    unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), coreRgb = SaberMix(base, 0, 0.88f);
+    float t = (float)(now % 3600000u) / 1000.0f, cy = (1 - SABER_CY) * H, hc = SABER_CORE / 2 * H, g = SABER_GLOW * H;
+    float front = FireClamp(shown, 0, 1) * W, line = H / 1440.0f, round = hc * 2.5f;
+    int n = (int)(W / SABER_COL_PX);
+    if (n < 16) n = 16;
+    if (n > SABER_COLS_MAX) n = SABER_COLS_MAX;
+    float cw = W / (float)n;
+    int b = 0;                                                     /* the column edges reached, the last at the tip */
+    if (front > 0)
+        for (; b <= n; b++) {
+            float x = b < n && b * cw < front ? b * cw : front;
+            float tip = (front - x) / round;                         /* the tip rounded off: sqrt-ish, no C runtime */
+            tip = shown >= 1 ? 1 : FireClamp(tip, 0, 1);
+            tip = 1 - (1 - tip) * (1 - tip);
+            g_sbX[b] = x;
+            for (int s = 0; s < 2; s++) {
+                SaberEdge(x / cw, t, s, H, &g_sbCore[s][b], &g_sbGlow[s][b], &g_sbHot[s][b]);
+                g_sbCore[s][b] *= tip; g_sbGlow[s][b] *= tip;
+            }
+            if (x >= front) { b++; break; }
+        }
+    /* the glow, added: a narrow bright one and a wide faint one beyond the core's edge, above and below */
+    for (int k = 0; k + 1 < b; k++)
+        for (int s = 0; s < 2; s++) {
+            float d = s ? 1.0f : -1.0f, x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
+            for (int layer = 0; layer < 2; layer++) {
+                float reach = layer ? 1.0f : 0.32f;
+                float a0 = layer ? 0.3f : 0.5f + 0.4f * g_sbHot[s][k], a1 = layer ? 0.3f : 0.5f + 0.4f * g_sbHot[s][k + 1];
+                float e0 = cy + d * g_sbCore[s][k], e1 = cy + d * g_sbCore[s][k + 1];
+                float y[4] = { e0 + d * reach * g_sbGlow[s][k], e1 + d * reach * g_sbGlow[s][k + 1], e1, e0 };
+                DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, a1), SaberArgb(rgb, a0) };
+                SaberPut(-1, 1, x, y, c, NULL);
             }
         }
+    /* the way still to go, then the dark core over the glow's inner edge */
+    if (front < W) {
+        float x[4] = { front, W, W, front }, y[4] = { cy - hc * 0.55f, cy - hc * 0.55f, cy + hc * 0.55f, cy + hc * 0.55f };
+        DWORD c[4] = { SABER_TRACK, SABER_TRACK, SABER_TRACK, SABER_TRACK };
+        SaberPut(-1, 0, x, y, c, NULL);
     }
-    if (g_ovOn && gar > 0 && gar <= g_bars.families) {         /* a garland: its blooms opening, its wisps, at the fill's
-                                                                * front (the bar as shown, never the game's own: on a later
-                                                                * load that is full in a third of a second, and every flower
-                                                                * opened at once while the leaves still grew in; his 5 Oct
-                                                                * teleports) */
-        int fi = (int)gar - 1;
-        float front = FireClamp(shown, 0, 1);
-        if (g_bloomTab[fi].types && g_viewTex[VT_BLOOMS + fi]) {
-            BloomsBuild(fi, front, now, g_zoomScreens);
-            ViewStrips(VT_BLOOMS + fi, g_bmPos, g_bmUV, g_bmCol, g_bmQuads, W, H);
+    for (int k = 0; k + 1 < b; k++) {
+        float x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
+        float y[4] = { cy - g_sbCore[0][k], cy - g_sbCore[0][k + 1], cy + g_sbCore[1][k + 1], cy + g_sbCore[1][k] };
+        DWORD c[4] = { SaberArgb(coreRgb, 0.94f), SaberArgb(coreRgb, 0.94f), SaberArgb(coreRgb, 0.94f), SaberArgb(coreRgb, 0.94f) };
+        SaberPut(-1, 0, x, y, c, NULL);
+    }
+    /* the hot edge, added over the core's: a thin line of near white, brighter where it burns hotter */
+    for (int k = 0; k + 1 < b; k++)
+        for (int s = 0; s < 2; s++) {
+            float d = s ? 1.0f : -1.0f, x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
+            float w0 = line * (1.4f + 1.2f * g_sbHot[s][k]), w1 = line * (1.4f + 1.2f * g_sbHot[s][k + 1]);
+            float e0 = cy + d * g_sbCore[s][k], e1 = cy + d * g_sbCore[s][k + 1];
+            float y[4] = { e0 + d * w0, e1 + d * w1, e1 - d * w1 * 0.5f, e0 - d * w0 * 0.5f };
+            DWORD c[4] = { SaberArgb(hotRgb, 0.35f * g_sbHot[s][k]), SaberArgb(hotRgb, 0.35f * g_sbHot[s][k + 1]),
+                           SaberArgb(hotRgb, g_sbHot[s][k + 1]), SaberArgb(hotRgb, g_sbHot[s][k]) };
+            SaberPut(-1, 1, x, y, c, NULL);
         }
-        if (g_wispTab[fi].n && g_viewTex[VT_WISPS + fi]) {
-            WispsBuild(fi, front, t, dt);
-            ViewStrips(VT_WISPS + fi, g_wsPos, g_wsUV, g_wsCol, g_wsQuads, W, H);
+    /* the tip, flaring and throwing sparks back as it runs (none once the blade is whole) */
+    if (g_viewTex[VT_SPARK] && front > 0 && shown < 1) {
+        float flick = 0.75f + 0.25f * SaberNoise(0, t * 23, 9);
+        SaberGlowAt(front, cy, g * 1.1f, g * 1.3f * flick, SaberArgb(rgb, 0.85f * flick));
+        SaberGlowAt(front, cy, g * 0.45f, g * 0.45f, SaberArgb(hotRgb, 0.9f));
+        for (int i = 0; i < SABER_SPARKS; i++) {
+            float life = 0.28f + 0.3f * SeaRand((unsigned)i, 77), ph = (t + SeaRand((unsigned)i, 11) * 5) / life;
+            float age = ph - MapFloor(ph);
+            unsigned gen = (unsigned)i * 31u + (unsigned)(int)MapFloor(ph);
+            float dist = age * g * (1.5f + 2.5f * SeaRand(gen, 7));
+            float sx = front - (0.4f + 0.8f * SeaRand(gen, 3)) * dist;
+            float sy = cy + (SeaRand(gen, 5) - 0.5f) * 1.3f * dist + age * age * g * 0.4f;
+            float r = g * 0.16f * (1 - age) + line;
+            SaberGlowAt(sx, sy, r, r, SaberArgb(hotRgb, 0.9f * (1 - age)));
         }
     }
-    if (g_viewTex[border]) ViewRect(border, L * W, (1 - T) * H, (L + w) * W, (1 - B) * H, 0, 0, 1, 1, 0xFFFFFFFFu);
+    /* the logo on it at the centre, its halfway mark: lit in the class's colour as the tip reaches it */
+    if (g_logoOn && g_logo.ok && g_viewTex[VT_LOGO]) {
+        float lh = SABER_LOGO_H * H, lw = lh * g_logo.aspect;
+        if (lw > LOGO_W * W) { lh *= LOGO_W * W / lw; lw = LOGO_W * W; }
+        float lx = W / 2, lit = FireClamp((shown - 0.47f) / 0.06f, 0, 1);
+        if (lit > 0 && g_viewTex[VT_SPARK]) {
+            float flick = 0.85f + 0.15f * SaberNoise(0, t * 9, 10);
+            SaberGlowAt(lx, cy, lw * 0.85f, lh * 0.9f, SaberArgb(rgb, 0.55f * lit * flick));
+            SaberGlowAt(lx, cy, lw * 0.5f, lh * 0.45f, SaberArgb(hotRgb, 0.35f * lit));
+        }
+        unsigned grey = 210 + (unsigned)(int)(45 * lit);
+        ViewRect(VT_LOGO, lx - lw / 2, cy - lh / 2, lx + lw / 2, cy + lh / 2, g_logo.tu0, g_logo.tv0, g_logo.tu1, g_logo.tv1,
+                 0xFF000000u | grey << 16 | grey << 8 | grey);
+    }
 }
 
 /* W x H pixels at the view's clock now: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its
- * top left, [2], [3] its bottom right), the overlay over it, and the bar, its front the bar as shown. */
+ * top left, [2], [3] its bottom right), the overlay over it, and the blade, its tip the bar as shown. */
 static void ViewBuild(float W, float H, float shown, DWORD now)
 {
     ViewListStart();
     ViewRect(VT_MAP, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
     ViewOverlayBuild(W, H, now);
-    ViewBarBuild(W, H, shown, now);
+    SaberBuild(W, H, shown, now);
 }
 
 /* The view's thread, a screen up and the view not open: 1 once the game's first frame of it has begun it (seen: the
@@ -4927,6 +5053,7 @@ static int ViewFadeDue(DWORD now, DWORD goneAt, LONG seen)
 #define GL_FLOAT_                0x1406
 #define GL_SRC_ALPHA_            0x0302
 #define GL_ONE_MINUS_SRC_ALPHA_  0x0303
+#define GL_ONE_                  1
 static struct {
     HMODULE lib, gdi;
     HGLRC (WINAPI *CreateContext)(HDC);
@@ -4967,7 +5094,6 @@ static struct {
                                                                  * OpenGL has it */
     DWORD since, last, gap, frames;
 } g_view;
-static char g_viewArch[12][80];                                 /* each class's banner's path */
 
 /* opengl32.dll and gdi32.dll's few calls: 1 when every one is there. */
 static int GlLoad(void)
@@ -5071,33 +5197,36 @@ done:
     return ok;
 }
 
-/* A picture of the bar's, path without .blp, read and given to OpenGL into slot the first time it is wanted; said once in
- * the log when it cannot be (that part of the bar is then left out). */
-static unsigned char g_viewTried[VT_COUNT];
-static void ViewTexFile(int slot, const char *path)
+/* The blade's soft spark (VT_SPARK), made here: white, its alpha falling smoothly from the centre to nothing at the
+ * edge, SPARK_PX square. 0 when OpenGL would not take it (the blade then has no tip, sparks or light on the logo). */
+#define SPARK_PX 64
+static unsigned char g_sparkPx[SPARK_PX * SPARK_PX * 4];
+static void SparkMake(unsigned char *px)
 {
-    char p[96], m[200];
-    const char *why = "";
-    if (g_viewTex[slot] || g_viewTried[slot] || lstrlenA(path) + 5 > (int)sizeof p) return;
-    g_viewTried[slot] = 1;
-    lstrcpyA(p, path);
-    lstrcatA(p, ".blp");
-    int r = mpq_read(&kIo, "patch-~.MPQ", p, &g_view.blp[slot], &g_view.len[slot]);
-    if (r != MPQ_OK) why = mpq_error_text(r);
-    else if (ViewTexUp(slot, &why)) return;
-    wsprintfA(m, "  the view: %s was not given to OpenGL, as %s; that part of the bar is left out", p, why);
-    Log(m);
+    for (int y = 0; y < SPARK_PX; y++)
+        for (int x = 0; x < SPARK_PX; x++) {
+            float dx = (x + 0.5f) / (SPARK_PX / 2) - 1, dy = (y + 0.5f) / (SPARK_PX / 2) - 1, a = 1 - dx * dx - dy * dy;
+            a = a > 0 ? a * a * a : 0;
+            unsigned char *p = px + 4 * (y * SPARK_PX + x);
+            p[0] = p[1] = p[2] = 255;
+            p[3] = (unsigned char)(int)(a * 255 + 0.5f);
+        }
 }
-/* As a screen's view opens: its bar's pictures (its family's, a garland's blooms and wisps), each the first time. */
-static void ViewBarTextures(void)
+static int ViewSparkUp(void)
 {
-    LONG f = ViewBarFam(), g = g_barGarland;
-    ViewTexFile(ViewBarSlot(f, 0), f >= 0 ? g_bars.family[f].fill : kBarFillPath);
-    ViewTexFile(ViewBarSlot(f, 1), f >= 0 ? g_bars.family[f].border : kBarBorderPath);
-    if (g > 0 && g <= g_bars.families) {
-        if (g_bloomTab[g - 1].types) ViewTexFile(VT_BLOOMS + (int)g - 1, g_bars.family[g - 1].blooms);
-        if (g_wispTab[g - 1].n) ViewTexFile(VT_WISPS + (int)g - 1, g_bars.family[g - 1].wisps);
-    }
+    SparkMake(g_sparkPx);
+    while (gl.GetError()) {}
+    gl.GenTextures(1, &g_viewTex[VT_SPARK]);
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_SPARK]);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA8_, SPARK_PX, SPARK_PX, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, g_sparkPx);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, 0);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    if (gl.GetError()) g_viewTex[VT_SPARK] = 0;
+    return g_viewTex[VT_SPARK] != 0;
 }
 
 /* The window's own alpha (a layered window's): 255 whole. 0 when the system will not do it. */
@@ -5191,8 +5320,9 @@ static int ViewOpen(const char **why)
         }
         wsprintfA(m, "  the view's overlay: %d of its %d sheets given to OpenGL", given, sheets);
         Log(m);
+        Log(ViewSparkUp() ? "  the view's blade: one bar for every class, in its colour; its spark given to OpenGL"
+                          : "  the view's blade: its spark was not given to OpenGL; the blade has no tip, sparks or light on the logo");
     }
-    ViewBarTextures();
     g_view.w = w; g_view.h = h;
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
     return 1;
@@ -5215,13 +5345,19 @@ static int ViewFrame(DWORD *drawn, DWORD *gpu)
     gl.VertexPointer(2, GL_FLOAT_, (int)sizeof(ViewVert), &g_vv[0].x);
     gl.TexCoordPointer(2, GL_FLOAT_, (int)sizeof(ViewVert), &g_vv[0].u);
     gl.ColorPointer(4, GL_UNSIGNED_BYTE_, (int)sizeof(ViewVert), g_vv[0].c);
+    int added = 0;
     for (int i = 0; i < g_vbN; i++) {
         int t = g_vb[i].tex;
         if (t < 0) gl.Disable(GL_TEXTURE_2D_);
         else if (!g_viewTex[t]) continue;
         else { gl.Enable(GL_TEXTURE_2D_); gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[t]); }
+        if (g_vb[i].add != added) {                               /* light added (the blade's glow), or drawn over */
+            added = g_vb[i].add;
+            gl.BlendFunc(GL_SRC_ALPHA_, added ? GL_ONE_ : GL_ONE_MINUS_SRC_ALPHA_);
+        }
         gl.DrawArrays(GL_QUADS_, g_vb[i].first, g_vb[i].count);
     }
+    if (added) gl.BlendFunc(GL_SRC_ALPHA_, GL_ONE_MINUS_SRC_ALPHA_);
     if (drawn) *drawn = ViewNow();
     if (gpu) { gl.Finish(); *gpu = ViewNow(); }
     return gl.Swap(g_view.dc) != 0;
@@ -5294,11 +5430,6 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             { VT_LOGO, &g_logoOn, LOGO_PATH } };
         for (unsigned i = 0; i < sizeof kSheets / sizeof kSheets[0]; i++)
             if (*kSheets[i].on) mpq_read(&kIo, "patch-~.MPQ", kSheets[i].path, &g_view.blp[kSheets[i].slot], &g_view.len[kSheets[i].slot]);
-        for (unsigned c = 1; c < 12; c++)
-            if (g_archOn && g_archHas[c] && ArchPath(c, g_viewArch[c]) && lstrlenA(g_viewArch[c]) + 5 < (int)sizeof g_viewArch[c]) {
-                lstrcatA(g_viewArch[c], ".blp");
-                mpq_read(&kIo, "patch-~.MPQ", g_viewArch[c], &g_view.blp[VT_ARCH + c], &g_view.len[VT_ARCH + c]);
-            }
     }
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
     LONG seen = g_gameSeq, worldSeen = 0;
