@@ -4489,23 +4489,6 @@ static float SaberNoise(float x, float t, unsigned seed)
     float lo = a + (b - a) * ax, hi = c + (d - c) * ax;
     return lo + (hi - lo) * at;
 }
-/* The blade at column place k (columns from the left, fractions between), t seconds, above (side 0) or below (1), its
- * core's half height hc and its glow's reach g, in pixels: how far its core reaches from the centre line (*core), how far its glow then reaches
- * (*glow), and how hot its edge burns (*hot, 0 to 1). Slow swelling, a fast edge that never sits still, a glow whose
- * reach flickers, and now and then a jagged flare. */
-static void SaberEdge(float k, float t, int side, float hc, float g, float *core, float *glow, float *hot)
-{
-    unsigned s = (unsigned)side * 4;
-    float swell = SaberNoise(k * 0.03f, t * 0.8f, s + 1) - 0.5f;
-    float jitter = SaberNoise(k * 0.45f, t * 26, s + 2) - 0.5f;
-    float crackle = SaberNoise(k * 0.22f, t * 17, s + 3);
-    float flare = SaberNoise(k * 0.18f, t * 11, s + 4) - 0.76f;
-    flare = flare > 0 ? flare / 0.24f : 0;
-    flare *= flare;
-    *core = hc * (1 + 0.16f * swell) + hc * 0.32f * jitter;
-    *glow = g * (0.55f + 0.5f * crackle + 0.8f * flare);
-    *hot = FireClamp(0.55f + 0.45f * crackle + flare, 0, 1);
-}
 /* A quad round from its top left: corners x, y, each its own colour (a plain quad's u, v unused). */
 static void SaberPut(int tex, int add, const float *x, const float *y, const DWORD *c, const float *uv)
 {
@@ -4583,18 +4566,33 @@ static void FrameLips(float x0, float x1, float cy, float ch, float line, unsign
     }
 }
 
-static float g_sbCore[2][SABER_COLS_MAX + 1], g_sbGlow[2][SABER_COLS_MAX + 1], g_sbHot[2][SABER_COLS_MAX + 1];
+static float g_sbCore[2][SABER_COLS_MAX + 1], g_sbGlow[2][SABER_COLS_MAX + 1], g_sbMid[SABER_COLS_MAX + 1];
+/* A square root, with no C runtime (Newton's steps from above). */
+static float SaberSqrt(float v)
+{
+    if (!(v > 0)) return 0;
+    float r = v > 1 ? v : 1;
+    for (int i = 0; i < 8; i++) r = 0.5f * (r + v / r);
+    return r;
+}
 static float g_sbX[SABER_COLS_MAX + 1];
 /* The blade for a W x H window, its tip at the bar as shown, at the view's clock now. */
 static void SaberBuild(float W, float H, float shown, DWORD now)
 {
     LONG cl = g_class;
     unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0], rgb = SaberVivid(base);
-    unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), midRgb = SaberMix(rgb, 0xFFFFFF, 0.45f);
+    unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f);
     float fs, ftop, cy, ch, fx0, fx1;
     FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1);            /* the channel the frame holds it in, end to end */
-    float t = (float)(now % 3600000u) / 1000.0f, hc = ch * SABER_FILL, g = SABER_GLOW * H;
-    float span = fx1 - fx0, front = fx0 + FireClamp(shown, 0, 1) * span, line = H / 1440.0f, round = hc * 2.5f;
+    /* the light (his calls on his reference, 7 Oct: "a more uniform fill", "darker towards the edges and lighter white
+     * towards the middle ... the light is more fully in the middle"; "no black area at the beginning or ending"): a
+     * smooth fill the whole height of its channel, its ends rounded like a pill inside the metal; deeper in the class's
+     * colour at its top and bottom edges and toward the bar's ends, near white along its centre and in its middle; the
+     * light breathing slowly so it is never quite still */
+    float t = (float)(now % 3600000u) / 1000.0f, hc = ch, g = SABER_GLOW * H;
+    float span = fx1 - fx0, front = fx0 + FireClamp(shown, 0, 1) * span, round = ch * 1.2f, line = H / 1440.0f;
+    float xc = fx0 + span / 2, breath = 0.94f + 0.06f * SaberNoise(0, t * 0.6f, 21);
+    unsigned deep = SaberMix(rgb, 0, 0.42f);
     int n = (int)(span / SABER_COL_PX);
     if (n < 16) n = 16;
     if (n > SABER_COLS_MAX) n = SABER_COLS_MAX;
@@ -4603,58 +4601,46 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     if (shown > 0)
         for (; b <= n; b++) {
             float x = b < n && fx0 + b * cw < front ? fx0 + b * cw : front;
-            float tip = (front - x) / round, foot = (x - fx0) / round;   /* both ends rounded off, inside the metal */
-            tip = FireClamp(tip < foot ? tip : foot, 0, 1);
-            tip = 1 - (1 - tip) * (1 - tip);
+            float k1 = FireClamp((front - x) / round, 0, 1), k2 = FireClamp((x - fx0) / round, 0, 1), k = k1 < k2 ? k1 : k2;
+            float shape = SaberSqrt(k * (2 - k)), hx = (x - xc) / (span * 0.5f);   /* a round end; how near the middle */
+            hx = 1 - hx * hx;
             g_sbX[b] = x;
-            for (int s = 0; s < 2; s++) {
-                SaberEdge(x / cw, t, s, hc, g, &g_sbCore[s][b], &g_sbGlow[s][b], &g_sbHot[s][b]);
-                g_sbCore[s][b] *= tip; g_sbGlow[s][b] *= tip;
-            }
+            g_sbCore[0][b] = g_sbCore[1][b] = hc * shape;
+            g_sbGlow[0][b] = g_sbGlow[1][b] = g * 0.6f * shape * breath;
+            g_sbMid[b] = hx > 0 ? hx : 0;
             if (x >= front) { b++; break; }
         }
-    float mouth = fs > 0 ? ch : 0;                                  /* (on into the caps' mouths, dark as in his picture) */
-    FrameChannel(fx0 - mouth, fx1 + mouth, cy, ch);                 /* the dark channel the blade runs in */
+    FrameChannel(fx0 + round, fx1 - round, cy, ch);                 /* the dark channel, under the blade's full height */
     /* the glow, added: a narrow bright one and a wide faint one beyond the core's edge, above and below */
     for (int k = 0; k + 1 < b; k++)
         for (int s = 0; s < 2; s++) {
             float d = s ? 1.0f : -1.0f, x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
             for (int layer = 0; layer < 2; layer++) {
-                float reach = layer ? 1.0f : 0.32f;
-                float a0 = layer ? 0.3f : 0.5f + 0.4f * g_sbHot[s][k], a1 = layer ? 0.3f : 0.5f + 0.4f * g_sbHot[s][k + 1];
+                float reach = layer ? 1.0f : 0.32f, a = layer ? 0.22f : 0.45f;
                 float e0 = cy + d * g_sbCore[s][k], e1 = cy + d * g_sbCore[s][k + 1];
                 float y[4] = { e0 + d * reach * g_sbGlow[s][k], e1 + d * reach * g_sbGlow[s][k + 1], e1, e0 };
-                DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, a1), SaberArgb(rgb, a0) };
+                DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, a), SaberArgb(rgb, a) };
                 SaberPut(-1, 1, x, y, c, NULL);
             }
         }
-    /* the way still to go, then the core over the glow's inner edge: solid, the class's light at its edges, paler along
-     * its centre line (two quads a column, the top half and the bottom) */
-    if (front < fx1) {
-        float x[4] = { front, fx1, fx1, front }, y[4] = { cy - hc * 0.55f, cy - hc * 0.55f, cy + hc * 0.55f, cy + hc * 0.55f };
+    /* the way still to go, then the fill: two quads a column (its top half and its bottom), each corner its own light */
+    if (front < fx1 - round) {
+        float x[4] = { front, fx1 - round, fx1 - round, front }, y[4] = { cy - hc * 0.4f, cy - hc * 0.4f, cy + hc * 0.4f, cy + hc * 0.4f };
         DWORD c[4] = { SABER_TRACK, SABER_TRACK, SABER_TRACK, SABER_TRACK };
         SaberPut(-1, 0, x, y, c, NULL);
     }
-    DWORD edgeC = SaberArgb(rgb, 0.96f), midC = SaberArgb(midRgb, 0.96f);
     for (int k = 0; k + 1 < b; k++) {
         float x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
         float yt[4] = { cy - g_sbCore[0][k], cy - g_sbCore[0][k + 1], cy, cy };
         float yb[4] = { cy, cy, cy + g_sbCore[1][k + 1], cy + g_sbCore[1][k] };
-        DWORD ct[4] = { edgeC, edgeC, midC, midC }, cb[4] = { midC, midC, edgeC, edgeC };
+        DWORD e0 = SaberArgb(SaberMix(deep, rgb, 0.35f + 0.65f * g_sbMid[k]), 0.97f);
+        DWORD e1 = SaberArgb(SaberMix(deep, rgb, 0.35f + 0.65f * g_sbMid[k + 1]), 0.97f);
+        DWORD m0 = SaberArgb(SaberMix(rgb, 0xFFFFFF, (0.3f + 0.55f * g_sbMid[k]) * breath), 0.97f);
+        DWORD m1 = SaberArgb(SaberMix(rgb, 0xFFFFFF, (0.3f + 0.55f * g_sbMid[k + 1]) * breath), 0.97f);
+        DWORD ct[4] = { e0, e1, m1, m0 }, cbt[4] = { m0, m1, e1, e0 };
         SaberPut(-1, 0, x, yt, ct, NULL);
-        SaberPut(-1, 0, x, yb, cb, NULL);
+        SaberPut(-1, 0, x, yb, cbt, NULL);
     }
-    /* the hot edge, added over the core's: a thin line of near white, brighter where it burns hotter */
-    for (int k = 0; k + 1 < b; k++)
-        for (int s = 0; s < 2; s++) {
-            float d = s ? 1.0f : -1.0f, x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
-            float w0 = line * (1.4f + 1.2f * g_sbHot[s][k]), w1 = line * (1.4f + 1.2f * g_sbHot[s][k + 1]);
-            float e0 = cy + d * g_sbCore[s][k], e1 = cy + d * g_sbCore[s][k + 1];
-            float y[4] = { e0 + d * w0, e1 + d * w1, e1 - d * w1 * 0.5f, e0 - d * w0 * 0.5f };
-            DWORD c[4] = { SaberArgb(hotRgb, 0.35f * g_sbHot[s][k]), SaberArgb(hotRgb, 0.35f * g_sbHot[s][k + 1]),
-                           SaberArgb(hotRgb, g_sbHot[s][k + 1]), SaberArgb(hotRgb, g_sbHot[s][k]) };
-            SaberPut(-1, 1, x, y, c, NULL);
-        }
     if (fs > 0) FrameBuild(W, fs, ftop);                            /* the frame over it, the light spilling past */
     if (shown > 0) FrameLips(fx0, front, cy, ch, line, hotRgb);      /* its lips lit where the blade has reached */
     /* the tip, flaring and throwing sparks back as it runs (none once the blade is whole) */
