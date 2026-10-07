@@ -3666,7 +3666,9 @@ static void LabelsBuild(void)
  * and a diamond at its centre, the blade's light in its channel; "all the way against the bottom of the screen") ----
  * CinderBar.blp (DXT5) and CinderLoad\bar.txt: `sheet <w> <h>`, each piece `<left|rail|centre|right> <x0> <y0> <x1>
  * <y1>` on it, `band <top> <bottom>` (the rail's metal, top to bottom) and `channel <top> <bottom>` (the open channel),
- * rows of the pieces. Laid end to end across the window at one scale: the caps at its edges, the diamond at its centre,
+ * rows of the pieces; `ends <left> <right>`, where the channel opens inside the left cap and closes inside the right one,
+ * columns of those caps (his call, 7 Oct: the blade stops "inside the metal" at both ends; without the line, at the caps'
+ * inner edges). Laid end to end across the window at one scale: the caps at its edges, the diamond at its centre,
  * the rail repeated between; the rail band FRAME_BAND of the window tall, its bottom on the window's (what hangs below,
  * the caps' lower prongs and the diamond's point, is past the edge). Over the blade, so its light shows only in the
  * channel and spills past the metal; the channel's lips lit in the class's colour where the blade has reached. Without
@@ -3675,13 +3677,13 @@ static void LabelsBuild(void)
 #define FRAME_BAND  0.066f         /* the rail band, of the window's height */
 #define FRAME_TILES 256            /* rail pieces at the most (a 32:9 window at the smallest scale wants about 190) */
 enum { FR_LEFT, FR_RAIL, FR_CENTRE, FR_RIGHT, FR_PIECES };
-static struct { int ok, sw, sh, r[FR_PIECES][4], band[2], chan[2]; } g_frame;
+static struct { int ok, sw, sh, r[FR_PIECES][4], band[2], chan[2], ends[2]; } g_frame;
 static int g_frameOn;
 static void FrameParse(const char *s, unsigned len)
 {
     static const char *const kName[FR_PIECES] = { "left", "rail", "centre", "right" };
     int have = 0;
-    g_frame.ok = 0; g_frame.sw = g_frame.sh = 0;
+    g_frame.ok = 0; g_frame.sw = g_frame.sh = 0; g_frame.ends[0] = g_frame.ends[1] = -1;
     for (unsigned at = 0; at < len;) {
         unsigned end = at;
         while (end < len && s[end] != '\n') end++;
@@ -3690,6 +3692,10 @@ static void FrameParse(const char *s, unsigned len)
         if (SndWord(l, n, &i, "sheet")) {
             if (LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) && v[0] > 0 && v[1] > 0 && v[0] <= 4096 && v[1] <= 4096) {
                 g_frame.sw = v[0]; g_frame.sh = v[1]; have |= 1 << 4;
+            }
+        } else if ((i = 0, SndWord(l, n, &i, "ends"))) {
+            if (LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) && v[0] >= 0 && v[1] >= 0) {
+                g_frame.ends[0] = v[0]; g_frame.ends[1] = v[1];
             }
         } else if ((i = 0, SndWord(l, n, &i, "band")) || (i = 0, SndWord(l, n, &i, "channel"))) {
             int ch = l[i - 1] == 'l';                                /* (the word read was "channel") */
@@ -3712,7 +3718,10 @@ static void FrameParse(const char *s, unsigned len)
     int fits = 1;
     for (int p = 0; p < FR_PIECES; p++)
         fits &= g_frame.r[p][2] <= g_frame.sw && g_frame.r[p][3] <= g_frame.sh && g_frame.band[1] <= g_frame.r[p][3] - g_frame.r[p][1];
-    g_frame.ok = have == 0x7F && fits && g_frame.chan[0] >= g_frame.band[0] && g_frame.chan[1] <= g_frame.band[1];
+    int lw = g_frame.r[FR_LEFT][2] - g_frame.r[FR_LEFT][0], rw = g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0];
+    if (g_frame.ends[0] < 0) { g_frame.ends[0] = lw; g_frame.ends[1] = 0; }      /* (no ends line: at the caps' inner edges) */
+    g_frame.ok = have == 0x7F && fits && g_frame.chan[0] >= g_frame.band[0] && g_frame.chan[1] <= g_frame.band[1] &&
+                 g_frame.ends[0] <= lw && g_frame.ends[1] <= rw;
 }
 /* ---- the RavenCraft logo (4 Oct 2026, his ask: "so that people know that it's Ravencraft") ----
  * CinderLogo.blp (DXT5) and CinderLoad\logo.txt: `logo <sheet w> <sheet h> <x0> <y0> <x1> <y1>`, the logo's rectangle
@@ -4515,17 +4524,20 @@ static void SaberGlowAt(float x, float y, float rx, float ry, DWORD argb)
 }
 /* (the frame's table and its parser are with the logo's, above: FrameParse) */
 /* Where the bar sits in a W x H window: its pieces' scale (*s, 0 with no frame) and top, the channel's centre line and
- * half height. */
-static void FrameLayout(float H, float *s, float *top, float *cy, float *ch)
+ * half height, and its ends (*x0 inside the left cap, *x1 inside the right: the blade runs between them). */
+static void FrameLayout(float W, float H, float *s, float *top, float *cy, float *ch, float *x0, float *x1)
 {
     if (g_frameOn && g_frame.ok && g_viewTex[VT_FRAME]) {
         *s = FRAME_BAND * H / (float)(g_frame.band[1] - g_frame.band[0]);
         *top = H - (float)g_frame.band[1] * *s;
         *cy = *top + (float)(g_frame.chan[0] + g_frame.chan[1]) * 0.5f * *s;
         *ch = (float)(g_frame.chan[1] - g_frame.chan[0]) * 0.5f * *s;
+        *x0 = (float)g_frame.ends[0] * *s;
+        *x1 = W - (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0] - g_frame.ends[1]) * *s;
     } else {
         *s = 0; *top = H - FRAME_BAND * H;
         *cy = H - FRAME_BAND * H * 0.5f; *ch = FRAME_BAND * H * 0.27f;
+        *x0 = 0; *x1 = W;
     }
 }
 /* Piece p from x0 to x1 at scale s, its top at top; cut, when x1 falls short of its width, at the same place on the sheet. */
@@ -4551,19 +4563,19 @@ static void FrameBuild(float W, float s, float top)
     FramePiece(FR_CENTRE, cx, cx + wc, s, top);
     FramePiece(FR_RIGHT, W - wr, W, s, top);
 }
-/* The channel, dark, under the blade. */
-static void FrameChannel(float W, float cy, float ch)
+/* The channel, dark, under the blade, from x0 to x1. */
+static void FrameChannel(float x0, float x1, float cy, float ch)
 {
-    float x[4] = { 0, W, W, 0 }, y[4] = { cy - ch, cy - ch, cy + ch, cy + ch };
+    float x[4] = { x0, x1, x1, x0 }, y[4] = { cy - ch, cy - ch, cy + ch, cy + ch };
     DWORD c[4] = { 0xE6050A0Fu, 0xE6050A0Fu, 0xE6050A0Fu, 0xE6050A0Fu };
     SaberPut(-1, 0, x, y, c, NULL);
 }
-/* The channel's lips lit by the blade (added, over the metal) from the left edge to x1, in its light rgb. */
-static void FrameLips(float x1, float cy, float ch, float line, unsigned rgb)
+/* The channel's lips lit by the blade (added, over the metal) from x0 to x1, in its light rgb. */
+static void FrameLips(float x0, float x1, float cy, float ch, float line, unsigned rgb)
 {
     for (int s = 0; s < 2; s++) {
         float d = s ? 1.0f : -1.0f, e = cy + d * ch;
-        float x[4] = { 0, x1, x1, 0 }, y[4] = { e + d * line * 3, e + d * line * 3, e - d * line, e - d * line };
+        float x[4] = { x0, x1, x1, x0 }, y[4] = { e + d * line * 3, e + d * line * 3, e - d * line, e - d * line };
         DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, 0.65f), SaberArgb(rgb, 0.65f) };
         if (s) { float t; t = y[0]; y[0] = y[3]; y[3] = t; t = y[1]; y[1] = y[2]; y[2] = t;
                  DWORD u = c[0]; c[0] = c[3]; c[3] = u; u = c[1]; c[1] = c[2]; c[2] = u; }
@@ -4579,20 +4591,20 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     LONG cl = g_class;
     unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0], rgb = SaberVivid(base);
     unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), midRgb = SaberMix(rgb, 0xFFFFFF, 0.45f);
-    float fs, ftop, cy, ch;
-    FrameLayout(H, &fs, &ftop, &cy, &ch);                           /* the channel the frame holds it in */
+    float fs, ftop, cy, ch, fx0, fx1;
+    FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1);            /* the channel the frame holds it in, end to end */
     float t = (float)(now % 3600000u) / 1000.0f, hc = ch * SABER_FILL, g = SABER_GLOW * H;
-    float front = FireClamp(shown, 0, 1) * W, line = H / 1440.0f, round = hc * 2.5f;
-    int n = (int)(W / SABER_COL_PX);
+    float span = fx1 - fx0, front = fx0 + FireClamp(shown, 0, 1) * span, line = H / 1440.0f, round = hc * 2.5f;
+    int n = (int)(span / SABER_COL_PX);
     if (n < 16) n = 16;
     if (n > SABER_COLS_MAX) n = SABER_COLS_MAX;
-    float cw = W / (float)n;
+    float cw = span / (float)n;
     int b = 0;                                                     /* the column edges reached, the last at the tip */
-    if (front > 0)
+    if (shown > 0)
         for (; b <= n; b++) {
-            float x = b < n && b * cw < front ? b * cw : front;
-            float tip = (front - x) / round;                         /* the tip rounded off: sqrt-ish, no C runtime */
-            tip = shown >= 1 ? 1 : FireClamp(tip, 0, 1);
+            float x = b < n && fx0 + b * cw < front ? fx0 + b * cw : front;
+            float tip = (front - x) / round, foot = (x - fx0) / round;   /* both ends rounded off, inside the metal */
+            tip = FireClamp(tip < foot ? tip : foot, 0, 1);
             tip = 1 - (1 - tip) * (1 - tip);
             g_sbX[b] = x;
             for (int s = 0; s < 2; s++) {
@@ -4601,7 +4613,8 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             }
             if (x >= front) { b++; break; }
         }
-    FrameChannel(W, cy, ch);                                        /* the dark channel the blade runs in */
+    float mouth = fs > 0 ? ch : 0;                                  /* (on into the caps' mouths, dark as in his picture) */
+    FrameChannel(fx0 - mouth, fx1 + mouth, cy, ch);                 /* the dark channel the blade runs in */
     /* the glow, added: a narrow bright one and a wide faint one beyond the core's edge, above and below */
     for (int k = 0; k + 1 < b; k++)
         for (int s = 0; s < 2; s++) {
@@ -4617,8 +4630,8 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
         }
     /* the way still to go, then the core over the glow's inner edge: solid, the class's light at its edges, paler along
      * its centre line (two quads a column, the top half and the bottom) */
-    if (front < W) {
-        float x[4] = { front, W, W, front }, y[4] = { cy - hc * 0.55f, cy - hc * 0.55f, cy + hc * 0.55f, cy + hc * 0.55f };
+    if (front < fx1) {
+        float x[4] = { front, fx1, fx1, front }, y[4] = { cy - hc * 0.55f, cy - hc * 0.55f, cy + hc * 0.55f, cy + hc * 0.55f };
         DWORD c[4] = { SABER_TRACK, SABER_TRACK, SABER_TRACK, SABER_TRACK };
         SaberPut(-1, 0, x, y, c, NULL);
     }
@@ -4643,9 +4656,9 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             SaberPut(-1, 1, x, y, c, NULL);
         }
     if (fs > 0) FrameBuild(W, fs, ftop);                            /* the frame over it, the light spilling past */
-    if (front > 0) FrameLips(front, cy, ch, line, hotRgb);           /* its lips lit where the blade has reached */
+    if (shown > 0) FrameLips(fx0, front, cy, ch, line, hotRgb);      /* its lips lit where the blade has reached */
     /* the tip, flaring and throwing sparks back as it runs (none once the blade is whole) */
-    if (g_viewTex[VT_SPARK] && front > 0 && shown < 1) {
+    if (g_viewTex[VT_SPARK] && shown > 0 && shown < 1) {
         float flick = 0.75f + 0.25f * SaberNoise(0, t * 23, 9);
         SaberGlowAt(front, cy, g * 1.1f, g * 1.3f * flick, SaberArgb(rgb, 0.85f * flick));
         SaberGlowAt(front, cy, g * 0.45f, g * 0.45f, SaberArgb(hotRgb, 0.9f));
