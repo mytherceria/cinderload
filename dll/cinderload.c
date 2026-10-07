@@ -531,11 +531,12 @@ static struct {
  *   hearth    the Hearthstone's own: its channel whir (the client's spell 8690), stretched and looped, the cast and the
  *             Astral Recall whoosh as the bar lands
  *   portal    an instance portal's hum, a crystal portal and Zul'Gurub's rising over it, the mage's Teleport at the end
- *   class     the character's class's own (below)
+ *   class     the character's class's own (below; the Hearthstone's while the class is not known)
  *   cycle     the next of hum, hearth, portal, class at each loading screen (Data\CinderLoad\sound-cycle.txt counts)
  *   classes   the next of the nine classes' at each loading screen, whoever is playing
  *   warrior, paladin, hunter, rogue, priest, shaman, mage, warlock, druid: that class's, whoever is playing
- * No file, or a word it does not know: hum. Read as each screen comes up, so a change needs no restart. */
+ * No file, or a word it does not know: hearth (his pick, 7 Oct: "definitely hearth"). Read as each screen comes up, so a
+ * change needs no restart. */
 static const char *const kClassName[12];             /* (the classes' names and the character's class: below) */
 static volatile LONG g_class;
 #define SOUND_FILE  "Data\\CinderLoad\\sound.txt"
@@ -781,8 +782,8 @@ static int SoundPick(unsigned cls, int advance, const char **word)
 {
     static const char *const kModes[] = { "hum", "hearth", "portal", "class", "cycle", "classes" };
     char path[MAX_PATH], *t = NULL;
-    int mode = 0;
-    *word = "hum";
+    int mode = 1;                                                    /* (the Hearthstone: his pick) */
+    *word = "hearth";
     if (g_dir[0] && Join(path, g_dir, SOUND_FILE) && (t = ReadText(path, 256))) {
         int n = 0, i = 0, found = -1;
         while (t[n] && t[n] != '\r' && t[n] != '\n') n++;            /* its first line */
@@ -796,8 +797,8 @@ static int SoundPick(unsigned cls, int advance, const char **word)
     if (mode <= 2) return mode;
     unsigned at = g_sndCycle;
     int k;
-    if (mode == 3) k = cls > 0 && cls < 12 && kClassName[cls][0] != '?' ? SOUND_CLASS0 + (int)cls : SOUND_HUM;
-    else if (mode == 4) k = at % 4 == 3 ? (cls > 0 && cls < 12 && kClassName[cls][0] != '?' ? SOUND_CLASS0 + (int)cls : SOUND_HUM)
+    if (mode == 3) k = cls > 0 && cls < 12 && kClassName[cls][0] != '?' ? SOUND_CLASS0 + (int)cls : SOUND_HEARTH;
+    else if (mode == 4) k = at % 4 == 3 ? (cls > 0 && cls < 12 && kClassName[cls][0] != '?' ? SOUND_CLASS0 + (int)cls : SOUND_HEARTH)
                                         : (int)(at % 4);
     else {
         static const unsigned char kNine[9] = { 1, 2, 3, 4, 5, 7, 8, 9, 11 };
@@ -1045,7 +1046,7 @@ static void FireStart(void)
     }
     CloseHandle(t);
     SoundCycleLoad();
-    Log("sound on: each loading screen plays the recipe Data\\CinderLoad\\sound.txt names (the hum when it names none)");
+    Log("sound on: each loading screen plays the recipe Data\\CinderLoad\\sound.txt names (the Hearthstone's when it names none)");
 }
 
 /* ---- the fire bar ----

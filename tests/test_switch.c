@@ -427,7 +427,7 @@ static void FireTests(void)
     g_fire.base = shim_module;
     g_fire.channel = -1;
     DcMix(&g_fire.mix, 8000, 0, 0.1f, 0);
-    g_sndSpec = g_dcSpec; g_snd = g_dcSet; g_sndNow = SOUND_HUM; g_sndRate = 8000; g_sndBad = 0;   /* the hum, made */
+    g_sndSpec = g_dcSpec; g_snd = g_dcSet; g_sndNow = SOUND_HEARTH; g_sndRate = 8000; g_sndBad = 0;   /* the default, made */
     g_fire.built = 1;
     shim_ticks = 1000;
     Client(0x1234, 0.1f, 0);
@@ -452,7 +452,7 @@ static void FireTests(void)
     signed char more = g_cb(&g_streamTag, buf, (int)sizeof buf, NULL);
     Check(more == 1 && buf[2 * FIRE_BLOCK_FRAMES - 2] != 0 && !g_fire.quiet, "FMOD asks for sound: it gets the fire, fading in");
     Client(0, 0.6f, 1); FireStep(shim_ticks += 20);
-    Check(g_fire.gate == 0 && g_fire.stream && !g_calls[0] && LogSays("its sound (hum) played for") && LogSays("the bar reached 60%"),
+    Check(g_fire.gate == 0 && g_fire.stream && !g_calls[0] && LogSays("its sound (hearth) played for") && LogSays("the bar reached 60%"),
           "the screen goes: the sound fades out, and the log says which played and for how long");
     for (int i = 0; i < 5; i++) g_cb(&g_streamTag, buf, (int)sizeof buf, NULL);
     FireStep(shim_ticks += 20);
@@ -493,7 +493,7 @@ static void FireTests(void)
     FireStep(shim_ticks += 20);
     Client(0x1234, 0.2f, 1);
     FireStep(shim_ticks += 20);
-    Check(!g_calls[0] && g_fire.playing == -1 && LogSays("none of hum's loops") && g_sndBad == 1u << SOUND_HUM,
+    Check(!g_calls[0] && g_fire.playing == -1 && LogSays("none of hearth's loops") && g_sndBad == 1u << SOUND_HEARTH,
           "the client's sounds are not to be had: logged once, no FMOD call, the screens as ever");
     g_snd.n = 0; g_sndNow = -1; g_sndBad = 0;
 
@@ -513,18 +513,20 @@ static void FireTests(void)
     GameDir();
     g_sndCycle = 0;
     const char *w;
-    int pk = SoundPick(9, 1, &w) == SOUND_HUM && !strcmp(w, "hum");                 /* no file: the hum */
+    int pk = SoundPick(9, 1, &w) == SOUND_HEARTH && !strcmp(w, "hearth");          /* no file: the Hearthstone's (his pick) */
     Put("Data/CinderLoad/sound.txt", "portal\r\n");
     pk &= SoundPick(9, 1, &w) == SOUND_PORTAL;
     Put("Data/CinderLoad/sound.txt", "HEARTH  # the Hearthstone\n");
     pk &= SoundPick(9, 1, &w) == SOUND_HEARTH && !strcmp(w, "hearth");
     Put("Data/CinderLoad/sound.txt", "class");
-    pk &= SoundPick(9, 1, &w) == SOUND_CLASS0 + 9 && SoundPick(0, 1, &w) == SOUND_HUM;   /* a warlock's; no class: the hum */
+    pk &= SoundPick(9, 1, &w) == SOUND_CLASS0 + 9 && SoundPick(0, 1, &w) == SOUND_HEARTH;   /* a warlock's; no class: hearth */
     Put("Data/CinderLoad/sound.txt", "warlock\n");
     pk &= SoundPick(3, 1, &w) == SOUND_CLASS0 + 9 && !strcmp(w, "warlock");              /* that class's, whoever plays */
     Put("Data/CinderLoad/sound.txt", "fire\n");
-    pk &= SoundPick(9, 1, &w) == SOUND_HUM && g_sndCycle == 0;                          /* a word it does not know */
-    Check(pk, "sound.txt: none, or a word it does not know, is the hum; portal, hearth (any case), class (the character's), or a class by name");
+    pk &= SoundPick(9, 1, &w) == SOUND_HEARTH && g_sndCycle == 0;                       /* a word it does not know */
+    Put("Data/CinderLoad/sound.txt", "hum\n");
+    pk &= SoundPick(9, 1, &w) == SOUND_HUM;
+    Check(pk, "sound.txt: none, or a word it does not know, is the Hearthstone's (his pick, 7 Oct); hum, portal, hearth (any case), class (the character's), or a class by name");
     Put("Data/CinderLoad/sound.txt", "cycle\n");
     int seq[6];
     for (int i = 0; i < 6; i++) seq[i] = SoundPick(9, 1, &w);
