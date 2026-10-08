@@ -3499,17 +3499,18 @@ static void TestShips(void)
     g_ship[0].phase = 4.0f; g_ship[1].phase = 0; g_ship[2].phase = 0;
     ViewListStart();
     ShipsBuild(1000, 500, 1000, 0);                                        /* (now 1 s: the ship's clock at 5 s) */
-    int wakes = g_vbN >= 1 ? g_vb[0].count / 4 : 0;
-    ok = g_vbN == 2 && g_vb[0].tex == VT_SPARK && g_vb[0].add && wakes == 2 * SHIP_WAKE && g_vb[1].tex == VT_SHIPS &&
-         !g_vb[1].add && g_vb[1].count == 4 * 2 * 2;                       /* two ships under way: frame + accent each */
-    const ViewVert *q = g_vv + g_vb[1].first, *acc = q + 4;
+    ok = g_vbN == 3 && g_vb[0].tex == -1 && g_vb[0].add && g_vb[0].count == 4 * 2 * 6 * SHIP_WAKE_SEGS &&   /* wakes, */
+         g_vb[1].tex == VT_SPARK && g_vb[1].add && g_vb[1].count == 4 * 2 * (2 * SHIP_CAPS + SHIP_FOAM) &&   /* foam, */
+         g_vb[2].tex == VT_SHIPS && !g_vb[2].add && g_vb[2].count == 4 * 2 * 2;   /* two ships under way: frame + accent each */
+    const ViewVert *q = g_vv + g_vb[2].first, *acc = q + 4;
     float hs = SHIP_SIZE * 500;
     ok &= Near((q[0].x + q[1].x) / 2, 400, 1e-2) && Near((q[0].y + q[2].y) / 2, 250, 1e-2) && Near(q[1].x - q[0].x, 2 * hs, 1e-3);
     ok &= Near(q[0].u, 0.5 / 2048, 1e-6) && Near(q[1].u, 127.5 / 2048, 1e-6) && Near(q[0].v, 0.5 / 512, 1e-6);   /* east: frame 0 */
     ok &= acc[0].c[0] == 0xC8 && acc[0].c[1] == 0x28 && acc[0].c[2] == 0x28 && acc[0].c[3] == 255 && q[0].c[0] == 255 &&
           Near(acc[0].v, 128.5 / 512, 1e-6);                               /* its accent in red, from the accent row */
-    const ViewVert *wk = g_vv + g_vb[0].first;
-    ok &= wk[0].x < 400 && wk[0].c[3] > wk[4 * (SHIP_WAKE - 1)].c[3];      /* the wake behind it, fading */
+    const ViewVert *wk = g_vv + g_vb[0].first, *fm = g_vv + g_vb[1].first + 4 * 2 * SHIP_CAPS;
+    ok &= wk[0].x > 400 && wk[4 * (2 * SHIP_WAKE_SEGS - 1) + 1].x < 400 - 2 * hs && wk[0].c[3] > wk[4 * (2 * SHIP_WAKE_SEGS - 1) + 1].c[3] &&
+          (fm[0].x + fm[2].x) / 2 > 400 + 0.4f * hs && fm[0].c[3] > 0;   /* foam at its bow; the wake behind it, fading */
     /* on the way back the ship faces west (frame 8) */
     ViewListStart();
     ShipsBuild(1000, 500, 9000, 0);                                        /* (its clock at 13 s) */
@@ -3521,13 +3522,15 @@ static void TestShips(void)
     g_ship[0].phase = 0; g_ship[2].phase = 0;
     ViewListStart();
     ShipsBuild(1000, 500, 500, 0);                                         /* the ship's clock at 0.5 s: at its dock */
-    int dockedWake = 0;
-    for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_SPARK) dockedWake += g_vb[b].count / 4;
-    ok = dockedWake == SHIP_WAKE;                                          /* only the other ship's */
+    int litDocked = 0, litOther = 0;                                       /* (its quads all there, dark) */
+    for (int i = 0; i < g_vb[0].count; i++) *(i < 4 * 6 * SHIP_WAKE_SEGS ? &litDocked : &litOther) += g_vv[g_vb[0].first + i].c[3] > 0;
+    for (int i = 0; i < g_vb[1].count; i++) *(i < 4 * (2 * SHIP_CAPS + SHIP_FOAM) ? &litDocked : &litOther) += g_vv[g_vb[1].first + i].c[3] > 0;
+    ok = g_vbN == 3 && g_vb[0].count == 4 * 2 * 6 * SHIP_WAKE_SEGS && litDocked == 0 && litOther > 0;   /* only the other ship's */
     ViewListStart();
     ShipsBuild(1000, 500, 100, 1);
     q = g_vv + g_vb[0].first;
-    ok &= g_vbN == 1 && g_vb[0].tex == VT_SHIPS && g_vb[0].count == 8 && Near(q[0].v, (2 * 128 + 0.5) / 512, 1e-6) &&
+    ok &= g_vbN == 2 && g_vb[0].tex == VT_SHIPS && g_vb[0].count == 8 && Near(q[0].v, (2 * 128 + 0.5) / 512, 1e-6) &&
+          g_vb[1].tex == -1 && g_vb[1].add && g_vb[1].count == 4 * ZEP_STREAK_Q &&   /* the wind past it, over it */
           Near(q[4].v, (3 * 128 + 0.5) / 512, 1e-6) && Near(q[0].u, (4 * 128 + 0.5) / 2048, 1e-6) &&
           Near(q[1].x - q[0].x, 2 * ZEP_SIZE * 500, 1e-3) && q[4].c[0] == 0x8A;
     Check(ok, "a ship at its dock leaves no wake; the zeppelins drawn on their own, from their own rows, turned down their way, in their colour");
@@ -3542,7 +3545,8 @@ static void TestShips(void)
     for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_SHIPS) quads += g_vb[b].count / 4;
     q = g_vv + g_vb[g_vbN - 1].first;
     float grow = (float)sqrt(1 / 0.2);
-    ok = quads == 2 && Near(q[1].x - q[0].x, 2 * SHIP_SIZE * 500 * (grow < SHIP_GROW ? grow : SHIP_GROW), 1e-2);
+    ok = g_vb[g_vbN - 1].tex == VT_SHIPS;
+    ok &= quads == 2 && Near(q[1].x - q[0].x, 2 * SHIP_SIZE * 500 * (grow < SHIP_GROW ? grow : SHIP_GROW), 1e-2);
     static const float nearer[8] = { 0.38f, 0.55f, 0.42f, 0.55f, 0.38f, 0.45f, 0.42f, 0.45f };   /* a tenth: past the cap */
     memcpy(g_bgUV, nearer, sizeof nearer);
     ViewListStart();
@@ -3556,6 +3560,181 @@ static void TestShips(void)
     for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_SHIPS;
     Check(ok, "nearer in the transports grow (as the square root of the zoom, capped); one off screen is not drawn; without their sheet none are");
     g_shipsOn = 0; g_ships = 0; g_viewTex[VT_SPARK] = 0;
+}
+
+/* The wakes and the wind (his ask, 7 Oct: "a little white foam at the front where they part the waves", "a little
+ * widening path in the water as they pass"; for a zeppelin "little effects to make it look like the wind is streaking
+ * past them"): one transport, sailing a way of 200 pixels across a 1000 x 500 window heading f (the picture's u counted
+ * twice, so 500 pixels to a height), waiting wait seconds at each end. */
+static void WakeOne(int kind, int f, float wait)
+{
+    float c = (float)cos(f * 22.5 * M_PI / 180), sn = (float)sin(f * 22.5 * M_PI / 180), du = 0.2f * c, dv = 0.4f * sn;
+    g_ships = 1; g_shipPts = 2;
+    g_ship[0].kind = kind; g_ship[0].rgb = 0xFFFFFF; g_ship[0].first = 0; g_ship[0].n = 2; g_ship[0].phase = 0;
+    g_shipU[0] = 0.5f - du / 2; g_shipV[0] = 0.5f - dv / 2; g_shipU[1] = 0.5f + du / 2; g_shipV[1] = 0.5f + dv / 2;
+    g_shipWait[0] = g_shipWait[1] = wait;
+    g_shipSpeed = 0.1f; g_shipDock = 1;
+    ShipsTime(2.0f);
+    g_ship[0].phase = 0;                                   /* (its clock the view's) */
+}
+/* Quad i of batch b: the middle of its corners, and its alpha at corner k. */
+static float WakeMidX(int b, int i) { const ViewVert *v = g_vv + g_vb[b].first + 4 * i; return (v[0].x + v[2].x) / 2; }
+static float WakeMidY(int b, int i) { const ViewVert *v = g_vv + g_vb[b].first + 4 * i; return (v[0].y + v[2].y) / 2; }
+static void TestWakes(void)
+{
+    memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+    g_shipsOn = 1; g_viewTex[VT_SHIPS] = 1; g_viewTex[VT_SPARK] = 1;
+    float hs = SHIP_SIZE * 500, len = SHIP_WAKE_LEN * hs;
+    int okFoam = 1, okArms = 1, okDock = 1, okLeave = 1;
+    for (int f = 0; f < 16; f++) {
+        float hx = kShipHead[f][0], hy = kShipHead[f][1], wx = 500, wy = 250 + SHIP_WATER * hs;   /* its waterline's middle */
+        WakeOne(0, f, 0);
+        ViewListStart();
+        ShipsBuild(1000, 500, 2000, 0);                    /* half way out, 100 pixels from its turn: its whole wake made */
+        if (g_vbN != 3 || g_vb[0].tex != -1 || g_vb[1].tex != VT_SPARK || g_vb[2].tex != VT_SHIPS ||
+            g_vb[0].count != 4 * 6 * SHIP_WAKE_SEGS || g_vb[1].count != 4 * (2 * SHIP_CAPS + SHIP_FOAM) ||
+            !Near(g_vv[g_vb[2].first].u, (f * 128 + 0.5) / 2048, 1e-6)) { okFoam = okArms = 0; continue; }
+        /* the foam at its bow: ahead of its waterline along the frame's heading, at the prow and either side of it */
+        float sides[SHIP_FOAM];
+        for (int i = 0; i < SHIP_FOAM; i++) {
+            float dx = WakeMidX(1, 2 * SHIP_CAPS + i) - wx, dy = WakeMidY(1, 2 * SHIP_CAPS + i) - wy, ahead = dx * hx + dy * hy;
+            sides[i] = dx * -hy + dy * hx;               /* (the hull is shorter up and down the screen: a little aside) */
+            okFoam &= ahead > 0.3f * hs && fabsf(sides[i]) < 0.2f * hs && g_vv[g_vb[1].first + 4 * (2 * SHIP_CAPS + i)].c[3] > 0;
+        }
+        okFoam &= (sides[1] - sides[0]) * (sides[2] - sides[0]) < 0 && fabsf(sides[1] - sides[0]) > 0.05f * hs &&
+                  fabsf(sides[2] - sides[0]) > 0.05f * hs;   /* the prow's, and one either side of it */
+        /* the arms: from its bow, along the way it came, parting at the Kelvin angle, wider and fainter as they go */
+        const ViewVert *L = g_vv + g_vb[0].first, *R = L + 4 * 2 * SHIP_WAKE_SEGS;
+        float s0 = 0, sPrev = -1, wPrev = -1, mx0 = 0, my0 = 0, mxN = 0, myN = 0, sN = 0, s1 = 0, d1 = 0, aFirst = L[0].c[3], aLate = 0;
+        for (int j = 0; j <= SHIP_WAKE_SEGS; j++) {
+            const ViewVert *l = j < SHIP_WAKE_SEGS ? L + 8 * j : L + 8 * (j - 1) + 1, *r = j < SHIP_WAKE_SEGS ? R + 8 * j : R + 8 * (j - 1) + 1;
+            float sx = l->x - r->x, sy = l->y - r->y, sep = sqrtf(sx * sx + sy * sy), mx = (l->x + r->x) / 2, my = (l->y + r->y) / 2;
+            okArms &= sep > sPrev;                          /* parting */
+            sPrev = sep;
+            if (j < SHIP_WAKE_SEGS) {                       /* widening: its reach at each point */
+                float w = sqrtf((l[3].x - l[0].x) * (l[3].x - l[0].x) + (l[3].y - l[0].y) * (l[3].y - l[0].y));
+                okArms &= w > wPrev;
+                wPrev = w;
+            }
+            if (j == 0) { s0 = sep; mx0 = mx; my0 = my; }
+            if (j == 1) { s1 = sep; d1 = sqrtf((mx - mx0) * (mx - mx0) + (my - my0) * (my - my0)); }
+            if (j == SHIP_WAKE_SEGS) { sN = sep; mxN = mx; myN = my; }
+            if (2 * j >= SHIP_WAKE_SEGS) aLate = l->c[3] > aLate ? l->c[3] : aLate;
+        }
+        float dN = sqrtf((mxN - mx0) * (mxN - mx0) + (myN - my0) * (myN - my0));
+        okArms &= Near(dN, len, 0.5) && Near((sN - s1) / (dN - d1), 2 * tan(19.47 * M_PI / 180), 0.02) &&   /* the Kelvin angle */
+                  Near(s0, 2 * SHIP_PART * hs, 0.05) && (mxN - wx) * hx + (myN - wy) * hy < -2 * hs &&   /* behind it */
+                  aFirst > 2 * aLate && aFirst > 60 && L[8 * (SHIP_WAKE_SEGS - 1) + 1].c[3] == 0;   /* fading to nothing */
+        /* at its dock: all of it there, and dark */
+        WakeOne(0, f, 2.0f);                               /* (2 s at each end: at the first until 2 s) */
+        ViewListStart();
+        ShipsBuild(1000, 500, 1000, 0);
+        okDock &= g_vbN == 3 && g_vb[0].count == 4 * 6 * SHIP_WAKE_SEGS && g_vb[1].count == 4 * (2 * SHIP_CAPS + SHIP_FOAM);
+        for (int b = 0; b < 2; b++) for (int i = 0; i < g_vb[b].count; i++) okDock &= g_vv[g_vb[b].first + i].c[3] == 0;
+        /* a fifth of a second out of it: its wake only as far back as it has come, its foam as it gathers way */
+        ViewListStart();
+        ShipsBuild(1000, 500, 2200, 0);
+        float far = 0, foamA = g_vv[g_vb[1].first + 4 * 2 * SHIP_CAPS].c[3];
+        for (int j = 0; j < 2 * SHIP_WAKE_SEGS; j++) {
+            const ViewVert *v = g_vv + g_vb[0].first + 4 * j, *b = g_vv + g_vb[0].first;   /* (from its bow) */
+            float d = (v[0].x - b[0].x) * -hx + (v[0].y - b[0].y) * -hy;
+            if (v[0].c[3] > 0 && d > far) far = d;
+        }
+        const ViewVert *L0 = g_vv + g_vb[0].first, *e = L0 + 8 * (SHIP_WAKE_SEGS - 1) + 1;   /* (its arm's far end) */
+        float reach = sqrtf((e->x - L0[0].x) * (e->x - L0[0].x) + (e->y - L0[0].y) * (e->y - L0[0].y));   /* (never past it) */
+        okLeave &= far > 0 && far < 0.02f * 500 + 0.5f * hs && foamA > 0 && foamA < 0.5f * 255 && reach < 0.02f * 500 * 1.1f + 1 &&
+                   e->c[3] == 0;                           /* (and soft where it ends) */
+    }
+    Check(okFoam, "the foam at a ship's bow: ahead of its waterline along its frame's heading, for all 16 headings, at its prow and either side of it");
+    Check(okArms, "a ship's wake: two arms from its bow along the way it came, parting at the Kelvin angle (19.5 degrees either side), widening and fading to nothing as they go, behind it, for all 16 headings");
+    Check(okDock, "a ship at its dock: its wake and foam all there and all dark (the list keeps its shape)");
+    Check(okLeave, "a ship leaving its dock: its wake only as far back as it has come, its foam faint as it gathers way");
+    /* across its clock's turn: a loop whose clock starts out at sea (from the middle across, back, and to the middle) */
+    {
+        g_ships = 1; g_shipPts = 3;
+        g_ship[0].kind = 0; g_ship[0].first = 0; g_ship[0].n = 3;
+        float uu[3] = { 0.5f, 0.6f, 0.4f };
+        for (int i = 0; i < 3; i++) { g_shipU[i] = uu[i]; g_shipV[i] = 0.5f; g_shipWait[i] = 0; }
+        g_shipSpeed = 0.1f;
+        ShipsTime(2.0f);
+        g_ship[0].phase = 0;
+        ViewListStart();
+        ShipsBuild(1000, 500, 300, 0);                     /* 15 pixels past the clock's start, heading east */
+        const ViewVert *L = g_vv + g_vb[0].first;
+        Check(g_vbN == 3 && Near(L[0].x - L[8 * (SHIP_WAKE_SEGS - 1) + 1].x, len, 0.5) && L[8].c[3] > 0,
+              "a ship's wake carries on across its clock's turn (its whole length behind it, lit)");
+        /* round a bend: 100 pixels down and right, then east; 20 pixels past the bend its wake follows the way it came */
+        float u3[3] = { 0.4f, 0.5f, 0.7f }, v3[3] = { 0.3f, 0.5f, 0.5f };
+        for (int i = 0; i < 3; i++) { g_shipU[i] = u3[i]; g_shipV[i] = v3[i]; }
+        ShipsTime(2.0f);
+        g_ship[0].phase = 0;
+        ViewListStart();
+        ShipsBuild(1000, 500, (DWORD)((100 * sqrt(2.0) + 20) / 50 * 1000), 0);
+        L = g_vv + g_vb[0].first;
+        const ViewVert *R = L + 4 * 2 * SHIP_WAKE_SEGS, *le = L + 8 * (SHIP_WAKE_SEGS - 1) + 1, *re = R + 8 * (SHIP_WAKE_SEGS - 1) + 1;
+        float by = (L[0].y + R[0].y) / 2, my = (le->y + re->y) / 2, mx = (le->x + re->x) / 2, bx = (L[0].x + R[0].x) / 2;
+        Check(g_vbN == 3 && Near(g_vv[g_vb[2].first].u, 0.5 / 2048, 1e-6) && my < by - 0.5f * (len - 20) && mx > bx - len,
+              "round a bend a ship's wake follows the way it came, not straight back from its heading");
+    }
+
+    /* the wind past a zeppelin: streaks along its heading, beside it, sliding aft as the clock runs */
+    float zs = ZEP_SIZE * 500;
+    int okPar = 1, okAft = 1, okDark = 1, aft = 0;
+    for (int f = 0; f < 16; f++) {
+        float hx = kShipHead[f][0], hy = kShipHead[f][1], mid0[ZEP_STREAKS], lit = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            WakeOne(1, f, 0);
+            ViewListStart();
+            ShipsBuild(1000, 500, 2000 + 30 * (DWORD)pass, 1);
+            if (g_vbN != 2 || g_vb[0].tex != VT_SHIPS || g_vb[1].tex != -1 || !g_vb[1].add || g_vb[1].count != 4 * ZEP_STREAK_Q) { okPar = 0; break; }
+            float zx = WakeMidX(0, 0), zy = WakeMidY(0, 0);   /* (from the zeppelin, which sails on too) */
+            for (int i = 0; i < ZEP_STREAKS; i++) {
+                const ViewVert *v = g_vv + g_vb[1].first + 16 * i;   /* fore end, middle, aft end */
+                float ax = v[8 + 1].x - v[0].x, ay = v[8 + 1].y - v[0].y, l = sqrtf(ax * ax + ay * ay);
+                float along = (v[1].x - zx) * hx + (v[1].y - zy) * hy, side = (v[1].x - zx) * -hy + (v[1].y - zy) * hx;
+                okPar &= l > 0.4f * zs && fabsf(ax * -hy + ay * hx) < 1e-3f * l && (ax * hx + ay * hy) < -0.99f * l &&
+                         fabsf(side) > 0.29f * zs && fabsf(side) < 0.69f * zs && v[0].c[3] == 0 && v[9].c[3] == 0;
+                if (v[1].c[3] > lit) lit = v[1].c[3];
+                if (pass == 0) mid0[i] = along;
+                else {
+                    float moved = along - mid0[i];        /* aft, a little; or a new streak, well ahead */
+                    okAft &= (moved < 0 && moved > -0.2f * zs) || moved > 0.5f * zs;
+                    aft += moved < 0;
+                }
+            }
+        }
+        okPar &= lit > 0;
+        WakeOne(1, f, 2.0f);                               /* at its tower: no wind */
+        ViewListStart();
+        ShipsBuild(1000, 500, 1000, 1);
+        okDark &= g_vbN == 2 && g_vb[1].count == 4 * ZEP_STREAK_Q;
+        for (int i = 0; i < g_vb[1].count; i++) okDark &= g_vv[g_vb[1].first + i].c[3] == 0;
+    }
+    Check(okPar, "the wind past a zeppelin: thin streaks along its heading for all 16 headings, beside its balloon, fading at both ends, some lit");
+    Check(okAft && aft >= 16 * (ZEP_STREAKS - 1), "the wind's streaks slide aft past the zeppelin as the clock runs (a new one from ahead)");
+    Check(okDark, "a zeppelin at its tower: its streaks all there and all dark");
+
+    /* the budget: every transport in view, all under way, ships or zeppelins or half of each */
+    int okBudget = 1;
+    for (int mix = 0; mix < 3; mix++) {
+        g_ships = SHIPS_MAX; g_shipPts = 2 * SHIPS_MAX;
+        for (int r = 0; r < SHIPS_MAX; r++) {
+            g_ship[r].kind = mix == 2 ? (r & 1) : mix; g_ship[r].first = 2 * r; g_ship[r].n = 2; g_ship[r].rgb = 0x808080;
+            g_shipU[2 * r] = 0.3f + 0.01f * r; g_shipV[2 * r] = 0.3f; g_shipU[2 * r + 1] = 0.3f + 0.01f * r; g_shipV[2 * r + 1] = 0.7f;
+            g_shipWait[2 * r] = g_shipWait[2 * r + 1] = 0;
+        }
+        ShipsTime(2.0f);
+        for (int r = 0; r < SHIPS_MAX; r++) g_ship[r].phase = 0;
+        ViewListStart();
+        int others = 2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS + SKY_QUADS;   /* (the rest of the view at its most) */
+        for (int i = 0; i < others; i++) ViewQuadMode(VT_MAP, 0);
+        ShipsBuild(1000, 500, 1000, 0);
+        ShipsBuild(1000, 500, 1000, 1);
+        int zeps = mix == 2 ? SHIPS_MAX / 2 : mix * SHIPS_MAX, ships = SHIPS_MAX - zeps;
+        okBudget &= !g_vbFull && g_vvN - 4 * others == 4 * (ships * (2 + SHIP_WAKE_Q) + zeps * (2 + ZEP_STREAK_Q)) && g_vbN <= 6;
+    }
+    Check(okBudget, "every transport in view and under way: their wakes, foam and wind all in the list, within the view's budget for them, in at most five batches");
+    g_shipsOn = 0; g_ships = 0; g_viewTex[VT_SHIPS] = 0; g_viewTex[VT_SPARK] = 0;
 }
 
 /* The weather (7 Oct 2026): its grid read, his circulation's winds, clouds born only where the grid has them, raining,
@@ -3814,6 +3993,7 @@ int main(int argc, char **argv)
     }
 
     TestShips();
+    TestWakes();
     TestSky();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;

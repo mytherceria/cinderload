@@ -3793,9 +3793,27 @@ static void LogoBuild(void)
 #define ZEP_SIZE       0.034f     /* a zeppelin's */
 #define SHIP_GROW      2.4f       /* as the view comes in they grow, as the square root of the zoom, to this at the most */
 #define ZEP_FASTER     1.3f       /* a zeppelin is quicker than a ship */
-#define SHIP_WAKE      6          /* the wake: soft white marks behind a ship under way */
-#define SHIP_WAKE_STEP 0.0045f    /* heights of the picture between them */
 #define SHIP_TURN      0.004f     /* heights each way along its way that a transport's heading is taken over */
+/* Under way (his ask, 7 Oct: "a little white foam at the front where they part the waves", "a little widening path in
+ * the water as they pass", and for a zeppelin "little effects to make it look like the wind is streaking past them").
+ * Sizes in sprite half sizes. The sheet's camera looks down at a slant: a hull's waterline is a little below its
+ * frame's middle, and a hull heading up or down the screen is shorter on it than one heading across. */
+#define SHIP_WAKE_SEGS 8          /* a ship's wake: its two arms and its churned middle, each through this many pieces */
+#define SHIP_WAKE_LEN  3.2f       /* behind its bow (shorter while the ship has come less far from its dock) */
+#define SHIP_KELVIN    0.3536f    /* its arms part at the Kelvin angle, 19.5 degrees either side of its way (the tangent) */
+#define SHIP_PART      0.06f      /* and are this far either side of its way at the bow */
+#define SHIP_FOAM      3          /* the foam at the bow: soft white splashes at the prow and either side of it */
+#define SHIP_CAPS      6          /* whitecaps along each arm, where the water is (they stay as the ship sails on) */
+#define SHIP_CAP_STEP  0.5f       /* that far apart along its way */
+#define SHIP_WAKE_Q    (6 * SHIP_WAKE_SEGS + SHIP_FOAM + 2 * SHIP_CAPS)   /* a ship's quads for them, always (dark at its dock) */
+#define SHIP_WATER     0.24f      /* the middle of a hull's waterline, below its frame's middle */
+#define SHIP_BOW_X     0.58f      /* its bow from there, heading across the screen, */
+#define SHIP_BOW_Y     0.42f      /* and heading up or down it */
+#define SHIP_RAMP      0.6f       /* seconds a transport takes to get under way, or to slow into its dock */
+#define ZEP_STREAKS    5          /* the wind past a zeppelin: streaks, a few at once, */
+#define ZEP_STREAK_Q   (4 * ZEP_STREAKS)                  /* (a zeppelin's quads for them, always) */
+#define ZEP_FORE       0.75f      /* each sliding aft from this far ahead of its middle */
+#define ZEP_AFT        1.45f      /* to this far behind it */
 static struct { int kind, first, n; unsigned rgb; float len, cycle, phase; } g_ship[SHIPS_MAX];
 static float g_shipU[SHIP_POINTS], g_shipV[SHIP_POINTS], g_shipWait[SHIP_POINTS];   /* (the game's wait, seconds) */
 static float g_shipS[SHIP_POINTS], g_shipT[SHIP_POINTS];   /* the way to each point (heights), and when it is reached (s) */
@@ -4586,7 +4604,7 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 5 * (256 + 3) + 3 + ORB_GLOWS + \
                         SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS)   /* (the frame's: FRAME_TILES and the rest, and
                                                                                     * its shine: four more a piece) */
-#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE) + SKY_QUADS)
+#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
 #define VIEW_BATCHES   48
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
 static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
@@ -4647,8 +4665,9 @@ static void ViewStrips(int tex, const float *pos, const float *uv, const unsigne
  * map gets the screen); the logo is the blade's, on it (below). now: the view's clock. */
 /* The ships (kind 0) or the zeppelins (1) this frame, for a W x H window at the view's clock now: each where its
  * time-lapsed clock has it, its frame the one of the 16 headings nearest its way on screen, its accent over it in its
- * colour; a ship under way leaves a soft wake (drawn first, under every ship). They grow as the view comes in, as the
- * square root of the zoom, SHIP_GROW at the most. */
+ * colour; a ship under way parts the sea in white foam at its bow and leaves a widening wake (drawn first, under every
+ * ship), the wind streaks past a zeppelin under way (drawn over it). They grow as the view comes in, as the square root
+ * of the zoom, SHIP_GROW at the most. */
 static const float kShipHead[16][2] = {
     { 1.0f, 0.0f }, { 0.92388f, 0.38268f }, { 0.70711f, 0.70711f }, { 0.38268f, 0.92388f }, { 0.0f, 1.0f },
     { -0.38268f, 0.92388f }, { -0.70711f, 0.70711f }, { -0.92388f, 0.38268f }, { -1.0f, 0.0f },
@@ -4679,12 +4698,150 @@ static void ShipPixel(float u, float v, float W, float H, float *x, float *y)
     ViewToScreen(u, v, &sx, &sy);
     *x = sx * W; *y = (1 - sy) * H;
 }
+/* How far transport r goes (heights) from its own time t0 to t1 (less than a cycle on; either may be outside it). */
+static float ShipGone(int r, float t0, float t1)
+{
+    float c = g_ship[r].cycle, L = g_ship[r].len;
+    int moving;
+    t0 -= MapFloor(t0 / c) * c; t1 -= MapFloor(t1 / c) * c;
+    float d = ShipWay(r, t1, &moving) - ShipWay(r, t0, &moving);
+    return d < -0.5f * L ? d + L : (d < 0 ? 0 : d);              /* (round the loop's end; never a rounding's -0) */
+}
+/* How much transport r is under way at its own time t: 0 at its dock to 1, getting under way over SHIP_RAMP s as it
+ * leaves and slowing over as long into its next dock (as far as it goes in that time, of what it goes at speed). */
+static float ShipGoing(int r, float t)
+{
+    float full = g_shipSpeed * (g_ship[r].kind ? ZEP_FASTER : 1.0f) * SHIP_RAMP;
+    float back = ShipGone(r, t - SHIP_RAMP, t), ahead = ShipGone(r, t, t + SHIP_RAMP);
+    return full > 0 ? FireClamp((back < ahead ? back : ahead) / full, 0, 1) : 0;
+}
+/* A soft white band through the n points x[], y[], added: alpha a[] along its middle, fading to nothing w[] to either
+ * side, each point its own (as the blade's SaberLine, its reach widening as it goes); two quads a piece. */
+static void ShipBand(const float *x, const float *y, const float *a, const float *w, int n)
+{
+    for (int i = 0; i + 1 < n; i++) {
+        float nx[2], ny[2];
+        for (int e = 0; e < 2; e++) {                                  /* each end's normal, from its neighbours */
+            int j = i + e, p = j > 0 ? j - 1 : j, q = j + 1 < n ? j + 1 : j;
+            float dx = x[q] - x[p], dy = y[q] - y[p], l = SaberSqrt(dx * dx + dy * dy);
+            if (!(l > 0)) { dx = 1; dy = 0; l = 1; }
+            nx[e] = -dy / l * w[j]; ny[e] = dx / l * w[j];
+        }
+        for (int s = 0; s < 2; s++) {
+            float d = s ? -1.0f : 1.0f;
+            ViewVert *q = ViewQuadMode(-1, 1);
+            if (!q) return;
+            ViewVertSet(q, x[i], y[i], 0, 0, SaberArgb(0xFFFFFF, a[i]));
+            ViewVertSet(q + 1, x[i + 1], y[i + 1], 0, 0, SaberArgb(0xFFFFFF, a[i + 1]));
+            ViewVertSet(q + 2, x[i + 1] + d * nx[1], y[i + 1] + d * ny[1], 0, 0, SaberArgb(0xFFFFFF, 0));
+            ViewVertSet(q + 3, x[i] + d * nx[0], y[i] + d * ny[0], 0, 0, SaberArgb(0xFFFFFF, 0));
+        }
+    }
+}
+static float SaberNoise(float x, float t, unsigned seed);   /* (the blade's, below: smooth value noise) */
+/* Where ship r's bow is on the window: its frame f's heading from the middle of its waterline, its centre at cx, cy. */
+static void ShipBow(int f, float cx, float cy, float hs, float *bx, float *by)
+{
+    *bx = cx + kShipHead[f][0] * SHIP_BOW_X * hs;
+    *by = cy + (SHIP_WATER + kShipHead[f][1] * SHIP_BOW_Y) * hs;
+}
+/* Ship r's wake, its centre at cx, cy on a W x H window, way along its way at its own time t, go under way (0 to 1),
+ * in frame f, hs its half size, ppu pixels to a height of the picture, T the view's clock (s): from its bow, along the
+ * way it has come, two arms parting at the Kelvin angle, widening and fading as they go, and a churned middle from its
+ * stern; only as far back as it has come since its dock. The foam lies where the water is (its lumps stay where they
+ * are made as the ship sails on). caps 0: the bands, always 6 * SHIP_WAKE_SEGS quads; 1: the whitecaps along its arms,
+ * always 2 * SHIP_CAPS (the soft spark's); dark when it is still. */
+static void ShipWake(int r, float cx, float cy, float W, float H, float way, float t, float go, int f, float hs, float ppu,
+                     float T, int caps)
+{
+    enum { N = SHIP_WAKE_SEGS + 1 };
+    float bx, by, len = SHIP_WAKE_LEN * hs, x[N], y[N], d[N];
+    ShipBow(f, cx, cy, hs, &bx, &by);
+    float back = len / ppu / g_shipSpeed;                       /* (the seconds it takes to sail its wake's length) */
+    if (back > 0.5f * g_ship[r].cycle) back = 0.5f * g_ship[r].cycle;
+    float made = ShipGone(r, t - back, t) * ppu, hull = (SHIP_BOW_X + SHIP_BOW_Y) * hs;
+    for (int j = 0; j < N; j++) {                                /* its way back from the bow, as far as it is made */
+        float u, v, qx, qy, dd = len * (float)j / (N - 1);
+        d[j] = dd < made ? dd : made;
+        ShipAt(r, way - d[j] / ppu, &u, &v);
+        ShipPixel(u, v, W, H, &qx, &qy);
+        x[j] = bx + qx - cx; y[j] = by + qy - cy;
+    }
+    float lx[N], ly[N], rx[N], ry[N], la[N], ra[N], lw[N], ma[N], mw[N];
+    for (int j = 0; j < N; j++) {
+        int p = j > 0 ? j - 1 : j, q = j + 1 < N ? j + 1 : j;
+        float tx = x[p] - x[q], ty = y[p] - y[q], l = SaberSqrt(tx * tx + ty * ty);   /* (forward along it) */
+        if (!(l > hs * 0.01f)) { tx = kShipHead[f][0]; ty = kShipHead[f][1]; l = 1; }
+        float nx = -ty / l, ny = tx / l, k = d[j] / len, spread = SHIP_PART * hs + SHIP_KELVIN * d[j];
+        float wpos = (way * ppu - d[j]) / hs, end = FireClamp((made - d[j]) / (0.4f * hs), 0, 1);   /* (soft where it ends) */
+        float tex = 0.6f + 0.4f * SaberNoise(wpos * 1.3f, T * 0.7f, (unsigned)r * 3 + 1);
+        lx[j] = x[j] + nx * spread; ly[j] = y[j] + ny * spread;
+        rx[j] = x[j] - nx * spread; ry[j] = y[j] - ny * spread;
+        float fade = (1 - k) * SaberSqrt(1 - k);
+        la[j] = go * end * 0.55f * fade * tex;
+        ra[j] = go * end * 0.55f * fade * (0.6f + 0.4f * SaberNoise(wpos * 1.3f + 17, T * 0.7f, (unsigned)r * 3 + 1));
+        lw[j] = (0.04f + 0.11f * k) * hs;
+        float in = FireClamp(d[j] / hull, 0, 1);                 /* (its churned middle rises from under the hull) */
+        ma[j] = go * end * 0.22f * in * (1 - k) * (1 - k) * (0.5f + 0.5f * SaberNoise(wpos * 2.1f, T * 1.1f, (unsigned)r * 3 + 2));
+        mw[j] = (0.1f + 0.45f * k) * hs;
+    }
+    if (!caps) {
+        ShipBand(lx, ly, la, lw, N);
+        ShipBand(rx, ry, ra, lw, N);
+        ShipBand(x, y, ma, mw, N);
+        return;
+    }
+    float step = SHIP_CAP_STEP * hs, first = way * ppu - MapFloor(way * ppu / step) * step;   /* (where the water's caps are) */
+    for (int i = 0; i < 2 * SHIP_CAPS; i++) {                    /* whitecaps along each arm, swelling and fading as they go */
+        float dc = first + (float)(i >> 1) * step, k = dc / len, at = k * (N - 1);
+        int j = (int)at < N - 2 ? (int)at : N - 2;
+        float e = FireClamp(at - (float)j, 0, 1), *ax = i & 1 ? rx : lx, *ay = i & 1 ? ry : ly, *aa = i & 1 ? ra : la;
+        float cx2 = ax[j] + (ax[j + 1] - ax[j]) * e, cy2 = ay[j] + (ay[j + 1] - ay[j]) * e, a = aa[j] + (aa[j + 1] - aa[j]) * e;
+        unsigned c = (unsigned)(int)MapFloor(way * ppu / step) - (unsigned)(i >> 1);
+        float fl = 0.5f + 0.5f * SeaRand(c * 2u + (unsigned)(i & 1), (unsigned)r + 90);
+        ShipQuad(VT_SPARK, 1, cx2, cy2, (0.12f + 0.16f * k) * hs, 0, 0, 1, 1, SaberArgb(0xFFFFFF, a * fl * FireClamp(dc / (0.6f * hs), 0, 1)));
+    }
+}
+/* The foam at ship r's bow (frame f, centre cx, cy, under way go): soft white splashes at its prow and either side,
+ * flickering on the view's clock T. Always its SHIP_FOAM quads. */
+static void ShipFoam(int r, float cx, float cy, int f, float go, float hs, float T)
+{
+    float bx, by, hx = kShipHead[f][0], hy = kShipHead[f][1];
+    ShipBow(f, cx, cy, hs, &bx, &by);
+    for (int k = 0; k < SHIP_FOAM; k++) {
+        float side = k == 0 ? 0.0f : (k == 1 ? 1.0f : -1.0f), fl = SaberNoise(T * 6.0f, (float)k * 2.3f, (unsigned)r * 5 + 7);
+        float x = bx + hx * (k ? -0.05f : 0.05f) * hs - hy * side * 0.1f * hs, y = by + hy * (k ? -0.05f : 0.05f) * hs + hx * side * 0.1f * hs;
+        ShipQuad(VT_SPARK, 1, x, y, (k ? 0.17f : 0.21f) * hs * (0.85f + 0.3f * fl), 0, 0, 1, 1,
+                 SaberArgb(0xFFFFFF, go * (k ? 0.65f : 0.85f) * (0.55f + 0.45f * fl)));
+    }
+}
+/* The wind past zeppelin r (frame f, centre cx, cy, under way go): ZEP_STREAKS thin streaks along its heading, each on
+ * its own beat of the view's clock T sliding aft past it, beside its balloon, fading in and out; now and then one
+ * missing. Always its ZEP_STREAK_Q quads. */
+static void ZepStreaks(int r, float cx, float cy, int f, float go, float hs, float T)
+{
+    float hx = kShipHead[f][0], hy = kShipHead[f][1];
+    for (int i = 0; i < ZEP_STREAKS; i++) {
+        unsigned s = (unsigned)r * 16u + (unsigned)i;
+        float per = 0.9f + 0.5f * SeaRand(s, 61), ph = T / per + SeaRand(s, 62), g = MapFloor(ph), k = ph - g;
+        unsigned c = s * 7919u + (unsigned)(int)g;
+        float lat = (SeaRand(c, 64) < 0.5f ? -1.0f : 1.0f) * (0.3f + 0.38f * SeaRand(c, 65)) * hs;
+        float half = (0.26f + 0.2f * SeaRand(c, 66)) * hs, along = (ZEP_FORE - (ZEP_FORE + ZEP_AFT) * k) * hs;
+        float a = go * 0.5f * SeaSin(3.14159265f * k) * (SeaRand(c, 63) < 0.8f ? 1.0f : 0.0f);
+        float x[3], y[3], al[3] = { 0, a, 0 }, w[3] = { 0.03f * hs, 0.03f * hs, 0.03f * hs };
+        for (int e = 0; e < 3; e++) {                            /* its fore end, its middle, its aft end */
+            float dd = along + (float)(1 - e) * half;
+            x[e] = cx + hx * dd - hy * lat; y[e] = cy + hy * dd + hx * lat;
+        }
+        ShipBand(x, y, al, w, 3);
+    }
+}
 static void ShipsBuild(float W, float H, DWORD now, int kind)
 {
     float vs = g_bgUV[1] - g_bgUV[5], grow = vs > 0 ? SaberSqrt(1.0f / vs) : 1;
     grow = FireClamp(grow, 1, SHIP_GROW);
-    float hs = (kind ? ZEP_SIZE : SHIP_SIZE) * H * grow;
-    static float px[SHIPS_MAX], py[SHIPS_MAX], way[SHIPS_MAX];
+    float hs = (kind ? ZEP_SIZE : SHIP_SIZE) * H * grow, ppu = vs > 0 ? H / vs : H, T = (float)(now % 3600000u) / 1000.0f;
+    static float px[SHIPS_MAX], py[SHIPS_MAX], way[SHIPS_MAX], at[SHIPS_MAX], go[SHIPS_MAX];
     static int frame[SHIPS_MAX], moving[SHIPS_MAX], seen[SHIPS_MAX];
     for (int r = 0; r < g_ships; r++) {
         seen[r] = 0;
@@ -4699,18 +4856,19 @@ static void ShipsBuild(float W, float H, DWORD now, int kind)
         ShipAt(r, way[r] - SHIP_TURN, &ua, &va); ShipAt(r, way[r] + SHIP_TURN, &ub, &vb);
         ShipPixel(ua, va, W, H, &ax, &ay); ShipPixel(ub, vb, W, H, &bx, &by);
         frame[r] = ShipFrame(bx - ax, by - ay);
+        at[r] = t; go[r] = moving[r] ? ShipGoing(r, t) : 0;
         seen[r] = 1;
     }
-    if (!kind && g_viewTex[VT_SPARK])                       /* the wakes, under all the ships */
-        for (int r = 0; r < g_ships; r++) {
-            if (!seen[r] || !moving[r]) continue;
-            for (int k = 1; k <= SHIP_WAKE; k++) {
-                float u, v, x, y, a = 0.32f * (1 - (float)k / (SHIP_WAKE + 1));
-                ShipAt(r, way[r] - k * SHIP_WAKE_STEP, &u, &v);
-                ShipPixel(u, v, W, H, &x, &y);
-                ShipQuad(VT_SPARK, 1, x, y + hs * 0.25f, hs * (0.16f + 0.05f * k), 0, 0, 1, 1, SaberArgb(0xFFFFFF, a));
-            }
-        }
+    if (!kind) {                                            /* the wakes, under all the ships, then the foam at their bows */
+        for (int r = 0; r < g_ships; r++)
+            if (seen[r]) ShipWake(r, px[r], py[r], W, H, way[r], at[r], go[r], frame[r], hs, ppu, T, 0);
+        if (g_viewTex[VT_SPARK])
+            for (int r = 0; r < g_ships; r++)
+                if (seen[r]) {
+                    ShipWake(r, px[r], py[r], W, H, way[r], at[r], go[r], frame[r], hs, ppu, T, 1);
+                    ShipFoam(r, px[r], py[r], frame[r], go[r], hs, T);
+                }
+    }
     for (int r = 0; r < g_ships; r++) {
         if (!seen[r]) continue;
         float u0 = ((float)frame[r] * SHIP_FRAME + 0.5f) / SHIP_SHEET_W, u1 = ((float)(frame[r] + 1) * SHIP_FRAME - 0.5f) / SHIP_SHEET_W;
@@ -4719,6 +4877,9 @@ static void ShipsBuild(float W, float H, DWORD now, int kind)
         ShipQuad(VT_SHIPS, 0, px[r], py[r], hs, u0, (row + SHIP_FRAME + 0.5f) / SHIP_SHEET_H, u1,
                  (row + 2 * SHIP_FRAME - 0.5f) / SHIP_SHEET_H, 0xFF000000u | g_ship[r].rgb);
     }
+    if (kind)                                               /* the wind streaking past the zeppelins, over them */
+        for (int r = 0; r < g_ships; r++)
+            if (seen[r]) ZepStreaks(r, px[r], py[r], frame[r], go[r], hs, T);
 }
 
 /* A quad of picture tex, centre x, y, half sizes hw, hh, the whole of u0..u1, v0..v1 on it. */
