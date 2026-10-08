@@ -112,6 +112,7 @@ static int LogSays(const char *words) { const char *g = Get("Logs/CinderLoad.log
 
 /* ---- the fire sound ---- */
 #include <math.h>
+#include <time.h>
 
 static int Near(double a, double b, double tol) { return fabs(a - b) <= tol; }
 
@@ -3981,19 +3982,458 @@ static void TestSky(void)
     memcpy(g_bgUV, whole, sizeof whole);
     Check(ok, "a cloud stands above its ground with the rain falling between; nearer in it swells past the map's own zoom; with the camera down among them they are gone");
 
-    /* the passes in their order: shadows, rain, the clouds, then the lightning */
-    g_viewTex[VT_SPARK] = 1; g_viewTex[VT_SKY] = 1;
+    /* no clouds' tile: no clouds, so nothing rains (the passes themselves: TestClouds) */
+    g_viewTex[VT_SPARK] = 1; g_viewTex[VT_SKY] = 1; g_cloudOk = 0;
     ViewListStart();
     SkyBuild(1000, 500, 5000);
-    int sh = -1, rn = -1, cl = -1;
-    for (int b = 0; b < g_vbN; b++) {
-        if (g_vb[b].tex == VT_SPARK && !g_vb[b].add && sh < 0) sh = b;
-        if (g_vb[b].tex == -1 && !g_vb[b].add && rn < 0) rn = b;
-        if (g_vb[b].tex == VT_SKY && cl < 0) cl = b;
-    }
-    ok = sh >= 0 && rn > sh && cl > rn && g_vb[cl].count / 4 > 0;
-    Check(ok, "the weather drawn in its passes: the clouds' shadows on the ground, then the rain falling, then the clouds over it");
+    Check(g_vbN == 0, "without the clouds' tile no cloud is drawn, and no rain falls from one");
     g_viewTex[VT_SPARK] = 0; g_viewTex[VT_SKY] = 0; g_sky.ok = 0;
+}
+
+/* The clouds as light makes them (7 Oct 2026): a field composited from the tile (clouds.bin) over the weather's grid,
+ * in three parts (the shadows on the ground, the low clouds, the high), premultiplied, drawn through the view each frame
+ * at their layers' heights. */
+static unsigned char g_ctile[8 + 2 * CLOUD_N * CLOUD_N];
+static unsigned char g_cgrid[16 + 16 * 8 * 13];
+static float g_cd[CLOUD_N][CLOUD_N];
+/* A tile: round heaps on a 64-texel lattice (blobs 1), cloud everywhere (2), or smooth noise (0); lit as clouds.py
+ * lights it (slopes toward the upper left bright, the lower flank greyer). */
+static void CloudTileMake(int blobs)
+{
+    for (int y = 0; y < CLOUD_N; y++)
+        for (int x = 0; x < CLOUD_N; x++) {
+            float d;
+            if (blobs == 2) d = 0.9f;
+            else if (blobs == 3) d = x % 64 < 32 && y % 64 < 32 ? 1 : 0;      /* sharp-edged squares */
+            else if (blobs) {
+                float dx = (float)(x % 64) - 32, dy = (float)(y % 64) - 32, r = sqrtf(dx * dx + dy * dy);
+                d = r < 24 ? 1 - r / 24 : 0;
+            } else {
+                d = 0;
+                for (int o = 0; o < 2; o++) {
+                    int s = o ? 16 : 32;
+                    float fx = (float)x / s, fy = (float)y / s;
+                    int ix = (int)fx, iy = (int)fy, n = CLOUD_N / s;
+                    float ax = fx - ix, ay = fy - iy;
+                    ax = ax * ax * (3 - 2 * ax); ay = ay * ay * (3 - 2 * ay);
+                    float a = SeaRand((unsigned)(ix % n) + 97u * o, (unsigned)(iy % n)), b = SeaRand((unsigned)((ix + 1) % n) + 97u * o, (unsigned)(iy % n));
+                    float c = SeaRand((unsigned)(ix % n) + 97u * o, (unsigned)((iy + 1) % n)), e = SeaRand((unsigned)((ix + 1) % n) + 97u * o, (unsigned)((iy + 1) % n));
+                    d += (o ? 0.35f : 0.65f) * ((a + (b - a) * ax) * (1 - ay) + (c + (e - c) * ax) * ay);
+                }
+            }
+            g_cd[y][x] = d;
+        }
+    memcpy(g_ctile, "CCLD", 4); g_ctile[4] = CLOUD_N & 255; g_ctile[5] = CLOUD_N >> 8; g_ctile[6] = 2; g_ctile[7] = 0;
+    for (int y = 0; y < CLOUD_N; y++)
+        for (int x = 0; x < CLOUD_N; x++) {
+            float gx = g_cd[y][(x + 1) % CLOUD_N] - g_cd[y][(x + CLOUD_N - 1) % CLOUD_N];
+            float gy = g_cd[(y + 1) % CLOUD_N][x] - g_cd[(y + CLOUD_N - 1) % CLOUD_N][x];
+            float L = 0.5f + 4.0f * (gx + gy) - 3.0f * (gy < 0 ? -gy : 0);
+            g_ctile[8 + 2 * (y * CLOUD_N + x)] = (unsigned char)(int)(g_cd[y][x] * 255 + 0.5f);
+            g_ctile[9 + 2 * (y * CLOUD_N + x)] = (unsigned char)(int)(FireClamp(L, 0, 1) * 255 + 0.5f);
+        }
+}
+/* A 16 x 8 grid, the equator at v 0.5, 76 degrees high: cover (raw, the grid's percent) in the cells c0..c1, r0..r1
+ * (all: -1), rain each season. */
+static void CloudGrid(int cover, int rain, int c0, int c1, int r0, int r1)
+{
+    unsigned char *d = g_cgrid;
+    float veq = 0.5f, deg = 76;
+    memcpy(d, "CWTH", 4); d[4] = 16; d[5] = 0; d[6] = 8; d[7] = 0;
+    memcpy(d + 8, &veq, 4); memcpy(d + 12, &deg, 4);
+    for (int j = 0; j < 8; j++)
+        for (int i = 0; i < 16; i++) {
+            unsigned char *e = d + 16 + 13 * (j * 16 + i);
+            e[0] = (unsigned char)(c0 < 0 || (i >= c0 && i <= c1 && j >= r0 && j <= r1) ? cover : 0);
+            for (int k = 0; k < 4; k++) { e[1 + 3 * k] = (unsigned char)rain; e[2 + 3 * k] = 0; e[3 + 3 * k] = 0; }
+        }
+    SkyParse(g_cgrid, sizeof g_cgrid);
+}
+static void CloudView(float u0, float vt, float span)
+{
+    float uv[8] = { u0, vt + span, u0 + span, vt + span, u0, vt, u0 + span, vt };
+    memcpy(g_bgUV, uv, sizeof uv);
+}
+/* A whole picture of the sky for the view now, made and shown (as the view's thread: begun, worked, swapped). */
+static void CloudMake(float W, float H, DWORD now)
+{
+    g_cj.on = 0;
+    CloudBegin(W, H, now);
+    CloudWork(1);
+    CloudSwap();
+}
+static unsigned CloudPx(int k, int i, int j)
+{
+    const CloudPart *c = &g_cloudShown.part[k];
+    return g_cloudPx[g_cloudFront][(c->y + j) * CLOUD_TEX_W + c->x + i];
+}
+static double CloudSumA(int k)
+{
+    double s = 0;
+    for (int j = 0; j < g_cloudShown.part[k].h; j++)
+        for (int i = 0; i < g_cloudShown.part[k].w; i++) s += CloudPx(k, i, j) >> 24;
+    return s;
+}
+/* The centroid of part k's alpha on screen (its layer's mapping), and its ground (picture) centroid. */
+static void CloudCentroid(int k, float W, float H, float *sx, float *sy, float *gu, float *gv)
+{
+    const CloudPart *c = &g_cloudShown.part[k];
+    int l = k == 2;
+    float p = k ? g_cj.p[l] : 1, lift = k ? g_cj.lift[l] : 0;
+    double a = 0, x = 0, y = 0, u = 0, v = 0;
+    for (int j = 0; j < c->h; j++)
+        for (int i = 0; i < c->w; i++) {
+            double w = CloudPx(k, i, j) >> 24;
+            float cu = c->u0 + ((float)i + 0.5f) * c->du, cv = c->v0 + ((float)j + 0.5f) * c->dv;
+            float gx = (cu - g_cj.u0) / g_cj.us * W, gy = (cv - g_cj.vt) / g_cj.vs * H;
+            a += w; u += w * cu; v += w * cv;
+            x += w * (W / 2 + (gx - W / 2) * p); y += w * (H / 2 + (gy - H / 2) * p - lift);
+        }
+    *sx = (float)(x / a); *sy = (float)(y / a); *gu = (float)(u / a); *gv = (float)(v / a);
+}
+static double CloudMs(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+static void TestClouds(void)
+{
+    /* the tile read; a wrong one is no clouds */
+    CloudTileMake(0);
+    int ok = CloudParse(g_ctile, sizeof g_ctile) && g_cloudTile[5] == (g_ctile[18] | (unsigned)g_ctile[19] << 16) && g_cloudSteep > 0;
+    ok &= !CloudParse(g_ctile, sizeof g_ctile - 1);
+    g_ctile[3] = 'X'; ok &= !CloudParse(g_ctile, sizeof g_ctile); g_ctile[3] = 'D';
+    ok &= CloudParse(g_ctile, sizeof g_ctile);
+    Check(ok, "the clouds' tile read (density and light, its steepness); a short one or a wrong header is no clouds");
+    unsigned keepTile[4] = { g_cloudTile[0], g_cloudTile[1], g_cloudTile[CLOUD_N], g_cloudTile[CLOUD_N + 1] };
+    g_cloudTile[0] = 0 | 200u << 16; g_cloudTile[1] = 200 | 0u << 16; g_cloudTile[CLOUD_N] = 100; g_cloudTile[CLOUD_N + 1] = 100;
+    unsigned t1 = CloudTap(65536 / 4, 0), t2 = CloudTap(0, 65536 / 4);
+    ok = Near(t1 & 255, 50, 1) && Near(t1 >> 16, 150, 1) && Near(t2 & 255, 25, 1) && Near(t2 >> 16, 150, 1);
+    g_cloudTile[0] = keepTile[0]; g_cloudTile[1] = keepTile[1]; g_cloudTile[CLOUD_N] = keepTile[2]; g_cloudTile[CLOUD_N + 1] = keepTile[3];
+    Check(ok, "the tile read between its texels, density and light at once, each the nearer the more");
+
+    /* deterministic; premultiplied (no channel over its alpha); none where the cover is nothing; more with more cover */
+    float W = 1600, H = 675;
+    g_shipAsp = W / H;
+    CloudGrid(100, 0, -1, 0, 0, 0);
+    CloudView(0, 0, 1);
+    g_destOk = 0;
+    CloudMake(W, H, 5000000);
+    static unsigned first[CLOUD_TEX_W * CLOUD_TEX_H];
+    memcpy(first, g_cloudPx[g_cloudFront], sizeof first);
+    CloudMake(W, H, 5000000);
+    ok = !memcmp(first, g_cloudPx[g_cloudFront], sizeof first) && CloudSumA(1) > 0;
+    Check(ok, "the sky's picture is the same for the same moment and view (all from the clock), and has clouds where the cover is full");
+    ok = 1;
+    for (int i = 0; i < CLOUD_TEX_W * g_cloudShown.rows; i++) {
+        unsigned q = g_cloudPx[g_cloudFront][i], a = q >> 24;
+        ok &= (q & 255) <= a && (q >> 8 & 255) <= a && (q >> 16 & 255) <= a;
+    }
+    Check(ok, "premultiplied: no texel's colour is over its alpha (drawn ONE, ONE_MINUS_SRC_ALPHA)");
+    double full = CloudSumA(1), fullShadow = CloudSumA(0);
+    CloudGrid(70, 0, -1, 0, 0, 0); CloudMake(W, H, 5000000);
+    double most = CloudSumA(1);
+    double fullHigh = CloudSumA(2);
+    CloudGrid(35, 0, -1, 0, 0, 0); CloudMake(W, H, 5000000);
+    double some = CloudSumA(1), someHigh = CloudSumA(2);
+    CloudGrid(0, 0, -1, 0, 0, 0); CloudMake(W, H, 5000000);
+    ok = some > 0 && most > some * 1.3 && full > most * 1.1 && fullShadow > 0 && fullHigh > someHigh * 1.2 && CloudSumA(0) == 0 && CloudSumA(1) == 0 && CloudSumA(2) == 0;
+    ViewListStart();
+    CloudDraw(0, W, H, 5000000); CloudDraw(1, W, H, 5000000); CloudDraw(2, W, H, 5000000);
+    ok &= g_vbN == 0;
+    Check(ok, "no cloud and no shadow where the cover is nothing (and nothing drawn); more cloud as the cover rises");
+
+    /* lit toward the sun in the upper left; the bases darker; darker still where it rains */
+    CloudTileMake(1); CloudParse(g_ctile, sizeof g_ctile);
+    CloudGrid(100, 0, -1, 0, 0, 0); CloudMake(W, H, 5000000);
+    double lum[4] = { 0, 0, 0, 0 }, cnt[4] = { 0, 0, 0, 0 };
+    const CloudPart *lo = &g_cloudShown.part[1];
+    for (int j = 1; j < lo->h - 1; j++)
+        for (int i = 1; i < lo->w - 1; i++) {
+            unsigned q = CloudPx(1, i, j);
+            int a = (int)(q >> 24);
+            if (a < 60) continue;
+            int gx = (int)(CloudPx(1, i + 1, j) >> 24) - (int)(CloudPx(1, i - 1, j) >> 24), gy = (int)(CloudPx(1, i, j + 1) >> 24) - (int)(CloudPx(1, i, j - 1) >> 24);
+            double l = ((q & 255) + (q >> 8 & 255) + (q >> 16 & 255)) / (3.0 * a);
+            if (gx > 4 && gy > 4) { lum[0] += l; cnt[0]++; }             /* the upper-left flank: facing the sun */
+            if (gx < -4 && gy < -4) { lum[1] += l; cnt[1]++; }           /* the lower-right */
+            if (gy < -4 && gx > -3 && gx < 3) { lum[2] += l; cnt[2]++; } /* the base, below */
+            if (gy > 4 && gx > -3 && gx < 3) { lum[3] += l; cnt[3]++; }  /* the top */
+        }
+    for (int k = 0; k < 4; k++) lum[k] = cnt[k] ? lum[k] / cnt[k] : 0;
+    ok = cnt[0] > 20 && cnt[1] > 20 && cnt[2] > 20 && cnt[3] > 20 && lum[0] > lum[1] + 0.08 && lum[3] > lum[2] + 0.08;
+    double fair = lum[0] * cnt[0] + lum[1] * cnt[1];
+    CloudGrid(100, 40, -1, 0, 0, 0); CloudMake(W, H, 5000000);
+    double sl = 0, sn = 0;
+    for (int j = 0; j < lo->h; j++)
+        for (int i = 0; i < lo->w; i++) {
+            unsigned q = CloudPx(1, i, j);
+            int a = (int)(q >> 24);
+            if (a >= 60) { sl += ((q & 255) + (q >> 8 & 255) + (q >> 16 & 255)) / (3.0 * a); sn++; }
+        }
+    ok &= sn > 0 && sl / sn < fair / (cnt[0] + cnt[1]) - 0.1;
+    Check(ok, "the clouds lit from the upper left (the flanks facing the sun brighter than the far ones), their bases darker than their tops, and greyer where it rains");
+
+    /* the shadow on the ground away from the sun: below and right of its cloud, which stands up the screen from it */
+    CloudGrid(100, 0, 6, 9, 2, 5);
+    CloudMake(W, H, 5000000);
+    float cx, cy, cu, cv, sx, sy, su, sv;
+    CloudCentroid(1, W, H, &cx, &cy, &cu, &cv);
+    CloudCentroid(0, W, H, &sx, &sy, &su, &sv);
+    /* the shadow's shape is its cloud's, where the sun's ray from each ground point meets the clouds: it matches the
+     * clouds best shifted that way, not as they are overhead nor shifted the other way */
+    double match[3] = { 0, 0, 0 };
+    const CloudPart *gp0 = &g_cloudShown.part[0], *cp = &g_cloudShown.part[1];
+    for (int o = 0; o < 3; o++)
+        for (int j = 0; j < gp0->h; j++)
+            for (int i = 0; i < gp0->w; i++) {
+                float k = (float)(1 - o), gu = gp0->u0 + ((float)i + 0.5f) * gp0->du, gv = gp0->v0 + ((float)j + 0.5f) * gp0->dv;
+                float lu = gu + k * CLOUD_SUN_U * CLOUD_ALT_LO / g_shipAsp, lv = gv + k * CLOUD_SUN_V * CLOUD_ALT_LO;
+                int ci = (int)((lu - cp->u0) / cp->du), cj = (int)((lv - cp->v0) / cp->dv);
+                if (ci < 0 || cj < 0 || ci >= cp->w || cj >= cp->h) continue;
+                double sa = (CloudPx(0, i, j) >> 24) / 255.0, ca = (CloudPx(1, ci, cj) >> 24) > 100 ? 1 : 0;
+                match[o] += sa * ca - sa * (1 - ca);
+            }
+    ok = sx > cx && sy > cy + 20 && su > cu && sv > cv && match[0] > match[1] * 1.1 && match[0] > match[2] * 1.2;
+    Check(ok, "each cloud's shadow on the ground falls away from the sun (below and right of it), the same shapes where the sun's ray meets them");
+
+    /* the layers part as the camera comes down: the high swells and climbs faster than the low (cloud everywhere) */
+    CloudTileMake(2); CloudParse(g_ctile, sizeof g_ctile);
+    CloudGrid(100, 0, -1, 0, 0, 0);
+    float ratio[2];
+    for (int z = 0; z < 2; z++) {
+        CloudView(z ? 0.3f : 0, z ? 0.3f : 0, z ? 0.3f : 1);
+        CloudMake(W, H, 5000000);
+        float k[3];
+        for (int part = 1; part < 3; part++) {
+            ViewListStart();
+            CloudDraw(part, W, H, 5000000);
+            const ViewVert *q = g_vv + g_vb[0].first;
+            k[part] = (q[1].x - q[0].x) / ((q[1].u - q[0].u) * CLOUD_TEX_W * g_cloudShown.part[part].du);   /* pixels a picture unit */
+            ok &= g_vbN == 1 && g_vb[0].tex == VT_SKY && g_vb[0].add == 2;
+        }
+        ratio[z] = k[2] / k[1];
+    }
+    ok &= ratio[0] > 1.01f && ratio[1] > ratio[0] * 1.15f;
+    Check(ok, "the high clouds swell past the low ones as the view comes down (parallax: the layers part), drawn premultiplied from the sky's picture");
+
+    /* below the camera they are gone: the high first, then the low (a sky of cloud everywhere) */
+    CloudTileMake(2); CloudParse(g_ctile, sizeof g_ctile);
+    CloudView(0.4f, 0.4f, 0.2f); CloudMake(W, H, 5000000);
+    ok = CloudSumA(2) > 0 && CloudSumA(1) > 0;
+    CloudView(0.4f, 0.4f, 0.13f); CloudMake(W, H, 5000000);
+    ok &= CloudSumA(2) == 0 && CloudSumA(1) > 0;
+    CloudView(0.45f, 0.45f, 0.05f); CloudMake(W, H, 5000000);
+    ok &= CloudSumA(1) == 0 && CloudSumA(0) == 0;
+    Check(ok, "the camera coming down through them: the high clouds gone first, then the low (and their shadows)");
+
+    /* parting over the arrival: at the end of the zoom, clear where you arrive, cloud further out */
+    CloudView(0.44f, 0.44f, 0.12f);
+    g_destOk = 1; g_destU = 0.5f; g_destV = 0.5f;
+    CloudMake(W, H, 5000000);
+    double nearA = 0, farA = 0;
+    for (int j = 0; j < lo->h; j++)
+        for (int i = 0; i < lo->w; i++) {
+            float cu2 = lo->u0 + ((float)i + 0.5f) * lo->du, cv2 = lo->v0 + ((float)j + 0.5f) * lo->dv;
+            float x = W / 2 + ((cu2 - g_cj.u0) / g_cj.us * W - W / 2) * g_cj.p[0], y = H / 2 + ((cv2 - g_cj.vt) / g_cj.vs * H - H / 2) * g_cj.p[0] - g_cj.lift[0];
+            float d = sqrtf((x - W / 2) * (x - W / 2) + (y - H / 2) * (y - H / 2));
+            if (d < g_cj.r0) nearA += CloudPx(1, i, j) >> 24;
+            if (d > g_cj.r1) farA += CloudPx(1, i, j) >> 24;
+        }
+    double shade = 0;                                                  /* no shadow on the arrival either */
+    const CloudPart *gp = &g_cloudShown.part[0];
+    for (int j = 0; j < gp->h; j++)
+        for (int i = 0; i < gp->w; i++) {
+            float x = (gp->u0 + ((float)i + 0.5f) * gp->du - g_cj.u0) / g_cj.us * W, y = (gp->v0 + ((float)j + 0.5f) * gp->dv - g_cj.vt) / g_cj.vs * H;
+            if ((x - W / 2) * (x - W / 2) + (y - H / 2) * (y - H / 2) < g_cj.r0 * g_cj.r0) shade += CloudPx(0, i, j) >> 24;
+        }
+    ok = g_cj.clear > 0.99f && nearA == 0 && farA > 0 && shade == 0 && CloudSumA(0) > 0;
+    g_destOk = 0;
+    CloudTileMake(0); CloudParse(g_ctile, sizeof g_ctile);
+    Check(ok, "the clouds part over where you arrive as the view comes down onto it, and cast no shadow on it");
+
+    /* blown on the wind of their latitude; every so often morphing into the next field, never jumping */
+    CloudView(0, 0, 1);
+    double moved = 0, still = 0;
+    float e, n;
+    CloudWind(0.5f - 45 / 76.0f, &e, &n);                             /* 45 N: the westerlies */
+    for (int s = 0; s < 40; s++) {
+        float u = 0.1f + 0.02f * s, v = 0.5f - 45 / 76.0f;
+        DWORD t0 = 5000000 + 2000;                                    /* (early in its field's life: no morph) */
+        int a = CloudThick(u, v, t0);
+        int b = CloudThick(u + e * SKY_WIND * 1.0f / g_shipAsp, v - n * SKY_WIND * 1.0f, t0 + 1000), c = CloudThick(u, v, t0 + 1000);
+        moved += fabs((double)(a - b)); still += fabs((double)(a - c));
+    }
+    ok = e > 0.3f && moved < still * 0.2;
+    /* at v 0.3 the field turns over when T plus its phase (0.6 of an epoch) passes a whole number of epochs: tb ms */
+    double ph = CLOUD_EPOCH * 0.6;
+    DWORD tb = (DWORD)((ceil((5000 + ph) / CLOUD_EPOCH) * CLOUD_EPOCH - ph) * 1000 + 0.5), tm = tb - (DWORD)(CLOUD_MORPH * 1000);
+    double across = 0, before = 0, other = 0;
+    for (int s = 0; s < 64; s++) {
+        float u = 0.05f + 0.014f * s;
+        int a = CloudThick(u, 0.3f, tb - 1), b = CloudThick(u, 0.3f, tb + 1);
+        across += fabs((double)(a - b));
+        before += fabs((double)(CloudThick(u, 0.3f, tm + 1499) - CloudThick(u, 0.3f, tm + 1501)));     /* mid-morph */
+        other += fabs((double)(CloudThick(u, 0.3f, tm - 2000) - CloudThick(u, 0.3f, tb + 1)));         /* a field and its next */
+    }
+    double start = 0, m0 = 0, m1 = 0, q0 = 0, q1 = 0;
+    for (int s = 0; s < 256; s++) {
+        float u = 0.01f + 0.0037f * s;
+        start += fabs((double)(CloudThick(u, 0.3f, tm - 1) - CloudThick(u, 0.3f, tm + 1)));           /* the morph begins */
+        double a = CloudThick(u, 0.3f, tm - 2000), b = CloudThick(u, 0.3f, tm + (DWORD)(CLOUD_MORPH * 500));
+        m0 += a; q0 += a * a; m1 += b; q1 += b * b;
+    }
+    double sd0 = sqrt(q0 / 256 - (m0 / 256) * (m0 / 256)), sd1 = sqrt(q1 / 256 - (m1 / 256) * (m1 / 256));
+    for (int s = 0; s <= 7; s++) {                                    /* the two fields' shares keep the spread: squares whole */
+        CloudRow rr;
+        float sx[2] = { 300, 2400 };
+        CloudRowSet(&rr, 0.5f, 0.3f, (float)tm / 1000.0f + CLOUD_MORPH * (float)s / 8, g_shipAsp, sx, sx, 1, 0);
+        ok &= Near(rr.ka * rr.ka + rr.kb * rr.kb, 65536, 1200) && rr.la + rr.lb == 256 && (s == 0 ? rr.kb == 0 : rr.kb > 0);
+    }
+    for (int s = 0; s < 20; s++) {                                    /* only some latitudes morphing at any moment */
+        int morphing = 0, k;
+        float age;
+        for (int r = 0; r < 100; r++) morphing += CloudEpoch(0.005f + 0.01f * r, 5000.0f + 1.3f * s, &k, &age) > 0;
+        ok &= morphing >= 8 && morphing <= 32;
+    }
+    ok &= across / 64 < 200 && before / 64 < 200 && other / 64 > 4000 && start / 256 < 200 && sd1 > 0.7 * sd0;
+    double mean = 0;
+    CloudMake(W, H, tb);
+    memcpy(first, g_cloudPx[g_cloudFront], sizeof first);
+    CloudMake(W, H, tb + 15);
+    for (int i = 0; i < CLOUD_TEX_W * g_cloudShown.rows; i++) mean += fabs((double)(first[i] >> 24) - (double)(g_cloudPx[g_cloudFront][i] >> 24));
+    ok &= mean / (CLOUD_TEX_W * g_cloudShown.rows) < 0.5;
+    Check(ok, "the field drifts on the wind of its latitude (the westerlies carry it east), and morphs into the next one without a jump");
+
+    /* the detail as the view comes down: none at the whole world, finer shapes coming down (the finer tile on) */
+    CloudView(0, 0, 1); CloudMake(W, H, 5000000);
+    ok = g_cj.detail == 0;
+    CloudView(0.25f, 0.25f, 0.5f); CloudMake(W, H, 5000000);
+    ok &= g_cj.detail == 0;                                          /* (still too fine there: it would speckle) */
+    CloudView(0.44f, 0.44f, 0.1f);
+    int edges[2];
+    for (int d = 0; d < 2; d++) {
+        g_cj.on = 0;
+        CloudBegin(W, H, 5000000);
+        if (!d) { ok &= g_cj.detail > 0; g_cj.detail = 0; }
+        CloudWork(1); CloudSwap();
+        edges[d] = 0;
+        for (int j = 0; j < lo->h; j++)
+            for (int i = 1; i < lo->w; i++) edges[d] += (CloudPx(1, i, j) >> 24 > 100) != (CloudPx(1, i - 1, j) >> 24 > 100);
+    }
+    ok &= edges[1] > edges[0] * 1.3;
+    Check(ok, "the finer tile comes in as the view comes down, once its texels show its shapes: none at the whole world or half way, finer shapes near the end");
+
+    /* the edges never sharper than a texel shows (no stairs where the picture is magnified): hard on the lit side as
+     * designed where the texels are fine, widened to a texel's change of density where they are coarse */
+    CloudTileMake(3); CloudParse(g_ctile, sizeof g_ctile);
+    float litW[2];
+    for (int z = 0; z < 2; z++) {
+        CloudView(z ? 0.3f : 0, z ? 0.3f : 0, z ? 0.3f : 1);
+        CloudMake(z ? W : 400, z ? H : 169, 5000000);
+        float least = 1.0f * g_cloudSteep * ((float)g_cj.dx[0] / 65536 + 0.7f * (float)g_cj.dx[1] / 65536 * (float)g_cj.detail / 256);
+        litW[z] = 64.0f / (float)g_cj.kw[255];
+        ok = 64.0f / (float)g_cj.kw[0] >= litW[z] && Near(litW[z], least > g_cloudW[255] ? least : g_cloudW[255], 0.003);
+    }
+    ok &= litW[0] > 0.05f && litW[1] < litW[0] * 0.8f;
+    int widths = ok;
+    CloudTileMake(0); CloudParse(g_ctile, sizeof g_ctile);
+    CloudView(0, 0, 1); CloudMake(5120, 2160, 5000000);                  /* (his screen: its coarsest texels) */
+    int steps = 0, hard = 0;
+    for (int j = 0; j < lo->h; j++)
+        for (int i = 1; i < lo->w; i++) {
+            int d = (int)(CloudPx(1, i, j) >> 24) - (int)(CloudPx(1, i - 1, j) >> 24);
+            if (d < 0) d = -d;
+            steps += d > 8; hard += d > 120;
+        }
+    ok = widths && steps > 100 && hard * 50 < steps;
+    Check(ok, "the clouds' edges soft enough for their texels: no stairs at the whole world's view");
+
+    /* between pictures the parts ride the wind (at the view's middle, the doldrums: westward) */
+    ViewListStart(); CloudDraw(1, W, H, 5000000);
+    float x0 = g_vv[g_vb[0].first].x;
+    ViewListStart(); CloudDraw(1, W, H, 5000300);
+    float x1 = g_vv[g_vb[0].first].x, want = g_cloudShown.windU * 0.3f / g_cj.us * W * g_cj.p[0];
+    ok = g_cloudShown.windU < 0 && Near(x1 - x0, want, 0.01) && x1 < x0;
+    Check(ok, "between its pictures the sky rides the wind of the view's middle, so the drift never steps");
+
+    /* the picture shown is never touched while the next is made */
+    CloudMake(W, H, 5000000);
+    memcpy(first, g_cloudPx[g_cloudFront], sizeof first);
+    g_cj.on = 0;
+    CloudView(0.2f, 0.2f, 0.4f);
+    CloudBegin(W, H, 5000500); CloudWork(1);
+    ok = !memcmp(first, g_cloudPx[g_cloudFront], sizeof first);
+    CloudSwap();
+    ok &= memcmp(first, g_cloudPx[g_cloudFront], sizeof first) != 0 && g_cloudUpload;
+    CloudView(0, 0, 1);
+    Check(ok, "the next picture made beside the one shown (two of them), the shown one untouched until it is swapped");
+
+    /* drawn each frame through the view: in their passes, the picture shown only while it is fresh */
+    CloudGrid(100, 40, -1, 0, 0, 0);
+    g_skyOn = 1; g_viewTex[VT_SKY] = 1; g_viewTex[VT_SPARK] = 1; g_cloudShownOk = 0; g_cj.on = 0;
+    ViewListStart();
+    SkyBuild(W, H, 6000000);                                          /* begun: nothing to draw yet */
+    int none = 1;
+    for (int b = 0; b < g_vbN; b++) none &= g_vb[b].tex != VT_SKY;
+    CloudWork(1);
+    ViewListStart();
+    SkyBuild(W, H, 6000040);
+    /* each of the sky's quads by the part of the picture it shows, in the order drawn (the shadows' and the low clouds'
+     * are one batch, the same picture drawn the same way) */
+    int order[4] = { -1, -1, -1, -1 }, last[4] = { -1, -1, -1, -1 }, rn = -1, seq = 0, pre = 1;
+    for (int b = 0; b < g_vbN; b++) {
+        if (g_vb[b].tex == -1 && !g_vb[b].add && rn < 0) rn = seq++;
+        if (g_vb[b].tex != VT_SKY) continue;
+        pre &= g_vb[b].add == 2;
+        for (int q = g_vb[b].first; q < g_vb[b].first + g_vb[b].count; q += 4) {
+            float tu = g_vv[q].u * CLOUD_TEX_W, tv = g_vv[q].v * CLOUD_TEX_H;
+            int k = tv < g_cloudShown.part[0].y - 1 ? 1 : tu < g_cloudShown.part[2].x - 1 ? 0 : 2;
+            if (order[k] < 0) order[k] = seq;
+            last[k] = seq++;
+        }
+    }
+    ok = none && pre && g_cloudUpload && order[0] == 0 && order[1] > last[0] && rn > last[1] && order[2] > rn;
+    ViewListStart();
+    SkyBuild(W, H, 6000040 + CLOUD_STALE + 1000);                      /* (much later, its picture not made yet) */
+    none = 1;
+    for (int b = 0; b < g_vbN; b++) none &= g_vb[b].tex != VT_SKY;
+    ok &= none;
+    Check(ok, "the weather drawn in its passes: the shadows, the low clouds, the rain out of their undersides, the high over all; a picture of another moment not drawn");
+
+    /* rain only from the thick of the clouds */
+    CloudGrid(10, 40, -1, 0, 0, 0);                                   /* (10%: cells born, but too few clouds to show) */
+    int born = 0;
+    SkyCloud cc;
+    for (int i = 0; i < SKY_CLOUDS; i++) born += SkyAt(i, 6000000, W, H, &cc) && cc.rain;
+    ViewListStart();
+    SkyBuild(W, H, 6000000);
+    int rain = 0;
+    for (int b = 0; b < g_vbN; b++) rain += g_vb[b].tex == -1;
+    ok = born > 0 && rain == 0;
+    Check(ok, "rain and snow fall only from the thick of the clouds, none from a clear sky");
+
+    /* the time a picture takes, at his screen's size with cloud everywhere and the detail in (the worst there is) */
+    CloudTileMake(0); CloudParse(g_ctile, sizeof g_ctile);
+    CloudGrid(100, 20, -1, 0, 0, 0);
+    g_shipAsp = 5120.0f / 2160.0f;
+    double best[2] = { 1e9, 1e9 };
+    for (int z = 0; z < 2; z++) {
+        CloudView(z ? 0.44f : 0, z ? 0.44f : 0, z ? 0.12f : 1);           /* (the whole world; the end, the detail in) */
+        for (int r = 0; r < 12; r++) {
+            double t0 = CloudMs();
+            g_cj.on = 0;
+            CloudBegin(5120, 2160, 5000000u + (DWORD)r * 1700u);
+            CloudWork(1);
+            double t = CloudMs() - t0;
+            if (t < best[z]) best[z] = t;
+        }
+    }
+#ifdef __OPTIMIZE__
+    double budget = 3.0;
+#else
+    double budget = 6.0;                                               /* (this build unoptimised: the DLL is -O2) */
+#endif
+    printf("  the sky's picture at 5120 x 2160 (cloud everywhere): %.2f ms at the whole world, %.2f ms at the end of the zoom (%d + %d + %d texels)\n",
+           best[0], best[1], g_cj.pic.part[1].w * g_cj.pic.part[1].h, g_cj.pic.part[0].w * g_cj.pic.part[0].h, g_cj.pic.part[2].w * g_cj.pic.part[2].h);
+    Check(best[0] <= budget && best[1] <= budget, "the sky's picture made at 5120 x 2160 within its budget (3 ms optimised)");
+    g_skyOn = 0; g_viewTex[VT_SKY] = 0; g_viewTex[VT_SPARK] = 0; g_sky.ok = 0; g_cloudOk = 0; g_cloudShownOk = 0; g_cj.on = 0;
 }
 
 int main(int argc, char **argv)
@@ -4140,6 +4580,7 @@ int main(int argc, char **argv)
     TestShips();
     TestWakes();
     TestSky();
+    TestClouds();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }

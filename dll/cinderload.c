@@ -3940,29 +3940,59 @@ static void ShipAt(int r, float s, float *u, float *v)
 
 /* ---- the weather (7 Oct 2026, his calls: "clouds that rain where it is really raining" -> TYPICAL weather, not live;
  * placed and blown by HIS climate model: Stranglethorn on the equator, the trade winds, the doldrums, the westerlies;
- * cartoony, Warcraft 3 style; rain, snow, lightning; "3D clouds ... moving across the two continents and the sea") ----
+ * rain, snow, lightning; "3D clouds ... moving across the two continents and the sea"; the clouds themselves made by
+ * light, not cartoon puffs: see the clouds' block below) ----
  * CinderLoad\weather.bin (weather.py): a grid over the picture, each cell how cloudy it usually is and, for each
- * season, its chances of rain, snow and blowing sand (a zone's own on land, by latitude at sea); CinderSky.blp
- * (sky.py): four fair clouds, two storm clouds and a sand haze. Each cloud is born where the grid says clouds are,
- * drifts on the wind of its latitude, lives SKY_LIFE seconds and gives way to another: all from the clock, so each
- * screen picks up where the last left off. It rains, snows or throws up dust by the season's chances where it is now;
- * a raining cloud in the tropics or over a wet zone throws lightning. It floats SKY_ALT above the map: its shadow on
- * the ground, the rain falling between, and as the view comes down it swells past and thins away. */
-#define SKY_PATH     "Interface\\Glues\\LoadingScreens\\CinderSky.blp"
-#define SKY_CLOUDS   56         /* clouds at once over the whole world */
-#define SKY_LIFE     26.0f      /* seconds a cloud lives (time-lapsed, as the ships) */
+ * season, its chances of rain, snow and blowing sand (a zone's own on land, by latitude at sea). The clouds are a field
+ * over it (CinderLoad\clouds.bin, below). The weather cells: each born where the grid says clouds are, drifting on the
+ * wind of its latitude, living SKY_LIFE seconds and giving way to another: all from the clock, so each screen picks up
+ * where the last left off. Under the thick of the clouds it rains, snows or (in the clear) throws up dust by the
+ * season's chances where it is now; a raining cell in the tropics or over a wet zone throws lightning. It is SKY_ALT
+ * above the map, with the low clouds: the rain falls from their base to the ground, and as the view comes down it
+ * swells past and thins away. */
+#define SKY_CLOUDS   56         /* weather cells at once over the whole world */
+#define SKY_LIFE     26.0f      /* seconds a cell lives (time-lapsed, as the ships) */
 #define SKY_FADE     5.0f       /* fading in and out over this much of it */
 #define SKY_WIND     0.006f     /* heights of the picture a second at the usual wind */
-#define SKY_SIZE     0.12f      /* a cloud's frame, heights of the picture (0.6 to 1.4 of it) */
+#define SKY_SIZE     0.12f      /* a cell's size, heights of the picture (0.6 to 1.4 of it) */
 #define SKY_ALT      0.05f      /* its height above the ground, heights of the picture */
 #define SKY_CAM      1.25f      /* the camera's height, of the view's height on the picture */
-#define SKY_TILT     0.7f       /* how far up the screen a cloud stands from its ground (the 3/4 view, as the ships') */
-#define SKY_DROPS    14         /* rain streaks or snowflakes under a cloud at once */
+#define SKY_TILT     0.7f       /* how far up the screen a cloud stands from its ground, of its height (the 3/4 view, as the ships') */
+#define SKY_DROPS    14         /* rain streaks or snowflakes under a cell at once */
 #define SKY_CELLS    (256 * 128)
-#define SKY_QUADS    (SKY_CLOUDS * (4 + SKY_DROPS + 4))
+#define SKY_QUADS    (SKY_CLOUDS * (4 + SKY_DROPS + 4) + CLOUD_PARTS * CLOUD_TILES)
 static struct { int ok, cols, rows, season; float veq, deg; } g_sky;
 static unsigned char g_skyCell[SKY_CELLS * 13];
 static int g_skyOn;
+/* The grid as the clouds read it (CloudCover): each cell's cover (0..255) | how stormy this season is there (rain or
+ * snow, 0..255, full from a 40% chance) << 16, smoothed over its neighbours (1 2 1 each way), so no cloud's edge ever
+ * follows a cell's. */
+static unsigned g_skyMix[SKY_CELLS];
+static void SkyMixMake(void)
+{
+    static int h[2][SKY_CELLS];
+    int c = g_sky.cols, r = g_sky.rows;
+    for (int j = 0; j < r; j++)
+        for (int i = 0; i < c; i++) {
+            int at = j * c + i, l = j * c + (i > 0 ? i - 1 : i), rt = j * c + (i < c - 1 ? i + 1 : i);
+            for (int k = 0; k < 2; k++) {
+                int a[3], q[3] = { l, at, rt };
+                for (int m = 0; m < 3; m++) {
+                    const unsigned char *e = g_skyCell + 13 * q[m], *s = e + 1 + 3 * (g_sky.season & 3);
+                    int wet = s[0] > s[1] ? s[0] : s[1];
+                    int cov = e[0] > 100 ? 100 : e[0];          /* (cover as seen: 15% none, 40% 14, 75% 37; the land between) */
+                    a[m] = k ? (wet * 255 / 40 > 255 ? 255 : wet * 255 / 40) : (cov * 13 / 20 > 12 ? (cov * 13 / 20 - 12) * 255 / 100 : 0);
+                }
+                h[k][at] = a[0] + 2 * a[1] + a[2];
+            }
+        }
+    for (int j = 0; j < r; j++)
+        for (int i = 0; i < c; i++) {
+            int at = j * c + i, up = (j > 0 ? j - 1 : j) * c + i, dn = (j < r - 1 ? j + 1 : j) * c + i;
+            unsigned cov = (unsigned)(h[0][up] + 2 * h[0][at] + h[0][dn] + 8) / 16, wet = (unsigned)(h[1][up] + 2 * h[1][at] + h[1][dn] + 8) / 16;
+            g_skyMix[at] = cov | wet << 16;
+        }
+}
 static int SkyParse(const unsigned char *d, unsigned len)
 {
     g_sky.ok = 0;
@@ -3977,6 +4007,7 @@ static int SkyParse(const unsigned char *d, unsigned len)
     GetLocalTime(&t);
     int m = t.wMonth;                                       /* spring March to May, summer, fall, winter December to February */
     g_sky.season = m >= 3 && m <= 5 ? 0 : m >= 6 && m <= 8 ? 1 : m >= 9 && m <= 11 ? 2 : 3;
+    SkyMixMake();
     return 1;
 }
 /* The grid's cell at picture u, v: its first byte (cover, then the seasons'), or NULL off the picture. */
@@ -4002,6 +4033,433 @@ static void SkyWind(float v, float *east, float *north)
         e += (band[k + 1][0] - e) * f; n += (band[k + 1][1] - n) * f;
     }
     *east = e; *north = lat < 0 ? -n : n;
+}
+
+/* ---- the clouds as light makes them (7 Oct 2026, ~19:05, his call, replacing the cartoon puffs: "those weren't the
+ * kind of clouds i was envisioning"; his references: animated clouds over a map, the cloud types, clouds over a map in
+ * 3D: forms made by light, shadow and the air between, a sun where the map's light comes from, shadows on the ground
+ * matching the shapes, soft, hard and lost edges, never an outline, darker bases so they hover) ----
+ * Not sprites: a field. CinderLoad\clouds.bin (clouds.py) is one tile of noise that repeats, the clouds' density, with
+ * the light of a sun in the upper left baked in: the slopes toward it lit, the far ones in shade, the tall parts shading
+ * the lower, the lower flank of each heap greyer, its base. The view makes a picture of the sky from it (VT_SKY, made
+ * here, not read) about 30 times a second, in three parts side by side: the clouds' shadows on the ground, the low
+ * clouds (cumulus, and stratus where the sky is mostly cloud) and the high (thin cirrus, combed out along the wind).
+ * Each texel: the grid's cover there (weather.bin, g_skyMix), the tile at the scale of the big shapes and, as the view
+ * comes down, a finer one for the detail; cloud where the density passes 1 - cover, its edge a soft step, hard on the
+ * lit side and soft in the shade, thin parts letting the map through; lit by the baked light (flatter where the sky is
+ * mostly cloud, the stratus), greyer and darker where it rains or snows; the shadow the same density where the sun's
+ * ray from the ground meets the clouds, up and to the left. Each part is drawn over the map premultiplied (VT_SKY's
+ * batches are mode 2), through the view as it is that frame and at its layer's height (the ships' camera: nearer it
+ * swells and stands up the screen from its ground), so the clouds never slide over the map between pictures; between
+ * them the parts ride the wind. The field drifts on the winds of its latitude (SkyWind) and every CLOUD_EPOCH seconds
+ * morphs into a fresh one, a latitude at a time; the layers thin away as the camera comes down through them, and part
+ * over where you arrive. Phase 2 (not yet): the terrain under them (Azeroth.wdl, Kalimdor.wdl) lifting them over the
+ * mountains; CloudCover is where it would raise the cover. */
+#define CLOUD_PATH    "CinderLoad\\clouds.bin"
+#define CLOUD_N       256        /* the tile's side */
+#define CLOUD_TEX_W   1024       /* the sky's picture (VT_SKY): its three parts side by side */
+#define CLOUD_TEX_H   512
+#define CLOUD_TEXELS  118000     /* the low clouds' part, at the most this many texels (the other two a quarter each) */
+#define CLOUD_PX_MIN  4.0f       /* and a texel never finer than this many pixels */
+#define CLOUD_MARGIN  0.05f      /* each part reaches this far past the screen (of its height): the view moves on */
+#define CLOUD_SCALE   0.7f       /* the tile's width for the big shapes, heights of the picture */
+#define CLOUD_FINER   4.0f       /* the detail's tile this much smaller, */
+#define CLOUD_DETAIL  0.35f      /* this strong at the most */
+#define CLOUD_ALT_LO  SKY_ALT    /* the low clouds' height above the ground (heights of the picture), */
+#define CLOUD_ALT_HI  0.11f      /* the high clouds' */
+#define CLOUD_HI_WIND 1.6f       /* the winds up there this much stronger */
+#define CLOUD_HI_COMB 5.0f       /* the high clouds' tile this much longer along the wind than across */
+#define CLOUD_EPOCH   22.0f      /* seconds a field drifts, */
+#define CLOUD_MORPH   3.0f       /* the last this many of them morphing into the next */
+#define CLOUD_EVERY   33u        /* ms: a new picture of the sky about 30 times a second */
+#define CLOUD_STALE   400u       /* ms: an older picture is not drawn (a new screen's first comes at once) */
+#define CLOUD_TILE    32         /* the parts drawn in squares of this many texels; the empty ones left out */
+#define CLOUD_SUN_U   -0.36f     /* the sun's ray from the ground: this far left (heights) */
+#define CLOUD_SUN_V   -0.30f     /* and up the picture for each height it climbs (a high sun: shadows near their clouds) */
+#define CLOUD_SHADOW  0.34f      /* a thick cloud's shadow darkens the ground this much */
+#define CLOUD_HI_A    0.6f       /* and the high clouds are at the most this opaque (thin, bright wisps) */
+#define CLOUD_PARTS   3          /* 0 the shadows on the ground, 1 the low clouds, 2 the high */
+#define CLOUD_TILES   ((CLOUD_TEX_W / CLOUD_TILE) * (CLOUD_TEX_H / CLOUD_TILE))
+static unsigned g_cloudTile[CLOUD_N * CLOUD_N];          /* each texel: density | light << 16 */
+static int g_cloudOk;
+static float g_cloudSteep;                               /* how much the density changes from texel to texel, on average */
+static int CloudParse(const unsigned char *d, unsigned len)
+{
+    g_cloudOk = 0;
+    if (len != 8u + 2u * CLOUD_N * CLOUD_N || d[0] != 'C' || d[1] != 'C' || d[2] != 'L' || d[3] != 'D' ||
+        (d[4] | d[5] << 8) != CLOUD_N || (d[6] | d[7] << 8) != 2)
+        return 0;
+    unsigned steep = 0;
+    for (int i = 0; i < CLOUD_N * CLOUD_N; i++) {
+        g_cloudTile[i] = d[8 + 2 * i] | (unsigned)d[9 + 2 * i] << 16;
+        int a = d[8 + 2 * i], b = d[8 + 2 * (i % CLOUD_N == CLOUD_N - 1 ? i + 1 - CLOUD_N : i + 1)];
+        steep += (unsigned)(a > b ? a - b : b - a);
+    }
+    g_cloudSteep = (float)steep / (255.0f * CLOUD_N * CLOUD_N);
+    return g_cloudOk = 1;
+}
+/* The tile at x, y (texels, 16 bits of fraction; it repeats): density | light << 16, between its texels both at once. */
+static inline unsigned CloudTap(unsigned x, unsigned y)
+{
+    unsigned ix = x >> 16 & (CLOUD_N - 1), iy = y >> 16 & (CLOUD_N - 1), fx = x >> 8 & 255, fy = y >> 8 & 255;
+    const unsigned *r0 = g_cloudTile + iy * CLOUD_N, *r1 = g_cloudTile + ((iy + 1) & (CLOUD_N - 1)) * CLOUD_N;
+    unsigned jx = (ix + 1) & (CLOUD_N - 1);
+    unsigned top = (r0[ix] * (256 - fx) + r0[jx] * fx) >> 8 & 0x00FF00FFu;
+    unsigned bot = (r1[ix] * (256 - fx) + r1[jx] * fx) >> 8 & 0x00FF00FFu;
+    return (top * (256 - fy) + bot * fy) >> 8 & 0x00FF00FFu;
+}
+/* The grid's cover | storm << 16 at grid x, y (cells, 8 bits of fraction, from the first cell's middle), held at its
+ * edges. */
+static inline unsigned CloudCover(int x, int y)
+{
+    int ix = x >> 8, iy = y >> 8, fx = x & 255, fy = y & 255, c = g_sky.cols, r = g_sky.rows;
+    if (ix < 0) ix = 0, fx = 0;
+    if (ix > c - 2) ix = c - 2, fx = 255;
+    if (iy < 0) iy = 0, fy = 0;
+    if (iy > r - 2) iy = r - 2, fy = 255;
+    const unsigned *m0 = g_skyMix + iy * c + ix, *m1 = m0 + c;
+    unsigned top = (m0[0] * (unsigned)(256 - fx) + m0[1] * (unsigned)fx) >> 8 & 0x00FF00FFu;
+    unsigned bot = (m1[0] * (unsigned)(256 - fx) + m1[1] * (unsigned)fx) >> 8 & 0x00FF00FFu;
+    return (top * (unsigned)(256 - fy) + bot * (unsigned)fy) >> 8 & 0x00FF00FFu;
+}
+/* Tile texels as the 16.16 the taps take, any x (it repeats). */
+static unsigned CloudFix(float x)
+{
+    x -= MapFloor(x / CLOUD_N) * CLOUD_N;
+    return (unsigned)(int)(x * 65536.0f);
+}
+/* The wind the field drifts on at v: SkyWind's, averaged over 8 degrees either side, so the latitudes pull the field
+ * apart gently and never tear it. */
+static void CloudWind(float v, float *east, float *north)
+{
+    float e = 0, n = 0;
+    for (int k = -4; k <= 4; k++) {
+        float a, b;
+        SkyWind(v + (float)k * 2.0f / g_sky.deg, &a, &b);
+        e += a; n += b;
+    }
+    *east = e / 9; *north = n / 9;
+}
+/* The field at picture height v, T seconds on the clock: which one (*k: each lives CLOUD_EPOCH s, a latitude's turning
+ * over when T plus its phase passes a whole number of them, so they never all morph at once) and how long it has
+ * drifted (*age); returns how far it has morphed into the next (0..1, eased). */
+static float CloudEpoch(float v, float T, int *k, float *age)
+{
+    float c = FireClamp(v, 0, 1), t = T + CLOUD_EPOCH * (c < 0.5f ? 2 * c : 2 - 2 * c), e = MapFloor(t / CLOUD_EPOCH);
+    *k = (int)e;
+    *age = t - e * CLOUD_EPOCH;
+    float m = FireClamp((*age - (CLOUD_EPOCH - CLOUD_MORPH)) / CLOUD_MORPH, 0, 1);
+    return m * m * (3 - 2 * m);
+}
+/* A row of the field: the tile's place (16.16) at its first texel for the two octaves, of this field and (while it
+ * morphs) the next; their shares, the densities' kept to one spread (256 whole). */
+typedef struct { unsigned x[2][2], y[2][2]; int ka, kb, la, lb; } CloudRow;
+/* ... at picture u, v (the row's first texel) at T s; sx, sy: tile texels a height, per octave; wind: of SkyWind's. */
+static void CloudRowSet(CloudRow *r, float u, float v, float T, float asp, const float *sx, const float *sy, float wind,
+                        unsigned salt)
+{
+    int k;
+    float age, e, n, m = CloudEpoch(v, T, &k, &age);
+    CloudWind(v, &e, &n);
+    e *= wind * SKY_WIND; n *= wind * SKY_WIND;
+    for (int f = 0; f < 2; f++) {
+        float a = f ? age - CLOUD_EPOCH : age, xh = u * asp - e * a, yh = v + n * a;   /* where its air was as it began */
+        unsigned kk = (unsigned)(k + f) * 2654435761u + salt;
+        for (int o = 0; o < 2; o++) {
+            r->x[f][o] = CloudFix(xh * sx[o] + SeaRand(kk, 11u + (unsigned)o) * CLOUD_N);
+            r->y[f][o] = CloudFix(yh * sy[o] + SeaRand(kk, 21u + (unsigned)o) * CLOUD_N);
+        }
+    }
+    float l = SaberSqrt((1 - m) * (1 - m) + m * m);
+    r->ka = (int)((1 - m) / l * 256 + 0.5f); r->kb = (int)(m / l * 256 + 0.5f);
+    r->lb = (int)(m * 256 + 0.5f); r->la = 256 - r->lb;
+}
+/* The low clouds' density at the row's texel: of 65535 (and over: the detail), and its light (0..255); below thr, no
+ * cloud whatever the detail, the detail is left out (it is never seen). */
+static inline int CloudField(const CloudRow *r, const unsigned *x, const unsigned *y, int detail, int thr, int *light)
+{
+    unsigned A = CloudTap(x[0], y[0]);
+    int n = (int)(A & 255) << 8, L = (int)(A >> 16);
+    if (detail && !r->kb && n + detail * 127 <= thr) { *light = L; return n; }
+    if (detail) {
+        unsigned B = CloudTap(x[1], y[1]);
+        n += detail * ((int)(B & 255) - 128);
+        L += (detail * ((int)(B >> 16) - 128)) >> 8;
+    }
+    if (r->kb) {                                             /* morphing: the next field too, the spread kept */
+        unsigned C = CloudTap(x[2], y[2]);
+        int n2 = (int)(C & 255) << 8, L2 = (int)(C >> 16);
+        if (detail) {
+            unsigned D = CloudTap(x[3], y[3]);
+            n2 += detail * ((int)(D & 255) - 128);
+            L2 += (detail * ((int)(D >> 16) - 128)) >> 8;
+        }
+        n = 32768 + (((n - 32768) * r->ka + (n2 - 32768) * r->kb) >> 8);
+        L = (L * r->la + L2 * r->lb) >> 8;
+    }
+    *light = L < 0 ? 0 : L > 255 ? 255 : L;
+    return n;
+}
+
+/* The picture of the sky: each part's rectangle on its layer (picture u, v of its first texel's corner, a texel's size
+ * there) and its place in VT_SKY; the squares with anything in them; the clock it was made for and the wind then. */
+typedef struct { float u0, v0, du, dv; int x, y, w, h; } CloudPart;
+typedef struct {
+    CloudPart part[CLOUD_PARTS];
+    unsigned char tile[CLOUD_PARTS][CLOUD_TILES];
+    DWORD now;
+    float windU, windV, vs;                                  /* (the view's height on the picture it was made for) */
+    int rows;                                                /* VT_SKY's rows it fills */
+} CloudPic;
+static unsigned g_cloudPx[2][CLOUD_TEX_W * CLOUD_TEX_H];    /* RGBA, premultiplied: being made, and the one shown */
+static CloudPic g_cloudShown;
+static int g_cloudShownOk, g_cloudFront, g_cloudUpload;
+/* The picture being made (CloudBegin, then CloudWork a share of its rows at a time): the view it is for, its layers. */
+static struct {
+    int on, next, rows, detail, layout[4], kw[256], wl[256], ks, kh, ws, wh;
+    CloudPic pic;
+    float W, H, u0, vt, us, vs, asp, T, ax, ay, clear, r0, r1;
+    float p[2], lift[2], fade[CLOUD_PARTS], sx[2], sy[2], hx[2], hy[2];
+    unsigned dx[2], hdx[2];
+} g_cj;
+static unsigned char g_cloudA[256], g_cloudShadowA[256], g_cloudHiA[256];   /* the edges' steps */
+static float g_cloudW[256];                                                  /* the edge's width by light */
+static int g_cloudCon[256];                                                  /* the light's flatness by cover */
+static unsigned g_cloudPal[16 * 64];                                         /* colour by storm and light */
+static void CloudTables(void)
+{
+    static int made;
+    if (made) return;
+    made = 1;
+    for (int i = 0; i < 256; i++) {
+        float t = (float)i / 255;
+        float e = FireClamp((float)i / 64, 0, 1), b = FireClamp(((float)i - 64) / 191, 0, 1);
+        e = e * e * (3 - 2 * e); b = b * b * (3 - 2 * b);
+        g_cloudA[i] = (unsigned char)(int)(255 * (0.7f * e + 0.28f * b) + 0.5f);   /* the edge, then the body thickening */
+        g_cloudShadowA[i] = (unsigned char)(int)(255 * t * t * (3 - 2 * t) + 0.5f);
+        g_cloudHiA[i] = (unsigned char)(int)(255 * t * t * (3 - 2 * t) + 0.5f);
+        float lit = FireClamp((t - 0.4f) / 0.35f, 0, 1);
+        g_cloudW[i] = 0.12f - 0.085f * lit * lit * (3 - 2 * lit);                 /* hard on the lit side, soft in shade */
+        float flat = FireClamp((t - 0.62f) / 0.33f, 0, 1);                       /* the stratus: mostly cloud, flatter */
+        g_cloudCon[i] = (int)(256 * (1 - 0.6f * flat) + 0.5f);
+    }
+    static const float fair[3][3] = { { 80, 88, 110 }, { 200, 206, 222 }, { 255, 253, 247 } };    /* base, middle, lit */
+    static const float storm[3][3] = { { 46, 50, 64 }, { 112, 118, 134 }, { 196, 200, 212 } };
+    for (int s = 0; s < 16; s++)
+        for (int l = 0; l < 64; l++) {
+            float t = (float)l / 63, k = (float)s / 15, c[3];
+            for (int ch = 0; ch < 3; ch++) {
+                float a = t < 0.5f ? fair[0][ch] + (fair[1][ch] - fair[0][ch]) * t * 2 : fair[1][ch] + (fair[2][ch] - fair[1][ch]) * (t * 2 - 1);
+                float b = t < 0.5f ? storm[0][ch] + (storm[1][ch] - storm[0][ch]) * t * 2 : storm[1][ch] + (storm[2][ch] - storm[1][ch]) * (t * 2 - 1);
+                c[ch] = a + (b - a) * k;
+            }
+            g_cloudPal[s * 64 + l] = (unsigned)(int)(c[0] + 0.5f) | (unsigned)(int)(c[1] + 0.5f) << 8 | (unsigned)(int)(c[2] + 0.5f) << 16;
+        }
+}
+/* A layer alt high, the camera hc above the ground: how much nearer it is (its swell), as SkyAt has it. */
+static float CloudP(float hc, float alt)
+{
+    float p = hc > alt * 1.05f ? hc / (hc - alt) : 20;
+    return p > 3 ? 3 : p;
+}
+/* Begins a picture of the sky for the view now (g_bgUV), a W x H window at the clock now (the view's thread, under
+ * g_stepLock: all it needs of the view is kept here, so the work can go on outside the lock). */
+static void CloudBegin(float W, float H, DWORD now)
+{
+    CloudTables();
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1], us = u1 - u0, vs = vb - vt;
+    if (!(us > 0 && vs > 0 && W > 0 && H > 0)) return;
+    g_cj.W = W; g_cj.H = H; g_cj.u0 = u0; g_cj.vt = vt; g_cj.us = us; g_cj.vs = vs; g_cj.asp = g_shipAsp;
+    g_cj.T = (float)(now % 36000000u) / 1000.0f;
+    float hc = SKY_CAM * vs, ppu = H / vs, m = CLOUD_MARGIN * H;
+    for (int l = 0; l < 2; l++) {
+        float alt = l ? CLOUD_ALT_HI : CLOUD_ALT_LO;
+        g_cj.p[l] = CloudP(hc, alt);
+        g_cj.lift[l] = alt * ppu * SKY_TILT * g_cj.p[l];
+    }
+    float pass0 = FireClamp((hc - 1.6f * CLOUD_ALT_LO) / CLOUD_ALT_LO, 0, 1), pass1 = FireClamp((hc - 1.6f * CLOUD_ALT_HI) / CLOUD_ALT_HI, 0, 1);
+    g_cj.fade[0] = pass0 * CLOUD_SHADOW; g_cj.fade[1] = pass0; g_cj.fade[2] = pass1 * CLOUD_HI_A;
+    for (int o = 0; o < 2; o++) {
+        float s = CLOUD_N / (CLOUD_SCALE / (o ? CLOUD_FINER : 1));
+        g_cj.sx[o] = g_cj.sy[o] = s;
+        g_cj.hx[o] = s * 1.6f / CLOUD_HI_COMB; g_cj.hy[o] = s * 1.6f;   /* the high: finer, combed out along the wind */
+    }
+    /* where you arrive, on screen, and how far the clouds have parted over it */
+    g_cj.clear = FireClamp((0.45f - vs) / 0.3f, 0, 1);
+    g_cj.ax = g_destOk ? (g_destU - u0) / us * W : W / 2;
+    g_cj.ay = g_destOk ? (g_destV - vt) / vs * H : H / 2;
+    g_cj.r0 = 0.07f * H; g_cj.r1 = 0.36f * H;
+    /* the parts: texels as fine as the budget lets, the shadows' and the high's half as fine, all fitting VT_SKY */
+    float tpx = SaberSqrt((W + 2 * m) * (H + 2 * m) / CLOUD_TEXELS);
+    if (tpx < CLOUD_PX_MIN) tpx = CLOUD_PX_MIN;
+    int w[3], h[3];
+    for (int tries = 0; tries < 40; tries++) {
+        for (int k = 0; k < 3; k++) {
+            float t = k == 1 ? tpx : 2 * tpx;
+            w[k] = (int)((W + 2 * m) / t) + 2; h[k] = (int)((H + 2 * m) / t) + 2;
+        }
+        if (w[1] + 2 <= CLOUD_TEX_W && w[0] + w[2] + 4 <= CLOUD_TEX_W && h[1] + 4 + (h[0] > h[2] ? h[0] : h[2]) <= CLOUD_TEX_H) break;
+        tpx *= 1.08f;
+    }
+    CloudPic *pic = &g_cj.pic;
+    pic->part[1].x = 1; pic->part[1].y = 1;
+    pic->part[0].x = 1; pic->part[0].y = h[1] + 3;
+    pic->part[2].x = w[0] + 3; pic->part[2].y = h[1] + 3;
+    pic->rows = h[1] + 4 + (h[0] > h[2] ? h[0] : h[2]);
+    if (pic->rows > CLOUD_TEX_H) pic->rows = CLOUD_TEX_H;
+    for (int k = 0; k < 3; k++) {
+        CloudPart *c = &pic->part[k];
+        int l = k == 2 ? 1 : 0;
+        float p = k == 0 ? 1 : g_cj.p[l], lift = k == 0 ? 0 : g_cj.lift[l], t = (float)(W + 2 * m) / (float)(w[k] - 2);
+        c->w = w[k]; c->h = h[k];
+        c->du = t / p / W * us; c->dv = t / p / H * vs;     /* (a texel on screen t pixels, wherever its layer) */
+        float gx = W / 2 + (-m - t - W / 2) / p, gy = H / 2 + (-m - t + lift - H / 2) / p;   /* (a texel spare each side) */
+        c->u0 = u0 + gx / W * us; c->v0 = vt + gy / H * vs;
+        for (int i = 0; i < CLOUD_TILES; i++) pic->tile[k][i] = 0;
+    }
+    for (int o = 0; o < 2; o++) {
+        g_cj.dx[o] = (unsigned)(int)(pic->part[1].du * g_cj.asp * g_cj.sx[o] * 65536.0f + 0.5f);
+        g_cj.hdx[o] = (unsigned)(int)(pic->part[2].du * g_cj.asp * g_cj.hx[o] * 65536.0f + 0.5f);
+    }
+    /* the detail as the view comes down: the finer tile in as soon as a texel shows its shapes (no more than 1.5 of its
+     * texels to one of ours), none while it would only speckle (3 or more) */
+    float z = FireClamp((3.0f - (float)g_cj.dx[1] / 65536.0f) / 1.5f, 0, 1), dk = CLOUD_DETAIL * z * z * (3 - 2 * z);
+    g_cj.detail = (int)(dk * 256 + 0.5f);
+    float e, n;
+    CloudWind(vt + vs / 2, &e, &n);
+    pic->windU = e * SKY_WIND / g_cj.asp; pic->windV = -n * SKY_WIND;
+    pic->now = now; pic->vs = vs;
+    int lay[4] = { w[1], h[1], w[0], w[2] };                 /* a new layout: the old picture's leftovers cleared */
+    if (lay[0] != g_cj.layout[0] || lay[1] != g_cj.layout[1] || lay[2] != g_cj.layout[2] || lay[3] != g_cj.layout[3]) {
+        for (int b = 0; b < 2; b++) for (int i = 0; i < CLOUD_TEX_W * CLOUD_TEX_H; i++) g_cloudPx[b][i] = 0;
+        for (int i = 0; i < 4; i++) g_cj.layout[i] = lay[i];
+    }
+    /* the edges: as the light has them, but never sharper than the texels can show (a texel's usual change of density at
+     * the least; where the field is steeper, CloudRowMake widens them texel by texel) */
+    float step0 = (float)g_cj.dx[0] / 65536.0f, step1 = (float)g_cj.dx[1] / 65536.0f * (float)g_cj.detail / 256.0f;
+    float least = 1.0f * g_cloudSteep * (step0 + 0.7f * step1);
+    for (int i = 0; i < 256; i++) {
+        float w = g_cloudW[i] > least ? g_cloudW[i] : least;
+        g_cj.kw[i] = (int)(64.0f / w + 0.5f);
+        g_cj.wl[i] = (int)(w * 65536.0f + 0.5f);
+    }
+    float ws = 0.07f, wh = 0.16f, ls = 2 * least, lh = 1.0f * g_cloudSteep * (float)g_cj.hdx[0] / 65536.0f;
+    ws = ws > ls ? ws : ls; wh = wh > lh ? wh : lh;
+    g_cj.ks = (int)(255.0f / ws + 0.5f); g_cj.ws = (int)(ws * 65536.0f + 0.5f);   /* the shadows' penumbra */
+    g_cj.kh = (int)(255.0f / wh + 0.5f); g_cj.wh = (int)(wh * 65536.0f + 0.5f);   /* the high clouds' wisps */
+    g_cj.rows = h[0] + h[1] + h[2];
+    g_cj.next = 0;
+    g_cj.on = 1;
+}
+/* How much of the clouds at screen x, y are left as they part over the arrival (256 whole): none within r0 of it (with
+ * the clearing whole), all from r1 out, eased between (on the squares of the distances: no root a texel). */
+static int CloudKeep(float x, float y)
+{
+    float dx = x - g_cj.ax, dy = y - g_cj.ay, d2 = dx * dx + dy * dy;
+    if (d2 >= g_cj.r1 * g_cj.r1) return 256;
+    float s = FireClamp((d2 - g_cj.r0 * g_cj.r0) / (g_cj.r1 * g_cj.r1 - g_cj.r0 * g_cj.r0), 0, 1);
+    return (int)(256 * (1 - g_cj.clear * (1 - s * s * (3 - 2 * s))) + 0.5f);
+}
+/* Row j of part k into the picture being made. */
+static void CloudRowMake(int k, int j)
+{
+    CloudPart *c = &g_cj.pic.part[k];
+    unsigned *out = g_cloudPx[g_cloudFront ^ 1] + (c->y + j) * CLOUD_TEX_W + c->x;
+    unsigned char *tiles = g_cj.pic.tile[k] + (j / CLOUD_TILE) * (CLOUD_TEX_W / CLOUD_TILE);
+    int w = c->w, fade = (int)(g_cj.fade[k] * 256 + 0.5f), any[CLOUD_TEX_W / CLOUD_TILE + 1];
+    for (int i = 0; i <= w / CLOUD_TILE; i++) any[i] = 0;
+    if (fade <= 0 || !g_sky.ok || !g_cloudOk) { for (int i = 0; i < w; i++) out[i] = 0; return; }
+    float u = c->u0 + 0.5f * c->du, v = c->v0 + ((float)j + 0.5f) * c->dv;
+    /* the layer this texel's cloud is on, and where it shows on screen (the arrival's clearing) */
+    int l = k == 2 ? 1 : 0;
+    float cu = u, cv = v;
+    if (k == 0) { cu += CLOUD_SUN_U * CLOUD_ALT_LO / g_cj.asp; cv += CLOUD_SUN_V * CLOUD_ALT_LO; }   /* the shadow's cloud */
+    float p = g_cj.p[l], sx0 = g_cj.W / 2 + ((cu - g_cj.u0) / g_cj.us * g_cj.W - g_cj.W / 2) * p;
+    float sdx = c->du / g_cj.us * g_cj.W * p, sy = g_cj.H / 2 + ((cv - g_cj.vt) / g_cj.vs * g_cj.H - g_cj.H / 2) * p - g_cj.lift[l];
+    float gx0 = (u - g_cj.u0) / g_cj.us * g_cj.W, gdx = c->du / g_cj.us * g_cj.W, gsy = (v - g_cj.vt) / g_cj.vs * g_cj.H;
+    int clearRow = g_cj.clear > 0 && ((sy - g_cj.ay) * (sy - g_cj.ay) < g_cj.r1 * g_cj.r1 ||
+                                      (k == 0 && (gsy - g_cj.ay) * (gsy - g_cj.ay) < g_cj.r1 * g_cj.r1));
+    CloudRow r;
+    unsigned x[4], y[4], dx[2];
+    if (k == 2) {
+        CloudRowSet(&r, cu, cv, g_cj.T, g_cj.asp, g_cj.hx, g_cj.hy, CLOUD_HI_WIND, 0x5A17u);
+        dx[0] = g_cj.hdx[0]; dx[1] = g_cj.hdx[1];
+    } else {
+        CloudRowSet(&r, cu, cv, g_cj.T, g_cj.asp, g_cj.sx, g_cj.sy, 1, 0);
+        dx[0] = g_cj.dx[0]; dx[1] = g_cj.dx[1];
+    }
+    if (k == 0) { dx[0] = (unsigned)(int)(c->du * g_cj.asp * g_cj.sx[0] * 65536.0f + 0.5f); dx[1] = (unsigned)(int)(c->du * g_cj.asp * g_cj.sx[1] * 65536.0f + 0.5f); }
+    x[0] = r.x[0][0]; y[0] = r.y[0][0]; x[1] = r.x[0][1]; y[1] = r.y[0][1];
+    x[2] = r.x[1][0]; y[2] = r.y[1][0]; x[3] = r.x[1][1]; y[3] = r.y[1][1];
+    int detail = k == 1 ? g_cj.detail : 0;                    /* (the shadows their clouds' big shapes, under their
+                                                                         * penumbra; the wisps none) */
+    int gx = (int)((cu * (float)g_sky.cols - 0.5f) * 256), dgx = (int)(c->du * (float)g_sky.cols * 256 + 0.5f);
+    int gy = (int)((cv * (float)g_sky.rows - 0.5f) * 256);
+    static int above[CLOUD_TEX_W];                           /* (this part's row above: each texel's t) */
+    int prev = 0;
+    unsigned cs0 = CloudCover(gx, gy), cs1 = cs0;
+    for (int i = 0; i < w; i++) {
+        if (!(i & 3)) { cs0 = cs1; cs1 = CloudCover(gx + 4 * dgx, gy); gx += 4 * dgx; }   /* (the grid every 4th texel) */
+        unsigned f = (unsigned)(i & 3) * 64, cs = (cs0 * (256 - f) + cs1 * f) >> 8 & 0x00FF00FFu, px = 0;
+        int cov = (int)(cs & 255), a = 0, t = -32768, L = 128;
+        if (cov) {
+            int thr = k == 2 ? (255 - 4 - cov / 5) << 8 : (255 - cov) << 8;
+            t = CloudField(&r, x, y, detail, thr, &L) - thr;  /* (the density over the edge) */
+        }
+        /* how much it changes to the texel left and the one above: no edge sharper than three of those (a shader's
+         * fwidth), so the picture, magnified, never shows its texels as stairs */
+        int fl = i ? t - prev : 0, fu = j ? t - above[i] : 0;
+        if (fl < 0) fl = -fl;
+        if (fu < 0) fu = -fu;
+        int fw = 3 * (fl > fu ? fl : fu);
+        prev = t; above[i] = t;
+        if (t > 0) {
+            if (k == 2) {                                  /* the high: thin, combed, bright, where the sky is cloudy below */
+                int idx = fw > g_cj.wh ? t * 255 / fw : (t * g_cj.kh) >> 16;
+                a = (g_cloudHiA[idx > 255 ? 255 : idx] * fade) >> 8;
+                int lum = 236 + (L * 15 >> 8);              /* white, a little blue: 236..250, then +2, +5 */
+                px = (unsigned)(lum * a >> 8) | (unsigned)((lum + 2) * a >> 8) << 8 | (unsigned)((lum + 5) * a >> 8) << 16;
+            } else {
+                if (k == 0) {                              /* the shadow: the same cloud, its edge the penumbra */
+                    int idx = fw > g_cj.ws ? t * 255 / fw : (t * g_cj.ks) >> 16;
+                    a = (g_cloudShadowA[idx > 255 ? 255 : idx] * fade) >> 8;
+                    px = (unsigned)(10 * a >> 8) | (unsigned)(16 * a >> 8) << 8 | (unsigned)(30 * a >> 8) << 16;
+                } else {
+                    int idx = fw > g_cj.wl[L] ? t * 64 / fw : (t * g_cj.kw[L]) >> 16;
+                    a = (g_cloudA[idx > 255 ? 255 : idx] * fade) >> 8;
+                    int lit = 128 + (((L - 128) * g_cloudCon[cov]) >> 8);
+                    unsigned rgb = g_cloudPal[(cs >> 20) * 64 + (lit < 0 ? 0 : lit > 255 ? 255 : lit) / 4];
+                    px = ((rgb & 255) * (unsigned)a >> 8) | ((rgb >> 8 & 255) * (unsigned)a >> 8) << 8 | ((rgb >> 16 & 255) * (unsigned)a >> 8) << 16;
+                }
+                if (clearRow && a) {                        /* parting over the arrival (and no shadow falling on it) */
+                    int keep = CloudKeep(sx0 + (float)i * sdx, sy);
+                    if (k == 0) keep = keep * CloudKeep(gx0 + (float)i * gdx, gsy) >> 8;
+                    if (keep < 256) {
+                        a = a * keep >> 8;
+                        px = ((px & 0x00FF00FFu) * (unsigned)keep >> 8 & 0x00FF00FFu) | ((px >> 8 & 255) * (unsigned)keep >> 8) << 8;
+                    }
+                }
+            }
+        }
+        out[i] = px | (unsigned)a << 24;
+        any[i / CLOUD_TILE] |= a;
+        x[0] += dx[0]; x[1] += dx[1]; x[2] += dx[0]; x[3] += dx[1];
+    }
+    for (int i = 0; i <= (w - 1) / CLOUD_TILE; i++) if (any[i]) tiles[i] = 1;
+}
+/* The picture being made, on by rows: all of them (all 1) or about a quarter of its work (the view's thread, after
+ * each frame's step, outside the lock); 1 when it is finished. */
+static int CloudWork(int all)
+{
+    if (!g_cj.on) return 0;
+    int quota = all ? 1 << 30 : (g_cj.pic.part[1].w * g_cj.pic.part[1].h + 2 * g_cj.pic.part[0].w * g_cj.pic.part[0].h) / 4 + 1;
+    while (g_cj.next < g_cj.rows && quota > 0) {
+        int j = g_cj.next++, k = 1;
+        if (j >= g_cj.pic.part[1].h) { j -= g_cj.pic.part[1].h; k = 0; if (j >= g_cj.pic.part[0].h) { j -= g_cj.pic.part[0].h; k = 2; } }
+        CloudRowMake(k, j);
+        quota -= g_cj.pic.part[k].w;
+    }
+    return g_cj.next >= g_cj.rows;
 }
 
 #if defined(__i386__)
@@ -4206,12 +4664,16 @@ static void OverlayStart(void)
         if (g_ships && asp > 0.5f && asp < 5) { ShipsTime(asp); g_shipsOn = 1; }
     }
     g_skyOn = 0;
-    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSky")) {          /* the weather (the view's) */
-        unsigned char *data = NULL;
-        unsigned len = 0;
-        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\weather.bin", &data, &len) == MPQ_OK && data)
-            g_skyOn = SkyParse(data, len) && g_shipAsp > 0;
+    {                                                                          /* the weather and the clouds (the view's) */
+        unsigned char *data = NULL, *tile = NULL;
+        unsigned len = 0, tlen = 0;
+        g_sky.ok = g_cloudOk = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\weather.bin", &data, &len) == MPQ_OK && data &&
+            mpq_read(&kIoSmall, "patch-~.MPQ", CLOUD_PATH, &tile, &tlen) == MPQ_OK && tile && CloudParse(tile, tlen))
+            SkyParse(data, len);
         if (data) HeapFree(GetProcessHeap(), 0, data);
+        if (tile) HeapFree(GetProcessHeap(), 0, tile);
+        g_skyOn = g_sky.ok && g_shipAsp > 0;
         if (!g_skyOn && g_sky.ok) {                         /* (the picture's shape from the map when no ships set it) */
             int m = g_map.m[0].ok ? 0 : 1;
             float asp = g_map.m[m].bu != 0 ? g_map.m[m].bv / g_map.m[m].bu : 0;
@@ -4252,8 +4714,8 @@ static void OverlayStart(void)
     }
     if (g_skyOn) {
         static const char *const kSeason[4] = { "spring", "summer", "fall", "winter" };
-        wsprintfA(m, "  the living map: the weather, %d x %d cells, %s's typical rain, snow and sand, drawn by the view",
-                  g_sky.cols, g_sky.rows, kSeason[g_sky.season & 3]);
+        wsprintfA(m, "  the living map: the weather, %d x %d cells, %s's typical rain, snow and sand, under clouds made by light "
+                  "(clouds.bin), drawn by the view", g_sky.cols, g_sky.rows, kSeason[g_sky.season & 3]);
         Log(m);
     }
 }
@@ -4610,9 +5072,10 @@ static int TextHas(const char *list, const char *name)
 
 /* A frame of the view, as the quads it draws, in batches by picture (the renderer's seam: the tests read the list):
  * pixels, y down; each corner's place on its picture and its colour (RGBA). Made where the bar and the zoom move (under
- * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, the blade's
- * soft spark (made here, not read); g_viewTex holds OpenGL's name for each (0 while it has none). A batch is drawn
- * over what is under it, or added to it (add: light, the blade's glow). */
+ * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, the sky's
+ * picture and the blade's soft spark (both made here, not read); g_viewTex holds OpenGL's name for each (0 while it has
+ * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
+ * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_COUNT };
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
@@ -4637,7 +5100,7 @@ static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT
 static int g_vbN, g_vvN, g_vbFull;
 static void ViewListStart(void) { g_vbN = g_vvN = g_vbFull = 0; }
 
-/* Room for one more quad of picture tex, added (add 1) or drawn over: its four corners, in the last batch when that is
+/* Room for one more quad of picture tex, added (add 1), premultiplied (2) or drawn over: its four corners, in the last batch when that is
  * the same picture's the same way; NULL once the list is full (that quad and every one after it left out, so nothing is
  * drawn out of its order). */
 static ViewVert *ViewQuadMode(int tex, int add)
@@ -5035,8 +5498,11 @@ static void SkyLine(int add, float x0, float y0, float x1, float y1, float w, DW
     ViewVertSet(q, x0 - nx, y0 - ny, 0, 0, c0); ViewVertSet(q + 1, x0 + nx, y0 + ny, 0, 0, c0);
     ViewVertSet(q + 2, x1 + nx, y1 + ny, 0, 0, c1); ViewVertSet(q + 3, x1 - nx, y1 - ny, 0, 0, c1);
 }
-/* One cloud this frame, from the clock alone: 0 when cloud i has no life now (born where no cloud would be). */
-typedef struct { float gx, gy, x, y, size, a, base, alt, p; int sprite, rain, snow, dust, flash; unsigned seed; } SkyCloud;
+/* One weather cell this frame, from the clock alone: 0 when cell i has no life now (born where no cloud would be). The
+ * field draws the clouds (CloudDraw); a cell is where rain, snow, blowing sand or lightning comes from, born where the
+ * grid says clouds usually are and blown on the wind of its latitude, at the low clouds' height; it rains, snows or
+ * flashes only under the thick of the field (CloudThick). */
+typedef struct { float u, v, gx, gy, x, y, size, a, base, alt, p; int rain, snow, dust, flash; unsigned seed; } SkyCloud;
 static int SkyAt(int i, DWORD now, float W, float H, SkyCloud *c)
 {
     float T = (float)(now % 36000000u) / 1000.0f + SeaRand((unsigned)i, 1) * SKY_LIFE, gen = MapFloor(T / SKY_LIFE);
@@ -5049,24 +5515,23 @@ static int SkyAt(int i, DWORD now, float W, float H, SkyCloud *c)
         if (cell && SeaRand(seed, 30 + k) * 100 < cell[0]) { u = cu; v = cv; }
     }
     if (u < 0) return 0;
-    const unsigned char *born = SkyCell(u, v);
     float e, n;
     SkyWind(v, &e, &n);
     u += e * SKY_WIND * age / g_shipAsp; v -= n * SKY_WIND * age;   /* (u counted g_shipAsp times v; north up) */
     const unsigned char *cell = SkyCell(u, v);
     if (!cell) return 0;
-    const unsigned char *now3 = cell + 1 + 3 * (g_sky.season & 3), *born3 = born + 1 + 3 * (g_sky.season & 3);
+    const unsigned char *now3 = cell + 1 + 3 * (g_sky.season & 3);
     float wet = SeaRand(seed, 3), rainP = now3[0] * 0.025f, snowP = now3[1] * 0.025f, dustP = now3[2] * 0.03f;
     c->snow = now3[1] >= now3[0] && wet < snowP;
     c->rain = !c->snow && wet < rainP;
     c->dust = !c->rain && !c->snow && wet < dustP;
     float lat = (g_sky.veq - v) * g_sky.deg;
     int stormy = c->rain && (lat < 12 && lat > -12 ? 1 : now3[0] >= 25) && wet < 0.4f * rainP;
-    c->sprite = (born3[0] >= 20 || (lat < 8 && lat > -8)) && wet < rainP ? 4 + (int)(SeaRand(seed, 5) * 2) : (int)(SeaRand(seed, 4) * 4);
     c->flash = stormy && SeaRand(seed, 40 + (unsigned)(int)(T * 4)) < 0.12f;
     c->seed = seed;
-    /* the camera: above the view's middle, SKY_CAM of its height up; the cloud SKY_ALT above its ground, nearer it */
-    float vs = g_bgUV[1] - g_bgUV[5], ppu = vs > 0 ? H / vs : H, hc = SKY_CAM * vs, alt = SKY_ALT * (0.8f + 0.4f * SeaRand(seed, 6));
+    c->u = u; c->v = v;
+    /* the camera: above the view's middle, SKY_CAM of its height up; the cell SKY_ALT above its ground, nearer it */
+    float vs = g_bgUV[1] - g_bgUV[5], ppu = vs > 0 ? H / vs : H, hc = SKY_CAM * vs, alt = SKY_ALT;
     float p = hc > alt * 1.05f ? hc / (hc - alt) : 20;
     if (p > 3) p = 3;
     c->alt = alt; c->p = p;
@@ -5074,7 +5539,7 @@ static int SkyAt(int i, DWORD now, float W, float H, SkyCloud *c)
     c->x = W / 2 + (c->gx - W / 2) * p;
     c->y = H / 2 + (c->gy - H / 2) * p - alt * ppu * SKY_TILT * p;
     c->size = SKY_SIZE * (0.6f + 0.8f * SeaRand(seed, 7)) * ppu * p;
-    c->base = c->y + c->size * 0.13f;                       /* (the sprites' flat bases, a little below their middles) */
+    c->base = c->y + c->size * 0.13f;                       /* (the cloud's base, a little below its middle) */
     float life = FireClamp(age / SKY_FADE, 0, 1) * FireClamp((SKY_LIFE - age) / SKY_FADE, 0, 1);
     float pass = FireClamp((hc - 1.6f * alt) / alt, 0, 1);  /* the camera coming down through them: they thin away */
     float zoom = FireClamp((0.45f - vs) / 0.3f, 0, 1), dx = (c->x - W / 2) / H, dy = (c->y - H / 2) / H;
@@ -5082,30 +5547,110 @@ static int SkyAt(int i, DWORD now, float W, float H, SkyCloud *c)
     c->a = life * pass * (1 - zoom * (1 - clear) * 0.85f);
     return c->a > 0.01f && c->x > -c->size && c->x < W + c->size && c->y > -c->size && c->y < H + 1.5f * c->size;
 }
-/* The weather this frame, in its passes: the clouds' shadows on the ground, the dust, the rain and the snow falling,
- * the clouds, then the lightning. */
+/* How thick the low clouds are at picture u, v at the clock now, in their big shapes: above 0 inside a cloud (of 65536,
+ * density over its edge), below outside it. */
+static int CloudThick(float u, float v, DWORD now)
+{
+    if (!g_cloudOk || !g_sky.ok || !(g_shipAsp > 0)) return -65536;
+    float s[2] = { CLOUD_N / CLOUD_SCALE, CLOUD_N / CLOUD_SCALE * CLOUD_FINER };
+    CloudRow r;
+    CloudRowSet(&r, u, v, (float)(now % 36000000u) / 1000.0f, g_shipAsp, s, s, 1, 0);
+    unsigned x[4] = { r.x[0][0], r.x[0][1], r.x[1][0], r.x[1][1] }, y[4] = { r.y[0][0], r.y[0][1], r.y[1][0], r.y[1][1] };
+    int L, n = CloudField(&r, x, y, 0, 0, &L);
+    int cov = (int)(CloudCover((int)((u * (float)g_sky.cols - 0.5f) * 256), (int)((v * (float)g_sky.rows - 0.5f) * 256)) & 255);
+    return cov ? n - ((255 - cov) << 8) : -65536;
+}
+/* A finished picture of the sky becomes the one drawn; VT_SKY is given it on the view's next frame (g_cloudUpload). */
+static void CloudSwap(void)
+{
+    if (!g_cj.on || g_cj.next < g_cj.rows) return;
+    g_cj.on = 0;
+    const unsigned char *s = (const unsigned char *)&g_cj.pic;
+    unsigned char *d = (unsigned char *)&g_cloudShown;
+    for (unsigned i = 0; i < sizeof g_cloudShown; i++) d[i] = s[i];
+    g_cloudFront ^= 1;
+    g_cloudShownOk = 1;
+    g_cloudUpload = 1;
+}
+/* Part k of the picture drawn, through the view now (g_bgUV) at its layer's height (the shadows on the ground), ridden
+ * on the wind since it was made: a quad for each square with anything in it or next to one. Texels' middles at the
+ * part's edges (nothing of its neighbour in VT_SKY sampled), their edges between its squares (no seam). */
+static void CloudDraw(int k, float W, float H, DWORD now)
+{
+    const CloudPart *c = &g_cloudShown.part[k];
+    float u0 = g_bgUV[0], us = g_bgUV[2] - g_bgUV[0], vt = g_bgUV[5], vs = g_bgUV[1] - g_bgUV[5];
+    if (!(us > 0 && vs > 0) || c->w < 2 || c->h < 2) return;
+    int l = k == 2 ? 1 : 0, tw = (c->w + CLOUD_TILE - 1) / CLOUD_TILE, th = (c->h + CLOUD_TILE - 1) / CLOUD_TILE;
+    float alt = l ? CLOUD_ALT_HI : CLOUD_ALT_LO, p = k ? CloudP(SKY_CAM * vs, alt) : 1, lift = k ? alt * (H / vs) * SKY_TILT * p : 0;
+    float dt = (float)(LONG)(now - g_cloudShown.now) / 1000.0f, wm = l ? CLOUD_HI_WIND : 1;
+    float su = g_cloudShown.windU * wm * dt, sv = g_cloudShown.windV * wm * dt;
+    const unsigned char *f = g_cloudShown.tile[k];
+    for (int ty = 0; ty < th; ty++)
+        for (int tx = 0; tx < tw; tx++) {
+            int on = 0;
+            for (int b = ty - 1; b <= ty + 1; b++)
+                for (int a = tx - 1; a <= tx + 1; a++)
+                    if (b >= 0 && b < th && a >= 0 && a < tw && f[b * (CLOUD_TEX_W / CLOUD_TILE) + a]) on = 1;
+            if (!on) continue;
+            float ex[2], ey[2], X[2], Y[2];
+            ex[0] = tx ? (float)(tx * CLOUD_TILE) : 0.5f; ex[1] = tx < tw - 1 ? (float)((tx + 1) * CLOUD_TILE) : (float)c->w - 0.5f;
+            ey[0] = ty ? (float)(ty * CLOUD_TILE) : 0.5f; ey[1] = ty < th - 1 ? (float)((ty + 1) * CLOUD_TILE) : (float)c->h - 0.5f;
+            for (int s = 0; s < 2; s++) {
+                float gx = (c->u0 + ex[s] * c->du + su - u0) / us * W, gy = (c->v0 + ey[s] * c->dv + sv - vt) / vs * H;
+                X[s] = W / 2 + (gx - W / 2) * p;
+                Y[s] = H / 2 + (gy - H / 2) * p - lift;
+            }
+            ViewVert *q = ViewQuadMode(VT_SKY, 2);
+            if (!q) return;
+            float a0 = ((float)c->x + ex[0]) / CLOUD_TEX_W, a1 = ((float)c->x + ex[1]) / CLOUD_TEX_W;
+            float b0 = ((float)c->y + ey[0]) / CLOUD_TEX_H, b1 = ((float)c->y + ey[1]) / CLOUD_TEX_H;
+            ViewVertSet(q, X[0], Y[0], a0, b0, 0xFFFFFFFFu); ViewVertSet(q + 1, X[1], Y[0], a1, b0, 0xFFFFFFFFu);
+            ViewVertSet(q + 2, X[1], Y[1], a1, b1, 0xFFFFFFFFu); ViewVertSet(q + 3, X[0], Y[1], a0, b1, 0xFFFFFFFFu);
+        }
+}
+/* The sky's picture now: a finished one drawn from now on, a new one begun every CLOUD_EVERY ms, none drawn while the
+ * one there was made for another moment or another view (a new screen, until its first is made). 1 when one is shown. */
+static int CloudKeepUp(float W, float H, DWORD now)
+{
+    CloudSwap();
+    float vs = g_bgUV[1] - g_bgUV[5];
+    if (g_cloudShownOk && ((DWORD)(now - g_cloudShown.now) > CLOUD_STALE || vs > g_cloudShown.vs * 1.4f || vs * 1.4f < g_cloudShown.vs))
+        g_cloudShownOk = 0;
+    if (g_cj.on && ((DWORD)(now - g_cj.pic.now) > CLOUD_STALE || g_cj.W != W || g_cj.H != H)) g_cj.on = 0;
+    if (!g_cj.on && (!g_cloudShownOk || (DWORD)(now - g_cloudShown.now) >= CLOUD_EVERY)) CloudBegin(W, H, now);
+    return g_cloudShownOk;
+}
+/* The weather this frame, in its passes: the clouds' shadows on the ground, the blowing sand, the low clouds, the rain
+ * and the snow falling out of the thick of them (from their undersides, seen from the camera's slant), the lightning in
+ * them, then the high clouds over all. */
+#define SKY_THICK 6000          /* rain, snow and lightning only where the low clouds are this thick (of 65536) */
 static void SkyBuild(float W, float H, DWORD now)
 {
     static SkyCloud cl[SKY_CLOUDS];
-    static int live[SKY_CLOUDS];
+    static int live[SKY_CLOUDS], wet[SKY_CLOUDS];
     float T = (float)(now % 36000000u) / 1000.0f, line = H / 1080.0f;
-    for (int i = 0; i < SKY_CLOUDS; i++) live[i] = SkyAt(i, now, W, H, &cl[i]);
-    for (int i = 0; i < SKY_CLOUDS; i++)                    /* shadows, soft, a little down and right of the ground below */
-        if (live[i] && !cl[i].dust && g_viewTex[VT_SPARK])
-            SkyQuad(VT_SPARK, 0, cl[i].gx + cl[i].size * 0.12f, cl[i].gy + cl[i].size * 0.06f, cl[i].size * 0.42f,
-                    cl[i].size * 0.2f, 0, 0, 1, 1, SaberArgb(0x101820, 0.2f * cl[i].a));
-    for (int i = 0; i < SKY_CLOUDS; i++)                    /* blowing sand: a low haze over the ground, no cloud */
-        if (live[i] && cl[i].dust)
-            SkyQuad(VT_SKY, 0, cl[i].gx, cl[i].gy, cl[i].size * 0.6f, cl[i].size * 0.6f, 512 / 1024.0f, 256 / 1024.0f,
-                    768 / 1024.0f, 512 / 1024.0f, SaberArgb(0xFFFFFF, 0.8f * cl[i].a));
+    int shown = CloudKeepUp(W, H, now);
+    for (int i = 0; i < SKY_CLOUDS; i++) {
+        live[i] = SkyAt(i, now, W, H, &cl[i]);
+        wet[i] = live[i] && (cl[i].rain || cl[i].snow) && CloudThick(cl[i].u, cl[i].v, now) > SKY_THICK;
+    }
+    if (shown) CloudDraw(0, W, H, now);                      /* the shadows */
+    if (g_viewTex[VT_SPARK])                                /* blowing sand: a low haze over the ground, no cloud */
+        for (int i = 0; i < SKY_CLOUDS; i++)
+            if (live[i] && cl[i].dust) {
+                SkyQuad(VT_SPARK, 0, cl[i].gx, cl[i].gy, cl[i].size * 0.62f, cl[i].size * 0.26f, 0, 0, 1, 1, SaberArgb(0xD6B27A, 0.42f * cl[i].a));
+                SkyQuad(VT_SPARK, 0, cl[i].gx + cl[i].size * 0.2f, cl[i].gy - cl[i].size * 0.05f, cl[i].size * 0.4f, cl[i].size * 0.18f,
+                        0, 0, 1, 1, SaberArgb(0xE2C690, 0.3f * cl[i].a));
+            }
+    if (shown) CloudDraw(1, W, H, now);                      /* the low clouds */
     for (int i = 0; i < SKY_CLOUDS; i++) {                  /* rain: a grey curtain from the cloud's base to the ground, */
-        if (!live[i] || !cl[i].rain) continue;              /* and streaks falling through it */
+        if (!wet[i] || !cl[i].rain) continue;               /* and streaks falling through it */
         float fall = cl[i].gy - cl[i].base;
         if (!(fall > 2)) continue;
         float w0 = cl[i].size * 0.3f, w1 = cl[i].size * 0.24f, slant = cl[i].size * 0.06f;
         ViewVert *q = ViewQuadMode(-1, 0);
         if (q) {
-            DWORD top = SaberArgb(0x8C9AB4, 0.34f * cl[i].a), foot = SaberArgb(0x8C9AB4, 0);
+            DWORD top = SaberArgb(0x7C8AA4, 0.3f * cl[i].a), foot = SaberArgb(0x8C9AB4, 0);   /* (the raining base greyer) */
             ViewVertSet(q, cl[i].x - w0, cl[i].base, 0, 0, top); ViewVertSet(q + 1, cl[i].x + w0, cl[i].base, 0, 0, top);
             ViewVertSet(q + 2, cl[i].gx + w1 - slant, cl[i].gy, 0, 0, foot); ViewVertSet(q + 3, cl[i].gx - w1 - slant, cl[i].gy, 0, 0, foot);
         }
@@ -5118,7 +5663,7 @@ static void SkyBuild(float W, float H, DWORD now)
         }
     }
     for (int i = 0; i < SKY_CLOUDS; i++) {                  /* snow: flakes drifting down, swaying */
-        if (!live[i] || !cl[i].snow || !g_viewTex[VT_SPARK]) continue;
+        if (!wet[i] || !cl[i].snow || !g_viewTex[VT_SPARK]) continue;
         float fall = cl[i].gy - cl[i].base;
         if (!(fall > 2)) continue;
         for (int j = 0; j < SKY_DROPS; j++) {
@@ -5128,20 +5673,13 @@ static void SkyBuild(float W, float H, DWORD now)
             SkyQuad(VT_SPARK, 0, x, y, r, r, 0, 0, 1, 1, SaberArgb(0xFFFFFF, 0.9f * cl[i].a * FireClamp(at * 6, 0, 1)));
         }
     }
-    for (int i = 0; i < SKY_CLOUDS; i++) {                  /* the clouds */
-        if (!live[i] || cl[i].dust) continue;
-        int s = cl[i].sprite;
-        float u0 = (float)(s & 3) * 0.25f, v0 = (float)(s >> 2) * 0.25f, h = cl[i].size * 0.5f;
-        SkyQuad(VT_SKY, 0, cl[i].x, cl[i].y, h, h, u0 + 0.5f / 1024, v0 + 0.5f / 1024, u0 + 0.25f - 0.5f / 1024, v0 + 0.25f - 0.5f / 1024,
-                SaberArgb(0xFFFFFF, cl[i].a));
-    }
     if (g_viewTex[VT_SPARK])                                /* lightning: the cloud lit from within, and a bolt to the ground */
         for (int i = 0; i < SKY_CLOUDS; i++)
-            if (live[i] && cl[i].flash)
+            if (wet[i] && cl[i].flash)
                 SkyQuad(VT_SPARK, 1, cl[i].x, cl[i].base - cl[i].size * 0.08f, cl[i].size * 0.5f, cl[i].size * 0.3f, 0, 0, 1, 1,
                         SaberArgb(0xDDE6FF, 0.75f * cl[i].a));
     for (int i = 0; i < SKY_CLOUDS; i++) {
-        if (!live[i] || !cl[i].flash) continue;
+        if (!wet[i] || !cl[i].flash) continue;
         unsigned b = cl[i].seed + (unsigned)(int)(T * 4) * 31u;
         float x = cl[i].x + (SeaRand(b, 1) - 0.5f) * cl[i].size * 0.3f, y = cl[i].base, ex = cl[i].gx, ey = cl[i].gy;
         for (int k = 1; k <= 4; k++) {                      /* four jagged steps down */
@@ -5151,6 +5689,7 @@ static void SkyBuild(float W, float H, DWORD now)
             x = nx; y = ny;
         }
     }
+    if (shown) CloudDraw(2, W, H, now);                      /* the high clouds, over all */
 }
 
 static DWORD g_ovViewAt;
@@ -5834,6 +6373,7 @@ static struct {
     void (WINAPI *BindTexture)(unsigned, unsigned);
     void (WINAPI *TexParameteri)(unsigned, unsigned, int);
     void (WINAPI *TexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (WINAPI *TexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);   /* the sky's */
     void (WINAPI *PixelStorei)(unsigned, int);
     const unsigned char *(WINAPI *GetString)(unsigned);
     void (WINAPI *GetIntegerv)(unsigned, int *);
@@ -5870,6 +6410,7 @@ static int GlLoad(void)
         !GLP(DrawArrays, gl.lib, "glDrawArrays") || !GLP(BlendFunc, gl.lib, "glBlendFunc") ||
         !GLP(GenTextures, gl.lib, "glGenTextures") || !GLP(BindTexture, gl.lib, "glBindTexture") ||
         !GLP(TexParameteri, gl.lib, "glTexParameteri") || !GLP(TexImage2D, gl.lib, "glTexImage2D") ||
+        !GLP(TexSubImage2D, gl.lib, "glTexSubImage2D") ||
         !GLP(PixelStorei, gl.lib, "glPixelStorei") || !GLP(GetString, gl.lib, "glGetString") ||
         !GLP(GetIntegerv, gl.lib, "glGetIntegerv") || !GLP(GetError, gl.lib, "glGetError") ||
         !GLP(Finish, gl.lib, "glFinish") ||
@@ -5986,6 +6527,32 @@ static int ViewSparkUp(void)
     return g_viewTex[VT_SPARK] != 0;
 }
 
+/* The sky's picture (VT_SKY), made here and given anew as each is finished (CloudUpload): CLOUD_TEX_W x CLOUD_TEX_H,
+ * premultiplied, smooth between its texels. 0 when OpenGL would not take it (the view then has no weather). */
+static int ViewSkyUp(void)
+{
+    while (gl.GetError()) {}
+    gl.GenTextures(1, &g_viewTex[VT_SKY]);
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_SKY]);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA8_, CLOUD_TEX_W, CLOUD_TEX_H, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, g_cloudPx[g_cloudFront]);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, 0);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    if (gl.GetError()) g_viewTex[VT_SKY] = 0;
+    return g_viewTex[VT_SKY] != 0;
+}
+/* A finished picture of the sky given to OpenGL (its rows in use), before the frame that draws it. */
+static void CloudUpload(void)
+{
+    if (!g_cloudUpload || !g_viewTex[VT_SKY]) return;
+    g_cloudUpload = 0;
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_SKY]);
+    gl.TexSubImage2D(GL_TEXTURE_2D_, 0, 0, 0, CLOUD_TEX_W, g_cloudShown.rows, GL_RGBA_, GL_UNSIGNED_BYTE_, g_cloudPx[g_cloudFront]);
+}
+
 /* The window's own alpha (a layered window's): 255 whole. 0 when the system will not do it. */
 static int ViewAlpha(BYTE a)
 {
@@ -6079,6 +6646,9 @@ static int ViewOpen(const char **why)
         Log(m);
         Log(ViewSparkUp() ? "  the view's blade: one bar for every class, in its colour; its spark given to OpenGL"
                           : "  the view's blade: its spark was not given to OpenGL; the blade has no tip, sparks or light on the logo");
+        if (g_skyOn)
+            Log(ViewSkyUp() ? "  the view's sky: its clouds' picture made with OpenGL, given anew about 30 times a second"
+                            : "  the view's sky: OpenGL would not make its clouds' picture; the weather is left out");
     }
     g_view.w = w; g_view.h = h;
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
@@ -6102,15 +6672,16 @@ static int ViewFrame(DWORD *drawn, DWORD *gpu)
     gl.VertexPointer(2, GL_FLOAT_, (int)sizeof(ViewVert), &g_vv[0].x);
     gl.TexCoordPointer(2, GL_FLOAT_, (int)sizeof(ViewVert), &g_vv[0].u);
     gl.ColorPointer(4, GL_UNSIGNED_BYTE_, (int)sizeof(ViewVert), g_vv[0].c);
+    CloudUpload();
     int added = 0;
     for (int i = 0; i < g_vbN; i++) {
         int t = g_vb[i].tex;
         if (t < 0) gl.Disable(GL_TEXTURE_2D_);
         else if (!g_viewTex[t]) continue;
         else { gl.Enable(GL_TEXTURE_2D_); gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[t]); }
-        if (g_vb[i].add != added) {                               /* light added (the blade's glow), or drawn over */
+        if (g_vb[i].add != added) {          /* light added (1: the blade's glow), premultiplied (2: the sky), or drawn over */
             added = g_vb[i].add;
-            gl.BlendFunc(GL_SRC_ALPHA_, added ? GL_ONE_ : GL_ONE_MINUS_SRC_ALPHA_);
+            gl.BlendFunc(added == 2 ? GL_ONE_ : GL_SRC_ALPHA_, added == 1 ? GL_ONE_ : GL_ONE_MINUS_SRC_ALPHA_);
         }
         gl.DrawArrays(GL_QUADS_, g_vb[i].first, g_vb[i].count);
     }
@@ -6184,8 +6755,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         static const struct { int slot, *on; const char *path; } kSheets[] = {
             { VT_SEA, &g_seaOn, SEA_PATH }, { VT_MARKS, &g_marksOn, MARKS_PATH }, { VT_WAVES, &g_wavesOn, WAVES_PATH },
             { VT_FLOW, &g_flowOn, FLOW_PATH }, { VT_GLOW, &g_glowOn, GLOW_PATH }, { VT_LABELS, &g_lblOn, LABELS_PATH },
-            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH }, { VT_SHIPS, &g_shipsOn, SHIPS_PATH },
-            { VT_SKY, &g_skyOn, SKY_PATH } };
+            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH }, { VT_SHIPS, &g_shipsOn, SHIPS_PATH } };
         for (unsigned i = 0; i < sizeof kSheets / sizeof kSheets[0]; i++)
             if (*kSheets[i].on) mpq_read(&kIo, "patch-~.MPQ", kSheets[i].path, &g_view.blp[kSheets[i].slot], &g_view.len[kSheets[i].slot]);
     }
@@ -6248,6 +6818,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             DWORD t2 = ViewNow();
             if (ViewStepLocked(p, ViewClock(t2), (float)g_view.w, (float)g_view.h)) built = 1;
             StepUnlock(held);
+            CloudWork(!g_cloudShownOk);                      /* the sky's next picture, a share a frame (in "step") */
             DWORD t3 = ViewNow(), t4 = t3, t5 = t3, gameAt = g_gameAt;
             LONG quiet = (LONG)(t0 - gameAt);                /* the game's last loading frame, before this one began */
             if (!built) { Sleep(1); continue; }              /* (this screen's first quads not made yet) */
