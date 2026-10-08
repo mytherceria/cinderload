@@ -3678,13 +3678,13 @@ static void LabelsBuild(void)
 #define FRAME_BAND  0.066f         /* the rail band, of the window's height */
 #define FRAME_TILES 256            /* rail pieces at the most (a 32:9 window at the smallest scale wants about 190) */
 enum { FR_LEFT, FR_RAIL, FR_CENTRE, FR_RIGHT, FR_PIECES };
-static struct { int ok, sw, sh, r[FR_PIECES][4], band[2], chan[2], ends[2]; } g_frame;
+static struct { int ok, sw, sh, r[FR_PIECES][4], band[2], chan[2], ends[2], lips[2]; } g_frame;
 static int g_frameOn;
 static void FrameParse(const char *s, unsigned len)
 {
     static const char *const kName[FR_PIECES] = { "left", "rail", "centre", "right" };
     int have = 0;
-    g_frame.ok = 0; g_frame.sw = g_frame.sh = 0; g_frame.ends[0] = g_frame.ends[1] = -1;
+    g_frame.ok = 0; g_frame.sw = g_frame.sh = 0; g_frame.ends[0] = g_frame.ends[1] = -1; g_frame.lips[0] = g_frame.lips[1] = -1;
     for (unsigned at = 0; at < len;) {
         unsigned end = at;
         while (end < len && s[end] != '\n') end++;
@@ -3694,9 +3694,10 @@ static void FrameParse(const char *s, unsigned len)
             if (LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) && v[0] > 0 && v[1] > 0 && v[0] <= 4096 && v[1] <= 4096) {
                 g_frame.sw = v[0]; g_frame.sh = v[1]; have |= 1 << 4;
             }
-        } else if ((i = 0, SndWord(l, n, &i, "ends"))) {
+        } else if ((i = 0, SndWord(l, n, &i, "ends")) || (i = 0, SndWord(l, n, &i, "lips"))) {
+            int *d = l[0] == 'l' ? g_frame.lips : g_frame.ends;
             if (LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) && v[0] >= 0 && v[1] >= 0) {
-                g_frame.ends[0] = v[0]; g_frame.ends[1] = v[1];
+                d[0] = v[0]; d[1] = v[1];
             }
         } else if ((i = 0, SndWord(l, n, &i, "band")) || (i = 0, SndWord(l, n, &i, "channel"))) {
             int ch = l[i - 1] == 'l';                                /* (the word read was "channel") */
@@ -3721,8 +3722,9 @@ static void FrameParse(const char *s, unsigned len)
         fits &= g_frame.r[p][2] <= g_frame.sw && g_frame.r[p][3] <= g_frame.sh && g_frame.band[1] <= g_frame.r[p][3] - g_frame.r[p][1];
     int lw = g_frame.r[FR_LEFT][2] - g_frame.r[FR_LEFT][0], rw = g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0];
     if (g_frame.ends[0] < 0) { g_frame.ends[0] = lw; g_frame.ends[1] = 0; }      /* (no ends line: at the caps' inner edges) */
+    if (g_frame.lips[0] < 0) { g_frame.lips[0] = lw; g_frame.lips[1] = 0; }      /* (no lips line: the same) */
     g_frame.ok = have == 0x7F && fits && g_frame.chan[0] >= g_frame.band[0] && g_frame.chan[1] <= g_frame.band[1] &&
-                 g_frame.ends[0] <= lw && g_frame.ends[1] <= rw;
+                 g_frame.ends[0] <= lw && g_frame.ends[1] <= rw && g_frame.lips[0] <= lw && g_frame.lips[1] <= rw;
 }
 /* ---- the RavenCraft logo (4 Oct 2026, his ask: "so that people know that it's Ravencraft") ----
  * CinderLogo.blp (DXT5) and CinderLoad\logo.txt: `logo <sheet w> <sheet h> <x0> <y0> <x1> <y1>`, the logo's rectangle
@@ -4350,7 +4352,8 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
 #define SABER_COLS_MAX 1024       /* and at the most this many */
 #define SABER_SPARKS   14         /* sparks thrown back off its tip */
-#define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 256 + 3 + 3)   /* (the frame's: FRAME_TILES and the rest) */
+#define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 5 * (256 + 3) + 3)   /* (the frame's: FRAME_TILES and the rest, and
+                                                                                    * its shine: four more a piece) */
 #define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS)
 #define VIEW_BATCHES   32
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
@@ -4524,14 +4527,54 @@ static void FrameLayout(float W, float H, float *s, float *top, float *cy, float
         *x0 = 0; *x1 = W;
     }
 }
+/* The blade's light on the metal (7 Oct 2026, his ask: "make it look cooler"): the frame drawn a second time over itself,
+ * added, in the class's light, so the steel catches the blade. Strongest along the channel and fading to nothing at the
+ * pieces' tips; over the stretch the blade has filled, SHINE_LIT of it, and at its tip SHINE_TIP, the bright reflection
+ * running along the rails with it (SHINE_REACH of the window's width each way); the whole bar SHINE_FULL once it is full.
+ * Full strength over the rail band (where the rails' metal is), fading out beyond it to the tips of the caps' prongs and
+ * the diamond's points. g_shine.on while FrameBuild draws it (FramePiece then puts the shine's four quads a piece: above
+ * the band, the band's upper half, its lower half, below it). */
+#define SHINE_LIT   0.40f
+#define SHINE_TIP   1.10f
+#define SHINE_REACH 0.035f
+#define SHINE_FULL  0.50f
+static struct { int on; float front, reach, mid, full; unsigned rgb; } g_shine;
+static float ShineAt(float x)
+{
+    if (g_shine.full > 0) return g_shine.full;
+    float d = (x - g_shine.front) / g_shine.reach, lit = d <= 0 ? SHINE_LIT : d < 1 ? SHINE_LIT * (1 - d) : 0;
+    float b = 1 - d * d / 9;                                     /* the tip's light: a smooth bump three reaches each way */
+    return lit + (b > 0 ? SHINE_TIP * b * b : 0);
+}
 /* Piece p from x0 to x1 at scale s, its top at top; cut, when x1 falls short of its width, at the same place on the sheet. */
 static void FramePiece(int p, float x0, float x1, float s, float top)
 {
     const int *r = g_frame.r[p];
-    float w = (float)(r[2] - r[0]) * s, u0 = (float)r[0] / (float)g_frame.sw, u1 = (float)r[2] / (float)g_frame.sw;
+    /* (half a texel in from the piece's own edges: the sheet's filtering would otherwise reach the clear gap beside it,
+     * a dark seam wherever two pieces meet, at every repeat of the rail) */
+    float w = (float)(r[2] - r[0]) * s, u0 = ((float)r[0] + 0.5f) / (float)g_frame.sw, u1 = ((float)r[2] - 0.5f) / (float)g_frame.sw;
+    float v0 = (float)r[1] / (float)g_frame.sh, v1 = (float)r[3] / (float)g_frame.sh, y1 = top + (float)(r[3] - r[1]) * s;
     if (x1 < x0 + w) u1 = u0 + (u1 - u0) * (x1 - x0) / w;
-    ViewRect(VT_FRAME, x0, top, x1, top + (float)(r[3] - r[1]) * s, u0, (float)r[1] / (float)g_frame.sh, u1,
-             (float)r[3] / (float)g_frame.sh, 0xFFFFFFFFu);
+    if (!g_shine.on) {
+        ViewRect(VT_FRAME, x0, top, x1, y1, u0, v0, u1, v1, 0xFFFFFFFFu);
+        return;
+    }
+    /* four bands down the piece: its top to the rail band's top (fading in), the band to the channel's middle and on to
+     * the band's foot (full), the band's foot to its bottom (fading out); each band's corners lit by ShineAt across */
+    float row[5] = { 0, (float)g_frame.band[0], g_shine.mid, (float)g_frame.band[1], (float)(r[3] - r[1]) };
+    static const int lit[5] = { 0, 1, 1, 1, 0 };
+    float al = ShineAt(x0), ar = ShineAt(x1);
+    for (int k = 0; k < 4; k++) {
+        if (!(row[k + 1] > row[k])) continue;
+        ViewVert *q = ViewQuadMode(VT_FRAME, 1);
+        if (!q) return;
+        float ya = top + row[k] * s, yb = top + row[k + 1] * s;
+        float va = ((float)r[1] + row[k]) / (float)g_frame.sh, vb = ((float)r[1] + row[k + 1]) / (float)g_frame.sh;
+        ViewVertSet(q, x0, ya, u0, va, SaberArgb(g_shine.rgb, lit[k] * al));
+        ViewVertSet(q + 1, x1, ya, u1, va, SaberArgb(g_shine.rgb, lit[k] * ar));
+        ViewVertSet(q + 2, x1, yb, u1, vb, SaberArgb(g_shine.rgb, lit[k + 1] * ar));
+        ViewVertSet(q + 3, x0, yb, u0, vb, SaberArgb(g_shine.rgb, lit[k + 1] * al));
+    }
 }
 /* The frame over a W-wide window: the caps, the diamond, the rail repeated between (each run cut where it meets). */
 static void FrameBuild(float W, float s, float top)
@@ -4643,7 +4686,22 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
         SaberPut(-1, 0, x, yb, cbt, NULL);
     }
     if (fs > 0) FrameBuild(W, fs, ftop);                            /* the frame over it, the light spilling past */
-    if (shown > 0) FrameLips(fx0, front, cy, ch, line, hotRgb);      /* its lips lit where the blade has reached */
+    if (fs > 0 && shown > 0) {                                      /* and the blade's light on its metal */
+        g_shine.front = front; g_shine.reach = SHINE_REACH * W; g_shine.rgb = rgb;
+        g_shine.mid = (float)(g_frame.chan[0] + g_frame.chan[1]) * 0.5f;
+        g_shine.full = shown >= 1 ? SHINE_FULL * breath : 0;
+        g_shine.on = 1;
+        FrameBuild(W, fs, ftop);
+        g_shine.on = 0;
+    }
+    if (shown > 0) {                                                /* its lips lit where the blade has reached: along */
+        float lx0 = fx0, lx1 = fx1;                                 /* the rails, from cup rim to cup rim (bar.txt's lips) */
+        if (fs > 0) {
+            lx0 = (float)g_frame.lips[0] * fs;
+            lx1 = W - (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0] - g_frame.lips[1]) * fs;
+        }
+        if (front > lx0) FrameLips(lx0, front < lx1 ? front : lx1, cy, ch, line, hotRgb);
+    }
     /* the tip, flaring and throwing sparks back as it runs (none once the blade is whole) */
     if (g_viewTex[VT_SPARK] && shown > 0 && shown < 1) {
         float flick = 0.75f + 0.25f * SaberNoise(0, t * 23, 9);

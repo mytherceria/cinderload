@@ -2861,8 +2861,15 @@ static void ViewTests(void)
         static const char farEnds[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nends 200 20\n";
         FrameParse(farEnds, sizeof farEnds - 1);
         parsed &= !g_frame.ok;                                            /* an end past its cap */
+        parsed &= g_frame.lips[0] == 132 && g_frame.lips[1] == 0;          /* no lips line: the lit lips cap to cap */
+        static const char lips[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nlips 100 40\n";
+        FrameParse(lips, sizeof lips - 1);
+        parsed &= g_frame.ok && g_frame.lips[0] == 100 && g_frame.lips[1] == 40;
+        static const char farLips[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nlips 100 131\n";
+        FrameParse(farLips, sizeof farLips - 1);
+        parsed &= !g_frame.ok;                                            /* lips past their cap */
         FrameParse(bar, sizeof bar - 1);
-        Check(parsed && g_frame.ok, "the frame's table read (CRLF, comments, an unknown line skipped); one missing a piece, with a piece off its sheet, its channel outside its band or an end past its cap is no frame; no ends line, the channel's ends at the caps' inner edges");
+        Check(parsed && g_frame.ok, "the frame's table read (CRLF, comments, an unknown line skipped); one missing a piece, with a piece off its sheet, its channel outside its band, an end or a lip past its cap is no frame; no ends line, the channel's ends at the caps' inner edges; no lips line, the lips lit from cap to cap");
         g_frameOn = 1; g_viewTex[VT_FRAME] = 1;
         float s = FRAME_BAND * 500 / 90, top = 500 - 123 * s, cy = top + 78.5f * s, ch = 22.5f * s;
         float fs, ftop, fcy, fch, fx0, fx1, x0 = 82 * s, x1 = 1000 - (130 - 20) * s, span = x1 - x0;
@@ -2887,21 +2894,23 @@ static void ViewTests(void)
             const ViewVert *t2 = fr + 4 * q;
             if (Near(t2[0].x, cx + wc, 1e-3) && q) at = cx + wc;
             edges &= Near(t2[0].x, at, 1e-3) && Near(t2[0].y, top, 1e-3) && Near(t2[2].y, top + 180 * s, 1e-3) &&
-                     Near(t2[0].u, 136 / 1024.0, 1e-6) && t2[1].x <= (at < cx ? cx : 1000 - wr) + 1e-3f &&
-                     (t2[1].x - t2[0].x > wt - 1e-3f || Near(t2[1].u - t2[0].u, (96 / 1024.0) * (t2[1].x - t2[0].x) / wt, 1e-6));
+                     Near(t2[0].u, 136.5 / 1024.0, 1e-6) && t2[1].x <= (at < cx ? cx : 1000 - wr) + 1e-3f &&
+                     (t2[1].x - t2[0].x > wt - 1e-3f ? Near(t2[1].u, 231.5 / 1024.0, 1e-6)
+                                                      : Near(t2[1].u - t2[0].u, (95 / 1024.0) * (t2[1].x - t2[0].x) / wt, 1e-6));
             at = t2[1].x;
             ends += Near(t2[1].x, cx, 1e-3) || Near(t2[1].x, 1000 - wr, 1e-3);   /* each run reaches what it meets */
         }
         const ViewVert *lc = fr + 4 * tiles, *cc = lc + 4, *rc = cc + 4;
         edges &= Near(lc[0].x, 0, 1e-6) && Near(lc[1].x, wl, 1e-3) && Near(cc[0].x, cx, 1e-3) && Near(cc[1].x, cx + wc, 1e-3) &&
-                 Near(rc[1].x, 1000, 1e-3) && Near(rc[0].x, 1000 - wr, 1e-3) && Near(rc[0].u, 340 / 1024.0, 1e-6) &&
+                 Near(rc[1].x, 1000, 1e-3) && Near(rc[0].x, 1000 - wr, 1e-3) && Near(rc[0].u, 340.5 / 1024.0, 1e-6) &&
+                 Near(rc[1].u, 469.5 / 1024.0, 1e-6) &&
                  Near(rc[2].v, 180 / 256.0, 1e-6) && tiles > 6 && tiles < FRAME_TILES && ends == 2;
-        Check(edges, "the frame laid across the screen: the caps at its edges, the diamond at its centre, the rail repeated between them with no gap (each run's last piece cut where it meets), all at one scale");
+        Check(edges, "the frame laid across the screen: the caps at its edges, the diamond at its centre, the rail repeated between them with no gap (each run's last piece cut where it meets), all at one scale, each piece half a texel in from its edges on the sheet (no seam where two meet)");
         /* a quarter loaded, a warlock */
         g_class = 9; g_viewTex[VT_SPARK] = 1;
         ViewBuild(1000, 500, 0.25f, 1234);
-        enum { CH = 1, GL, CO, FRAME, LIPS, LIGHT };
-        ok = g_vbN == 7 && g_vb[CH].tex == -1 && !g_vb[CH].add && g_vb[CH].count == 4 && g_vb[GL].tex == -1 && g_vb[GL].add &&
+        enum { CH = 1, GL, CO, FRAME, SHINE, LIPS, LIGHT };
+        ok = g_vbN == 8 && g_vb[CH].tex == -1 && !g_vb[CH].add && g_vb[CH].count == 4 && g_vb[GL].tex == -1 && g_vb[GL].add &&
              g_vb[CO].tex == -1 && !g_vb[CO].add && g_vb[FRAME].tex == VT_FRAME &&
              !g_vb[FRAME].add && g_vb[LIPS].tex == -1 && g_vb[LIPS].add && g_vb[LIPS].count == 8 && g_vb[LIGHT].tex == VT_SPARK &&
              g_vb[LIGHT].add && g_vb[LIGHT].count == 4 * (2 + SABER_SPARKS);
@@ -2929,14 +2938,35 @@ static void ViewTests(void)
         lit &= NEAR(gl0[0].c, 132, 91, 255) && gl0[0].c[3] == 0 && gl0[3].c[3] > 100 &&      /* a richer purple than */
                gl0[0].y < gl0[3].y && fabsf(gl0[3].y - co[8 * mc].y) < 1e-3f;               /* Blizzard's pale one */
         lit &= fabsf((tip[0].x + tip[1].x) / 2 - front) < 1e-3f && fabsf((tip[0].y + tip[2].y) / 2 - cy) < 1e-3f;
-        lit &= Near(lip[0].x, x0, 1e-3) && Near(lip[1].x, front, 1e-3) && NEAR(lip[3].c, 181, 157, 255) && lip[3].c[3] > 150 && lip[0].c[3] == 0 &&
+        lit &= Near(lip[0].x, 132 * s, 1e-3) && Near(lip[1].x, front, 1e-3) && NEAR(lip[3].c, 181, 157, 255) && lip[3].c[3] > 150 && lip[0].c[3] == 0 &&
                Near(lip[3].y, cy - ch + 500 / 1440.0f, 1e-3) && lip[4 + 0].y > cy;                  /* the lips, lit */
         /* its foot: full height right up to the back of the left cap's cup (the metal shapes it: his call, "filled in
          * until it hits the metal"); only its moving tip is rounded */
         float foot0 = co[0].y, mid = co[8 * (cols / 2)].y, tipy = last[1].y;
         ok &= Near(foot0, cy - ch, 1e-3) && Near(mid, cy - ch, 1e-3) && Near(tipy, cy, 1e-3);
         Check(ok && body, "the blade, a quarter loaded: its glow added, the way to go a dark line from the tip to the right cap, the fill SOLID and SMOOTH the whole height of its channel (his calls, 7 Oct), paler along its centre line, from the back of the left cap's cup (square, under the metal) to its rounded tip in columns that join");
-        Check(lit, "the blade's colour: a warlock's purple glow, richer than Blizzard's pale text colour, fading out from the fill, the tip flaring at the bar as shown, the frame's lips lit to the tip");
+        Check(lit, "the blade's colour: a warlock's purple glow, richer than Blizzard's pale text colour, fading out from the fill, the tip flaring at the bar as shown, the frame's lips lit from the left cap's rim to the tip");
+        /* the blade's light on the metal (his ask, 7 Oct: "make it look cooler"): the frame again, added, in the class's
+         * light, four bands a piece (fading in above the rail band, full across it, fading out below); lit over the
+         * stretch the blade has filled, brightest at its tip, dark ahead of it */
+        int nfq = g_vb[FRAME].count / 4, shine = g_vb[SHINE].tex == VT_FRAME && g_vb[SHINE].add && g_vb[SHINE].count == 16 * nfq;
+        const ViewVert *sh = g_vv + g_vb[SHINE].first, *fq = g_vv + g_vb[FRAME].first;
+        float best = 0, bestX = 0;
+        int rgbOk = 1;
+        for (int q = 0; q < nfq && shine; q++) {
+            const ViewVert *b0 = sh + 16 * q, *pc = fq + 4 * q;
+            shine &= b0[0].c[3] == 0 && b0[1].c[3] == 0 && b0[3].c[3] == b0[4].c[3] && b0[12 + 2].c[3] == 0 &&   /* fade in, out */
+                     Near(b0[0].y, pc[0].y, 1e-3) && Near(b0[15].y, pc[3].y, 1e-3) && Near(b0[0].x, pc[0].x, 1e-3) &&
+                     Near(b0[3].y, top + 33 * s, 1e-3) && Near(b0[7].y, cy, 1e-3) && Near(b0[11].y, top + 123 * s, 1e-3);
+            rgbOk &= NEAR(b0[4].c, 132, 91, 255);                    /* the warlock's own purple, as the glow */
+            float xa = (b0[4].x + b0[5].x) / 2;
+            int a = b0[4].c[3] + b0[5].c[3];
+            if (a > best) { best = (float)a; bestX = xa; }
+            if (b0[4].x > front + 4 * SHINE_REACH * 1000) shine &= b0[4].c[3] == 0 && b0[5].c[3] == 0;   /* dark ahead */
+            if (b0[5].x < front - 4 * SHINE_REACH * 1000) shine &= abs(b0[4].c[3] - (int)(SHINE_LIT * 255 + 0.5f)) <= 1;   /* lit behind */
+        }
+        shine &= rgbOk && fabsf(bestX - front) < 96 * s && best > 2 * SHINE_LIT * 255 + 20;   /* brightest at the tip */
+        Check(shine, "the blade's light on the metal: the frame again, added, in the class's colour, full across the rail band and fading to nothing at the pieces' tips; lit over the stretch the blade has filled, brightest where its tip is, dark ahead of it");
         /* the light fullest in the middle of the bar (his reference): whiter along the centre line there, deeper toward
          * the ends, the fill's top and bottom edges deeper still */
         ViewBuild(1000, 500, 1.0f, 1234);
@@ -2976,9 +3006,11 @@ static void ViewTests(void)
         ViewBuild(1000, 500, 1.0f, 2000);
         cols = g_vb[CO].count / 8;
         const ViewVert *endq = g_vv + g_vb[CO].first + 8 * (cols - 1);
-        ok = g_vbN == 6 && g_vb[CO].count == 8 * cols && Near(g_vv[g_vb[CO].first].x, x0, 1e-3) && g_vb[LIPS].count == 8 &&
+        ok = g_vbN == 7 && g_vb[SHINE].add && g_vb[SHINE].tex == VT_FRAME && g_vb[CO].count == 8 * cols && Near(g_vv[g_vb[CO].first].x, x0, 1e-3) && g_vb[LIPS].count == 8 &&
              Near(endq[1].x, x1, 1e-3) && Near(endq[1].y, cy - ch, 1e-3) && g_vv[g_vb[CO].first].c[3] == 247 && cols == (int)(span / SABER_COL_PX);
-        Check(ok, "the blade full: the fill from cup to cup, full height right up to the metal at both ends (no dead space: his call), nothing still to go, no tip");
+        const ViewVert *shl = g_vv + g_vb[SHINE].first, *shr = shl + g_vb[SHINE].count - 16;
+        ok &= shl[4].c[3] > 0 && shl[4].c[3] == shr[5].c[3];                   /* the whole frame lit alike once full */
+        Check(ok, "the blade full: the fill from cup to cup, full height right up to the metal at both ends (no dead space: his call), nothing still to go, no tip, its light on the whole frame");
         /* the logo on it at the centre, its halfway mark, standing on the bottom of the screen: over the tip, grey before
          * the tip reaches it, lit after */
         g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2; g_logo.tu0 = 0.1f; g_logo.tv0 = 0.2f; g_logo.tu1 = 0.9f; g_logo.tv1 = 0.8f;
@@ -2999,7 +3031,7 @@ static void ViewTests(void)
         Check(ok, "the RavenCraft logo stands on the bottom of the screen at the blade's centre, its halfway mark, over the tip as it passes: grey before the tip reaches it, then white and lit behind in the class's colour");
         g_viewTex[VT_SPARK] = 0;                                         /* no spark: no tip, no light, the rest as ever */
         ViewBuild(1000, 500, 0.6f, 3000);
-        ok = g_vbN == 7 && g_vb[FRAME].tex == VT_FRAME && g_vb[LIPS].add && g_vb[6].tex == VT_LOGO;
+        ok = g_vbN == 8 && g_vb[FRAME].tex == VT_FRAME && g_vb[SHINE].add && g_vb[LIPS].add && g_vb[7].tex == VT_LOGO;
         Check(ok, "without its spark the blade has no tip or light, and the rest is drawn");
         g_viewTex[VT_FRAME] = 0;                                         /* no frame: a channel of its size, flush, no metal */
         ViewBuild(1000, 500, 0.6f, 3000);
