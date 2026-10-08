@@ -890,6 +890,9 @@ static volatile LONG g_screenWatch;      /* 1 once the fire's worker watches for
 static volatile LONG g_dispNew = 1;      /* the bar as shown: the next frame begins a new screen */
 static volatile LONG g_viewOn, g_viewSteps, g_gameSeq;   /* the view (below): on; its thread moves the bar and the zoom
                                                           * now; the game's loading frames drawn */
+static volatile LONG g_viewDrew;         /* the view has drawn this screen: the game's own bar under it stays dark, so its
+                                          * fire never shows through the end's blur and dissolve (his 7 Oct load: "the old
+                                          * lava loading bar" for half a second after the blade had faded) */
 static int g_settleView;                 /* the hold's glide in is the view's (HoldFrame): the push its last stretch, landing
                                           * with the world */
 static volatile LONG g_frmCount, g_frmGap, g_frmGapFrom, g_frmGapTo, g_frmDips, g_frmShown;   /* this screen's, for the log */
@@ -2336,6 +2339,7 @@ static void GameFacts(float p, DWORD now)
     int fallback = !g_screenWatch && g_gameAt && gap > 1000 && p < 0.1f && g_gameMax > 0.5f;
     if (InterlockedExchange(&g_dispNew, 0) || !g_gameAt || fallback) {
         InterlockedExchange(&g_viewSteps, 0);                         /* (the view takes them back after this frame) */
+        InterlockedExchange(&g_viewDrew, 0);                          /* (a screen the view may not draw: the game's bar) */
         g_disp = g_dispMax = g_gameMax = p;
         g_dispV = g_dispRate = 0;
         g_dispAt = now;                                               /* the bar as shown starts here, without a step */
@@ -2963,7 +2967,13 @@ static void MarksParse(const char *s, unsigned len)
 
 /* Mark id as a quad into g_mk*: its middle at screen sx, sy, half as tall as hs (in screen heights; square on screen),
  * turned ang radians (anticlockwise on screen), alpha shown. Left out off screen, when faint, or when the pass is full. */
+static void MarkPutTint(int id, float sx, float sy, float hs, float ang, float alpha, unsigned rgb);
 static void MarkPut(int id, float sx, float sy, float hs, float ang, float alpha)
+{
+    MarkPutTint(id, sx, sy, hs, ang, alpha, 0xFFFFFFu);
+}
+/* (and in the colour rgb, times the sheet's own) */
+static void MarkPutTint(int id, float sx, float sy, float hs, float ang, float alpha, unsigned rgb)
 {
     if (id < 0 || id >= MARKS_SPRITES || !g_mark[id].ok || alpha <= 0.004f || g_mkQuads >= MARKS_FRAME) return;
     float k = (float)g_scrH / (float)g_scrW, c = SeaCos(ang), sn = SeaSin(ang), reach = hs * 1.42f;
@@ -2977,7 +2987,7 @@ static void MarkPut(int id, float sx, float sy, float hs, float ang, float alpha
     float tu0 = g_mark[id].x0 / MARKS_SHEET, tu1 = g_mark[id].x1 / MARKS_SHEET;
     float tv0 = g_mark[id].y0 / MARKS_SHEET, tv1 = g_mark[id].y1 / MARKS_SHEET;
     float tu[4] = { tu0, tu1, tu0, tu1 }, tv[4] = { tv1, tv1, tv0, tv0 };
-    QuadPut(g_mkPos, g_mkUV, g_mkCol, g_mkQuads++, x, y, tu, tv, (unsigned)(FireClamp(alpha, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
+    QuadPut(g_mkPos, g_mkUV, g_mkCol, g_mkQuads++, x, y, tu, tv, (unsigned)(FireClamp(alpha, 0, 1) * 255.0f + 0.5f) << 24 | (rgb & 0xFFFFFFu));
 }
 
 /* Where picture u, v shows on screen, for the view this frame. */
@@ -3013,11 +3023,17 @@ static void SwirlAt(float *x, float *v, float asp)
     *v = cv + dx * s + dv * c;
 }
 
-/* This frame's ripple: up to RIPPLE_RINGS rings in g_mk*, opening from the arrival once it is known. */
+/* This frame's ripple: up to RIPPLE_RINGS rings in g_mk*, opening from the arrival once it is known, in the class's
+ * colour (his ask, 7 Oct: "the pulse effect around the character to be class colored (orange for druid, green for
+ * hunter, etc)"; the sheet's ring is white for it), or the ring's old gold while the class is not known. */
+static unsigned SaberVivid(unsigned rgb);
+static const unsigned kClassColour[12];
 static void RippleBuild(float t, DWORD now)
 {
     g_mkQuads = 0;
     if (!g_destOk) return;
+    LONG cl = g_class;
+    unsigned tint = cl > 0 && cl < 12 ? SaberVivid(kClassColour[cl]) : 0xFFE49Cu;
     float sx, sy, appear = FireClamp((float)(now - g_destSince) / (RIPPLE_IN * 1000.0f), 0, 1);
     ViewToScreen(g_destU, g_destV, &sx, &sy);
     for (int k = 0; k < RIPPLE_RINGS; k++) {
@@ -3025,7 +3041,7 @@ static void RippleBuild(float t, DWORD now)
         ph -= (float)(int)ph;
         float px = RIPPLE_PX * (0.12f + 0.88f * ph), a = (1 - ph) * (float)FireExp(0.2 * MapLn(1 - ph + 1e-6f));
         a *= FireClamp(ph / 0.08f, 0, 1) * appear;
-        MarkPut(0, sx, sy, px / 2160.0f, 0, a);                       /* the ring's size steady on any screen height */
+        MarkPutTint(0, sx, sy, px / 2160.0f, 0, a, tint);             /* the ring's size steady on any screen height */
     }
 }
 
@@ -4783,6 +4799,7 @@ void WINAPI RevealFill(const float *v)
     int n2 = FillStrip(L, B, T, z, full, shown, (float)(GetTickCount() % 3600000u) / 1000.0f, g_fillVerts, g_fillUV,
                        g_fillColor);
     for (int k = 0; k < n2; k++) g_fillIndex[k] = (unsigned short)k;
+    if (g_viewDrew) for (int k = 0; k < n2; k++) g_fillColor[k] &= 0x00FFFFFFu;   /* the view's screen: none of the game's fire */
     g_fillCount = n2;
 }
 
@@ -6915,6 +6932,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             if (t - g_view.last > g_view.gap) g_view.gap = t - g_view.last;
             g_view.last = t;
             g_view.frames++;
+            InterlockedExchange(&g_viewDrew, 1);
             continue;
         }
         if (showing) {                                      /* the screen has gone */

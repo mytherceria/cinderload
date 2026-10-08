@@ -1399,6 +1399,17 @@ static void LiveTests(void)
     g_dispNew = 1;                                                    /* a fresh screen: the bar as shown starts at the game's */
     RevealFill(v1);
     Check(g_fillCount <= 2 * FILL_COLUMNS && g_fillVerts[6 * (g_fillCount / 2 - 1)] == 1.0f, "a progress past 1 is taken as 1");
+    /* his 7 Oct load: after the blade had faded, the game's own lava bar showed through the end's blur for half a second.
+     * A screen the view has drawn: the game's fill is drawn dark; the next screen (the view may not draw it) has it back */
+    PutFloat(0x882BE4, 0.6f);
+    g_viewDrew = 1;
+    RevealFill(v1);
+    int dark = g_fillCount > 0;
+    for (int k = 0; k < g_fillCount; k++) dark &= (g_fillColor[k] >> 24) == 0;
+    g_dispNew = 1;
+    RevealFill(v1);
+    int back = g_viewDrew == 0 && (g_fillColor[0] >> 24) == 255;
+    Check(dark && back, "a screen the view has drawn: the game's own fire bar under it is dark (no lava through the end's blur); a new screen has it back");
 
     /* his ask, 4 Oct: the bar ran to two thirds, stopped while the game drew nothing, then leapt; it should move at a steady
      * rate. The bar as shown: the game's progress in lumps (5% every 0.2 s, frames every 20 ms) is followed at an even pace,
@@ -1959,6 +1970,17 @@ static void LiveTests(void)
         int near = g_mkQuads == RIPPLE_RINGS, bright = 0;
         for (int q = 0; q < g_mkQuads; q++) bright |= (g_mkCol[q ? q * 6 : 0] >> 24) > 150;
         rp &= near && bright && RIPPLE_PX >= 200;
+        /* his ask, 7 Oct: the pulse round the character in the class's colour (a druid's orange, a hunter's green), the
+         * ring's old gold while the class is not known */
+        LONG was = g_class;
+        g_class = 11; RippleBuild(1.5f, 50000);
+        int tinted = g_mkQuads > 0 && (g_mkCol[0] & 0xFFFFFFu) == SaberVivid(kClassColour[11]);
+        g_class = 3; RippleBuild(1.5f, 50000);
+        tinted &= g_mkQuads > 0 && (g_mkCol[0] & 0xFFFFFFu) == SaberVivid(kClassColour[3]);
+        g_class = 0; RippleBuild(1.5f, 50000);
+        tinted &= g_mkQuads > 0 && (g_mkCol[0] & 0xFFFFFFu) == 0xFFE49Cu;
+        g_class = was;
+        Check(tinted, "the ripple round the arrival in the class's colour (a druid's orange, a hunter's green), the ring's old gold while the class is not known");
         g_destOk = 0; g_mael.ok = 0; g_seaW = 0;
         Check(rp, "the ripple: none before the arrival is known; then rings at it, square, the wider the fainter, faint at first, still there and bright close in");
     }
