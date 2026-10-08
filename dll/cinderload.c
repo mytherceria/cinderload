@@ -2415,8 +2415,11 @@ static float BarStep(float p, DWORD now)
     float want = FireClamp(g_dispRate + (g_dispMax - g_disp) / DISP_CATCH, 0, DISP_FASTEST);
     g_dispV += (want - g_dispV) * (float)(1.0 - FireExp(-(double)dt / DISP_EASE));
     if (g_disp >= cap && g_dispV > 0) g_dispV = 0;                    /* held at the lead: it waits for the game */
-    if (g_dispMax >= 0.999f) g_disp = 1;                              /* the load is done: the bar reads full, as the game's
-                                                                       * freeze at its end holds this frame a second or two */
+    if (g_dispMax >= 0.999f && !g_viewSteps) g_disp = 1;             /* the load is done: the bar reads full, as the game's
+                                                                       * freeze at its end holds this frame a second or two;
+                                                                       * the view draws on through that freeze, so its bar
+                                                                       * runs the rest at its fastest instead of leaping
+                                                                       * there (his 7 Oct load: 52% to full in one frame) */
     float shown = g_timed && g_planU < g_disp ? g_planU : g_disp;    /* on the plan: never ahead of it, nor of the game */
     InterlockedExchange(&g_frmShown, (LONG)(shown * 100 + 0.5f));
     return shown;

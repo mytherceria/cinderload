@@ -1437,6 +1437,24 @@ static void LiveTests(void)
         steady &= last > 0.999f && g_frmGap == 1200 && g_frmGapFrom == 60 && g_frmGapTo == 91 && g_frmDips == 1 &&
                   g_frmShown == 100;
         Check(steady, "the bar as shown: lumps followed at an even pace, a stall eased into, a leap after a pause glided, no dip, full at the end; its pause logged");
+        /* the view stepping it (his 7 Oct load: the game paused at 54%, then its bar read 100% and froze there two
+         * seconds; the bar shown leapt from 52% to full in one frame): it runs the rest at its fastest, smoothly, and is
+         * full well inside the freeze */
+        g_disp = g_dispV = g_dispRate = g_dispMax = 0; g_dispAt = 0;
+        t = 500000; last = 0;
+        for (int f = 0; f < 300 && last < 0.52f; f++) { t += 20; p = 0.54f * f / 299.0f + 0.3f; if (p > 0.54f) p = 0.54f; last = DisplayStep(p, t); }
+        InterlockedExchange(&g_viewSteps, 1);
+        float from = last, step = 0, full = 0;
+        for (int f = 1; f <= 100 && !full; f++) {
+            t += 7;
+            float d = DisplayStep(1, t);
+            if (d - last > step) step = d - last;
+            last = d;
+            if (d > 0.999f) full = f * 0.007f;
+        }
+        InterlockedExchange(&g_viewSteps, 0);
+        Check(from < 0.6f && step <= DISP_FASTEST * 0.007f + 1e-5f && full > 0.2f && full < 0.7f,
+              "the view's bar when the game's leaps to 100% and freezes: it runs the rest at its fastest, a frame at a time, full in about half a second (no leap from 52% to full)");
     }
     /* his three logins (4 Oct) paused 0.2 to 0.6 s at 41, 44, 50 and 54%, the game drawing nothing: a bar moving steadily
      * comes out of a pause where its pace would have taken it (no lag to hurry back from), and a long freeze counts
