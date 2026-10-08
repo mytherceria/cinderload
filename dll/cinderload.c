@@ -3894,6 +3894,72 @@ static void ShipAt(int r, float s, float *u, float *v)
     *v = g_shipV[i] + (g_shipV[j] - g_shipV[i]) * k;
 }
 
+/* ---- the weather (7 Oct 2026, his calls: "clouds that rain where it is really raining" -> TYPICAL weather, not live;
+ * placed and blown by HIS climate model: Stranglethorn on the equator, the trade winds, the doldrums, the westerlies;
+ * cartoony, Warcraft 3 style; rain, snow, lightning; "3D clouds ... moving across the two continents and the sea") ----
+ * CinderLoad\weather.bin (weather.py): a grid over the picture, each cell how cloudy it usually is and, for each
+ * season, its chances of rain, snow and blowing sand (a zone's own on land, by latitude at sea); CinderSky.blp
+ * (sky.py): four fair clouds, two storm clouds and a sand haze. Each cloud is born where the grid says clouds are,
+ * drifts on the wind of its latitude, lives SKY_LIFE seconds and gives way to another: all from the clock, so each
+ * screen picks up where the last left off. It rains, snows or throws up dust by the season's chances where it is now;
+ * a raining cloud in the tropics or over a wet zone throws lightning. It floats SKY_ALT above the map: its shadow on
+ * the ground, the rain falling between, and as the view comes down it swells past and thins away. */
+#define SKY_PATH     "Interface\\Glues\\LoadingScreens\\CinderSky.blp"
+#define SKY_CLOUDS   70         /* clouds at once over the whole world */
+#define SKY_LIFE     26.0f      /* seconds a cloud lives (time-lapsed, as the ships) */
+#define SKY_FADE     5.0f       /* fading in and out over this much of it */
+#define SKY_WIND     0.006f     /* heights of the picture a second at the usual wind */
+#define SKY_SIZE     0.12f      /* a cloud's frame, heights of the picture (0.6 to 1.4 of it) */
+#define SKY_ALT      0.05f      /* its height above the ground, heights of the picture */
+#define SKY_CAM      1.25f      /* the camera's height, of the view's height on the picture */
+#define SKY_TILT     0.7f       /* how far up the screen a cloud stands from its ground (the 3/4 view, as the ships') */
+#define SKY_DROPS    14         /* rain streaks or snowflakes under a cloud at once */
+#define SKY_CELLS    (256 * 128)
+#define SKY_QUADS    (SKY_CLOUDS * (4 + SKY_DROPS + 4))
+static struct { int ok, cols, rows, season; float veq, deg; } g_sky;
+static unsigned char g_skyCell[SKY_CELLS * 13];
+static int g_skyOn;
+static int SkyParse(const unsigned char *d, unsigned len)
+{
+    g_sky.ok = 0;
+    if (len < 16 || d[0] != 'C' || d[1] != 'W' || d[2] != 'T' || d[3] != 'H') return 0;
+    int c = d[4] | d[5] << 8, r = d[6] | d[7] << 8;
+    float veq = GlowF(d + 8), deg = GlowF(d + 12);
+    if (c < 2 || r < 2 || c * r > SKY_CELLS || len != 16u + (unsigned)(c * r * 13) || !(veq > -2 && veq < 3) || !(deg > 1 && deg < 360))
+        return 0;
+    for (int i = 0; i < c * r * 13; i++) g_skyCell[i] = d[16 + i];
+    g_sky.cols = c; g_sky.rows = r; g_sky.veq = veq; g_sky.deg = deg; g_sky.ok = 1;
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    int m = t.wMonth;                                       /* spring March to May, summer, fall, winter December to February */
+    g_sky.season = m >= 3 && m <= 5 ? 0 : m >= 6 && m <= 8 ? 1 : m >= 9 && m <= 11 ? 2 : 3;
+    return 1;
+}
+/* The grid's cell at picture u, v: its first byte (cover, then the seasons'), or NULL off the picture. */
+static const unsigned char *SkyCell(float u, float v)
+{
+    if (!g_sky.ok || !(u >= 0 && u < 1 && v >= 0 && v < 1)) return NULL;
+    int i = (int)(u * g_sky.cols), j = (int)(v * g_sky.rows);
+    return g_skyCell + 13 * (j * g_sky.cols + i);
+}
+/* The wind at picture v (his circulation, by latitude): east and north, of SKY_WIND. The doldrums light and westward
+ * near the equator, the trades from the northeast (toward the equator, westward), the horse latitudes still, the
+ * westerlies from the southwest, the polar easterlies; mirrored south of the equator; each band blending into the next. */
+static void SkyWind(float v, float *east, float *north)
+{
+    static const float edge[5] = { 5, 30, 35, 60, 1000 };
+    static const float band[5][2] = { { -0.25f, 0 }, { -0.85f, -0.35f }, { 0.1f, 0 }, { 0.85f, 0.3f }, { -0.6f, -0.2f } };
+    float lat = (g_sky.veq - v) * g_sky.deg, a = lat < 0 ? -lat : lat;
+    int k = 0;
+    while (k < 4 && a >= edge[k]) k++;
+    float e = band[k][0], n = band[k][1];
+    if (k < 4 && a > edge[k] - 2.5f) {                    /* blending into the next band over its last 2.5 degrees */
+        float f = (a - (edge[k] - 2.5f)) / 2.5f;
+        e += (band[k + 1][0] - e) * f; n += (band[k + 1][1] - n) * f;
+    }
+    *east = e; *north = lat < 0 ? -n : n;
+}
+
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -4095,6 +4161,20 @@ static void OverlayStart(void)
         if (asp < 0) asp = -asp;
         if (g_ships && asp > 0.5f && asp < 5) { ShipsTime(asp); g_shipsOn = 1; }
     }
+    g_skyOn = 0;
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderSky")) {          /* the weather (the view's) */
+        unsigned char *data = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\weather.bin", &data, &len) == MPQ_OK && data)
+            g_skyOn = SkyParse(data, len) && g_shipAsp > 0;
+        if (data) HeapFree(GetProcessHeap(), 0, data);
+        if (!g_skyOn && g_sky.ok) {                         /* (the picture's shape from the map when no ships set it) */
+            int m = g_map.m[0].ok ? 0 : 1;
+            float asp = g_map.m[m].bu != 0 ? g_map.m[m].bv / g_map.m[m].bu : 0;
+            if (asp < 0) asp = -asp;
+            if (asp > 0.5f && asp < 5) { g_shipAsp = asp; g_skyOn = 1; }
+        }
+    }
     g_wavesOn = g_seaOn && BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderWaves");
     if (g_seaOn && BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderFlow")) {
         unsigned char *data = NULL;
@@ -4103,9 +4183,9 @@ static void OverlayStart(void)
             g_flowOn = FlowParse(data, len);
         if (data) HeapFree(GetProcessHeap(), 0, data);
     }
-    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn && !g_glowOn && !g_shipsOn) return;
+    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn && !g_glowOn && !g_shipsOn && !g_skyOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
-        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = g_shipsOn = 0;
+        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = g_shipsOn = g_skyOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
@@ -4124,6 +4204,12 @@ static void OverlayStart(void)
         int z = 0;
         for (int r = 0; r < g_ships; r++) z += g_ship[r].kind;
         wsprintfA(m, "  the living map: %d ships and %d zeppelins on their routes (%d points), drawn by the view", g_ships - z, z, g_shipPts);
+        Log(m);
+    }
+    if (g_skyOn) {
+        static const char *const kSeason[4] = { "spring", "summer", "fall", "winter" };
+        wsprintfA(m, "  the living map: the weather, %d x %d cells, %s's typical rain, snow and sand, drawn by the view",
+                  g_sky.cols, g_sky.rows, kSeason[g_sky.season & 3]);
         Log(m);
     }
 }
@@ -4483,7 +4569,7 @@ static int TextHas(const char *list, const char *name)
  * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, the blade's
  * soft spark (made here, not read); g_viewTex holds OpenGL's name for each (0 while it has none). A batch is drawn
  * over what is under it, or added to it (add: light, the blade's glow). */
-enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SPARK, VT_COUNT };
+enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_COUNT };
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -4491,7 +4577,7 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_SPARKS   14         /* sparks thrown back off its tip */
 #define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 5 * (256 + 3) + 3)   /* (the frame's: FRAME_TILES and the rest, and
                                                                                     * its shine: four more a piece) */
-#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE))
+#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE) + SKY_QUADS)
 #define VIEW_BATCHES   48
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
 static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
@@ -4626,6 +4712,143 @@ static void ShipsBuild(float W, float H, DWORD now, int kind)
     }
 }
 
+/* A quad of picture tex, centre x, y, half sizes hw, hh, the whole of u0..u1, v0..v1 on it. */
+static void SkyQuad(int tex, int add, float x, float y, float hw, float hh, float u0, float v0, float u1, float v1, DWORD c)
+{
+    ViewVert *q = ViewQuadMode(tex, add);
+    if (!q) return;
+    ViewVertSet(q, x - hw, y - hh, u0, v0, c); ViewVertSet(q + 1, x + hw, y - hh, u1, v0, c);
+    ViewVertSet(q + 2, x + hw, y + hh, u1, v1, c); ViewVertSet(q + 3, x - hw, y + hh, u0, v1, c);
+}
+/* A line from x0, y0 to x1, y1, w wide, its colour c0 at the start and c1 at the end (plain colour). */
+static void SkyLine(int add, float x0, float y0, float x1, float y1, float w, DWORD c0, DWORD c1)
+{
+    float dx = x1 - x0, dy = y1 - y0, l = SaberSqrt(dx * dx + dy * dy);
+    if (!(l > 0)) return;
+    float nx = -dy / l * w * 0.5f, ny = dx / l * w * 0.5f;
+    ViewVert *q = ViewQuadMode(-1, add);
+    if (!q) return;
+    ViewVertSet(q, x0 - nx, y0 - ny, 0, 0, c0); ViewVertSet(q + 1, x0 + nx, y0 + ny, 0, 0, c0);
+    ViewVertSet(q + 2, x1 + nx, y1 + ny, 0, 0, c1); ViewVertSet(q + 3, x1 - nx, y1 - ny, 0, 0, c1);
+}
+/* One cloud this frame, from the clock alone: 0 when cloud i has no life now (born where no cloud would be). */
+typedef struct { float gx, gy, x, y, size, a, base, alt, p; int sprite, rain, snow, dust, flash; unsigned seed; } SkyCloud;
+static int SkyAt(int i, DWORD now, float W, float H, SkyCloud *c)
+{
+    float T = (float)(now % 36000000u) / 1000.0f + SeaRand((unsigned)i, 1) * SKY_LIFE, gen = MapFloor(T / SKY_LIFE);
+    float age = T - gen * SKY_LIFE;
+    unsigned g = (unsigned)(int)gen, seed = (unsigned)i * 7919u + g * 104729u;
+    float u = -1, v = -1;
+    for (int k = 0; k < 8 && u < 0; k++) {                 /* born where clouds are: the grid's cover, by chance */
+        float cu = SeaRand(seed, 10 + k), cv = SeaRand(seed, 20 + k);
+        const unsigned char *cell = SkyCell(cu, cv);
+        if (cell && SeaRand(seed, 30 + k) * 100 < cell[0]) { u = cu; v = cv; }
+    }
+    if (u < 0) return 0;
+    const unsigned char *born = SkyCell(u, v);
+    float e, n;
+    SkyWind(v, &e, &n);
+    u += e * SKY_WIND * age / g_shipAsp; v -= n * SKY_WIND * age;   /* (u counted g_shipAsp times v; north up) */
+    const unsigned char *cell = SkyCell(u, v);
+    if (!cell) return 0;
+    const unsigned char *now3 = cell + 1 + 3 * (g_sky.season & 3), *born3 = born + 1 + 3 * (g_sky.season & 3);
+    float wet = SeaRand(seed, 3), rainP = now3[0] * 0.025f, snowP = now3[1] * 0.025f, dustP = now3[2] * 0.03f;
+    c->snow = now3[1] >= now3[0] && wet < snowP;
+    c->rain = !c->snow && wet < rainP;
+    c->dust = !c->rain && !c->snow && wet < dustP;
+    float lat = (g_sky.veq - v) * g_sky.deg;
+    int stormy = c->rain && (lat < 12 && lat > -12 ? 1 : now3[0] >= 25) && wet < 0.4f * rainP;
+    c->sprite = (born3[0] >= 20 || (lat < 8 && lat > -8)) && wet < rainP ? 4 + (int)(SeaRand(seed, 5) * 2) : (int)(SeaRand(seed, 4) * 4);
+    c->flash = stormy && SeaRand(seed, 40 + (unsigned)(int)(T * 4)) < 0.12f;
+    c->seed = seed;
+    /* the camera: above the view's middle, SKY_CAM of its height up; the cloud SKY_ALT above its ground, nearer it */
+    float vs = g_bgUV[1] - g_bgUV[5], ppu = vs > 0 ? H / vs : H, hc = SKY_CAM * vs, alt = SKY_ALT * (0.8f + 0.4f * SeaRand(seed, 6));
+    float p = hc > alt * 1.05f ? hc / (hc - alt) : 20;
+    if (p > 3) p = 3;
+    c->alt = alt; c->p = p;
+    ShipPixel(u, v, W, H, &c->gx, &c->gy);
+    c->x = W / 2 + (c->gx - W / 2) * p;
+    c->y = H / 2 + (c->gy - H / 2) * p - alt * ppu * SKY_TILT * p;
+    c->size = SKY_SIZE * (0.6f + 0.8f * SeaRand(seed, 7)) * ppu * p;
+    c->base = c->y + c->size * 0.13f;                       /* (the sprites' flat bases, a little below their middles) */
+    float life = FireClamp(age / SKY_FADE, 0, 1) * FireClamp((SKY_LIFE - age) / SKY_FADE, 0, 1);
+    float pass = FireClamp((hc - 1.6f * alt) / alt, 0, 1);  /* the camera coming down through them: they thin away */
+    float zoom = FireClamp((0.45f - vs) / 0.3f, 0, 1), dx = (c->x - W / 2) / H, dy = (c->y - H / 2) / H;
+    float clear = FireClamp(SaberSqrt(dx * dx + dy * dy) / 0.35f, 0, 1);   /* and part over where you are arriving */
+    c->a = life * pass * (1 - zoom * (1 - clear) * 0.85f);
+    return c->a > 0.01f && c->x > -c->size && c->x < W + c->size && c->y > -c->size && c->y < H + 1.5f * c->size;
+}
+/* The weather this frame, in its passes: the clouds' shadows on the ground, the dust, the rain and the snow falling,
+ * the clouds, then the lightning. */
+static void SkyBuild(float W, float H, DWORD now)
+{
+    static SkyCloud cl[SKY_CLOUDS];
+    static int live[SKY_CLOUDS];
+    float T = (float)(now % 36000000u) / 1000.0f, line = H / 1080.0f;
+    for (int i = 0; i < SKY_CLOUDS; i++) live[i] = SkyAt(i, now, W, H, &cl[i]);
+    for (int i = 0; i < SKY_CLOUDS; i++)                    /* shadows, soft, a little down and right of the ground below */
+        if (live[i] && !cl[i].dust && g_viewTex[VT_SPARK])
+            SkyQuad(VT_SPARK, 0, cl[i].gx + cl[i].size * 0.12f, cl[i].gy + cl[i].size * 0.06f, cl[i].size * 0.42f,
+                    cl[i].size * 0.2f, 0, 0, 1, 1, SaberArgb(0x101820, 0.2f * cl[i].a));
+    for (int i = 0; i < SKY_CLOUDS; i++)                    /* blowing sand: a low haze over the ground, no cloud */
+        if (live[i] && cl[i].dust)
+            SkyQuad(VT_SKY, 0, cl[i].gx, cl[i].gy, cl[i].size * 0.6f, cl[i].size * 0.6f, 512 / 1024.0f, 256 / 1024.0f,
+                    768 / 1024.0f, 512 / 1024.0f, SaberArgb(0xFFFFFF, 0.8f * cl[i].a));
+    for (int i = 0; i < SKY_CLOUDS; i++) {                  /* rain: a grey curtain from the cloud's base to the ground, */
+        if (!live[i] || !cl[i].rain) continue;              /* and streaks falling through it */
+        float fall = cl[i].gy - cl[i].base;
+        if (!(fall > 2)) continue;
+        float w0 = cl[i].size * 0.3f, w1 = cl[i].size * 0.24f, slant = cl[i].size * 0.06f;
+        ViewVert *q = ViewQuadMode(-1, 0);
+        if (q) {
+            DWORD top = SaberArgb(0x8C9AB4, 0.34f * cl[i].a), foot = SaberArgb(0x8C9AB4, 0);
+            ViewVertSet(q, cl[i].x - w0, cl[i].base, 0, 0, top); ViewVertSet(q + 1, cl[i].x + w0, cl[i].base, 0, 0, top);
+            ViewVertSet(q + 2, cl[i].gx + w1 - slant, cl[i].gy, 0, 0, foot); ViewVertSet(q + 3, cl[i].gx - w1 - slant, cl[i].gy, 0, 0, foot);
+        }
+        for (int j = 0; j < SKY_DROPS; j++) {
+            float f = T * 1.7f + SeaRand(cl[i].seed, 100 + j), at = f - MapFloor(f);
+            float ox = (SeaRand(cl[i].seed, 120 + j) - 0.5f) * 2 * (w0 + (w1 - w0) * at);
+            float x0 = cl[i].x + ox + (cl[i].gx - cl[i].x) * at - slant * at, y0 = cl[i].base + fall * at, len = fall * 0.3f;
+            SkyLine(0, x0, y0, x0 - slant * 0.3f, y0 + len, line * 2.2f + cl[i].size * 0.006f, SaberArgb(0xC8D7F0, 0),
+                    SaberArgb(0xDCE6F8, 0.75f * cl[i].a * (1 - at * 0.6f)));
+        }
+    }
+    for (int i = 0; i < SKY_CLOUDS; i++) {                  /* snow: flakes drifting down, swaying */
+        if (!live[i] || !cl[i].snow || !g_viewTex[VT_SPARK]) continue;
+        float fall = cl[i].gy - cl[i].base;
+        if (!(fall > 2)) continue;
+        for (int j = 0; j < SKY_DROPS; j++) {
+            float f = T * 0.45f + SeaRand(cl[i].seed, 140 + j), at = f - MapFloor(f);
+            float ox = (SeaRand(cl[i].seed, 160 + j) - 0.5f) * cl[i].size * 0.62f, sway = SeaSin(T * 2 + j) * cl[i].size * 0.03f;
+            float x = cl[i].x + ox + (cl[i].gx - cl[i].x) * at + sway, y = cl[i].base + fall * at, r = line * 3.0f + cl[i].size * 0.014f;
+            SkyQuad(VT_SPARK, 0, x, y, r, r, 0, 0, 1, 1, SaberArgb(0xFFFFFF, 0.9f * cl[i].a * FireClamp(at * 6, 0, 1)));
+        }
+    }
+    for (int i = 0; i < SKY_CLOUDS; i++) {                  /* the clouds */
+        if (!live[i] || cl[i].dust) continue;
+        int s = cl[i].sprite;
+        float u0 = (float)(s & 3) * 0.25f, v0 = (float)(s >> 2) * 0.25f, h = cl[i].size * 0.5f;
+        SkyQuad(VT_SKY, 0, cl[i].x, cl[i].y, h, h, u0 + 0.5f / 1024, v0 + 0.5f / 1024, u0 + 0.25f - 0.5f / 1024, v0 + 0.25f - 0.5f / 1024,
+                SaberArgb(0xFFFFFF, cl[i].a));
+    }
+    if (g_viewTex[VT_SPARK])                                /* lightning: the cloud lit from within, and a bolt to the ground */
+        for (int i = 0; i < SKY_CLOUDS; i++)
+            if (live[i] && cl[i].flash)
+                SkyQuad(VT_SPARK, 1, cl[i].x, cl[i].base - cl[i].size * 0.08f, cl[i].size * 0.5f, cl[i].size * 0.3f, 0, 0, 1, 1,
+                        SaberArgb(0xDDE6FF, 0.75f * cl[i].a));
+    for (int i = 0; i < SKY_CLOUDS; i++) {
+        if (!live[i] || !cl[i].flash) continue;
+        unsigned b = cl[i].seed + (unsigned)(int)(T * 4) * 31u;
+        float x = cl[i].x + (SeaRand(b, 1) - 0.5f) * cl[i].size * 0.3f, y = cl[i].base, ex = cl[i].gx, ey = cl[i].gy;
+        for (int k = 1; k <= 4; k++) {                      /* four jagged steps down */
+            float f = (float)k / 4, nx = cl[i].x + (ex - cl[i].x) * f + (k < 4 ? (SeaRand(b, 10 + k) - 0.5f) * cl[i].size * 0.25f : 0);
+            float ny = y + (ey - cl[i].base) * 0.25f;
+            SkyLine(1, x, y, nx, ny, line * 2.2f, SaberArgb(0xF0F4FF, 0.95f * cl[i].a), SaberArgb(0xF0F4FF, 0.95f * cl[i].a));
+            x = nx; y = ny;
+        }
+    }
+}
+
 static DWORD g_ovViewAt;
 static void ViewOverlayBuild(float W, float H, DWORD now)
 {
@@ -4638,7 +4861,8 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
     if (g_marksOn && g_viewTex[VT_MARKS]) { MaelstromBuild(t); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
     if (g_flowOn && g_viewTex[VT_FLOW]) { FlowBuild(t, dt); ViewStrips(VT_FLOW, g_flPos, g_flUV, g_flCol, g_flQuads, W, H); }
     if (g_seaOn && g_viewTex[VT_SEA]) { GlintsBuild(t); ViewStrips(VT_SEA, g_glPos, g_glUV, g_glCol, g_glQuads, W, H); }
-    if (g_shipsOn && g_viewTex[VT_SHIPS]) ShipsBuild(W, H, now, 0);   /* the ships on the sea, then the zeppelins over all */
+    if (g_shipsOn && g_viewTex[VT_SHIPS]) ShipsBuild(W, H, now, 0);   /* the ships on the sea, the weather over them, and */
+    if (g_skyOn && g_viewTex[VT_SKY]) SkyBuild(W, H, now);            /* the zeppelins over all */
     if (g_shipsOn && g_viewTex[VT_SHIPS]) ShipsBuild(W, H, now, 1);
     if (g_marksOn && g_viewTex[VT_MARKS]) { RippleBuild(t, now); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
     if (g_glowOn && g_viewTex[VT_GLOW]) {                        /* the arrival's subzone, or the round glow in its place */
@@ -5444,7 +5668,8 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         static const struct { int slot, *on; const char *path; } kSheets[] = {
             { VT_SEA, &g_seaOn, SEA_PATH }, { VT_MARKS, &g_marksOn, MARKS_PATH }, { VT_WAVES, &g_wavesOn, WAVES_PATH },
             { VT_FLOW, &g_flowOn, FLOW_PATH }, { VT_GLOW, &g_glowOn, GLOW_PATH }, { VT_LABELS, &g_lblOn, LABELS_PATH },
-            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH }, { VT_SHIPS, &g_shipsOn, SHIPS_PATH } };
+            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH }, { VT_SHIPS, &g_shipsOn, SHIPS_PATH },
+            { VT_SKY, &g_skyOn, SKY_PATH } };
         for (unsigned i = 0; i < sizeof kSheets / sizeof kSheets[0]; i++)
             if (*kSheets[i].on) mpq_read(&kIo, "patch-~.MPQ", kSheets[i].path, &g_view.blp[kSheets[i].slot], &g_view.len[kSheets[i].slot]);
     }

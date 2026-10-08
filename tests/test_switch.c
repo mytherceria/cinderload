@@ -3397,6 +3397,120 @@ static void TestShips(void)
     g_shipsOn = 0; g_ships = 0; g_viewTex[VT_SPARK] = 0;
 }
 
+/* The weather (7 Oct 2026): its grid read, his circulation's winds, clouds born only where the grid has them, raining,
+ * snowing or blowing dust by the season's chances under them, standing above their shadows with the rain between, and
+ * thinning away as the camera comes down through them. */
+static unsigned char g_wtest[16 + 4 * 2 * 13];
+static void SkyGrid(int cover, int rain, int snow, int sand)
+{
+    unsigned char *d = g_wtest;
+    float veq = 0.5f, deg = 76;
+    memcpy(d, "CWTH", 4); d[4] = 4; d[5] = 0; d[6] = 2; d[7] = 0;
+    memcpy(d + 8, &veq, 4); memcpy(d + 12, &deg, 4);
+    for (int c = 0; c < 8; c++) {
+        unsigned char *e = d + 16 + 13 * c;
+        e[0] = (unsigned char)(c == 1 ? cover : 0);          /* clouds only in the second cell of the top row */
+        for (int k = 0; k < 4; k++) { e[1 + 3 * k] = (unsigned char)rain; e[2 + 3 * k] = (unsigned char)snow; e[3 + 3 * k] = (unsigned char)sand; }
+    }
+}
+static void TestSky(void)
+{
+    SkyGrid(100, 40, 0, 0);
+    int ok = SkyParse(g_wtest, sizeof g_wtest) && g_sky.cols == 4 && g_sky.rows == 2 && Near(g_sky.veq, 0.5, 1e-6) &&
+             g_sky.season == 3;                                            /* (the shim's month 0: winter, as December) */
+    ok &= !SkyParse(g_wtest, sizeof g_wtest - 1);                          /* a short grid */
+    g_wtest[0] = 'X'; ok &= !SkyParse(g_wtest, sizeof g_wtest); g_wtest[0] = 'C';
+    ok &= SkyParse(g_wtest, sizeof g_wtest) && SkyCell(0.3f, 0.2f) == g_skyCell + 13 && !SkyCell(1.2f, 0.2f);
+    Check(ok, "the weather's grid read (its cells, the equator, the season from the month); a short one or a wrong header is no weather");
+
+    /* his circulation (the equator at v 0.5, 76 degrees to the picture's height): latitude = (0.5 - v) * 76 */
+    float e, n;
+    SkyWind(0.5f - 2 / 76.0f, &e, &n);   ok = e < 0 && e > -0.4f && n == 0;           /* 2 N: the doldrums, light, west */
+    SkyWind(0.5f - 15 / 76.0f, &e, &n);  ok &= e < -0.5f && n < 0;                     /* 15 N: the trades, west and south */
+    SkyWind(0.5f + 15 / 76.0f, &e, &n);  ok &= e < -0.5f && n > 0;                     /* 15 S: west and north (mirrored) */
+    SkyWind(0.5f - 32 / 76.0f, &e, &n);  ok &= e > -0.2f && e < 0.2f;                  /* 32 N: the horse latitudes, still */
+    SkyWind(0.5f - 45 / 76.0f, &e, &n);  ok &= e > 0.5f && n > 0;                      /* 45 N: the westerlies, east and north */
+    SkyWind(0.5f - 65 / 76.0f, &e, &n);  ok &= e < 0;                                  /* 65 N: the polar easterlies */
+    float e1, n1;
+    SkyWind(0.5f - 29.5f / 76.0f, &e1, &n1);   ok &= e1 > -0.85f && e1 < 0.1f;         /* blended into the next band */
+    Check(ok, "the winds by latitude (his circulation): the doldrums light and westward, the trades from the northeast (mirrored south of the equator), the horse latitudes still, the westerlies, the polar easterlies, each blending into the next");
+
+    /* clouds: born only where the grid has them (the top row's second cell), drifting on its wind */
+    static const float whole[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
+    memcpy(g_bgUV, whole, sizeof whole);
+    g_shipAsp = 2;
+    int born = 0, outside = 0;
+    SkyCloud c;
+    for (int i = 0; i < SKY_CLOUDS; i++)
+        if (SkyAt(i, 5000, 1000, 500, &c)) {
+            born++;
+            float u = c.gx / 1000, v = c.gy / 500;
+            outside += !(u > 0.15f && u < 0.6f && v < 0.55f);
+        }
+    ok = born > SKY_CLOUDS / 4 && outside == 0;
+    SkyGrid(0, 40, 0, 0); SkyParse(g_wtest, sizeof g_wtest);
+    born = 0;
+    for (int i = 0; i < SKY_CLOUDS; i++) born += SkyAt(i, 5000, 1000, 500, &c);
+    ok &= born == 0;
+    SkyAt(3, 7000, 1000, 500, &c);
+    Check(ok, "clouds are born only where the grid says clouds are, and none where it says none");
+
+    /* what falls: rain where it rains (40%, every cloud), snow where snow is the likelier, dust over sand, as the season */
+    int rain = 0, snow = 0, dust = 0, all = 0;
+    SkyGrid(100, 40, 0, 0); SkyParse(g_wtest, sizeof g_wtest);
+    for (int i = 0; i < SKY_CLOUDS; i++) if (SkyAt(i, 5000, 1000, 500, &c)) { all++; rain += c.rain; snow += c.snow; }
+    ok = all > 0 && rain == all && snow == 0;
+    SkyGrid(100, 10, 40, 0); SkyParse(g_wtest, sizeof g_wtest); rain = snow = all = 0;
+    for (int i = 0; i < SKY_CLOUDS; i++) if (SkyAt(i, 5000, 1000, 500, &c)) { all++; rain += c.rain; snow += c.snow; }
+    ok &= all > 0 && snow == all && rain == 0;
+    SkyGrid(100, 0, 0, 40); SkyParse(g_wtest, sizeof g_wtest); all = 0;
+    for (int i = 0; i < SKY_CLOUDS; i++) if (SkyAt(i, 5000, 1000, 500, &c)) { all++; dust += c.dust; }
+    ok &= all > 0 && dust == all;
+    SkyGrid(100, 0, 0, 0); SkyParse(g_wtest, sizeof g_wtest); rain = snow = dust = 0;
+    for (int i = 0; i < SKY_CLOUDS; i++) if (SkyAt(i, 5000, 1000, 500, &c)) { rain += c.rain; snow += c.snow; dust += c.dust; }
+    ok &= rain == 0 && snow == 0 && dust == 0;
+    Check(ok, "under each cloud what the season usually brings there: rain where it rains, snow where snow is likelier, blowing sand over the deserts, nothing where it is dry");
+
+    /* 3D: a cloud stands above its ground (its shadow), rain falls between; nearer in it swells past the ground's own
+     * zoom, and once the camera is down among them it is gone */
+    SkyGrid(100, 40, 0, 0); SkyParse(g_wtest, sizeof g_wtest);
+    int i0 = -1;
+    for (int i = 0; i < SKY_CLOUDS && i0 < 0; i++) if (SkyAt(i, 5000, 1000, 500, &c)) i0 = i;
+    SkyAt(i0, 5000, 1000, 500, &c);
+    float size1 = c.size, ppu1 = 500;
+    ok = i0 >= 0 && c.y < c.gy && c.base < c.gy && c.size > 0;
+    ok &= c.alt >= 0.8f * SKY_ALT - 1e-6f && c.alt <= 1.2f * SKY_ALT + 1e-6f && Near(c.p, SKY_CAM / (SKY_CAM - c.alt), 1e-4) &&
+          Near(c.x, 500 + (c.gx - 500) * c.p, 1e-2) && Near(c.y, 250 + (c.gy - 250) * c.p - c.alt * 500 * SKY_TILT * c.p, 1e-2);
+    static const float near1[8] = { 0.2f, 0.45f, 0.6f, 0.45f, 0.2f, 0.25f, 0.6f, 0.25f };   /* a fifth of the height */
+    memcpy(g_bgUV, near1, sizeof near1);
+    SkyCloud d;
+    int seenNear = SkyAt(i0, 5000, 1000, 500, &d);
+    float hc = SKY_CAM * 0.2f;
+    ok &= !seenNear || d.size / (500 / 0.2f) > size1 / ppu1 * 1.0001f * (hc > SKY_ALT * 1.05f ? 1 : 0);   /* swells */
+    ok &= Near(d.p, hc > d.alt * 1.05f ? (hc / (hc - d.alt) < 3 ? hc / (hc - d.alt) : 3) : 3, 1e-4) && d.p > c.p;
+    static const float low[8] = { 0.38f, 0.43f, 0.42f, 0.43f, 0.38f, 0.41f, 0.42f, 0.41f };   /* the camera below them */
+    memcpy(g_bgUV, low, sizeof low);
+    int gone = 1;
+    for (int i = 0; i < SKY_CLOUDS; i++) gone &= !SkyAt(i, 5000, 1000, 500, &c);
+    ok &= gone;
+    memcpy(g_bgUV, whole, sizeof whole);
+    Check(ok, "a cloud stands above its ground with the rain falling between; nearer in it swells past the map's own zoom; with the camera down among them they are gone");
+
+    /* the passes in their order: shadows, rain, the clouds, then the lightning */
+    g_viewTex[VT_SPARK] = 1; g_viewTex[VT_SKY] = 1;
+    ViewListStart();
+    SkyBuild(1000, 500, 5000);
+    int sh = -1, rn = -1, cl = -1;
+    for (int b = 0; b < g_vbN; b++) {
+        if (g_vb[b].tex == VT_SPARK && !g_vb[b].add && sh < 0) sh = b;
+        if (g_vb[b].tex == -1 && !g_vb[b].add && rn < 0) rn = b;
+        if (g_vb[b].tex == VT_SKY && cl < 0) cl = b;
+    }
+    ok = sh >= 0 && rn > sh && cl > rn && g_vb[cl].count / 4 > 0;
+    Check(ok, "the weather drawn in its passes: the clouds' shadows on the ground, then the rain falling, then the clouds over it");
+    g_viewTex[VT_SPARK] = 0; g_viewTex[VT_SKY] = 0; g_sky.ok = 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -3539,6 +3653,7 @@ int main(int argc, char **argv)
     }
 
     TestShips();
+    TestSky();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
