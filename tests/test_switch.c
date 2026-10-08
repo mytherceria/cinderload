@@ -3841,6 +3841,80 @@ static void TestWakes(void)
             for (int i = 0; i < 3; i++) worst = m[i] > worst ? m[i] : worst;
         }
         Check(worst <= 6 && rounds >= 45, "round a sharp corner a ship's wakes curve: its arms and its stern's wake turn no more than a few degrees from one piece to the next, and round the corner with it");
+        /* round a hairpin, the right angle, and turns of 135 and 155 degrees (his note, 8 Oct: "the wakes were good except sometimes when a boat would
+         * turn, the front of it would send wakes out forwards"): at every moment of the turn no lit piece of its wakes lies
+         * ahead of its bow as the hull is drawn, and its bow wake is still there, lit, behind it */
+        {
+            float hu[4][4] = { { 0.3f, 0.5f, 0.5f, 0.3f }, { 0.3f, 0.5f, 0.5f, 0.3f }, { 0.3f, 0.5f, 0.35f, 0.3f }, { 0.3f, 0.5f, 0.32f, 0.3f } };
+            float hv[4][4] = { { 0.5f, 0.5f, 0.53f, 0.53f }, { 0.5f, 0.5f, 0.9f, 0.9f }, { 0.5f, 0.5f, 0.8f, 0.8f }, { 0.5f, 0.5f, 0.65f, 0.65f } };
+            float aheadMost = -9, litLeast = 255, leaves = -9, parts = 9, curls = -9;
+            for (int shape = 0; shape < 4; shape++) {
+                g_ships = 1; g_shipPts = 4; g_ship[0].n = 4;
+                for (int i = 0; i < 4; i++) { g_shipU[i] = hu[shape][i]; g_shipV[i] = hv[shape][i]; g_shipWait[i] = 0; }
+                ShipsTime(2.0f);
+                g_ship[0].phase = 0;
+                for (int k = 0; k <= 80; k++) {                 /* from 150 pixels before its turn to 150 past it */
+                    ViewListStart();
+                    ShipsBuild(1000, 500, (DWORD)((1.0 + 0.075 * k) * 1000), 0);
+                    if (g_vbN != 3) { aheadMost = 9; break; }
+                    const ViewVert *sp = g_vv + g_vb[2].first;
+                    int f = (int)(sp[0].u * SHIP_SHEET_W / SHIP_FRAME);
+                    float hx, hy, bx, by, lit = 0;
+                    ShipAxis(f, &hx, &hy);
+                    ShipEnd(f, (sp[0].x + sp[2].x) / 2, (sp[0].y + sp[2].y) / 2, hs, 0, &bx, &by);
+                    for (int i = 0; i < 4 * SHIP_WAKE_BANDS; i++) {
+                        const ViewVert *v = g_vv + g_vb[0].first + i;
+                        if (v->c[3] <= 2) continue;
+                        float fwd = ((v->x - bx) * hx + (v->y - by) * hy) / hs;
+                        aheadMost = fwd > aheadMost ? fwd : aheadMost;
+                        if (i < 4 * 4 * SHIP_WAKE_SEGS) lit = v->c[3] > lit ? v->c[3] : lit;
+                    }
+                    for (int i = 0; i < 2 * SHIP_CAPS + SHIP_STERN_FOAM; i++) {   /* (its whitecaps and the stern's foam too) */
+                        const ViewVert *v = g_vv + g_vb[1].first + 4 * i;
+                        if (v->c[3] <= 2) continue;
+                        float fwd = (((v[0].x + v[2].x) / 2 - bx) * hx + ((v[0].y + v[2].y) / 2 - by) * hy) / hs;
+                        aheadMost = fwd > aheadMost ? fwd : aheadMost;
+                    }
+                    litLeast = lit < litLeast ? lit : litLeast;
+                    int j5 = SHIP_WAKE_SEGS / (int)(2 * SHIP_WAKE_LEN);   /* (half a half size back along it) */
+                    const ViewVert *L5 = WakePt(0, 0, SHIP_WAKE_SEGS + 1, j5), *R5 = WakePt(0, 2 * SHIP_WAKE_SEGS, SHIP_WAKE_SEGS + 1, j5);
+                    if (L5->c[3] > 20 && R5->c[3] > 20) {           /* its bow wake leaves its bow behind it, parting either side */
+                        float mf = (((L5->x + R5->x) / 2 - bx) * hx + ((L5->y + R5->y) / 2 - by) * hy) / hs;
+                        float sl = ((L5->x - bx) * -hy + (L5->y - by) * hx) / hs, sr = ((R5->x - bx) * -hy + (R5->y - by) * hx) / hs;
+                        leaves = mf > leaves ? mf : leaves;
+                        float p = sl * sr < 0 ? -(fabsf(sl) < fabsf(sr) ? fabsf(sl) : fabsf(sr)) : 1;
+                        parts = p < parts ? p : parts;
+                    }
+                    for (int arm = 0; arm < 2; arm++) {             /* and its arms never curl back toward it */
+                        float back = 0;
+                        for (int j = 0; j <= SHIP_WAKE_SEGS; j++) {
+                            const ViewVert *v = WakePt(0, arm * 2 * SHIP_WAKE_SEGS, SHIP_WAKE_SEGS + 1, j);
+                            float fwd = ((v->x - bx) * hx + (v->y - by) * hy) / hs;
+                            back = fwd < back ? fwd : back;
+                            if (v->c[3] > 2) curls = fwd - back > curls ? fwd - back : curls;
+                        }
+                    }
+                }
+            }
+            Check(aheadMost <= 0.16f && litLeast >= 40 && leaves < -0.27f && parts < -0.08f && curls <= 0.31f,
+                  "round a hairpin, a right angle and sharper turns no lit piece of a ship's wakes or foam lies ahead of its bow, and its bow wake is still there: leaving its bow behind it, parting either side of the hull, its arms never curling back toward it");
+            /* the pieces: the hull's way on the screen as drawn (its slant), a turn through the quarter turn between two
+             * ways more than a right angle apart, and a wake's keep (all behind its bow, none 0.15 half sizes ahead of
+             * it, never rising again along it) */
+            float ax, ay, rx, ry, keep = 1;
+            ShipAxis(2, &ax, &ay);
+            int ok = Near(ax, 0.58 / sqrt(0.58 * 0.58 + 0.42 * 0.42), 1e-4) && Near(ay, 0.42 / sqrt(0.58 * 0.58 + 0.42 * 0.42), 1e-4);
+            ShipTurnTo(1, 0, -1, 0.0001f, 0.5f, &rx, &ry);      /* (east to west, by the north side: north half way) */
+            ok &= Near(rx, 0, 1e-3) && Near(ry, 1, 1e-3);
+            ShipTurnTo(1, 0, -1, -0.0001f, 0.25f, &rx, &ry);     /* (by the south side: south-east a quarter way) */
+            ok &= Near(rx, 0.7071, 1e-3) && Near(ry, -0.7071, 1e-3);
+            ShipTurnTo(1, 0, 0, 1, 0, &rx, &ry); ok &= Near(rx, 1, 1e-6) && Near(ry, 0, 1e-6);
+            ShipTurnTo(1, 0, 0, 1, 1, &rx, &ry); ok &= Near(rx, 0, 1e-6) && Near(ry, 1, 1e-6);
+            ok &= Near(ShipKeep(10, 0, 20, 0, 1, 0, 100, &keep), 1, 1e-6);   /* (behind) */
+            ok &= Near(ShipKeep(27.5f, 0, 20, 0, 1, 0, 100, &keep), 0.5, 1e-5) && Near(ShipKeep(10, 0, 20, 0, 1, 0, 100, &keep), 0.5, 1e-5);
+            ok &= Near(ShipKeep(35, 0, 20, 0, 1, 0, 100, &keep), 0, 1e-6);
+            Check(ok, "a ship's hull's way as it is drawn, a turn through the quarter turn between two ways, and a wake's keep: all behind its bow, none 0.15 half sizes ahead, never rising again");
+        }
         /* slowing into its dock (2 s waits at each end: arriving at 8 s): its wakes and foam fade with its way */
         WakeOne(0, 0, 2.0f);
         ViewListStart();

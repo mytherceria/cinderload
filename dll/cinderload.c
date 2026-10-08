@@ -3842,6 +3842,14 @@ static void LogoBuild(void)
                                    * turns when it should be curved"): the route's corners are sharp, its pieces short; */
 #define SHIP_ARM_TURN  2.5f       /* the bow wake's arms part across its way taken over this many times their spread
                                    * there either side (so round the inside of a turn they never fold back on themselves) */
+#define SHIP_BOW_HOLD  1.5f       /* where the way it came leaves its bow far off the way the hull heads (his note, 8 Oct:
+                                   * "sometimes when a boat would turn, the front of it would send wakes out forwards": the
+                                   * hull turns at once, the way it came is smoothed), the bow wake leaves its bow as the
+                                   * hull heads, bending into the way it came over this much of it; */
+#define SHIP_HOLD_FROM 0.643f     /* from 50 degrees off it (the cosine), wholly from a right angle */
+#define SHIP_AHEAD     0.15f      /* no wake lies ahead of its bow: gone this far past it, and from there on back; */
+#define SHIP_BACK      0.05f      /* nor does an arm come back toward it: gone once it has come this far back toward it, */
+#define SHIP_BACK_W    0.25f      /* and this much more */
 #define SHIP_WATER     0.24f      /* the middle of a hull's waterline, below its frame's middle */
 #define SHIP_BOW_X     0.58f      /* its bow from there, heading across the screen, */
 #define SHIP_BOW_Y     0.42f      /* and heading up or down it; */
@@ -5553,6 +5561,32 @@ static void ShipTrack(int r, float way, float W, float H, float ax, float ay, fl
         nx[j] = -ty / l; ny[j] = tx / l;
     }
 }
+/* The way frame f's hull heads on the screen, as it is drawn (from its waterline's middle to its bow): a unit vector. */
+static void ShipAxis(int f, float *hx, float *hy)
+{
+    float x = kShipHead[f][0] * SHIP_BOW_X, y = kShipHead[f][1] * SHIP_BOW_Y, l = SaberSqrt(x * x + y * y);
+    *hx = x / l; *hy = y / l;
+}
+/* Unit vector o turned toward unit vector g by e (0 to 1), through the quarter turn between them where they are more
+ * than a right angle apart (so it never passes through nothing), into *rx, *ry. */
+static void ShipTurnTo(float ox, float oy, float gx, float gy, float e, float *rx, float *ry)
+{
+    if (ox * gx + oy * gy < 0) {
+        float m = ox * gy - oy * gx < 0 ? -1.0f : 1.0f, qx = -oy * m, qy = ox * m;
+        if (e < 0.5f) { gx = qx; gy = qy; e *= 2; } else { ox = qx; oy = qy; e = 2 * e - 1; }
+    }
+    float x = ox + (gx - ox) * e, y = oy + (gy - oy) * e, l = SaberSqrt(x * x + y * y);
+    if (l > 1e-4f) { *rx = x / l; *ry = y / l; } else { *rx = ox; *ry = oy; }
+}
+/* How much of a wake at x, y is kept, its ship's bow at bx, by heading hx, hy (his note, 8 Oct: "the front of it would
+ * send wakes out forwards"): all of it behind the bow, none SHIP_AHEAD half sizes ahead of it. *keep, carried along the
+ * wake from where it starts, only ever falls, so all past a stretch of it ahead of the bow stays gone. */
+static float ShipKeep(float x, float y, float bx, float by, float hx, float hy, float hs, float *keep)
+{
+    float k = FireClamp(1 - ((x - bx) * hx + (y - by) * hy) / (SHIP_AHEAD * hs), 0, 1);
+    if (k < *keep) *keep = k;
+    return *keep;
+}
 /* Ship r's bow wake, its centre at cx, cy on a W x H window, way along its way, made pixels of it come since its dock,
  * go under way (0 to 1), in frame f, hs its half size, ppu pixels to a height of the picture, T the view's clock (s):
  * from its bow, along the way it has come, two arms parting at the Kelvin angle, widening and fading as they go. The
@@ -5565,7 +5599,25 @@ static void ShipWake(int r, float cx, float cy, float W, float H, float way, flo
     float bx, by, len = SHIP_WAKE_LEN * hs, x[N], y[N], d[N], nx[N], ny[N];
     ShipEnd(f, cx, cy, hs, 0, &bx, &by);
     ShipTrack(r, way, W, H, bx, by, len, made, ahead, ppu, f, hs, N, x, y, d, nx, ny);
-    float lx[N], ly[N], rx[N], ry[N], la[N], ra[N], lw[N];
+    float lx[N], ly[N], rx[N], ry[N], la[N], ra[N], lw[N], hx, hy, keepL = 1, keepR = 1, backL = 0, backR = 0, hold[N];
+    ShipAxis(f, &hx, &hy);
+    int j5 = (int)(0.5f * (N - 1) * hs / len + 0.5f);         /* (the way it came off its bow: its first half size) */
+    float gx = x[j5] - x[0], gy = y[j5] - y[0], gl = SaberSqrt(gx * gx + gy * gy), off = 0;
+    if (gl > 0.05f * hs) off = FireClamp((SHIP_HOLD_FROM + (gx * hx + gy * hy) / gl) / SHIP_HOLD_FROM, 0, 1);
+    for (int j = 0; j < N; j++) {
+        float e = FireClamp(d[j] / (SHIP_BOW_HOLD * hs), 0, 1);
+        hold[j] = off * (1 - e * e * (3 - 2 * e));
+    }
+    float px = x[0], py = y[0], ux = -hx, uy = -hy;             /* (at its bow straight back from it as the hull heads,
+                                                                 * turning piece by piece to the way it came, each piece
+                                                                 * as long as it is: smoothed round a hairpin the way it
+                                                                 * came bunches up, and the arms fan out off the bow) */
+    for (int j = 0; j + 1 < N; j++) {
+        float dx = x[j + 1] - px, dy = y[j + 1] - py, l = SaberSqrt(dx * dx + dy * dy);
+        px = x[j + 1]; py = y[j + 1];
+        if (l > 1e-4f) ShipTurnTo(-hx, -hy, dx / l, dy / l, 1 - 0.5f * (hold[j] + hold[j + 1]), &ux, &uy);
+        x[j + 1] = x[j] + ux * (d[j + 1] - d[j]); y[j + 1] = y[j] + uy * (d[j + 1] - d[j]);
+    }
     for (int j = 0; j < N; j++) {
         float k = d[j] / len, spread = SHIP_PART * hs + SHIP_KELVIN * d[j];
         float wpos = (way * ppu - d[j]) / hs, end = FireClamp((made - d[j]) / (0.4f * hs), 0, 1);   /* (soft where it ends) */
@@ -5579,6 +5631,14 @@ static void ShipWake(int r, float cx, float cy, float W, float H, float way, flo
         float fade = (1 - k) * SaberSqrt(1 - k);
         la[j] = go * end * 0.55f * fade * (0.6f + 0.4f * SaberNoise(wpos * 1.3f, T * 0.7f, (unsigned)r * 3 + 1));
         ra[j] = go * end * 0.55f * fade * (0.6f + 0.4f * SaberNoise(wpos * 1.3f + 17, T * 0.7f, (unsigned)r * 3 + 1));
+        ShipKeep(lx[j], ly[j], bx, by, hx, hy, hs, &keepL);     /* (never out ahead of its bow, */
+        ShipKeep(rx[j], ry[j], bx, by, hx, hy, hs, &keepR);
+        float fl = (lx[j] - bx) * hx + (ly[j] - by) * hy, fr = (rx[j] - bx) * hx + (ry[j] - by) * hy;   /* nor back toward it) */
+        backL = fl < backL ? fl : backL; backR = fr < backR ? fr : backR;
+        float kl = FireClamp(1 - ((fl - backL) / hs - SHIP_BACK) / SHIP_BACK_W, 0, 1);
+        float kr = FireClamp(1 - ((fr - backR) / hs - SHIP_BACK) / SHIP_BACK_W, 0, 1);
+        keepL = kl < keepL ? kl : keepL; keepR = kr < keepR ? kr : keepR;
+        la[j] *= keepL; ra[j] *= keepR;
         lw[j] = (0.04f + 0.11f * k) * hs;
     }
     if (!caps) {
@@ -5610,9 +5670,13 @@ static void ShipStern(int r, float cx, float cy, float W, float H, float way, fl
     float sx, sy, len = SHIP_STERN_LEN * hs, x[N], y[N], d[N], nx[N], ny[N], a0 = go * strong;
     ShipEnd(f, cx, cy, hs, 1, &sx, &sy);
     ShipTrack(r, way, W, H, sx, sy, len, made, ahead, ppu, f, hs, N, x, y, d, nx, ny);
+    float bx, by, hx, hy, keep = 1, kept[N];                     /* (never out ahead of its bow, round a hairpin) */
+    ShipEnd(f, cx, cy, hs, 0, &bx, &by);
+    ShipAxis(f, &hx, &hy);
+    for (int j = 0; j < N; j++) kept[j] = ShipKeep(x[j], y[j], bx, by, hx, hy, hs, &keep);
     if (!pass) {
         for (int m = -1; m <= 1; m++) {                          /* a lane to one side, its middle, the other side */
-            float lx[N], ly[N], la[N], lw[N];
+            float lx[N], ly[N], la[N], lw[N], lk = 1;
             for (int j = 0; j < N; j++) {
                 float k = d[j] / len, half = (SHIP_BEAM + SHIP_STERN_W * k) * hs, wpos = (way * ppu - d[j]) / hs;
                 float end = FireClamp((made - d[j]) / (0.4f * hs), 0, 1);
@@ -5620,6 +5684,8 @@ static void ShipStern(int r, float cx, float cy, float W, float H, float way, fl
                 float wander = (float)m * (0.5f + 0.5f * (SaberNoise(wpos * 1.1f + 9.0f * (float)m, T * 0.6f, (unsigned)r * 3 + 3) - 0.5f));
                 lx[j] = x[j] + nx[j] * half * wander; ly[j] = y[j] + ny[j] * half * wander;
                 la[j] = a0 * end * (m ? 0.4f : 0.6f) * (1 - k) * SaberSqrt(1 - k) * (0.25f + 0.75f * churn);
+                float kl = ShipKeep(lx[j], ly[j], bx, by, hx, hy, hs, &lk);
+                la[j] *= kl < kept[j] ? kl : kept[j];
                 lw[j] = half * (m ? 0.6f : 1.0f);
             }
             ShipBand(lx, ly, la, lw, N);
@@ -5650,6 +5716,7 @@ static void ShipStern(int r, float cx, float cy, float W, float H, float way, fl
         float fy = y[j] + (y[j + 1] - y[j]) * e + (ny[j] + (ny[j + 1] - ny[j]) * e) * lat;
         float fl = 0.5f + 0.5f * SaberNoise(T * 3.0f, (float)(c & 1023u) * 0.37f, (unsigned)r + 130);
         float a = a0 * FireClamp((made - dc) / (0.4f * hs), 0, 1) * 0.5f * (1 - k) * fl * FireClamp(dc / (0.3f * hs), 0, 1);
+        a *= kept[j] + (kept[j + 1] - kept[j]) * e;
         ShipQuad(VT_SPARK, 1, fx, fy, (0.05f + 0.09f * k + 0.06f * SeaRand(c, (unsigned)r + 121)) * hs, 0, 0, 1, 1,
                  SaberArgb(0xFFFFFF, a));
     }
