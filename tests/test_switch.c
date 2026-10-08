@@ -2826,9 +2826,10 @@ static void ViewTests(void)
     /* its frame: the world map over the whole window at the zoom's own corners, then the blade along the bottom (6 Oct
      * 2026, his design: one bar for every class, the same size, only its colour the class's, unstable like the Darksaber,
      * the logo on it as its halfway mark; 7 Oct: solid, in the dark metal frame of his reference, flush with the bottom
-     * of the screen; then, from his reference: a smooth fill, light fullest in the middle). The blade's batches, in order:
-     * the channel, the glow (added), the fill (and the way to go), the frame, the lips' light (added), the light (the
-     * spark, added: the tip, its sparks, the logo's), the logo */
+     * of the screen; then, from his reference: a smooth fill, light fullest in the middle; then alive: surges, an orb,
+     * lightning). The blade's batches, in order: the channel, the glow (added), the fill (and the way to go), its
+     * filaments (added), the frame, its shine (added), the lips' light and the lightning (added), the light (the spark,
+     * added: the orb, its embers, the surges' light, where the lightning strikes, the logo's), the logo */
     {
         static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
         memcpy(g_bgUV, uv, sizeof uv);
@@ -2909,11 +2910,12 @@ static void ViewTests(void)
         /* a quarter loaded, a warlock */
         g_class = 9; g_viewTex[VT_SPARK] = 1;
         ViewBuild(1000, 500, 0.25f, 1234);
-        enum { CH = 1, GL, CO, FRAME, SHINE, LIPS, LIGHT };
-        ok = g_vbN == 8 && g_vb[CH].tex == -1 && !g_vb[CH].add && g_vb[CH].count == 4 && g_vb[GL].tex == -1 && g_vb[GL].add &&
-             g_vb[CO].tex == -1 && !g_vb[CO].add && g_vb[FRAME].tex == VT_FRAME &&
-             !g_vb[FRAME].add && g_vb[LIPS].tex == -1 && g_vb[LIPS].add && g_vb[LIPS].count == 8 && g_vb[LIGHT].tex == VT_SPARK &&
-             g_vb[LIGHT].add && g_vb[LIGHT].count == 4 * (2 + SABER_SPARKS);
+        enum { CH = 1, GL, CO, STR, FRAME, SHINE, LIPS, LIGHT };
+        ok = g_vbN == 9 && g_vb[CH].tex == -1 && !g_vb[CH].add && g_vb[CH].count == 4 && g_vb[GL].tex == -1 && g_vb[GL].add &&
+             g_vb[CO].tex == -1 && !g_vb[CO].add && g_vb[STR].tex == -1 && g_vb[STR].add && g_vb[STR].count > 0 &&
+             g_vb[STR].count % (8 * SABER_STRANDS) == 0 && g_vb[FRAME].tex == VT_FRAME &&
+             !g_vb[FRAME].add && g_vb[LIPS].tex == -1 && g_vb[LIPS].add && g_vb[LIPS].count == 8 + 8 * ARC_SEGS * SABER_ARCS &&
+             g_vb[LIGHT].tex == VT_SPARK && g_vb[LIGHT].add && g_vb[LIGHT].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_ARCS);
         int cols = (g_vb[CO].count / 4 - 1) / 2;                         /* the way to go, then two quads a column */
         float front = x0 + 0.25f * span;
         ok &= cols > 30 && g_vb[CO].count == 4 * (1 + 2 * cols) && g_vb[GL].count == 16 * cols;
@@ -2963,17 +2965,21 @@ static void ViewTests(void)
             int a = b0[4].c[3] + b0[5].c[3];
             if (a > best) { best = (float)a; bestX = xa; }
             if (b0[4].x > front + 4 * SHINE_REACH * 1000) shine &= b0[4].c[3] == 0 && b0[5].c[3] == 0;   /* dark ahead */
-            if (b0[5].x < front - 4 * SHINE_REACH * 1000) shine &= abs(b0[4].c[3] - (int)(SHINE_LIT * 255 + 0.5f)) <= 1;   /* lit behind */
+            if (b0[5].x < front - 4 * SHINE_REACH * 1000) shine &= b0[4].c[3] >= (int)(SHINE_LIT * 255 + 0.5f) - 1;   /* lit behind */
         }
         shine &= rgbOk && fabsf(bestX - front) < 96 * s && best > 2 * SHINE_LIT * 255 + 20;   /* brightest at the tip */
         Check(shine, "the blade's light on the metal: the frame again, added, in the class's colour, full across the rail band and fading to nothing at the pieces' tips; lit over the stretch the blade has filled, brightest where its tip is, dark ahead of it");
         /* the light fullest in the middle of the bar (his reference): whiter along the centre line there, deeper toward
          * the ends, the fill's top and bottom edges deeper still */
-        ViewBuild(1000, 500, 1.0f, 1234);
-        int fc = g_vb[CO].count / 8;
-        const ViewVert *mq = g_vv + g_vb[CO].first + 8 * (fc / 2), *eq = g_vv + g_vb[CO].first + 8 * (fc / 12);
-        int whiter = mq[3].c[0] + mq[3].c[1] > eq[3].c[0] + eq[3].c[1] + 60 && mq[0].c[0] + mq[0].c[1] > eq[0].c[0] + eq[0].c[1] + 30 &&
-                     eq[3].c[0] > eq[0].c[0] && mq[3].c[1] > 180;
+        float mC = 0, eC = 0, mE = 0, eE = 0, eR = 0, eR0 = 0, mG = 0;           /* (on the whole: the surges pass) */
+        for (int i = 0; i < 30; i++) {
+            ViewBuild(1000, 500, 1.0f, 1234 + 97 * i);
+            int fc = g_vb[CO].count / 8;
+            const ViewVert *mq = g_vv + g_vb[CO].first + 8 * (fc / 2), *eq = g_vv + g_vb[CO].first + 8 * (fc / 12);
+            mC += mq[3].c[0] + mq[3].c[1]; eC += eq[3].c[0] + eq[3].c[1]; mE += mq[0].c[0] + mq[0].c[1]; eE += eq[0].c[0] + eq[0].c[1];
+            eR += eq[3].c[0]; eR0 += eq[0].c[0]; mG += mq[3].c[1];
+        }
+        int whiter = mC / 30 > eC / 30 + 60 && mE / 30 > eE / 30 + 30 && eR > eR0 && mG / 30 > 180;
         Check(whiter, "the light fullest in the middle of the bar (his reference): near white along its centre there, the class's colour deeper toward the bar's ends and at the fill's edges");
         ViewBuild(1000, 500, 0.25f, 1234);
         Check(SaberVivid(0xFFFFFF) == 0xFFFFFF && SaberVivid(0x0070DE) == 0x0081FF && SaberVivid(0xFF7D0A) == 0xFF7B06,
@@ -3002,15 +3008,170 @@ static void ViewTests(void)
         int moved = memcmp(g_vv[g_vb[CO].first + 4 + 8 * (cols / 2) + 3].c, before, 3) != 0;
         g_class = 3;
         Check(steady && moved, "the blade breathes: two seconds on its light has changed, the fill's shape and place have not (smooth, not crackling: his call)");
-        /* full: edge to edge, no way to go, no tip */
+        /* alive (his ask, 7 Oct: "it needs to 'be alive' and be more dynamic, like it's powerful, and the leading edge
+         * needs to be more variable like a pulsing orb of energy, and the whole bar should have some kind of effects"):
+         * the surges run from the foot to the tip at one speed, leaving unevenly, and each that arrives makes the orb flare
+         * (a warlock's blade throughout, its purple's green the measure of how white it runs) */
+        g_class = 9;
+        {
+            float px[8], pa[8], qx[8], qa[8], fl = 0, fl2 = 0, dt = 1.0f / 120, xs0 = 100, sspan = 800, sfront = 700, sch = 10;
+            int runs = 1, arrivals = 0, flared = 0, beats = 0, high = 0;
+            float lastBeat = -1, gapLo = 1e9f, gapHi = 0;
+            for (int f = 0; f < 120 * 30; f++) {
+                float tt = 10 + f * dt;
+                int a = SaberSurges(tt, xs0, sspan, sfront, sch, px, pa, 8, &fl);
+                int b2 = SaberSurges(tt + dt, xs0, sspan, sfront, sch, qx, qa, 8, &fl2);
+                runs &= fl >= 0 && fl <= 1 && a <= 8;
+                for (int i = 0; i < a; i++) {
+                    runs &= px[i] > xs0 && px[i] < sfront && pa[i] > 0 && pa[i] <= 1;
+                    float want = px[i] + dt / ORB_TRAVEL * sspan;
+                    int found = 0;
+                    for (int j = 0; j < b2; j++) found |= fabsf(qx[j] - want) < 1e-2f;
+                    if (want < sfront - 1e-2f) runs &= found;               /* on its way: a step on, at one speed */
+                    else if (!found) {                                       /* arrived: the orb flares within 60 ms */
+                        float most = 0, d1[8], d2[8];
+                        for (int k = 1; k <= 8; k++) {
+                            float ff;
+                            SaberSurges(tt + k * dt, xs0, sspan, sfront, sch, d1, d2, 8, &ff);
+                            if (ff > most) most = ff;
+                        }
+                        arrivals++;
+                        flared += most >= 0.5f;
+                    }
+                }
+                if (fl2 >= 0.45f && !high) {                                 /* a beat */
+                    if (lastBeat >= 0) { float gp = tt - lastBeat; if (gp < gapLo) gapLo = gp; if (gp > gapHi) gapHi = gp; }
+                    lastBeat = tt; beats++;
+                }
+                high = fl2 >= 0.45f ? 1 : fl2 < 0.3f ? 0 : high;
+            }
+            Check(runs && arrivals > 20 && flared == arrivals && beats >= 20 && beats <= 60 && gapLo < 0.35f && gapHi > 0.8f,
+                  "alive: power runs down the blade: surges leave its foot unevenly (beats as close as a third of a second and as far as most of one), run the bar at one speed, and each one that reaches the tip makes the orb there flare");
+        }
+        /* the orb: at the tip, bigger than the channel, swelling as it flares; the same at the same moment */
+        {
+            float rLo = 1e9f, rHi = 0, f0 = x0 + 0.4f * span;
+            int at = 1, same = 1;
+            for (int f = 0; f < 60 * 6; f++) {
+                DWORD nw = 50000 + (DWORD)(f * 1000 / 60);
+                ViewBuild(1000, 500, 0.4f, nw);
+                const ViewVert *o = g_vv + g_vb[LIGHT].first, *body = o + 4;
+                float r = (body[2].y - body[0].y) / 2 / 1.55f;
+                at &= g_vb[LIGHT].tex == VT_SPARK && fabsf((o[0].x + o[1].x) / 2 - f0) < 1e-3f && fabsf((o[0].y + o[2].y) / 2 - cy) < 1e-3f &&
+                      fabsf((body[0].x + body[1].x) / 2 - f0) < 1e-3f && NEAR(o[0].c, 132, 91, 255) && NEAR(body[0].c, 132, 91, 255);
+                if (r < rLo) rLo = r;
+                if (r > rHi) rHi = r;
+                if (f == 100) {
+                    static ViewVert keep[VIEW_QUADS_MAX * 4];
+                    int nk = g_vvN;
+                    memcpy(keep, g_vv, sizeof(ViewVert) * nk);
+                    ViewBuild(1000, 500, 0.4f, nw);
+                    same = g_vvN == nk && !memcmp(keep, g_vv, sizeof(ViewVert) * nk);
+                }
+            }
+            Check(at && same && rLo >= ch * 1.0f && rHi >= rLo * 1.25f,
+                  "alive: the orb at the tip, centred on it, bigger than the channel (its light spills onto the metal), swelling by a quarter and more as it flares; the same at the same moment");
+        }
+        /* lightning: from the orb onto the metal and into the dark way ahead, crackles off the fill anywhere along it;
+         * never off the bar (the frame's band); a dark one drawn dark */
+        {
+            float f0 = x0 + 0.5f * span, bandTop = top + 33 * s, bandBot = top + 123 * s;
+            int inside = 1, fromOrb = 1, metal = 0, ahead = 0, along = 0, lit = 0;
+            for (int f = 0; f < 30 * 4; f++) {
+                ViewBuild(1000, 500, 0.5f, 70000 + (DWORD)(f * 1000 / 30));
+                const ViewVert *ar = g_vv + g_vb[LIPS].first + 8;
+                inside &= g_vb[LIPS].count == 8 + 8 * ARC_SEGS * SABER_ARCS;
+                for (int a = 0; a < SABER_ARCS; a++) {
+                    const ViewVert *q = ar + a * 8 * ARC_SEGS, *endq2 = q + 8 * (ARC_SEGS - 1);
+                    if (q[0].c[3] == 0) continue;
+                    lit++;
+                    for (int v = 0; v < 8 * ARC_SEGS; v++) inside &= q[v].y >= bandTop - 1.5f && q[v].y <= bandBot + 1.5f;
+                    float ex = endq2[1].x, ey = endq2[1].y;
+                    if (a < ORB_ARCS) {
+                        float ddx = q[0].x - f0, ddy = q[0].y - cy;
+                        fromOrb &= ddx * ddx + ddy * ddy <= (ch * 1.9f * 0.3f + 1) * (ch * 1.9f * 0.3f + 1);
+                        metal += fabsf(ey - cy) > ch + 0.5f;
+                        ahead += ex > f0 + ch * 1.2f && fabsf(ey - cy) < ch;       /* in the channel, ahead */
+                    } else {
+                        inside &= fabsf(q[0].y - cy) <= ch;                   /* off the fill */
+                        along += q[0].x < f0 - 0.3f * span;
+                    }
+                }
+            }
+            Check(inside && fromOrb && lit > 40 && metal > 5 && ahead > 5 && along > 2,
+                  "alive: lightning from the orb onto the metal above and below and into the dark way ahead, and crackles off the fill onto the rails anywhere along the bar; never off the frame's band");
+        }
+        /* the filaments: inside the fill, wandering along it */
+        {
+            float f0 = x0 + 0.5f * span;
+            ViewBuild(1000, 500, 0.5f, 80000);
+            int in = g_vb[STR].count > 0, some = 0, nv3 = g_vb[STR].count;
+            static float ys[VIEW_QUADS_MAX * 4];
+            for (int i = 0; i < nv3; i++) {
+                const ViewVert *v = g_vv + g_vb[STR].first + i;
+                in &= fabsf(v->y - cy) <= ch && v->x >= x0 - 1e-3f && v->x <= f0 + 1e-3f;
+                some |= v->c[3] > 0;
+                ys[i] = v->y;
+            }
+            ViewBuild(1000, 500, 0.5f, 80500);
+            int moved2 = 0;
+            for (int i = 0; i < nv3 && i < g_vb[STR].count; i++) moved2 |= fabsf(g_vv[g_vb[STR].first + i].y - ys[i]) > 0.5f;
+            Check(in && some && moved2, "alive: faint filaments of the light inside the fill, behind the orb, wandering as they flow");
+        }
+        /* a surge whitens the fill right across where it is passing (the class's colour elsewhere: the churn never
+         * reaches white), lights the metal over it, and its light spills over the rails */
+        {
+            int seen = 0, whiter = 1, plain = 1, onMetal = 0, spill = 0;
+            unsigned g0 = SaberVivid(kClassColour[9]) >> 8 & 255;
+            for (int f = 0; f < 30 * 6; f++) {
+                ViewBuild(1000, 500, 0.8f, 90000 + (DWORD)(f * 1000 / 30));
+                int cols2 = (g_vb[CO].count / 4 - 1) / 2;
+                for (int k = 0; k <= cols2; k++) {
+                    unsigned gt = g_sbTop[k] >> 8 & 255;
+                    if (g_sbSurge[k] >= 0.5f) { seen++; whiter &= gt >= g0 + 20; }
+                    if (g_sbSurge[k] == 0) plain &= gt <= g0;
+                }
+                float sx2[8], sa2[8], fl3;
+                int n2 = SaberSurges((float)((90000 + f * 1000 / 30) % 3600000u) / 1000.0f, x0, span, x0 + 0.8f * span, ch, sx2, sa2, 7, &fl3);
+                const ViewVert *sg = g_vv + g_vb[LIGHT].first + 4 * (ORB_GLOWS + SABER_SPARKS);
+                for (int i = 0; i < n2; i++) {
+                    if (sa2[i] < 0.5f || sx2[i] > x0 + 0.8f * span - 6 * SHINE_REACH * 1000) continue;
+                    spill += fabsf((sg[4 * i].x + sg[4 * i + 1].x) / 2 - sx2[i]) < 1e-3f && sg[4 * i].c[3] > 0;
+                    for (int q = 0; q < g_vb[SHINE].count / 16; q++) {
+                        const ViewVert *b0 = g_vv + g_vb[SHINE].first + 16 * q;
+                        if (fabsf((b0[4].x + b0[5].x) / 2 - sx2[i]) < 96 * s * 0.6f) onMetal += b0[4].c[3] > (int)(SHINE_LIT * 255) + 15;
+                    }
+                }
+            }
+            Check(seen > 50 && whiter && plain && onMetal > 10 && spill > 10,
+                  "alive: a surge whitens the fill right across as it passes (elsewhere it keeps the class's colour, however it churns), lights the metal over it, and its light spills over the rails");
+        }
+        /* as the blade fills, a last surge runs the whole bar */
+        {
+            ViewBuild(1000, 500, 0.9f, 100000);
+            ViewBuild(1000, 500, 1.0f, 100500);                              /* it fills */
+            ViewBuild(1000, 500, 1.0f, 100700);                              /* 0.2 s on */
+            float head = x0 + 0.2f / SWEEP_S * span;
+            int cols3 = g_vb[CO].count / 8, k = (int)((head - x0) / (span / (float)cols3) + 0.5f);
+            int swept = k > 0 && k < cols3 && g_sbSurge[k] >= 1.25f;
+            ViewBuild(1000, 500, 0.5f, 101000);                              /* (a new screen) */
+            Check(swept && g_sbFullAt == 0, "alive: as the blade fills a last surge runs its whole length (a new screen begins it afresh)");
+        }
+        g_class = 3;
+        /* full: edge to edge, no way to go, no tip; the metal flashing as it fills, then lit along its whole length */
         ViewBuild(1000, 500, 1.0f, 2000);
+        int flashed = 255;
+        for (int i = g_vb[SHINE].first + 4; i < g_vb[SHINE].first + g_vb[SHINE].count; i += 16) if (g_vv[i].c[3] < flashed) flashed = g_vv[i].c[3];
+        ViewBuild(1000, 500, 1.0f, 5000);
         cols = g_vb[CO].count / 8;
         const ViewVert *endq = g_vv + g_vb[CO].first + 8 * (cols - 1);
-        ok = g_vbN == 7 && g_vb[SHINE].add && g_vb[SHINE].tex == VT_FRAME && g_vb[CO].count == 8 * cols && Near(g_vv[g_vb[CO].first].x, x0, 1e-3) && g_vb[LIPS].count == 8 &&
+        ok = g_vbN == 9 && g_vb[SHINE].add && g_vb[SHINE].tex == VT_FRAME && g_vb[CO].count == 8 * cols && Near(g_vv[g_vb[CO].first].x, x0, 1e-3) &&
+             g_vb[LIPS].count == 8 + 8 * ARC_SEGS * BAR_ARCS && g_vb[LIGHT].count == 4 * (SURGE_GLOWS + BAR_ARCS) &&
              Near(endq[1].x, x1, 1e-3) && Near(endq[1].y, cy - ch, 1e-3) && g_vv[g_vb[CO].first].c[3] == 247 && cols == (int)(span / SABER_COL_PX);
-        const ViewVert *shl = g_vv + g_vb[SHINE].first, *shr = shl + g_vb[SHINE].count - 16;
-        ok &= shl[4].c[3] > 0 && shl[4].c[3] == shr[5].c[3];                   /* the whole frame lit alike once full */
-        Check(ok, "the blade full: the fill from cup to cup, full height right up to the metal at both ends (no dead space: his call), nothing still to go, no tip, its light on the whole frame");
+        int settled = 255;
+        for (int i = g_vb[SHINE].first + 4; i < g_vb[SHINE].first + g_vb[SHINE].count; i += 16) if (g_vv[i].c[3] < settled) settled = g_vv[i].c[3];
+        ok &= settled >= (int)(SHINE_FULL * 0.94f * 255) - 1 && flashed > settled + 60;   /* the whole frame lit; the flash */
+        Check(ok, "the blade full: the fill from cup to cup, full height right up to the metal at both ends (no dead space: his call), nothing still to go, no orb, its light on the whole frame, flashing as it fills; still crackling");
         /* the logo on it at the centre, its halfway mark, standing on the bottom of the screen: over the tip, grey before
          * the tip reaches it, lit after */
         g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2; g_logo.tu0 = 0.1f; g_logo.tv0 = 0.2f; g_logo.tu1 = 0.9f; g_logo.tv1 = 0.8f;
@@ -3019,20 +3180,20 @@ static void ViewTests(void)
         const ViewVert *lg = g_vv + g_vb[g_vbN - 1].first;
         float lh = SABER_LOGO_H * 500, foot = 500 - SABER_LOGO_FOOT * 500;
         ok = g_vb[g_vbN - 1].tex == VT_LOGO && !g_vb[g_vbN - 1].add && g_vb[g_vbN - 1].count == 4 && g_vb[g_vbN - 2].tex == VT_SPARK &&
-             g_vb[g_vbN - 2].count == 4 * (2 + SABER_SPARKS) && fabsf(lg[0].x - (500 - lh)) < 1e-3f && fabsf(lg[2].x - (500 + lh)) < 1e-3f &&
+             g_vb[g_vbN - 2].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_ARCS) && fabsf(lg[0].x - (500 - lh)) < 1e-3f && fabsf(lg[2].x - (500 + lh)) < 1e-3f &&
              fabsf(lg[2].y - foot) < 1e-3f && fabsf(lg[0].y - (foot - lh)) < 1e-3f && lg[0].u == 0.1f && lg[0].v == 0.2f &&
              lg[2].u == 0.9f && lg[2].v == 0.8f && lg[0].c[0] == 210 && lg[0].c[3] == 255;
         ViewBuild(1000, 500, 0.6f, 3000);
         lg = g_vv + g_vb[g_vbN - 1].first;
         const ViewVert *aura = g_vv + g_vb[g_vbN - 2].first + g_vb[g_vbN - 2].count - 8;
-        ok &= g_vb[g_vbN - 1].tex == VT_LOGO && lg[0].c[0] == 255 && g_vb[g_vbN - 2].count == 4 * (2 + SABER_SPARKS + 2) &&
+        ok &= g_vb[g_vbN - 1].tex == VT_LOGO && lg[0].c[0] == 255 && g_vb[g_vbN - 2].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_ARCS + 2) &&
               fabsf((aura[0].x + aura[1].x) / 2 - 500) < 1e-3f && fabsf((aura[0].y + aura[2].y) / 2 - (foot - lh / 2)) < 1e-3f &&
               NEAR(aura[0].c, 179, 255, 76) && aura[0].c[3] > 0;
         Check(ok, "the RavenCraft logo stands on the bottom of the screen at the blade's centre, its halfway mark, over the tip as it passes: grey before the tip reaches it, then white and lit behind in the class's colour");
         g_viewTex[VT_SPARK] = 0;                                         /* no spark: no tip, no light, the rest as ever */
         ViewBuild(1000, 500, 0.6f, 3000);
-        ok = g_vbN == 8 && g_vb[FRAME].tex == VT_FRAME && g_vb[SHINE].add && g_vb[LIPS].add && g_vb[7].tex == VT_LOGO;
-        Check(ok, "without its spark the blade has no tip or light, and the rest is drawn");
+        ok = g_vbN == 9 && g_vb[FRAME].tex == VT_FRAME && g_vb[SHINE].add && g_vb[LIPS].add && g_vb[8].tex == VT_LOGO;
+        Check(ok, "without its spark the blade has no orb or light, and the rest is drawn (the lightning too)");
         g_viewTex[VT_FRAME] = 0;                                         /* no frame: a channel of its size, flush, no metal */
         ViewBuild(1000, 500, 0.6f, 3000);
         FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1);

@@ -4574,8 +4574,17 @@ static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
 #define SABER_COLS_MAX 1024       /* and at the most this many */
-#define SABER_SPARKS   14         /* sparks thrown back off its tip */
-#define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 5 * (256 + 3) + 3)   /* (the frame's: FRAME_TILES and the rest, and
+#define SABER_SPARKS   18         /* embers thrown back off its tip */
+#define ORB_GLOWS      9          /* the orb at its tip: corona, body, heat, core, four lobes, the flare's streak */
+#define SABER_STRANDS  3          /* the filaments wandering in its fill, */
+#define STRAND_PTS     512        /* each through this many points at the most */
+#define ORB_ARCS       5          /* lightning from the orb, */
+#define BAR_ARCS       3          /* crackles off the fill along the bar, */
+#define SABER_ARCS     (ORB_ARCS + BAR_ARCS)
+#define ARC_SEGS       6          /* each this many pieces */
+#define SURGE_GLOWS    8          /* the surges' light spilling over the metal (as many as can be on their way at once) */
+#define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 5 * (256 + 3) + 3 + ORB_GLOWS + \
+                        SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS)   /* (the frame's: FRAME_TILES and the rest, and
                                                                                     * its shine: four more a piece) */
 #define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE) + SKY_QUADS)
 #define VIEW_BATCHES   48
@@ -4977,13 +4986,20 @@ static void FrameLayout(float W, float H, float *s, float *top, float *cy, float
 #define SHINE_TIP   1.10f
 #define SHINE_REACH 0.035f
 #define SHINE_FULL  0.50f
-static struct { int on; float front, reach, mid, full; unsigned rgb; } g_shine;
+#define SHINE_SURGE 0.50f          /* a surge's light running along the rails over it (at its strongest) */
+#define SHINE_FLASH 0.60f          /* and the whole frame's flash as the blade fills */
+static struct { int on, ns; float front, reach, mid, full, sw, sx[8], sa[8]; unsigned rgb; } g_shine;
 static float ShineAt(float x)
 {
-    if (g_shine.full > 0) return g_shine.full;
+    float s = 0;
+    for (int i = 0; i < g_shine.ns; i++) {                       /* the surges' light, running along under the metal */
+        float d = (x - g_shine.sx[i]) / g_shine.sw;
+        if (d * d < 1) { float b = 1 - d * d; s += SHINE_SURGE * g_shine.sa[i] * b * b; }
+    }
+    if (g_shine.full > 0) return g_shine.full + s;
     float d = (x - g_shine.front) / g_shine.reach, lit = d <= 0 ? SHINE_LIT : d < 1 ? SHINE_LIT * (1 - d) : 0;
     float b = 1 - d * d / 9;                                     /* the tip's light: a smooth bump three reaches each way */
-    return lit + (b > 0 ? SHINE_TIP * b * b : 0);
+    return lit + s + (b > 0 ? SHINE_TIP * b * b : 0);
 }
 /* Piece p from x0 to x1 at scale s, its top at top; cut, when x1 falls short of its width, at the same place on the sheet. */
 static void FramePiece(int p, float x0, float x1, float s, float top)
@@ -5036,13 +5052,14 @@ static void FrameChannel(float x0, float x1, float cy, float ch)
     DWORD c[4] = { 0xE6050A0Fu, 0xE6050A0Fu, 0xE6050A0Fu, 0xE6050A0Fu };
     SaberPut(-1, 0, x, y, c, NULL);
 }
-/* The channel's lips lit by the blade (added, over the metal) from x0 to x1, in its light rgb. */
-static void FrameLips(float x0, float x1, float cy, float ch, float line, unsigned rgb)
+/* The channel's lips lit by the blade (added, over the metal) from x0 to x1, in its light rgb, a times as bright as
+ * they usually are (the orb's flare throbs through them). */
+static void FrameLips(float x0, float x1, float cy, float ch, float line, unsigned rgb, float a)
 {
     for (int s = 0; s < 2; s++) {
         float d = s ? 1.0f : -1.0f, e = cy + d * ch;
         float x[4] = { x0, x1, x1, x0 }, y[4] = { e + d * line * 3, e + d * line * 3, e - d * line, e - d * line };
-        DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, 0.65f), SaberArgb(rgb, 0.65f) };
+        DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, 0.65f * a), SaberArgb(rgb, 0.65f * a) };
         if (s) { float t; t = y[0]; y[0] = y[3]; y[3] = t; t = y[1]; y[1] = y[2]; y[2] = t;
                  DWORD u = c[0]; c[0] = c[3]; c[3] = u; u = c[1]; c[1] = c[2]; c[2] = u; }
         SaberPut(-1, 1, x, y, c, NULL);
@@ -5059,23 +5076,136 @@ static float SaberSqrt(float v)
     return r;
 }
 static float g_sbX[SABER_COLS_MAX + 1];
+
+/* ---- the blade alive (7 Oct 2026, his ask: "it needs to 'be alive' and be more dynamic, like it's powerful, and the
+ * leading edge needs to be more variable like a pulsing orb of energy, and the whole bar should have some kind of
+ * effects to it") ----
+ * Power runs down the blade. Surges leave its foot unevenly (about every ORB_BEAT s, now and then one skipped, some
+ * stronger than others) and run the bar in ORB_TRAVEL s: a brightening of the fill, of its glow and of the metal over
+ * them, sharp at its head, with a long tail. Each one that reaches the tip makes the orb there flare, so the orb's
+ * beat IS the surges arriving, and it never ticks like a clock. Under them the fill churns: its top, its middle and
+ * its bottom brighten and dim apart as slow currents flow toward the tip, and faint filaments wander along it. The
+ * orb: a white-hot core in the class's light, bigger than the channel (its light spills onto the metal), its edge
+ * churning, swelling as it flares, a streak of light across it at the flare's height; lightning reaching from it to
+ * the metal and into the dark way ahead, and now and then a crackle off the fill onto the rails anywhere along it
+ * (oftenest where a surge is passing); embers thrown back off it. Full, a last surge runs the whole bar and the
+ * metal flashes. All of it from the view's clock (and the moment the blade filled): the same at the same moment, and
+ * the same for every class but its colour. The fill keeps its shape (his call, 7 Oct: smooth, the whole height of
+ * its channel); only its light moves. */
+#define ORB_BEAT    0.55f      /* a surge leaves the foot about this often (s), 0.08 to 1 s apart */
+#define ORB_TRAVEL  1.40f      /* and runs the whole bar in this long */
+#define ORB_FADE    0.22f      /* the orb's flare falls back in about this long (s) */
+#define SURGE_HEAD  1.2f       /* a surge's head, in the channel's half heights, ahead of its peak, */
+#define SURGE_TAIL  6.0f       /* and its tail behind */
+#define SWEEP_S     0.45f      /* the last surge, as the blade fills: the whole bar in this long */
+#define CHURN       0.20f      /* how far the fill's light churns either way */
+static float g_sbSurge[SABER_COLS_MAX + 1], g_sbChurn[3][SABER_COLS_MAX + 1];
+static unsigned g_sbTop[SABER_COLS_MAX + 1], g_sbIn[SABER_COLS_MAX + 1], g_sbBot[SABER_COLS_MAX + 1];
+static DWORD g_sbFullAt;       /* the view's clock as the blade filled (0 while it is filling) */
+
+/* The surges at t s along a bar from x0, span long, its tip at front (x0 + span once full), ch its channel's half
+ * height: each one on its way, its place and strength into sx[], sa[] (n at the most; how many, returned), and the
+ * orb's flare, 0 to 1, from those that have reached the tip. */
+static int SaberSurges(float t, float x0, float span, float front, float ch, float *sx, float *sa, int n, float *flare)
+{
+    float reach = span > 0 ? (front - x0) / span * ORB_TRAVEL : 0, calm = 1;
+    int k0 = (int)MapFloor((t - ORB_TRAVEL - 6 * ORB_FADE) / ORB_BEAT) - 1, k1 = (int)MapFloor(t / ORB_BEAT), m = 0;
+    for (int k = k0; k <= k1; k++) {
+        unsigned u = (unsigned)k;
+        if (SeaRand(u, 43) > 0.85f) continue;                         /* (now and then a beat skipped) */
+        float age = t - ((float)k + 0.85f * SeaRand(u, 41)) * ORB_BEAT, s = 0.55f + 0.45f * SeaRand(u, 47);
+        if (age < 0) continue;
+        if (age < reach) {                                             /* on its way: in from the foot, into the orb */
+            float x = x0 + age / ORB_TRAVEL * span;
+            float in = FireClamp((x - x0) / (ch * 2), 0, 1) * FireClamp((front - x) / (ch * 1.5f), 0, 1);
+            if (m < n && in > 0) { sx[m] = x; sa[m] = s * in; m++; }
+        } else {                                                       /* arrived: the orb flares, quick up, slow down */
+            float d = age - reach, f = d < 0.03f ? d / 0.03f : (float)FireExp(-(double)(d - 0.03f) / ORB_FADE);
+            calm *= 1 - s * f;
+        }
+    }
+    *flare = 1 - calm;
+    return m;
+}
+/* How bright the surges make the bar at x: each of the n at sx[] its strength sa[] there, sharp ahead, a long tail behind. */
+static float SaberSurgeAt(float x, const float *sx, const float *sa, int n, float ch)
+{
+    float sum = 0;
+    for (int i = 0; i < n; i++) {
+        float d = x - sx[i];
+        d = d > 0 ? d / (ch * SURGE_HEAD) : -d / (ch * SURGE_TAIL);
+        if (d < 1) { float b = 1 - d * d; sum += sa[i] * b * b; }
+    }
+    return sum > 1.5f ? 1.5f : sum;
+}
+/* A soft line of light through the n points x[], y[], added: brightest along it (colour mid, alpha a[] at each point),
+ * fading to nothing w to either side (colour rim); two quads a piece, their corners shared, so it bends unbroken. */
+static void SaberLine(const float *x, const float *y, const float *a, int n, float w, unsigned mid, unsigned rim)
+{
+    for (int i = 0; i + 1 < n; i++) {
+        float nx[2], ny[2];
+        for (int e = 0; e < 2; e++) {                                  /* each end's normal, from its neighbours */
+            int j = i + e, p = j > 0 ? j - 1 : j, q = j + 1 < n ? j + 1 : j;
+            float dx = x[q] - x[p], dy = y[q] - y[p], l = SaberSqrt(dx * dx + dy * dy);
+            if (!(l > 0)) { dx = 1; dy = 0; l = 1; }
+            nx[e] = -dy / l * w; ny[e] = dx / l * w;
+        }
+        for (int s = 0; s < 2; s++) {
+            float d = s ? -1.0f : 1.0f;
+            float qx[4] = { x[i], x[i + 1], x[i + 1] + d * nx[1], x[i] + d * nx[0] };
+            float qy[4] = { y[i], y[i + 1], y[i + 1] + d * ny[1], y[i] + d * ny[0] };
+            DWORD c[4] = { SaberArgb(mid, a[i]), SaberArgb(mid, a[i + 1]), SaberArgb(rim, 0), SaberArgb(rim, 0) };
+            SaberPut(-1, 1, qx, qy, c, NULL);
+        }
+    }
+}
+/* A bolt of lightning from ax, ay to bx, by, alpha a (0: drawn dark, so the list keeps its shape), writhing with the
+ * clock t, its shape picked by seed, kept between the heights ylo and yhi (the metal's top and bottom: it never leaves
+ * the bar); w its light's reach either side. (Where it strikes, the caller's light.) */
+static void SaberArc(float ax, float ay, float bx, float by, float a, float t, unsigned seed, float ylo, float yhi, float w,
+                     unsigned mid, unsigned rim)
+{
+    float x[ARC_SEGS + 1], y[ARC_SEGS + 1], al[ARC_SEGS + 1];
+    float dx = bx - ax, dy = by - ay, l = SaberSqrt(dx * dx + dy * dy), nx = l > 0 ? -dy / l : 0, ny = l > 0 ? dx / l : 1;
+    for (int j = 0; j <= ARC_SEGS; j++) {
+        float k = (float)j / ARC_SEGS, taper = SeaSin(3.14159265f * k);
+        float off = l * 0.22f * (2 * SaberNoise((float)j * 1.3f, t * 14, seed) - 1) * taper;
+        x[j] = ax + dx * k + nx * off; y[j] = FireClamp(ay + dy * k + ny * off, ylo, yhi);
+        al[j] = a * (1 - 0.5f * k);                                    /* (brightest where it leaves the light) */
+    }
+    SaberLine(x, y, al, ARC_SEGS + 1, w, mid, rim);
+}
+
 /* The blade for a W x H window, its tip at the bar as shown, at the view's clock now. */
 static void SaberBuild(float W, float H, float shown, DWORD now)
 {
     LONG cl = g_class;
     unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0], rgb = SaberVivid(base);
-    unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f);
+    unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), boltRgb = SaberMix(rgb, 0xFFFFFF, 0.7f);
     float fs, ftop, cy, ch, fx0, fx1;
     FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1);            /* the channel the frame holds it in, end to end */
     /* the light (his calls on his reference, 7 Oct: "a more uniform fill", "darker towards the edges and lighter white
      * towards the middle ... the light is more fully in the middle"; "no black area at the beginning or ending"): a
      * smooth fill the whole height of its channel, filled right up to the metal at both ends, its moving tip rounded; deeper in the class's
      * colour at its top and bottom edges and toward the bar's ends, near white along its centre and in its middle; the
-     * light breathing slowly so it is never quite still */
+     * light breathing slowly so it is never quite still, and churning and surging (above: alive) */
     float t = (float)(now % 3600000u) / 1000.0f, hc = ch, g = SABER_GLOW * H;
     float span = fx1 - fx0, front = fx0 + FireClamp(shown, 0, 1) * span, round = ch * 1.2f, line = H / 1440.0f;
     float xc = fx0 + span / 2, breath = 0.94f + 0.06f * SaberNoise(0, t * 0.6f, 21);
     unsigned deep = SaberMix(rgb, 0, 0.42f);
+    /* the metal either side of the channel, for the lightning to strike (a little of the channel's own without a frame) */
+    float railUp = fs > 0 ? cy - ch - (ftop + (float)g_frame.band[0] * fs) : ch * 0.35f;
+    float railDn = fs > 0 ? ftop + (float)g_frame.band[1] * fs - (cy + ch) : ch * 0.35f;
+    float bandTop = cy - ch - railUp, bandBot = cy + ch + railDn;
+    /* the power running down it: the surges, the orb's flare, and once it is full the last surge and the flash */
+    if (shown >= 1) { if (!g_sbFullAt) g_sbFullAt = now ? now : 1; } else g_sbFullAt = 0;
+    float sx[8], sa[8], flare = 0, flash = 0;
+    int ns = shown > 0 ? SaberSurges(t, fx0, span, front, ch, sx, sa, 7, &flare) : 0;
+    if (g_sbFullAt) {
+        float age = (float)(LONG)(now - g_sbFullAt) / 1000.0f, x = fx0 + age / SWEEP_S * span;
+        flash = (float)FireExp(-(double)age / 0.5);
+        if (x < fx1 + ch * SURGE_TAIL) { sx[ns] = x; sa[ns] = 1.3f; ns++; }
+    }
     int n = (int)(span / SABER_COL_PX);
     if (n < 16) n = 16;
     if (n > SABER_COLS_MAX) n = SABER_COLS_MAX;
@@ -5087,10 +5217,20 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             float k = shown >= 1 ? 1 : FireClamp((front - x) / round, 0, 1);   /* the tip rounded; its ends square, */
             float shape = SaberSqrt(k * (2 - k)), hx = (x - xc) / (span * 0.5f);   /* under the metal; how near the middle */
             hx = 1 - hx * hx;
+            if (hx < 0) hx = 0;
+            float sg = SaberSurgeAt(x, sx, sa, ns, ch);
             g_sbX[b] = x;
             g_sbCore[0][b] = g_sbCore[1][b] = hc * shape;
-            g_sbGlow[0][b] = g_sbGlow[1][b] = g * 0.6f * shape * breath;
-            g_sbMid[b] = hx > 0 ? hx : 0;
+            g_sbGlow[0][b] = g_sbGlow[1][b] = g * 0.6f * shape * breath * (1 + 0.9f * sg + 0.8f * flash);
+            g_sbMid[b] = hx;
+            g_sbSurge[b] = sg;
+            for (int r = 0; r < 3; r++)                            /* the churn: its top, middle and bottom, flowing on */
+                g_sbChurn[r][b] = 1 + CHURN * (2 * SaberNoise(x / (ch * (4 + r)) - t * (1.5f + 0.25f * r), t * 0.35f + r * 5.3f, 91 + r) - 1);
+            float e = 0.35f + 0.65f * hx;                          /* its light: the edges deeper, the centre near white */
+            float hot = FireClamp(0.45f * sg, 0, 0.6f);             /* (a surge whitens it right across) */
+            g_sbTop[b] = SaberMix(SaberMix(deep, rgb, FireClamp(e * g_sbChurn[0][b] + 0.6f * sg, 0, 1)), 0xFFFFFF, hot);
+            g_sbBot[b] = SaberMix(SaberMix(deep, rgb, FireClamp(e * g_sbChurn[2][b] + 0.6f * sg, 0, 1)), 0xFFFFFF, hot);
+            g_sbIn[b] = SaberMix(rgb, 0xFFFFFF, FireClamp((0.3f + 0.55f * hx) * breath * g_sbChurn[1][b] + 0.5f * sg, 0, 1));
             if (x >= front) { b++; break; }
         }
     FrameChannel(fx0, fx1, cy, ch);                                 /* the dark channel, cup to cup */
@@ -5102,7 +5242,8 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
                 float reach = layer ? 1.0f : 0.32f, a = layer ? 0.22f : 0.45f;
                 float e0 = cy + d * g_sbCore[s][k], e1 = cy + d * g_sbCore[s][k + 1];
                 float y[4] = { e0 + d * reach * g_sbGlow[s][k], e1 + d * reach * g_sbGlow[s][k + 1], e1, e0 };
-                DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, a), SaberArgb(rgb, a) };
+                DWORD c[4] = { SaberArgb(rgb, 0), SaberArgb(rgb, 0), SaberArgb(rgb, a * (1 + 0.5f * g_sbSurge[k + 1])),
+                               SaberArgb(rgb, a * (1 + 0.5f * g_sbSurge[k])) };
                 SaberPut(-1, 1, x, y, c, NULL);
             }
         }
@@ -5116,22 +5257,41 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
         float x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
         float yt[4] = { cy - g_sbCore[0][k], cy - g_sbCore[0][k + 1], cy, cy };
         float yb[4] = { cy, cy, cy + g_sbCore[1][k + 1], cy + g_sbCore[1][k] };
-        DWORD e0 = SaberArgb(SaberMix(deep, rgb, 0.35f + 0.65f * g_sbMid[k]), 0.97f);
-        DWORD e1 = SaberArgb(SaberMix(deep, rgb, 0.35f + 0.65f * g_sbMid[k + 1]), 0.97f);
-        DWORD m0 = SaberArgb(SaberMix(rgb, 0xFFFFFF, (0.3f + 0.55f * g_sbMid[k]) * breath), 0.97f);
-        DWORD m1 = SaberArgb(SaberMix(rgb, 0xFFFFFF, (0.3f + 0.55f * g_sbMid[k + 1]) * breath), 0.97f);
-        DWORD ct[4] = { e0, e1, m1, m0 }, cbt[4] = { m0, m1, e1, e0 };
+        DWORD m0 = SaberArgb(g_sbIn[k], 0.97f), m1 = SaberArgb(g_sbIn[k + 1], 0.97f);
+        DWORD ct[4] = { SaberArgb(g_sbTop[k], 0.97f), SaberArgb(g_sbTop[k + 1], 0.97f), m1, m0 };
+        DWORD cbt[4] = { m0, m1, SaberArgb(g_sbBot[k + 1], 0.97f), SaberArgb(g_sbBot[k], 0.97f) };
         SaberPut(-1, 0, x, yt, ct, NULL);
         SaberPut(-1, 0, x, yb, cbt, NULL);
+    }
+    /* the filaments: faint threads of its light wandering along inside the fill toward the tip, brighter in a surge */
+    float stop = shown >= 1 ? fx1 - ch * 0.5f : front - ch * 0.8f, step = ch * 0.45f, from = fx0 + ch * 0.5f;
+    if (shown > 0 && stop > fx0 + ch * 2 && step > 0) {
+        static float lx[STRAND_PTS], ly[STRAND_PTS], la[STRAND_PTS];
+        int np = (int)((stop - from) / step) + 1;
+        if (np > STRAND_PTS) { np = STRAND_PTS; step = (stop - from) / (STRAND_PTS - 1); }
+        float sw = line * 3.5f > 1.6f ? line * 3.5f : 1.6f;
+        for (int s = 0; s < SABER_STRANDS; s++) {
+            for (int i = 0; i < np; i++) {
+                float x = from + (float)i * step;
+                float wander = 2 * SaberNoise(x / (ch * 3.2f) - t * (1.6f + 0.4f * s), t * 0.45f + s * 3.7f, 101 + s) - 1;
+                float ends = FireClamp((x - fx0) / (ch * 3), 0, 1) * FireClamp((stop - x) / (ch * 2), 0, 1);
+                lx[i] = x; ly[i] = cy + ch * 0.6f * wander;
+                la[i] = ends * (0.07f + 0.25f * SaberNoise(x / (ch * 7) - t * 1.1f, t * 0.25f + s * 2.1f, 111 + s)) *
+                        (1 + 1.5f * SaberSurgeAt(x, sx, sa, ns, ch));
+            }
+            SaberLine(lx, ly, la, np, sw, boltRgb, rgb);
+        }
     }
     if (fs > 0) FrameBuild(W, fs, ftop);                            /* the frame over it, the light spilling past */
     if (fs > 0 && shown > 0) {                                      /* and the blade's light on its metal */
         g_shine.front = front; g_shine.reach = SHINE_REACH * W; g_shine.rgb = rgb;
         g_shine.mid = (float)(g_frame.chan[0] + g_frame.chan[1]) * 0.5f;
-        g_shine.full = shown >= 1 ? SHINE_FULL * breath : 0;
+        g_shine.full = shown >= 1 ? SHINE_FULL * breath + SHINE_FLASH * flash : 0;
+        g_shine.ns = ns; g_shine.sw = ch * 4;
+        for (int i = 0; i < ns; i++) { g_shine.sx[i] = sx[i]; g_shine.sa[i] = sa[i]; }
         g_shine.on = 1;
         FrameBuild(W, fs, ftop);
-        g_shine.on = 0;
+        g_shine.on = 0; g_shine.ns = 0;
     }
     if (shown > 0) {                                                /* its lips lit where the blade has reached: along */
         float lx0 = fx0, lx1 = fx1;                                 /* the rails, from cup rim to cup rim (bar.txt's lips) */
@@ -5139,23 +5299,84 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             lx0 = (float)g_frame.lips[0] * fs;
             lx1 = W - (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0] - g_frame.lips[1]) * fs;
         }
-        if (front > lx0) FrameLips(lx0, front < lx1 ? front : lx1, cy, ch, line, hotRgb);
+        if (front > lx0) FrameLips(lx0, front < lx1 ? front : lx1, cy, ch, line, hotRgb, 1 + 0.35f * flare + 0.5f * flash);
     }
-    /* the tip, flaring and throwing sparks back as it runs (none once the blade is whole) */
-    if (g_viewTex[VT_SPARK] && shown > 0 && shown < 1) {
-        float flick = 0.75f + 0.25f * SaberNoise(0, t * 23, 9);
-        SaberGlowAt(front, cy, g * 1.1f, g * 1.3f * flick, SaberArgb(rgb, 0.85f * flick));
-        SaberGlowAt(front, cy, g * 0.45f, g * 0.45f, SaberArgb(hotRgb, 0.9f));
-        for (int i = 0; i < SABER_SPARKS; i++) {
-            float life = 0.28f + 0.3f * SeaRand((unsigned)i, 77), ph = (t + SeaRand((unsigned)i, 11) * 5) / life;
-            float age = ph - MapFloor(ph);
-            unsigned gen = (unsigned)i * 31u + (unsigned)(int)MapFloor(ph);
-            float dist = age * g * (1.5f + 2.5f * SeaRand(gen, 7));
-            float sx = front - (0.4f + 0.8f * SeaRand(gen, 3)) * dist;
-            float sy = cy + (SeaRand(gen, 5) - 0.5f) * 1.3f * dist + age * age * g * 0.4f;
-            float r = g * 0.16f * (1 - age) + line;
-            SaberGlowAt(sx, sy, r, r, SaberArgb(hotRgb, 0.9f * (1 - age)));
+    /* lightning, added over the metal: from the orb to the rails above and below it and into the dark way ahead (none
+     * once the blade is whole), and crackles off the fill onto the rails along the bar. Each comes and goes on its own
+     * clock, a fresh strike each time; the orb's oftener as it flares. Every one is drawn, a dark one dark, so the list
+     * keeps its shape. */
+    float R = ch * (1.18f + 0.5f * flare + 0.14f * SaberNoise(0, t * 3.1f, 51));   /* the orb's size */
+    float tipX[SABER_ARCS], tipY[SABER_ARCS], tipA[SABER_ARCS];
+    int na = 0;
+    if (shown > 0) {
+        float bw = line * 2.0f > 1.0f ? line * 2.0f : 1.0f;
+        for (int i = 0; i < SABER_ARCS; i++) {
+            int fromOrb = i < ORB_ARCS;
+            if (fromOrb && shown >= 1) continue;
+            unsigned iu = (unsigned)i;
+            float life = fromOrb ? 0.10f + 0.14f * SeaRand(iu, 61) : 0.07f + 0.08f * SeaRand(iu, 81);
+            float ph = t / life + SeaRand(iu, 63) * 7, gen = MapFloor(ph), age = ph - gen;
+            unsigned gu = (unsigned)(int)gen * 977u + iu * 131u;
+            float env = age < 0.15f ? age / 0.15f : age > 0.75f ? (1 - age) / 0.25f : 1;
+            float flick = 0.65f + 0.35f * SaberNoise(gen, t * 45, 125 + iu);
+            float up = SeaRand(gu, 69) < 0.5f ? -1.0f : 1.0f, rail = up < 0 ? railUp : railDn;
+            float ax, ay, bx, by, a;
+            if (fromOrb) {
+                if (SeaRand(gu, 67) < 0.7f) {                          /* onto the metal above or below */
+                    bx = front + (SeaRand(gu, 71) - 0.35f) * R * 3.2f;
+                    by = cy + up * (ch + rail * (0.25f + 0.7f * SeaRand(gu, 73)));
+                } else {                                               /* into the dark way ahead */
+                    bx = front + R * (1.3f + 1.6f * SeaRand(gu, 71));
+                    by = cy + (SeaRand(gu, 73) - 0.5f) * ch * 1.2f;
+                }
+                bx = FireClamp(bx, fx0, fx1);
+                float dx = bx - front, dy = by - cy, l = SaberSqrt(dx * dx + dy * dy);
+                ax = front + (l > 0 ? dx / l : 0) * R * 0.3f; ay = cy + (l > 0 ? dy / l : 0) * R * 0.3f;
+                a = SeaRand(gu, 65) < 0.45f + 0.45f * flare ? (0.55f + 0.4f * flare) * flick * env : 0;
+            } else {                                                   /* a crackle off the fill onto the rails */
+                float lo = fx0 + ch * 1.5f, hi = (shown >= 1 ? fx1 : front - R * 1.2f) - ch * 1.5f;
+                float x = lo + SeaRand(gu, 87) * (hi - lo);
+                if (ns && SeaRand(gu, 93) < 0.6f)                      /* oftenest where a surge is passing */
+                    x = sx[(int)(SeaRand(gu, 95) * (float)ns) % ns] + (SeaRand(gu, 97) - 0.5f) * ch * 3;
+                x = FireClamp(x, lo, hi > lo ? hi : lo);
+                ax = x; ay = cy + up * ch * 0.7f;
+                bx = x + (SeaRand(gu, 89) - 0.5f) * ch * 2.5f;
+                by = cy + up * (ch + rail * (0.3f + 0.6f * SeaRand(gu, 91)));
+                a = hi > lo && SeaRand(gu, 85) < 0.32f ? 0.8f * flick * env : 0;
+            }
+            SaberArc(ax, ay, bx, by, a, t, gu, bandTop, bandBot, bw, boltRgb, rgb);
+            tipX[na] = bx; tipY[na] = by; tipA[na] = a; na++;
         }
+    }
+    /* the light: the orb at the tip (none once the blade is whole), its embers, the surges' light, where the lightning strikes */
+    if (g_viewTex[VT_SPARK] && shown > 0) {
+        if (shown < 1) {
+            SaberGlowAt(front, cy, R * 3.2f, R * 2.4f, SaberArgb(rgb, 0.45f + 0.45f * flare));  /* its corona, on the metal */
+            SaberGlowAt(front, cy, R * 1.7f, R * 1.55f, SaberArgb(rgb, 0.75f));                 /* its body */
+            SaberGlowAt(front, cy, R * 1.05f, R * 0.95f, SaberArgb(hotRgb, 0.8f));              /* its heat */
+            SaberGlowAt(front, cy, R * 0.55f, R * 0.5f, SaberArgb(0xFFFFFF, 0.95f));            /* its white core */
+            for (int l = 0; l < 4; l++) {                                                       /* its edge, churning */
+                float ang = t * (1.7f + 0.6f * l) * (l & 1 ? -1.0f : 1.0f) + l * 1.5708f + 2 * SaberNoise((float)l, t * 0.8f, 55 + l);
+                float rr = R * (0.65f + 0.4f * SaberNoise((float)l, t * 2.3f, 59 + l));
+                SaberGlowAt(front + SeaCos(ang) * rr * 1.15f, cy + SeaSin(ang) * rr * 0.55f, R * 0.6f, R * 0.55f,
+                            SaberArgb(rgb, 0.5f + 0.3f * flare));
+            }
+            SaberGlowAt(front, cy, R * (2.5f + 6 * flare), R * 0.16f + line, SaberArgb(hotRgb, 0.15f + 0.6f * flare));   /* its streak */
+            for (int i = 0; i < SABER_SPARKS; i++) {                                            /* its embers, thrown back */
+                float life = 0.28f + 0.3f * SeaRand((unsigned)i, 77), ph = (t + SeaRand((unsigned)i, 11) * 5) / life;
+                float age = ph - MapFloor(ph);
+                unsigned gen = (unsigned)i * 31u + (unsigned)(int)MapFloor(ph);
+                float dist = R * 0.4f + age * g * (1.5f + 2.5f * SeaRand(gen, 7));
+                float ex = front - (0.4f + 0.8f * SeaRand(gen, 3)) * dist;
+                float ey = cy + (SeaRand(gen, 5) - 0.5f) * 1.3f * dist + age * age * g * 0.4f;
+                float r = g * 0.16f * (1 - age) + line;
+                SaberGlowAt(ex, ey, r, r, SaberArgb(hotRgb, 0.9f * (1 - age) * (0.75f + 0.5f * flare)));
+            }
+        }
+        for (int i = 0; i < SURGE_GLOWS; i++)                       /* the surges' light, spilling over the rails (every */
+            SaberGlowAt(i < ns ? sx[i] : fx0, cy, ch * 3.2f, ch * 1.9f,   /* slot drawn, a dark one dark) */
+                        SaberArgb(rgb, i < ns ? 0.3f * FireClamp(sa[i], 0, 1) : 0));
+        for (int i = 0; i < na; i++) SaberGlowAt(tipX[i], tipY[i], ch * 0.35f, ch * 0.35f, SaberArgb(hotRgb, 0.7f * tipA[i]));
     }
     /* the logo on it at the centre, its halfway mark, standing on the bottom of the window (the bar is flush with it):
      * lit in the class's colour as the tip reaches it */
