@@ -2934,7 +2934,7 @@ static void ViewTests(void)
              g_vb[CO].tex == -1 && !g_vb[CO].add && g_vb[STR].tex == -1 && g_vb[STR].add && g_vb[STR].count > 0 &&
              g_vb[STR].count % (8 * SABER_STRANDS) == 0 && g_vb[FRAME].tex == VT_FRAME &&
              !g_vb[FRAME].add && g_vb[LIPS].tex == -1 && g_vb[LIPS].add && g_vb[LIPS].count == 8 + 8 * ARC_SEGS * SABER_ARCS &&
-             g_vb[LIGHT].tex == VT_SPARK && g_vb[LIGHT].add && g_vb[LIGHT].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_ARCS);
+             g_vb[LIGHT].tex == VT_SPARK && g_vb[LIGHT].add && g_vb[LIGHT].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_DROPS + SABER_BLOOMS + SABER_ARCS);
         int cols = (g_vb[CO].count / 4 - 1) / 2;                         /* the way to go, then two quads a column */
         float front = x0 + 0.25f * span;
         ok &= cols > 30 && g_vb[CO].count == 4 * (1 + 2 * cols) && g_vb[GL].count == 16 * cols;
@@ -3185,7 +3185,7 @@ static void ViewTests(void)
         cols = g_vb[CO].count / 8;
         const ViewVert *endq = g_vv + g_vb[CO].first + 8 * (cols - 1);
         ok = g_vbN == 9 && g_vb[SHINE].add && g_vb[SHINE].tex == VT_FRAME && g_vb[CO].count == 8 * cols && Near(g_vv[g_vb[CO].first].x, x0, 1e-3) &&
-             g_vb[LIPS].count == 8 + 8 * ARC_SEGS * BAR_ARCS && g_vb[LIGHT].count == 4 * (SURGE_GLOWS + BAR_ARCS) &&
+             g_vb[LIPS].count == 8 + 8 * ARC_SEGS * BAR_ARCS && g_vb[LIGHT].count == 4 * (SURGE_GLOWS + SABER_BLOOMS + BAR_ARCS) &&
              Near(endq[1].x, x1, 1e-3) && Near(endq[1].y, cy - ch, 1e-3) && g_vv[g_vb[CO].first].c[3] == 247 && cols == (int)(span / SABER_COL_PX);
         int settled = 255;
         for (int i = g_vb[SHINE].first + 4; i < g_vb[SHINE].first + g_vb[SHINE].count; i += 16) if (g_vv[i].c[3] < settled) settled = g_vv[i].c[3];
@@ -3199,13 +3199,13 @@ static void ViewTests(void)
         const ViewVert *lg = g_vv + g_vb[g_vbN - 1].first;
         float lh = SABER_LOGO_H * 500, foot = 500 - SABER_LOGO_FOOT * 500;
         ok = g_vb[g_vbN - 1].tex == VT_LOGO && !g_vb[g_vbN - 1].add && g_vb[g_vbN - 1].count == 4 && g_vb[g_vbN - 2].tex == VT_SPARK &&
-             g_vb[g_vbN - 2].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_ARCS) && fabsf(lg[0].x - (500 - lh)) < 1e-3f && fabsf(lg[2].x - (500 + lh)) < 1e-3f &&
+             g_vb[g_vbN - 2].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_DROPS + SABER_BLOOMS + SABER_ARCS) && fabsf(lg[0].x - (500 - lh)) < 1e-3f && fabsf(lg[2].x - (500 + lh)) < 1e-3f &&
              fabsf(lg[2].y - foot) < 1e-3f && fabsf(lg[0].y - (foot - lh)) < 1e-3f && lg[0].u == 0.1f && lg[0].v == 0.2f &&
              lg[2].u == 0.9f && lg[2].v == 0.8f && lg[0].c[0] == 210 && lg[0].c[3] == 255;
         ViewBuild(1000, 500, 0.6f, 3000);
         lg = g_vv + g_vb[g_vbN - 1].first;
         const ViewVert *aura = g_vv + g_vb[g_vbN - 2].first + g_vb[g_vbN - 2].count - 8;
-        ok &= g_vb[g_vbN - 1].tex == VT_LOGO && lg[0].c[0] == 255 && g_vb[g_vbN - 2].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_ARCS + 2) &&
+        ok &= g_vb[g_vbN - 1].tex == VT_LOGO && lg[0].c[0] == 255 && g_vb[g_vbN - 2].count == 4 * (ORB_GLOWS + SABER_SPARKS + SURGE_GLOWS + SABER_DROPS + SABER_BLOOMS + SABER_ARCS + 2) &&
               fabsf((aura[0].x + aura[1].x) / 2 - 500) < 1e-3f && fabsf((aura[0].y + aura[2].y) / 2 - (foot - lh / 2)) < 1e-3f &&
               NEAR(aura[0].c, 179, 255, 76) && aura[0].c[3] > 0;
         Check(ok, "the RavenCraft logo stands on the bottom of the screen at the blade's centre, its halfway mark, over the tip as it passes: grey before the tip reaches it, then white and lit behind in the class's colour");
