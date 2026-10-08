@@ -3786,9 +3786,9 @@ static void LogoBuild(void)
 #define SHIPS_PATH     "Interface\\Glues\\LoadingScreens\\CinderShips.blp"
 #define SHIPS_MAX      24
 #define SHIP_POINTS    8192
-#define SHIP_SHEET_W   2048.0f
-#define SHIP_SHEET_H   512.0f
-#define SHIP_FRAME     128.0f
+#define SHIP_SHEET_W   4096.0f
+#define SHIP_SHEET_H   1024.0f
+#define SHIP_FRAME     256.0f
 #define SHIP_SIZE      0.030f     /* a ship's frame, half of it, of the screen's height with the whole world in view */
 #define ZEP_SIZE       0.034f     /* a zeppelin's */
 #define SHIP_GROW      2.4f       /* as the view comes in they grow, as the square root of the zoom, to this at the most */

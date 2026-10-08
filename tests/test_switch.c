@@ -3506,10 +3506,10 @@ static void TestShips(void)
     const ViewVert *q = g_vv + g_vb[2].first, *acc = q + 4;
     float hs = SHIP_SIZE * 500;
     ok &= Near((q[0].x + q[1].x) / 2, 400, 1e-2) && Near((q[0].y + q[2].y) / 2, 250, 1e-2) && Near(q[1].x - q[0].x, 2 * hs, 1e-3);
-    ok &= Near(q[0].u, 0.5 / 2048, 1e-6) && Near(q[1].u, 127.5 / 2048, 1e-6) && Near(q[0].v, 0.5 / 512, 1e-6);   /* east: frame 0 */
+    ok &= Near(q[0].u, 0.5 / SHIP_SHEET_W, 1e-6) && Near(q[1].u, (SHIP_FRAME - 0.5) / SHIP_SHEET_W, 1e-6) && Near(q[0].v, 0.5 / SHIP_SHEET_H, 1e-6);   /* east: frame 0 */
     ok &= acc[0].c[0] >= 0xE0 && acc[0].c[1] >= 0xC8 && acc[0].c[2] >= 0xB8 && acc[0].c[0] > acc[0].c[1] + 12 &&
           acc[0].c[0] > acc[0].c[2] + 12 && acc[0].c[3] == 255 && q[0].c[0] == 255 &&
-          Near(acc[0].v, 128.5 / 512, 1e-6);                               /* its sails white, a hint of red, from the accent row */
+          Near(acc[0].v, (SHIP_FRAME + 0.5) / SHIP_SHEET_H, 1e-6);                               /* its sails white, a hint of red, from the accent row */
     const ViewVert *wk = g_vv + g_vb[0].first, *fm = g_vv + g_vb[1].first + 4 * (2 * SHIP_CAPS + SHIP_STERN_FOAM);
     ok &= wk[0].x > 400 && wk[4 * (2 * SHIP_WAKE_SEGS - 1) + 1].x < 400 - 2 * hs && wk[0].c[3] > wk[4 * (2 * SHIP_WAKE_SEGS - 1) + 1].c[3] &&
           (fm[0].x + fm[2].x) / 2 > 400 + 0.4f * hs && fm[0].c[3] > 0;   /* foam at its bow; the wake behind it, fading */
@@ -3517,7 +3517,7 @@ static void TestShips(void)
     ViewListStart();
     ShipsBuild(1000, 500, 9000, 0);                                        /* (its clock at 13 s) */
     q = g_vv + g_vb[g_vbN - 1].first;
-    ok &= Near(q[0].u, (8 * 128 + 0.5) / 2048, 1e-6);
+    ok &= Near(q[0].u, (8 * SHIP_FRAME + 0.5) / SHIP_SHEET_W, 1e-6);
     Check(ok, "the ships drawn: each where its clock has it, in the frame of its heading (east out, west back), its sails over it white with a hint of its colour, foam at its bow and a fading wake behind it");
 
     /* docked: no wake; the zeppelins drawn in their own pass from their own rows, heading south down their way */
@@ -3531,9 +3531,9 @@ static void TestShips(void)
     ViewListStart();
     ShipsBuild(1000, 500, 100, 1);
     q = g_vv + g_vb[0].first;
-    ok &= g_vbN == 2 && g_vb[0].tex == VT_SHIPS && g_vb[0].count == 8 && Near(q[0].v, (2 * 128 + 0.5) / 512, 1e-6) &&
+    ok &= g_vbN == 2 && g_vb[0].tex == VT_SHIPS && g_vb[0].count == 8 && Near(q[0].v, (2 * SHIP_FRAME + 0.5) / SHIP_SHEET_H, 1e-6) &&
           g_vb[1].tex == -1 && g_vb[1].add && g_vb[1].count == 4 * ZEP_STREAK_Q &&   /* the wind past it, over it */
-          Near(q[4].v, (3 * 128 + 0.5) / 512, 1e-6) && Near(q[0].u, (4 * 128 + 0.5) / 2048, 1e-6) &&
+          Near(q[4].v, (3 * SHIP_FRAME + 0.5) / SHIP_SHEET_H, 1e-6) && Near(q[0].u, (4 * SHIP_FRAME + 0.5) / SHIP_SHEET_W, 1e-6) &&
           Near(q[1].x - q[0].x, 2 * ZEP_SIZE * 500, 1e-3) && q[4].c[0] == 0x8A && q[4].c[1] == 0x4A && q[4].c[2] == 0xC8;   /* (its balloon's own) */
     Check(ok, "a ship at its dock leaves no wake; the zeppelins drawn on their own, from their own rows, turned down their way, in their colour");
 
@@ -3609,7 +3609,7 @@ static void TestWakes(void)
         ShipsBuild(1000, 500, 2000, 0);                    /* half way out, 100 pixels from its turn: its whole wake made */
         if (g_vbN != 3 || g_vb[0].tex != -1 || g_vb[1].tex != VT_SPARK || g_vb[2].tex != VT_SHIPS ||
             g_vb[0].count != 4 * SHIP_WAKE_BANDS || g_vb[1].count != 4 * SHIP_WAKE_SPARKS ||
-            !Near(g_vv[g_vb[2].first].u, (f * 128 + 0.5) / 2048, 1e-6)) { okFoam = okArms = okStern = 0; continue; }
+            !Near(g_vv[g_vb[2].first].u, (f * SHIP_FRAME + 0.5) / SHIP_SHEET_W, 1e-6)) { okFoam = okArms = okStern = 0; continue; }
         /* the foam at its bow: ahead of its waterline along the frame's heading, at the prow and either side of it */
         float sides[SHIP_FOAM];
         for (int i = 0; i < SHIP_FOAM; i++) {
@@ -3754,7 +3754,7 @@ static void TestWakes(void)
         const ViewVert *R = L + 4 * 2 * SHIP_WAKE_SEGS, *le = L + 8 * (SHIP_WAKE_SEGS - 1) + 1, *re = R + 8 * (SHIP_WAKE_SEGS - 1) + 1;
         float by = (L[0].y + R[0].y) / 2, my = (le->y + re->y) / 2, mx = (le->x + re->x) / 2, bx = (L[0].x + R[0].x) / 2;
         const ViewVert *t0 = WakePt(0, lane, ln, 0), *tN = WakePt(0, lane, ln, ln - 1);
-        Check(g_vbN == 3 && Near(g_vv[g_vb[2].first].u, 0.5 / 2048, 1e-6) && my < by - 0.5f * (len - 20) && mx > bx - len &&
+        Check(g_vbN == 3 && Near(g_vv[g_vb[2].first].u, 0.5 / SHIP_SHEET_W, 1e-6) && my < by - 0.5f * (len - 20) && mx > bx - len &&
               tN->y < t0->y - 0.5f * (SHIP_STERN_LEN * hs - 20),
               "round a bend a ship's wakes follow the way it came, not straight back from its heading");
     }
