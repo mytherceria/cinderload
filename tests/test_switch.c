@@ -4147,6 +4147,9 @@ static void TestClouds(void)
     g_cloudTile[0] = 0 | 200u << 16; g_cloudTile[1] = 200 | 0u << 16; g_cloudTile[CLOUD_N] = 100; g_cloudTile[CLOUD_N + 1] = 100;
     unsigned t1 = CloudTap(65536 / 4, 0), t2 = CloudTap(0, 65536 / 4);
     ok = Near(t1 & 255, 50, 1) && Near(t1 >> 16, 150, 1) && Near(t2 & 255, 25, 1) && Near(t2 >> 16, 150, 1);
+    ok &= Near(CloudDense(65536 / 4, 0), 50 * 256, 64) && Near(CloudDense(0, 65536 / 4), 25 * 256, 64) &&
+          Near(CloudDense(65536 / 4 + 256, 0) - CloudDense(65536 / 4, 0), 200, 4) &&
+          Near(CloudDense(65536 / 4 + 512, 0) - CloudDense(65536 / 4 + 256, 0), 200, 4);   /* (sixteen bits: no steps) */
     g_cloudTile[0] = keepTile[0]; g_cloudTile[1] = keepTile[1]; g_cloudTile[CLOUD_N] = keepTile[2]; g_cloudTile[CLOUD_N + 1] = keepTile[3];
     Check(ok, "the tile read between its texels, density and light at once, each the nearer the more");
 
@@ -4478,10 +4481,206 @@ static void TestClouds(void)
     g_skyOn = 0; g_viewTex[VT_SKY] = 0; g_viewTex[VT_SPARK] = 0; g_sky.ok = 0; g_cloudOk = 0; g_cloudShownOk = 0; g_cj.on = 0;
 }
 
+/* The time of day (8 Oct 2026): the realm's clock (Central European, the EU's summer time), the light through the day by
+ * its keys, eased, the world graded by it, the clouds lit and shadowed by it, the capitals' lights, the client's sun or
+ * moon in the top right. */
+static SYSTEMTIME TodUtc(int y, int mo, int d, int h, int mi, int s, int ms)
+{
+    SYSTEMTIME u;
+    memset(&u, 0, sizeof u);
+    u.wYear = (unsigned short)y; u.wMonth = (unsigned short)mo; u.wDay = (unsigned short)d; u.wHour = (unsigned short)h;
+    u.wMinute = (unsigned short)mi; u.wSecond = (unsigned short)s; u.wMilliseconds = (unsigned short)ms;
+    return u;
+}
+static void TestTimeOfDay(void)
+{
+    /* the clock: his minimap's 9:03 at 7:03 UTC (0:03 PDT, 7 Oct); the EU's summer time ends 25 Oct 2026, begins 29 Mar */
+    SYSTEMTIME u = TodUtc(2026, 10, 7, 7, 3, 0, 0);
+    int ok = Near(TodServerMinutes(&u), 9 * 60 + 3, 1e-3) && TodWeekday(2026, 10, 25) == 0 && TodWeekday(2026, 3, 29) == 0 &&
+             TodWeekday(2000, 1, 1) == 6;
+    u = TodUtc(2026, 10, 25, 0, 59, 0, 0); ok &= Near(TodServerMinutes(&u), 2 * 60 + 59, 1e-3);      /* still summer: 2:59 */
+    u = TodUtc(2026, 10, 25, 1, 0, 0, 0);  ok &= Near(TodServerMinutes(&u), 2 * 60, 1e-3);           /* then 2:00 again */
+    u = TodUtc(2026, 10, 24, 23, 0, 0, 0); ok &= TodOffset(&u) == 120;
+    u = TodUtc(2026, 10, 26, 0, 0, 0, 0);  ok &= TodOffset(&u) == 60;
+    u = TodUtc(2026, 3, 29, 0, 59, 0, 0);  ok &= Near(TodServerMinutes(&u), 1 * 60 + 59, 1e-3);       /* winter: 1:59 */
+    u = TodUtc(2026, 3, 29, 1, 0, 0, 0);   ok &= Near(TodServerMinutes(&u), 3 * 60, 1e-3);            /* then 3:00 */
+    u = TodUtc(2026, 3, 28, 12, 0, 0, 0);  ok &= TodOffset(&u) == 60;
+    u = TodUtc(2026, 1, 15, 12, 0, 0, 0);  ok &= TodOffset(&u) == 60;
+    u = TodUtc(2026, 7, 15, 23, 30, 0, 0); ok &= TodOffset(&u) == 120 && Near(TodServerMinutes(&u), 90, 1e-3);   /* past midnight */
+    u = TodUtc(2026, 10, 7, 7, 3, 30, 500); ok &= Near(TodServerMinutes(&u), 9 * 60 + 3 + 30.5 / 60, 1e-3);    /* never steps */
+    float keep = g_todForce;
+    g_todForce = -1; shim_utc = TodUtc(2026, 10, 7, 19, 0, 0, 0);
+    ok &= Near(TodMinutes(), 21 * 60, 1e-3);                                                  /* (the clock itself) */
+    g_todForce = 1440 + 30; ok &= Near(TodMinutes(), 30, 1e-3);                               /* (an hour forced: any minutes) */
+    g_todForce = keep;
+    Check(ok, "the realm's clock: Central European time from UTC (his minimap's 9:03 at 7:03 UTC), summer time to 25 Oct and from 29 Mar 2026 at 01:00 UTC, its seconds in");
+
+    /* the sun by day, the moon by night, as the client's minimap swaps them (5:30, 9 pm) */
+    float f, up;
+    ok = TodBody(329.9f, &f, &up) == 0 && TodBody(330, &f, &up) == 1 && Near(f, 0, 1e-4) && TodBody(1259.9f, &f, &up) == 1 &&
+         f > 0.99f && TodBody(1260, &f, &up) == 0 && Near(f, 0, 1e-4);
+    TodBody((330 + 1260) / 2.0f, &f, &up); ok &= Near(f, 0.5, 1e-3) && up > 0.99f;
+    TodBody(0, &f, &up); ok &= f > 0.3f && f < 0.4f && up > 0.8f;
+    Check(ok, "the sun from 5:30 to 9 pm and the moon through the night, as the client's minimap has them, each along its arc");
+
+    /* the light through the day: the plain day at noon, never a jump from minute to minute, round midnight too */
+    TodLight L, M;
+    TodLightAt(720, &L);
+    ok = L.west[0] == 1 && L.east[2] == 1 && L.lit[0] == 255 && L.lit[1] == 253 && L.base[2] == 110 && Near(L.shadow, CLOUD_SHADOW, 1e-6) &&
+         L.turn == 0 && L.city == 0;
+    float most = 0, mostC = 0;
+    for (int m = 0; m < 1440 * 4; m++) {
+        TodLightAt(m / 4.0f, &L); TodLightAt(m / 4.0f + 0.25f, &M);
+        for (int c = 0; c < 3; c++) {
+            float d = fabsf(L.west[c] - M.west[c]) + fabsf(L.east[c] - M.east[c]), e = fabsf(L.lit[c] - M.lit[c]) + fabsf(L.base[c] - M.base[c]);
+            if (d > most) most = d;
+            if (e > mostC) mostC = e;
+        }
+    }
+    TodLightAt(1439.999f, &L); TodLightAt(0, &M);
+    ok &= most < 0.02f && mostC < 5 && Near(L.west[2], M.west[2], 1e-3) && Near(L.lit[0], M.lit[0], 0.05);
+    Check(ok, "the light through the day eased from key to key: the plain day at noon, never a jump in a quarter of a minute, midnight's join unseen");
+
+    /* each key as he asked: dawn warm from the east, the afternoon gold, sunset amber and rose from the west, night blue */
+    TodLight dawn, aft, sunset, night, day;
+    TodLightAt(360, &dawn); TodLightAt(1020, &aft); TodLightAt(1230, &sunset); TodLightAt(0, &night); TodLightAt(720, &day);
+    ok = dawn.east[0] > dawn.west[0] && dawn.east[0] > dawn.east[2] && dawn.lit[0] > dawn.lit[2] + 40;             /* dawn */
+    ok &= aft.west[0] >= aft.east[0] && aft.lit[2] < day.lit[2] - 20 && aft.lit[0] > aft.lit[2] && aft.lit[1] > sunset.lit[1] &&
+          aft.shadow > day.shadow;                                                                                  /* afternoon */
+    ok &= sunset.west[0] > sunset.east[0] && sunset.west[0] > sunset.west[2] && sunset.lit[0] > sunset.lit[2] + 100;   /* sunset */
+    ok &= night.west[2] > night.west[0] && night.west[0] < 0.45f && night.city > 0.9f && night.lit[2] > night.lit[0];  /* night */
+    Check(ok, "dawn warm and low from the east, the afternoon gold and lengthening, sunset amber and rose from the west, night deep blue with the capitals lit");
+
+    /* the clouds' sun: the map's own (upper left) through the day; from the east at dawn, the west at sunset, low and long */
+    float x, y, len, x2, y2, len2;
+    TodToward(720, &x, &y, &len);
+    ok = Near(x, -0.766f, 0.01) && Near(y, -0.643f, 0.01) && Near(len, 0.47f, 0.01);
+    TodToward(345, &x, &y, &len); ok &= x > 0.5f && len > 1.0f;
+    TodToward(1245, &x, &y, &len); ok &= x < -0.9f && len > 1.0f;
+    TodToward(1020, &x, &y, &len); TodToward(780, &x2, &y2, &len2); ok &= len > len2 && x <= x2 + 1e-4f;   /* afternoon */
+    Check(ok, "the clouds' sun from the map's own upper left by day, rising in the east and setting in the west, their shadows long and away from it, lengthening through the afternoon");
+
+    /* the world graded: the plain day untouched; dawn lighter in the east than the west; night darker and blue; names half */
+    float W = 1600, H = 675;
+    static const float whole[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
+    memcpy(g_bgUV, whole, sizeof whole);
+    g_viewTex[VT_LABELS] = 1;
+    int lefts[3][3], names[3];
+    float times[3] = { 720, 360, 0 };
+    for (int k = 0; k < 3; k++) {
+        g_todForce = times[k];
+        ViewListStart(); TodSet();
+        ViewRect(VT_MAP, 0, 0, W, H, 0, 0, 1, 1, 0xFFFFFFFFu);
+        ViewRect(VT_LABELS, 100, 100, 120, 120, 0, 0, 1, 1, 0xFFFFFFFFu);
+        TodGrade(W, 0, g_vvN);
+        for (int c = 0; c < 3; c++) lefts[k][c] = g_vv[0].c[c];
+        names[k] = g_vv[4].c[0];
+        if (k == 1) ok = g_vv[1].c[0] > g_vv[0].c[0] && g_vv[1].c[0] > g_vv[1].c[2];         /* dawn: the east warmer */
+    }
+    ok &= lefts[0][0] == 255 && lefts[0][2] == 255 && lefts[2][0] < 110 && lefts[2][2] > lefts[2][0] + 40 && names[2] > lefts[2][0] + 40;
+    g_todStyle &= ~TOD_GRADE; g_todForce = 0;
+    ViewListStart(); TodSet(); ViewRect(VT_MAP, 0, 0, W, H, 0, 0, 1, 1, 0xFFFFFFFFu); TodGrade(W, 0, g_vvN);
+    ok &= g_vv[0].c[0] == 255;
+    g_todStyle |= TOD_GRADE;
+    Check(ok, "the world map graded by the hour: the plain day as painted, dawn warmer in the east, night dark and blue, the names half as much; without the switch, as ever");
+
+    /* the capitals' lights: by night, near each, warm and left as they are; none by day */
+    g_map.ok = 1; g_map.m[0].ok = g_map.m[1].ok = 1;
+    for (int c = 0; c < 2; c++) { g_map.m[c].au = 0.5f; g_map.m[c].bu = 1 / 40000.0f; g_map.m[c].av = 0.5f; g_map.m[c].bv = -1 / 40000.0f; }
+    g_viewTex[VT_SPARK] = 1;
+    g_todForce = 0;
+    ViewListStart(); TodSet(); ViewRect(VT_MAP, 0, 0, W, H, 0, 0, 1, 1, 0xFFFFFFFFu);
+    TodCityBuild(W, H, 1000);
+    int lights = (g_todCityTo - g_todCityFrom) / 4, warm = g_todCityTo > g_todCityFrom ? g_vv[g_todCityFrom].c[0] : 0;
+    float sx = (0.5f + 554.0f / 40000.0f) * W, sy = (0.5f + 8913.0f / 40000.0f) * H;                 /* (Stormwind, here) */
+    float gx = (g_vv[g_todCityFrom].x + g_vv[g_todCityFrom + 1].x) / 2, gy = (g_vv[g_todCityFrom].y + g_vv[g_todCityFrom + 2].y) / 2;
+    TodGrade(W, 0, g_vvN);
+    ok = lights == TOD_CITIES * (1 + TOD_CITY_LIGHTS) && Near(gx, sx, 1) && Near(gy, sy, 1) && g_vv[g_todCityFrom].c[0] == warm &&
+         warm == 0xFF && g_vb[g_vbN - 1].add == 1;
+    g_todForce = 720;
+    ViewListStart(); TodSet(); TodCityBuild(W, H, 1000);
+    ok &= g_vvN == 0;
+    Check(ok, "the capitals' lights by night: a warm glow and a few twinkling lights at each, never graded; none by day");
+
+    /* the sun or moon in the top right: the client's own art, clear of the logo and the bar, crossing its arc */
+    g_viewTex[VT_TIME] = 1;
+    float px[4], py[4], pu[4];
+    float at[4] = { 340, 795, 1250, 0 };
+    for (int k = 0; k < 4; k++) {
+        g_todForce = at[k];
+        ViewListStart(); TodSet(); TodDiscBuild(W, H);
+        ok &= g_vbN == 1 && g_vb[0].tex == VT_TIME && !g_vb[0].add;
+        px[k] = (g_vv[0].x + g_vv[1].x) / 2; py[k] = (g_vv[0].y + g_vv[2].y) / 2; pu[k] = g_vv[0].u;
+        ok &= px[k] > W - 0.3f * H && py[k] < 0.15f * H && g_vv[1].x <= W && g_vv[0].y >= 0 && Near(g_vv[1].x - g_vv[0].x, TOD_DISC_H * H, 0.5);
+    }
+    ok &= pu[0] < 0.5f && pu[1] < 0.5f && pu[2] < 0.5f && pu[3] > 0.5f;                 /* sun, sun, sun, moon */
+    ok &= px[0] > px[1] && px[1] > px[2] && py[1] < py[0] && py[1] < py[2];              /* rising right (east), high at midday */
+    g_todForce = 340; ViewListStart(); TodSet(); TodDiscBuild(W, H); float m1 = g_vv[0].x;
+    g_todForce = 341; ViewListStart(); TodSet(); TodDiscBuild(W, H);
+    ok &= fabsf(g_vv[0].x - m1) < 0.5f;                                                   /* a minute: hardly moves */
+    g_todForce = 330.1f; ViewListStart(); TodSet(); TodDiscBuild(W, H);
+    ok &= g_vbN == 0 || g_vv[0].c[3] < 40;                                               /* fading in as it rises */
+    g_todStyle &= ~TOD_ARC;
+    float still[2];
+    for (int k = 0; k < 2; k++) { g_todForce = k ? 1000 : 400; ViewListStart(); TodSet(); TodDiscBuild(W, H); still[k] = g_vv[0].x; }
+    ok &= still[0] == still[1] && g_vv[0].c[3] == 255;
+    g_todStyle |= TOD_ARC;
+    g_viewTex[VT_TIME] = 0;
+    ViewListStart(); TodSet(); TodDiscBuild(W, H);
+    ok &= g_vbN == 0;
+    Check(ok, "the client's sun or moon in the top right (the moon by night), clear of the logo and the bar, crossing its arc east to west and highest at midday, fading in as it rises; still without the arc; none without its picture");
+
+    /* the clouds by the hour: the plain day as they were; dawn's warm colours, its shadows west, its light from the east */
+    CloudTileMake(1); CloudParse(g_ctile, sizeof g_ctile);
+    CloudGrid(100, 0, -1, 0, 0, 0);
+    g_shipAsp = W / H; g_destOk = 0; g_skyOn = 1;
+    static unsigned plain[CLOUD_TEX_W * CLOUD_TEX_H];
+    g_todAt = -1; g_tod = (TodLight){ { 1, 1, 1 }, { 1, 1, 1 }, { 255, 253, 247 }, { 200, 206, 222 }, { 80, 88, 110 }, .34f, 0, 0 };
+    CloudMake(W, H, 5000000);
+    memcpy(plain, g_cloudPx[g_cloudFront], sizeof plain);
+    g_todForce = 720; TodSet(); CloudMake(W, H, 5000000);
+    ok = !memcmp(plain, g_cloudPx[g_cloudFront], sizeof plain) && Near(g_cj.sunU, CLOUD_SUN_U, 0.01) && Near(g_cj.sunV, CLOUD_SUN_V, 0.01);
+    g_todForce = 345; TodSet(); CloudMake(W, H, 5000000);
+    ok &= g_cj.sunU > 0.4f && g_cj.turnX != 0;                                          /* the shadows' cloud east of them */
+    double east = 0, west = 0, ne = 0, nw = 0, red = 0, blue = 0;
+    const CloudPart *lp = &g_cloudShown.part[1];
+    for (int j = 1; j < lp->h - 1; j++)
+        for (int i = 1; i < lp->w - 1; i++) {
+            unsigned q = CloudPx(1, i, j);
+            int a = (int)(q >> 24);
+            if (a < 60) continue;
+            int gxa = (int)(CloudPx(1, i + 1, j) >> 24) - (int)(CloudPx(1, i - 1, j) >> 24);
+            double l = ((q & 255) + (q >> 8 & 255) + (q >> 16 & 255)) / (3.0 * a);
+            if (gxa < -4) { east += l; ne++; }                                                /* the east flanks */
+            if (gxa > 4) { west += l; nw++; }
+            red += (q & 255); blue += (q >> 16 & 255);
+        }
+    ok &= ne > 20 && nw > 20 && east / ne > west / nw + 0.05 && red > blue;
+    Check(ok, "the clouds by the hour: at noon exactly as they were; at dawn warm, lit from the east (their east flanks brighter), their shadows thrown west");
+    g_todForce = 720; g_skyOn = 0; g_sky.ok = 0; g_cloudOk = 0; g_cloudShownOk = 0; g_cj.on = 0; g_map.ok = 0;
+    g_viewTex[VT_SPARK] = 0; g_viewTex[VT_LABELS] = 0;
+
+    /* the client's own art is DXT3 (4 bits of alpha a texel): read and decoded */
+    static unsigned char blp[1172 + 16];
+    memset(blp, 0, sizeof blp);
+    memcpy(blp, "BLP2", 4); blp[4] = 1; blp[8] = 2; blp[9] = 8; blp[10] = 1; blp[11] = 0;
+    blp[12] = 4; blp[16] = 4; blp[20] = 0x94; blp[21] = 4; blp[84] = 16;               /* 4 x 4, one level at 1172 */
+    unsigned char *k = blp + 1172;
+    k[0] = 0x0F; k[1] = 0xF0;                                                            /* texels 0, 3 opaque */
+    k[8] = 0x00; k[9] = 0xF8; k[10] = 0x1F; k[11] = 0x00;                                /* red, blue */
+    BlpInfo b;
+    unsigned char rgba[64];
+    ok = BlpParse(blp, sizeof blp, &b) && b.dxt == 3 && b.w == 4 && b.levels == 1;
+    DxtDecode(blp + b.off[0], 4, 4, 3, rgba);
+    ok &= rgba[3] == 255 && rgba[7] == 0 && rgba[11] == 0 && rgba[15] == 255 && rgba[0] == 255 && rgba[2] == 0;
+    Check(ok, "the client's minimap art read as it is: DXT3, its alpha four bits a texel");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
     g_root = argv[1];
+    g_todForce = 720;                                    /* noon (the plain day) unless a test says otherwise */
 
     Fresh("nothing");
     Start();
@@ -4623,6 +4822,7 @@ int main(int argc, char **argv)
     TestWakes();
     TestSky();
     TestClouds();
+    TestTimeOfDay();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
