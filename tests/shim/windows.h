@@ -94,6 +94,8 @@ static DWORD GetLastError(void) { return 0; }
 static BOOL MoveFileExA(const char *from, const char *to, DWORD flags) { (void)flags; char a[1024], b[1024]; ShimPath(a, from); ShimPath(b, to); return rename(a, b) == 0; }
 static DWORD GetCurrentProcessId(void) { return (DWORD)getpid(); }
 static void GetLocalTime(SYSTEMTIME *t) { memset(t, 0, sizeof *t); }
+static SYSTEMTIME shim_utc;                                   /* UTC as GetSystemTime gives it (the tests set it) */
+static void GetSystemTime(SYSTEMTIME *t) { *t = shim_utc; }
 static HANDLE GetProcessHeap(void) { return (HANDLE)1; }
 static void *HeapAlloc(HANDLE h, DWORD f, size_t n) { (void)h; (void)f; return malloc(n); }
 static BOOL HeapFree(HANDLE h, DWORD f, void *p) { (void)h; (void)f; free(p); return TRUE; }

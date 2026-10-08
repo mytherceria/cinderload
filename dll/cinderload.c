@@ -4059,6 +4059,131 @@ static void SkyWind(float v, float *east, float *north)
     *east = e; *north = lat < 0 ? -n : n;
 }
 
+/* ---- the time of day (8 Oct 2026, his ask: "Is it possible to have a sun or moon like on the minimap in the top right
+ * hand corner of the screen to show what time of day or night it is? and to have the world in dawn, daytime sunlight,
+ * sunset, or shadow, accordingly?", and his word: "start the time of day now") ----
+ * The game's day follows its realm's clock, the same for every player: RavenCraft's runs on Central European time
+ * (measured 7 Oct: its 9:03 at his 0:03 PDT), UTC and an hour, two in summer by the EU's rule. The client's minimap swaps
+ * its sun for its moon at 5:30 and at 9 pm (GameTime.lua: GAMETIME_DAWN, GAMETIME_DUSK); so do we, and between them the
+ * light runs through keys: night's blue moonlight, dawn's low pink-gold light from the east, the day as the map was
+ * painted, the golden hour, sunset's amber and rose from the west, dusk; each eased into the next, never a jump. The world
+ * map and its overlay are graded together, warmer on the side the sun is low over; the clouds take the hour's colours,
+ * their undersides catching the sunset, their light and shadows turning to the sun or moon (long, and away from it, at
+ * dawn and dusk); the capitals glow faintly by night; and the client's own sun or moon (Interface\Minimap\
+ * UI-TOD-Indicator, read from interface.MPQ as it is) crosses a small arc in the top right. Each its own switch. */
+#define TOD_GRADE  1u            /* the world lit by the hour */
+#define TOD_DISC   2u            /* the sun or the moon in the top right, */
+#define TOD_ARC    4u            /* crossing its arc through its day or night (without it, still, as on the minimap) */
+#define TOD_CITY   8u            /* the capitals' lights by night */
+#define TOD_CLOUDS 16u           /* the clouds' colours, light and shadows by the hour */
+static unsigned g_todStyle = TOD_GRADE | TOD_DISC | TOD_ARC | TOD_CITY | TOD_CLOUDS;
+static float g_todForce = -1;    /* minutes into the realm's day to show instead of its clock (previews, tests); -1 its clock */
+#define TOD_DAWN   330.0f        /* 5:30, the client's own */
+#define TOD_DUSK   1260.0f       /* 9 pm */
+#define TOD_PATH   "Interface\\Minimap\\UI-TOD-Indicator.blp"
+#define TOD_DISC_H 0.042f        /* the disc's size, of the screen's height */
+/* Day of the week (0 Sunday) of a date, Sakamoto's way. */
+static int TodWeekday(int y, int m, int d)
+{
+    static const int t[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    if (m < 3) y--;
+    return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+/* The realm's clock's lead on UTC at UTC time u, minutes: an hour, two from 01:00 UTC on the last Sunday of March to 01:00
+ * UTC on the last Sunday of October (the EU's summer time). */
+static int TodOffset(const SYSTEMTIME *u)
+{
+    int m = u->wMonth;
+    if (m < 3 || m > 10) return 60;
+    if (m > 3 && m < 10) return 120;
+    int last = 31 - TodWeekday(u->wYear, m, 31);              /* (March and October both have 31 days) */
+    int at = (u->wDay - last) * 24 + u->wHour;                /* hours since that Sunday began */
+    return (m == 3 ? at >= 1 : at < 1) ? 120 : 60;
+}
+/* Minutes into the realm's day at UTC time u, its seconds and milliseconds in (it never steps). */
+static float TodServerMinutes(const SYSTEMTIME *u)
+{
+    int mins = (u->wHour * 60 + u->wMinute + TodOffset(u)) % 1440;
+    return (float)mins + (float)u->wSecond / 60.0f + (float)u->wMilliseconds / 60000.0f;
+}
+/* Minutes into the realm's day now: its clock, or the hour forced. */
+static float TodMinutes(void)
+{
+    if (g_todForce >= 0) return g_todForce - MapFloor(g_todForce / 1440) * 1440;
+    SYSTEMTIME u;
+    GetSystemTime(&u);
+    return TodServerMinutes(&u);
+}
+/* The light at a key of the day: the world's grade at the screen's left (west) and right (east) edges; the clouds' lit
+ * tops, their middles and their bases (RGB); how dark their shadows; the capitals' lights; how far the clouds' light is
+ * turned to the sun or moon from the map's own (upper left). */
+typedef struct { float west[3], east[3], lit[3], mid[3], base[3], shadow, city, turn; } TodLight;
+static const struct { float at; TodLight k; } kTodKeys[] = {
+    {    0, { { .37f, .42f, .64f }, { .37f, .42f, .64f }, { 150, 158, 186 }, {  96, 104, 130 }, { 40, 46, 68 }, .12f, 1.0f, .25f } },
+    {  270, { { .37f, .41f, .62f }, { .47f, .45f, .64f }, { 160, 158, 184 }, { 100, 100, 128 }, { 46, 46, 70 }, .06f, .9f, .10f } },
+    {  330, { { .42f, .40f, .56f }, { .80f, .62f, .62f }, { 230, 180, 175 }, { 150, 120, 135 }, { 80, 66, 90 }, 0, .6f, 0 } },   /* dawn */
+    {  360, { { .62f, .56f, .64f }, { 1.0f, .84f, .74f }, { 255, 214, 178 }, { 205, 172, 178 }, { 96, 82, 112 }, .46f, .15f, 1 } },
+    {  450, { { .94f, .92f, .92f }, { 1.0f, .97f, .92f }, { 255, 240, 222 }, { 208, 206, 215 }, { 88, 92, 112 }, .36f, 0, .35f } },
+    {  540, { { 1, 1, 1 }, { 1, 1, 1 }, { 255, 253, 247 }, { 200, 206, 222 }, { 80, 88, 110 }, .34f, 0, 0 } },                     /* day */
+    {  900, { { 1, 1, 1 }, { 1, 1, 1 }, { 255, 253, 247 }, { 200, 206, 222 }, { 80, 88, 110 }, .34f, 0, 0 } },
+    { 1020, { { 1.0f, .97f, .88f }, { .96f, .94f, .90f }, { 255, 240, 205 }, { 210, 202, 198 }, { 98, 94, 104 }, .38f, 0, .45f } },  /* afternoon:
+                                                                                     * the sun westering, warm gold, its sides warming */
+    { 1185, { { 1.0f, .94f, .80f }, { .88f, .84f, .84f }, { 255, 228, 180 }, { 215, 190, 170 }, { 130, 100, 100 }, .40f, 0, .6f } },
+    { 1230, { { 1.0f, .74f, .56f }, { .58f, .52f, .66f }, { 255, 190, 118 }, { 214, 150, 140 }, { 128, 78, 98 }, .44f, .2f, 1 } },  /* sunset */
+    { 1260, { { .66f, .50f, .58f }, { .40f, .38f, .58f }, { 200, 140, 140 }, { 140, 100, 120 }, { 90, 60, 80 }, 0, .6f, 0 } },    /* dusk */
+    { 1320, { { .40f, .41f, .64f }, { .37f, .41f, .63f }, { 160, 155, 185 }, { 100, 100, 130 }, { 46, 46, 70 }, .08f, .95f, .15f } },
+};
+#define TOD_KEYS ((int)(sizeof kTodKeys / sizeof kTodKeys[0]))
+/* The light at minutes m into the day: the keys either side of it, eased between (each key's own, held for a moment). */
+static void TodLightAt(float m, TodLight *L)
+{
+    m -= MapFloor(m / 1440) * 1440;
+    int k = TOD_KEYS - 1;
+    while (k > 0 && kTodKeys[k].at > m) k--;
+    if (m < kTodKeys[0].at) k = TOD_KEYS - 1;
+    int n = (k + 1) % TOD_KEYS;
+    float a = kTodKeys[k].at, b = kTodKeys[n].at + (n == 0 ? 1440 : 0), x = m < a ? m + 1440 : m;
+    float s = FireClamp((x - a) / (b - a), 0, 1);
+    s = s * s * (3 - 2 * s);
+    const float *p = &kTodKeys[k].k.west[0], *q = &kTodKeys[n].k.west[0];
+    float *o = &L->west[0];
+    for (unsigned i = 0; i < sizeof(TodLight) / sizeof(float); i++) o[i] = p[i] + (q[i] - p[i]) * s;
+}
+/* The sun (1, by day) or the moon (0): how far along its arc (*f, 0 rising .. 1 setting) and how high (*up, 0..1). */
+static int TodBody(float m, float *f, float *up)
+{
+    m -= MapFloor(m / 1440) * 1440;
+    int sun = m >= TOD_DAWN && m < TOD_DUSK;
+    float n = sun ? m - TOD_DAWN : (m >= TOD_DUSK ? m - TOD_DUSK : m + 1440 - TOD_DUSK);
+    *f = n / (sun ? TOD_DUSK - TOD_DAWN : 1440 - (TOD_DUSK - TOD_DAWN));
+    *up = SeaSin(3.14159265f * *f);
+    return sun;
+}
+/* Where the sun or moon is, from above the map: the way toward it on screen (x east, y down the screen) and how long a
+ * shadow falls for each height (the map's own light, from the upper left, through the middle of its day; from the east
+ * as it rises, the west as it sets, low and long then). */
+static void TodToward(float m, float *x, float *y, float *len)
+{
+    float f, up;
+    TodBody(m, &f, &up);
+    float a = f < 0.3f ? FireClamp(f / 0.3f, 0, 1) : 1, b = f > 0.7f ? FireClamp((f - 0.7f) / 0.3f, 0, 1) : 0;
+    a = a * a * (3 - 2 * a); b = b * b * (3 - 2 * b);
+    float th = (140.0f * a + 40.0f * b) * 3.14159265f / 180.0f;   /* 0 east, 140 the map's upper left, 180 west */
+    *x = SeaCos(th); *y = -SeaSin(th);
+    if (a >= 1 && b <= 0) { *x = -0.766f; *y = -0.643f; }      /* (the map's own, exactly: the clouds as they were) */
+    *len = 0.47f * FireClamp(0.85f / (up > 0.05f ? up : 0.05f), 1, 4);   /* (lengthening through the afternoon) */
+}
+/* The view's light this frame (ViewBuild sets it; the plain day until then, so the rest is as it was). */
+static TodLight g_tod = { { 1, 1, 1 }, { 1, 1, 1 }, { 255, 253, 247 }, { 200, 206, 222 }, { 80, 88, 110 }, .34f, 0, 0 };
+static float g_todAt = -1;                                  /* its minutes (-1: not set: the plain day) */
+static int g_todCityFrom, g_todCityTo;                      /* the capitals' lights in the list (left as they are) */
+static void TodSet(void)
+{
+    g_todCityFrom = g_todCityTo = 0;
+    if (!g_todStyle) { g_todAt = -1; return; }
+    g_todAt = TodMinutes();
+    TodLightAt(g_todAt, &g_tod);
+}
 /* ---- the clouds as light makes them (7 Oct 2026, ~19:05, his call, replacing the cartoon puffs: "those weren't the
  * kind of clouds i was envisioning"; his references: animated clouds over a map, the cloud types, clouds over a map in
  * 3D: forms made by light, shadow and the air between, a sun where the map's light comes from, shadows on the ground
@@ -4098,8 +4223,9 @@ static void SkyWind(float v, float *east, float *north)
 #define CLOUD_EVERY   33u        /* ms: a new picture of the sky about 30 times a second */
 #define CLOUD_STALE   400u       /* ms: an older picture is not drawn (a new screen's first comes at once) */
 #define CLOUD_TILE    32         /* the parts drawn in squares of this many texels; the empty ones left out */
-#define CLOUD_SUN_U   -0.36f     /* the sun's ray from the ground: this far left (heights) */
-#define CLOUD_SUN_V   -0.30f     /* and up the picture for each height it climbs (a high sun: shadows near their clouds) */
+#define CLOUD_SUN_U   (-0.766f * 0.47f)   /* the sun's ray from the ground: this far left (heights) */
+#define CLOUD_SUN_V   (-0.643f * 0.47f)   /* and up the picture for each height it climbs (a high sun: shadows near their
+                                           * clouds; the map's own light, from the upper left) */
 #define CLOUD_SHADOW  0.34f      /* a thick cloud's shadow darkens the ground this much */
 #define CLOUD_HI_A    0.6f       /* and the high clouds are at the most this opaque (thin, bright wisps) */
 #define CLOUD_PARTS   3          /* 0 the shadows on the ground, 1 the low clouds, 2 the high */
@@ -4198,31 +4324,43 @@ static void CloudRowSet(CloudRow *r, float u, float v, float T, float asp, const
     r->ka = (int)((1 - m) / l * 256 + 0.5f); r->kb = (int)(m / l * 256 + 0.5f);
     r->lb = (int)(m * 256 + 0.5f); r->la = 256 - r->lb;
 }
-/* The low clouds' density at the row's texel: of 65535 (and over: the detail), and its light (0..255); below thr, no
- * cloud whatever the detail, the detail is left out (it is never seen). */
-static inline int CloudField(const CloudRow *r, const unsigned *x, const unsigned *y, int detail, int thr, int *light)
+/* The tile's density at x, y (as CloudTap has it), to 16 bits (0..65280): fine enough that however near the view comes
+ * it never steps from texel to texel (the light, eight bits, only where there is cloud). */
+static inline int CloudDense(unsigned x, unsigned y)
 {
-    unsigned A = CloudTap(x[0], y[0]);
-    int n = (int)(A & 255) << 8, L = (int)(A >> 16);
-    if (detail && !r->kb && n + detail * 127 <= thr) { *light = L; return n; }
-    if (detail) {
-        unsigned B = CloudTap(x[1], y[1]);
-        n += detail * ((int)(B & 255) - 128);
-        L += (detail * ((int)(B >> 16) - 128)) >> 8;
-    }
+    unsigned ix = x >> 16 & (CLOUD_N - 1), iy = y >> 16 & (CLOUD_N - 1), fx = x >> 8 & 255, fy = y >> 8 & 255;
+    const unsigned *r0 = g_cloudTile + iy * CLOUD_N, *r1 = g_cloudTile + ((iy + 1) & (CLOUD_N - 1)) * CLOUD_N;
+    unsigned jx = (ix + 1) & (CLOUD_N - 1);
+    unsigned top = (r0[ix] & 255) * (256 - fx) + (r0[jx] & 255) * fx, bot = (r1[ix] & 255) * (256 - fx) + (r1[jx] & 255) * fx;
+    return (int)((top * (256 - fy) + bot * fy) >> 8);
+}
+/* The low clouds' density at the row's texel: of 65535 (and over: the detail); *big, the big shapes' alone (the slopes
+ * the hour's light turns by). Below thr, no cloud whatever the detail, the detail is left out (it is never seen). */
+static inline int CloudField(const CloudRow *r, const unsigned *x, const unsigned *y, int detail, int thr, int *big)
+{
+    int n = CloudDense(x[0], y[0]);
+    *big = n;
+    if (detail && !r->kb && n + detail * 127 <= thr) return n;
+    if (detail) n += (detail * (CloudDense(x[1], y[1]) - 32768)) >> 8;
     if (r->kb) {                                             /* morphing: the next field too, the spread kept */
-        unsigned C = CloudTap(x[2], y[2]);
-        int n2 = (int)(C & 255) << 8, L2 = (int)(C >> 16);
-        if (detail) {
-            unsigned D = CloudTap(x[3], y[3]);
-            n2 += detail * ((int)(D & 255) - 128);
-            L2 += (detail * ((int)(D >> 16) - 128)) >> 8;
-        }
+        int n2 = CloudDense(x[2], y[2]), b2 = n2;
+        if (detail) n2 += (detail * (CloudDense(x[3], y[3]) - 32768)) >> 8;
         n = 32768 + (((n - 32768) * r->ka + (n2 - 32768) * r->kb) >> 8);
+        *big = 32768 + (((*big - 32768) * r->ka + (b2 - 32768) * r->kb) >> 8);
+    }
+    return n;
+}
+/* Its light there (0..255), the octaves and the fields as the density has them. */
+static inline int CloudLight(const CloudRow *r, const unsigned *x, const unsigned *y, int detail)
+{
+    int L = (int)(CloudTap(x[0], y[0]) >> 16);
+    if (detail) L += (detail * ((int)(CloudTap(x[1], y[1]) >> 16) - 128)) >> 8;
+    if (r->kb) {
+        int L2 = (int)(CloudTap(x[2], y[2]) >> 16);
+        if (detail) L2 += (detail * ((int)(CloudTap(x[3], y[3]) >> 16) - 128)) >> 8;
         L = (L * r->la + L2 * r->lb) >> 8;
     }
-    *light = L < 0 ? 0 : L > 255 ? 255 : L;
-    return n;
+    return L < 0 ? 0 : L > 255 ? 255 : L;
 }
 
 /* The picture of the sky: each part's rectangle on its layer (picture u, v of its first texel's corner, a texel's size
@@ -4240,10 +4378,10 @@ static CloudPic g_cloudShown;
 static int g_cloudShownOk, g_cloudFront, g_cloudUpload;
 /* The picture being made (CloudBegin, then CloudWork a share of its rows at a time): the view it is for, its layers. */
 static struct {
-    int on, next, rows, detail, layout[4], kw[256], wl[256], ks, kh, ws, wh;
+    int on, next, rows, detail, layout[4], kw[256], wl[256], ks, kh, ws, wh, turnX, turnY, typ4;
     CloudPic pic;
     float W, H, u0, vt, us, vs, asp, T, ax, ay, clear, r0, r1;
-    float p[2], lift[2], fade[CLOUD_PARTS], sx[2], sy[2], hx[2], hy[2];
+    float p[2], lift[2], fade[CLOUD_PARTS], sx[2], sy[2], hx[2], hy[2], sunU, sunV;
     unsigned dx[2], hdx[2];
 } g_cj;
 static unsigned char g_cloudA[256], g_cloudShadowA[256], g_cloudHiA[256];   /* the edges' steps */
@@ -4267,15 +4405,23 @@ static void CloudTables(void)
         float flat = FireClamp((t - 0.62f) / 0.33f, 0, 1);                       /* the stratus: mostly cloud, flatter */
         g_cloudCon[i] = (int)(256 * (1 - 0.6f * flat) + 0.5f);
     }
-    static const float fair[3][3] = { { 80, 88, 110 }, { 200, 206, 222 }, { 255, 253, 247 } };    /* base, middle, lit */
+}
+/* The clouds' colours, by storm and light: from their bases through their middles to their lit tops as the hour has
+ * them (the plain day: as painted), the stormy ones the same darker. */
+static void CloudPalette(const float *lit, const float *mid, const float *base)
+{
+    static const float day[3][3] = { { 80, 88, 110 }, { 200, 206, 222 }, { 255, 253, 247 } };    /* base, middle, lit */
     static const float storm[3][3] = { { 46, 50, 64 }, { 112, 118, 134 }, { 196, 200, 212 } };
+    const float *fair[3] = { base, mid, lit };
     for (int s = 0; s < 16; s++)
         for (int l = 0; l < 64; l++) {
             float t = (float)l / 63, k = (float)s / 15, c[3];
             for (int ch = 0; ch < 3; ch++) {
-                float a = t < 0.5f ? fair[0][ch] + (fair[1][ch] - fair[0][ch]) * t * 2 : fair[1][ch] + (fair[2][ch] - fair[1][ch]) * (t * 2 - 1);
-                float b = t < 0.5f ? storm[0][ch] + (storm[1][ch] - storm[0][ch]) * t * 2 : storm[1][ch] + (storm[2][ch] - storm[1][ch]) * (t * 2 - 1);
-                c[ch] = a + (b - a) * k;
+                float f[3], d[3];
+                for (int i = 0; i < 3; i++) { f[i] = fair[i][ch]; d[i] = storm[i][ch] * fair[i][ch] / day[i][ch]; }
+                float a = t < 0.5f ? f[0] + (f[1] - f[0]) * t * 2 : f[1] + (f[2] - f[1]) * (t * 2 - 1);
+                float b = t < 0.5f ? d[0] + (d[1] - d[0]) * t * 2 : d[1] + (d[2] - d[1]) * (t * 2 - 1);
+                c[ch] = FireClamp(a + (b - a) * k, 0, 255);
             }
             g_cloudPal[s * 64 + l] = (unsigned)(int)(c[0] + 0.5f) | (unsigned)(int)(c[1] + 0.5f) << 8 | (unsigned)(int)(c[2] + 0.5f) << 16;
         }
@@ -4302,7 +4448,15 @@ static void CloudBegin(float W, float H, DWORD now)
         g_cj.lift[l] = alt * ppu * SKY_TILT * g_cj.p[l];
     }
     float pass0 = FireClamp((hc - 1.6f * CLOUD_ALT_LO) / CLOUD_ALT_LO, 0, 1), pass1 = FireClamp((hc - 1.6f * CLOUD_ALT_HI) / CLOUD_ALT_HI, 0, 1);
-    g_cj.fade[0] = pass0 * CLOUD_SHADOW; g_cj.fade[1] = pass0; g_cj.fade[2] = pass1 * CLOUD_HI_A;
+    /* the hour (the time of day): the clouds' colours, their shadows' way, length and darkness, their light turned to
+     * the sun or moon; the plain day without it */
+    int hour = (g_todStyle & TOD_CLOUDS) && g_todAt >= 0;
+    float tw = 0, dirx = -0.766f, diry = -0.643f, len = 0.47f;
+    if (hour) { TodToward(g_todAt, &dirx, &diry, &len); tw = g_tod.turn; }
+    static const float day[3][3] = { { 255, 253, 247 }, { 200, 206, 222 }, { 80, 88, 110 } };
+    CloudPalette(hour ? g_tod.lit : day[0], hour ? g_tod.mid : day[1], hour ? g_tod.base : day[2]);
+    g_cj.sunU = hour ? dirx * len : CLOUD_SUN_U; g_cj.sunV = hour ? diry * len : CLOUD_SUN_V;
+    g_cj.fade[0] = pass0 * (hour ? g_tod.shadow : CLOUD_SHADOW); g_cj.fade[1] = pass0; g_cj.fade[2] = pass1 * CLOUD_HI_A;
     for (int o = 0; o < 2; o++) {
         float s = CLOUD_N / (CLOUD_SCALE / (o ? CLOUD_FINER : 1));
         g_cj.sx[o] = g_cj.sy[o] = s;
@@ -4371,6 +4525,16 @@ static void CloudBegin(float W, float H, DWORD now)
     ws = ws > ls ? ws : ls; wh = wh > lh ? wh : lh;
     g_cj.ks = (int)(255.0f / ws + 0.5f); g_cj.ws = (int)(ws * 65536.0f + 0.5f);   /* the shadows' penumbra */
     g_cj.kh = (int)(255.0f / wh + 0.5f); g_cj.wh = (int)(wh * 65536.0f + 0.5f);   /* the high clouds' wisps */
+    /* the light turned to the sun or moon (the hour's share of it): each texel's change of density to the east and down
+     * the screen, against the way to the body less the map's own way, its usual change a light's 64 (enough to undo the
+     * map's own light, baked in, and light them from the other side) */
+    float typ = g_cloudSteep * step0 * 65536.0f;
+    if (typ < 1) typ = 1;
+    tw *= FireClamp(step0 * 2, 0.4f, 1);                     /* (less where the big shapes are much magnified: their tile's
+                                                             * texels would show in the light's slopes) */
+    g_cj.turnX = (int)FireClamp(64.0f * tw * (dirx + 0.766f) * 65536.0f / typ, -32767, 32767);
+    g_cj.turnY = (int)FireClamp(64.0f * tw * (diry + 0.643f) * 65536.0f / typ, -32767, 32767);
+    g_cj.typ4 = (int)FireClamp(4 * typ, 1, 32767);           /* (a texel's slope counted to four usual ones at the most) */
     g_cj.rows = h[0] + h[1] + h[2];
     g_cj.next = 0;
     g_cj.on = 1;
@@ -4397,7 +4561,7 @@ static void CloudRowMake(int k, int j)
     /* the layer this texel's cloud is on, and where it shows on screen (the arrival's clearing) */
     int l = k == 2 ? 1 : 0;
     float cu = u, cv = v;
-    if (k == 0) { cu += CLOUD_SUN_U * CLOUD_ALT_LO / g_cj.asp; cv += CLOUD_SUN_V * CLOUD_ALT_LO; }   /* the shadow's cloud */
+    if (k == 0) { cu += g_cj.sunU * CLOUD_ALT_LO / g_cj.asp; cv += g_cj.sunV * CLOUD_ALT_LO; }   /* the shadow's cloud */
     float p = g_cj.p[l], sx0 = g_cj.W / 2 + ((cu - g_cj.u0) / g_cj.us * g_cj.W - g_cj.W / 2) * p;
     float sdx = c->du / g_cj.us * g_cj.W * p, sy = g_cj.H / 2 + ((cv - g_cj.vt) / g_cj.vs * g_cj.H - g_cj.H / 2) * p - g_cj.lift[l];
     float gx0 = (u - g_cj.u0) / g_cj.us * g_cj.W, gdx = c->du / g_cj.us * g_cj.W, gsy = (v - g_cj.vt) / g_cj.vs * g_cj.H;
@@ -4419,25 +4583,25 @@ static void CloudRowMake(int k, int j)
                                                                          * penumbra; the wisps none) */
     int gx = (int)((cu * (float)g_sky.cols - 0.5f) * 256), dgx = (int)(c->du * (float)g_sky.cols * 256 + 0.5f);
     int gy = (int)((cv * (float)g_sky.rows - 0.5f) * 256);
-    static int above[CLOUD_TEX_W];                           /* (this part's row above: each texel's t) */
-    int prev = 0;
+    static int above[CLOUD_TEX_W], bigUp[4][CLOUD_TEX_W];   /* (this part's row above: each texel's t; its last four rows'
+                                                             * big shapes) */
+    int prev = 0, ring[4] = { 0, 0, 0, 0 };                   /* (and this row's last four) */
     unsigned cs0 = CloudCover(gx, gy), cs1 = cs0;
     for (int i = 0; i < w; i++) {
         if (!(i & 3)) { cs0 = cs1; cs1 = CloudCover(gx + 4 * dgx, gy); gx += 4 * dgx; }   /* (the grid every 4th texel) */
         unsigned f = (unsigned)(i & 3) * 64, cs = (cs0 * (256 - f) + cs1 * f) >> 8 & 0x00FF00FFu, px = 0;
-        int cov = (int)(cs & 255), a = 0, t = -32768, L = 128;
+        int cov = (int)(cs & 255), a = 0, t = -32768, L = 128, big = 0;
         if (cov) {
             int thr = k == 2 ? (255 - 4 - cov / 5) << 8 : (255 - cov) << 8;
-            t = CloudField(&r, x, y, detail, thr, &L) - thr;  /* (the density over the edge) */
+            t = CloudField(&r, x, y, detail, thr, &big) - thr;   /* (the density over the edge; big, the forms' own) */
         }
         /* how much it changes to the texel left and the one above: no edge sharper than three of those (a shader's
          * fwidth), so the picture, magnified, never shows its texels as stairs */
-        int fl = i ? t - prev : 0, fu = j ? t - above[i] : 0;
-        if (fl < 0) fl = -fl;
-        if (fu < 0) fu = -fu;
+        int dl = i ? t - prev : 0, du = j ? t - above[i] : 0, fl = dl < 0 ? -dl : dl, fu = du < 0 ? -du : du;
         int fw = 3 * (fl > fu ? fl : fu);
         prev = t; above[i] = t;
         if (t > 0) {
+            if (k) L = CloudLight(&r, x, y, detail);
             if (k == 2) {                                  /* the high: thin, combed, bright, where the sky is cloudy below */
                 int idx = fw > g_cj.wh ? t * 255 / fw : (t * g_cj.kh) >> 16;
                 a = (g_cloudHiA[idx > 255 ? 255 : idx] * fade) >> 8;
@@ -4449,6 +4613,15 @@ static void CloudRowMake(int k, int j)
                     a = (g_cloudShadowA[idx > 255 ? 255 : idx] * fade) >> 8;
                     px = (unsigned)(10 * a >> 8) | (unsigned)(16 * a >> 8) << 8 | (unsigned)(30 * a >> 8) << 16;
                 } else {
+                    if (g_cj.turnX | g_cj.turnY) {          /* (the light turned to the hour's sun or moon, by the slopes of the
+                                                             * big shapes, each across two texels: smooth however near the
+                                                             * view; the detail keeps its own light) */
+                        int bl = i >= 2 ? (big - ring[(i - 2) & 3]) / 2 : 0, bu = j >= 2 ? (big - bigUp[(j - 2) & 3][i]) / 2 : 0;
+                        int lim = g_cj.typ4, ex = bl > lim ? lim : bl < -lim ? -lim : bl, ey = bu > lim ? lim : bu < -lim ? -lim : bu;
+                        int turn = -((ex * g_cj.turnX >> 16) + (ey * g_cj.turnY >> 16));
+                        L += turn > 120 ? 120 : turn < -120 ? -120 : turn;
+                        L = L > 255 ? 255 : L < 0 ? 0 : L;
+                    }
                     int idx = fw > g_cj.wl[L] ? t * 64 / fw : (t * g_cj.kw[L]) >> 16;
                     a = (g_cloudA[idx > 255 ? 255 : idx] * fade) >> 8;
                     int lit = 128 + (((L - 128) * g_cloudCon[cov]) >> 8);
@@ -4465,6 +4638,7 @@ static void CloudRowMake(int k, int j)
                 }
             }
         }
+        ring[i & 3] = big; bigUp[j & 3][i] = big;
         out[i] = px | (unsigned)a << 24;
         any[i / CLOUD_TILE] |= a;
         x[0] += dx[0]; x[1] += dx[1]; x[2] += dx[0]; x[3] += dx[1];
@@ -5005,6 +5179,7 @@ static int BlpParse(const unsigned char *d, unsigned n, BlpInfo *b)
     if (d[8] == 1 && (d[9] == 0 || d[9] == 1 || d[9] == 4 || d[9] == 8)) b->dxt = 0;   /* palette indices */
     else if (d[8] == 2 && d[10] == 0 && d[9] <= 1) b->dxt = 1;   /* alpha encoding 0: DXT1 (no alpha, or one bit) */
     else if (d[8] == 2 && d[10] == 7 && d[9] == 8) b->dxt = 5;   /* 7: DXT5 */
+    else if (d[8] == 2 && d[10] == 1 && d[9] == 8) b->dxt = 3;   /* 1: DXT3 (the client's own minimap sun and moon) */
     else return 0;
     b->alpha = d[9];
     b->w = Rd32(d + 12); b->h = Rd32(d + 16);
@@ -5028,14 +5203,14 @@ static void Dxt565(unsigned c, unsigned char *rgb)
     unsigned r = c >> 11 & 31, g = c >> 5 & 63, b = c & 31;
     rgb[0] = (unsigned char)(r << 3 | r >> 2); rgb[1] = (unsigned char)(g << 2 | g >> 4); rgb[2] = (unsigned char)(b << 3 | b >> 2);
 }
-/* One level of DXT1 or DXT5 blocks, w x h texels, into out as RGBA (4 bytes a texel): for a driver without DXT. */
+/* One level of DXT1, DXT3 or DXT5 blocks, w x h texels, into out as RGBA (4 bytes a texel): for a driver without DXT. */
 static void DxtDecode(const unsigned char *src, unsigned w, unsigned h, int dxt, unsigned char *out)
 {
     unsigned bw = (w + 3) / 4, bh = (h + 3) / 4, size = dxt == 1 ? 8 : 16;
     for (unsigned by = 0; by < bh; by++)
         for (unsigned bx = 0; bx < bw; bx++) {
             const unsigned char *k = src + (by * bw + bx) * size, *c = dxt == 1 ? k : k + 8;
-            unsigned c0 = c[0] | c[1] << 8, c1 = c[2] | c[3] << 8, four = dxt == 5 || c0 > c1;
+            unsigned c0 = c[0] | c[1] << 8, c1 = c[2] | c[3] << 8, four = dxt != 1 || c0 > c1;
             unsigned char pal[4][4], a[8];
             Dxt565(c0, pal[0]); Dxt565(c1, pal[1]);
             for (int j = 0; j < 3; j++) {
@@ -5062,7 +5237,8 @@ static void DxtDecode(const unsigned char *src, unsigned w, unsigned h, int dxt,
                     unsigned char *o = out + (ty * w + tx) * 4;
                     const unsigned char *p = pal[c[4 + y] >> (2 * x) & 3];
                     o[0] = p[0]; o[1] = p[1]; o[2] = p[2];
-                    o[3] = dxt == 5 ? a[(i < 8 ? lo >> (3 * i) : hi >> (3 * (i - 8))) & 7] : p[3];
+                    o[3] = dxt == 5 ? a[(i < 8 ? lo >> (3 * i) : hi >> (3 * (i - 8))) & 7]
+                         : dxt == 3 ? (unsigned char)((k[i / 2] >> (4 * (i & 1)) & 15) * 17) : p[3];   /* (DXT3: 4 bits each) */
                 }
         }
 }
@@ -5101,7 +5277,8 @@ static int TextHas(const char *list, const char *name)
  * picture and the blade's soft spark (both made here, not read); g_viewTex holds OpenGL's name for each (0 while it has
  * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
-enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_COUNT };
+enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
+       VT_COUNT };
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -5683,7 +5860,7 @@ static int CloudThick(float u, float v, DWORD now)
     CloudRow r;
     CloudRowSet(&r, u, v, (float)(now % 36000000u) / 1000.0f, g_shipAsp, s, s, 1, 0);
     unsigned x[4] = { r.x[0][0], r.x[0][1], r.x[1][0], r.x[1][1] }, y[4] = { r.y[0][0], r.y[0][1], r.y[1][0], r.y[1][1] };
-    int L, n = CloudField(&r, x, y, 0, 0, &L);
+    int big, n = CloudField(&r, x, y, 0, 0, &big);
     int cov = (int)(CloudCover((int)((u * (float)g_sky.cols - 0.5f) * 256), (int)((v * (float)g_sky.rows - 0.5f) * 256)) & 255);
     return cov ? n - ((255 - cov) << 8) : -65536;
 }
@@ -5819,6 +5996,91 @@ static void SkyBuild(float W, float H, DWORD now)
     if (shown) CloudDraw(2, W, H, now);                      /* the high clouds, over all */
 }
 
+/* The world in the list, from vertex first to last, graded by the hour: each corner by where it is across the screen
+ * (the west's light at the left edge, the east's at the right); the names, the marks and the arrival's glow half as
+ * much (they must still be read); the sky's picture only by the difference across (its colours are the hour's
+ * already); the capitals' lights not at all. */
+static void TodGrade(float W, int first, int last)
+{
+    if (!(g_todStyle & TOD_GRADE) || g_todAt < 0) return;
+    const float *we = g_tod.west, *ea = g_tod.east;
+    if (we[0] == 1 && we[1] == 1 && we[2] == 1 && ea[0] == 1 && ea[1] == 1 && ea[2] == 1) return;   /* (the plain day) */
+    float avg[3];
+    for (int c = 0; c < 3; c++) avg[c] = (we[c] + ea[c]) / 2 > 0.2f ? (we[c] + ea[c]) / 2 : 0.2f;
+    for (int b = 0; b < g_vbN; b++) {
+        int t = g_vb[b].tex, half = t == VT_LABELS || t == VT_MARKS || t == VT_GLOW, rel = t == VT_SKY;
+        for (int i = g_vb[b].first; i < g_vb[b].first + g_vb[b].count; i++) {
+            if (i < first || i >= last || (i >= g_todCityFrom && i < g_todCityTo)) continue;
+            float k = FireClamp(g_vv[i].x / W, 0, 1);
+            for (int c = 0; c < 3; c++) {
+                float g = we[c] + (ea[c] - we[c]) * k;
+                if (rel) g /= avg[c];
+                else if (half) g = 0.5f + 0.5f * g;
+                float v = g_vv[i].c[c] * g;
+                g_vv[i].c[c] = (unsigned char)(int)(v > 255 ? 255 : v + 0.5f);
+            }
+        }
+    }
+}
+/* The capitals by night: a faint warm glow where each is, a few lights twinkling in it, growing as the view comes in. */
+static const struct { int map; float x, y; } kTodCities[] = {
+    { 0, -8913.0f, 554.0f }, { 0, -4981.0f, -881.0f }, { 0, 1586.0f, 239.0f },       /* Stormwind, Ironforge, Undercity */
+    { 1, 1629.0f, -4373.0f }, { 1, -1277.0f, 124.0f }, { 1, 9947.0f, 2482.0f } };   /* Orgrimmar, Thunder Bluff, Darnassus */
+#define TOD_CITIES ((int)(sizeof kTodCities / sizeof kTodCities[0]))
+#define TOD_CITY_LIGHTS 6
+static void TodCityBuild(float W, float H, DWORD now)
+{
+    g_todCityFrom = g_todCityTo = g_vvN;
+    float a = g_tod.city;
+    if (!(g_todStyle & TOD_CITY) || g_todAt < 0 || a < 0.02f || !g_viewTex[VT_SPARK] || !g_map.ok) return;
+    float vs = g_bgUV[1] - g_bgUV[5], grow = vs > 0 ? FireClamp(SaberSqrt(1.0f / vs), 1, 3) : 1, r = 0.011f * H * grow;
+    float t = (float)(now % 3600000u) / 1000.0f;
+    for (int i = 0; i < TOD_CITIES; i++) {
+        int m = kTodCities[i].map;
+        if (!g_map.m[m].ok) continue;
+        float u = g_map.m[m].au + g_map.m[m].bu * kTodCities[i].y, v = g_map.m[m].av + g_map.m[m].bv * kTodCities[i].x, x, y;
+        ShipPixel(u, v, W, H, &x, &y);
+        if (x < -4 * r || x > W + 4 * r || y < -4 * r || y > H + 4 * r) continue;
+        ViewVert *q = ViewQuadMode(VT_SPARK, 1);                 /* the glow */
+        if (!q) return;
+        DWORD c = SaberArgb(0xFFB060, 0.32f * a);
+        ViewVertSet(q, x - 2.2f * r, y - 1.6f * r, 0, 0, c); ViewVertSet(q + 1, x + 2.2f * r, y - 1.6f * r, 1, 0, c);
+        ViewVertSet(q + 2, x + 2.2f * r, y + 1.6f * r, 1, 1, c); ViewVertSet(q + 3, x - 2.2f * r, y + 1.6f * r, 0, 1, c);
+        for (int j = 0; j < TOD_CITY_LIGHTS; j++) {             /* its lights, each twinkling on its own */
+            float lx = x + (SeaRand((unsigned)i, 70u + j) - 0.5f) * 2.4f * r, ly = y + (SeaRand((unsigned)i, 80u + j) - 0.5f) * 1.6f * r;
+            float tw = 0.7f + 0.3f * SaberNoise(t * 1.3f, (float)j, 300u + (unsigned)i), lr = 0.22f * r;
+            q = ViewQuadMode(VT_SPARK, 1);
+            if (!q) return;
+            c = SaberArgb(0xFFD49A, 0.75f * a * tw);
+            ViewVertSet(q, lx - lr, ly - lr, 0, 0, c); ViewVertSet(q + 1, lx + lr, ly - lr, 1, 0, c);
+            ViewVertSet(q + 2, lx + lr, ly + lr, 1, 1, c); ViewVertSet(q + 3, lx - lr, ly + lr, 0, 1, c);
+        }
+    }
+    g_todCityTo = g_vvN;
+}
+/* The client's sun or moon in the top right: crossing a small arc (TOD_ARC: rising at its right, the east, highest at
+ * midday or midnight, setting at its left, fading in and out at its ends), or still in the corner as on the minimap. */
+static void TodDiscBuild(float W, float H)
+{
+    if (!(g_todStyle & TOD_DISC) || g_todAt < 0 || !g_viewTex[VT_TIME]) return;
+    float f, up, s = TOD_DISC_H * H, a = 1;
+    int sun = TodBody(g_todAt, &f, &up);
+    float x = W - 0.035f * H - s / 2, y = 0.03f * H + s / 2;    /* (still: the corner) */
+    if (g_todStyle & TOD_ARC) {
+        float span = 0.16f * H;
+        x = W - 0.035f * H - s / 2 - span * f;
+        y = 0.03f * H + s / 2 + 0.05f * H * (1 - up);
+        a = FireClamp(f / 0.02f, 0, 1) * FireClamp((1 - f) / 0.02f, 0, 1);
+    }
+    if (a <= 0.01f) return;
+    ViewVert *q = ViewQuadMode(VT_TIME, 0);
+    if (!q) return;
+    float u0 = (sun ? 0.5f : 64.5f) / 128, u1 = (sun ? 49.5f : 113.5f) / 128, v0 = 0.5f / 64, v1 = 49.5f / 64;
+    DWORD c = SaberArgb(0xFFFFFF, a);
+    ViewVertSet(q, x - s / 2, y - s / 2, u0, v0, c); ViewVertSet(q + 1, x + s / 2, y - s / 2, u1, v0, c);
+    ViewVertSet(q + 2, x + s / 2, y + s / 2, u1, v1, c); ViewVertSet(q + 3, x - s / 2, y + s / 2, u0, v1, c);
+}
+
 static DWORD g_ovViewAt;
 static void ViewOverlayBuild(float W, float H, DWORD now)
 {
@@ -5831,6 +6093,7 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
     if (g_marksOn && g_viewTex[VT_MARKS]) { MaelstromBuild(t); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
     if (g_flowOn && g_viewTex[VT_FLOW]) { FlowBuild(t, dt); ViewStrips(VT_FLOW, g_flPos, g_flUV, g_flCol, g_flQuads, W, H); }
     if (g_seaOn && g_viewTex[VT_SEA]) { GlintsBuild(t); ViewStrips(VT_SEA, g_glPos, g_glUV, g_glCol, g_glQuads, W, H); }
+    TodCityBuild(W, H, now);                                     /* the capitals' lights by night */
     if (g_shipsOn && g_viewTex[VT_SHIPS]) ShipsBuild(W, H, now, 0);   /* the ships on the sea, the weather over them, and */
     if (g_skyOn && g_viewTex[VT_SKY]) SkyBuild(W, H, now);            /* the zeppelins over all */
     if (g_shipsOn && g_viewTex[VT_SHIPS]) ShipsBuild(W, H, now, 1);
@@ -6440,8 +6703,11 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
 static void ViewBuild(float W, float H, float shown, DWORD now)
 {
     ViewListStart();
+    TodSet();                                                   /* the hour's light (the time of day) */
     ViewRect(VT_MAP, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
     ViewOverlayBuild(W, H, now);
+    TodGrade(W, 0, g_vvN);                                      /* the world, lit by it */
+    TodDiscBuild(W, H);                                         /* its sun or moon */
     SaberBuild(W, H, shown, now);
 }
 
@@ -6548,6 +6814,7 @@ static int ViewFadeDue(DWORD now, DWORD goneAt, LONG seen)
 #define GL_UNSIGNED_BYTE_        0x1401
 #define GL_DXT1_RGB_             0x83F0
 #define GL_DXT1_RGBA_            0x83F1
+#define GL_DXT3_RGBA_            0x83F2
 #define GL_DXT5_RGBA_            0x83F3
 #define GL_VERTEX_ARRAY_         0x8074
 #define GL_COLOR_ARRAY_          0x8076
@@ -6657,7 +6924,7 @@ static int ViewTexUp(int slot, const char **why)
     g_view.blp[slot] = NULL;
     int ok = 0, max = g_view.maxTex, s3tc = g_view.s3tc, first = 0;
     unsigned char *rgba = NULL;
-    if (!d || !BlpParse(d, n, &b)) { *why = "it is not a BLP2 of DXT1 or DXT5 blocks whole"; goto done; }
+    if (!d || !BlpParse(d, n, &b)) { *why = "it is not a BLP2 of DXT1, DXT3 or DXT5 blocks whole"; goto done; }
     if (!b.dxt) s3tc = 0;                                       /* a palette picture: decoded here, whatever the driver */
     while (first < b.levels - 1 && ((int)(b.w >> first) > max || (int)(b.h >> first) > max ||
                                     (!s3tc && (b.w >> first) > VIEW_DECODE_MAX && b.dxt)))
@@ -6670,7 +6937,7 @@ static int ViewTexUp(int slot, const char **why)
     gl.GenTextures(1, &g_viewTex[slot]);
     gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
     gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
-    unsigned fmt = b.dxt == 5 ? GL_DXT5_RGBA_ : b.alpha ? GL_DXT1_RGBA_ : GL_DXT1_RGB_;
+    unsigned fmt = b.dxt == 5 ? GL_DXT5_RGBA_ : b.dxt == 3 ? GL_DXT3_RGBA_ : b.alpha ? GL_DXT1_RGBA_ : GL_DXT1_RGB_;
     for (int i = first; i < b.levels; i++) {
         unsigned w = b.w >> i ? b.w >> i : 1, h = b.h >> i ? b.h >> i : 1;
         if (s3tc)
@@ -6855,6 +7122,10 @@ static int ViewOpen(const char **why)
         if (g_skyOn)
             Log(ViewSkyUp() ? "  the view's sky: its clouds' picture made with OpenGL, given anew about 30 times a second"
                             : "  the view's sky: OpenGL would not make its clouds' picture; the weather is left out");
+        int hm = (int)TodMinutes();
+        wsprintfA(m, "  the time of day: the realm's clock (Central European) at %02d:%02d; its sun or moon %s", hm / 60, hm % 60,
+                  g_viewTex[VT_TIME] ? "from the client's minimap" : "not shown (Interface\\Minimap\\UI-TOD-Indicator was not read)");
+        Log(m);
     }
     g_view.w = w; g_view.h = h;
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
@@ -6965,6 +7236,8 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         for (unsigned i = 0; i < sizeof kSheets / sizeof kSheets[0]; i++)
             if (*kSheets[i].on) mpq_read(&kIo, "patch-~.MPQ", kSheets[i].path, &g_view.blp[kSheets[i].slot], &g_view.len[kSheets[i].slot]);
     }
+    if (g_todStyle & TOD_DISC)                          /* the client's own sun and moon, from its minimap (read only) */
+        mpq_read(&kIo, "interface.MPQ", TOD_PATH, &g_view.blp[VT_TIME], &g_view.len[VT_TIME]);
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
     LONG seen = g_gameSeq, worldSeen = 0;
     DWORD fadeAt = 0, waitAt = 0;
