@@ -5950,7 +5950,8 @@ static float g_sbSurge[SABER_COLS_MAX + 1], g_sbChurn[3][SABER_COLS_MAX + 1];
                                    * flame, the orb jitters */
 #define SABER_RAW      8u         /* harsher: darker deeps, a harder white heat, molten drops flung off the tip, arcing
                                    * and falling */
-static unsigned g_saberStyle;     /* which of them (0: the blade as it was) */
+static unsigned g_saberStyle = SABER_PULSE | SABER_RAW;   /* which of them: his pick, 7 Oct ("merge 2 and 4": pulse and
+                                                         * raw); 0 is the blade as it was */
 static unsigned g_sbStop[SABER_BANDS + 1][SABER_COLS_MAX + 1];
 /* A heat h (0 cold .. 1 and past it white) as the light's colour: its deep, its colour, its hot, white. */
 static unsigned SaberHeat(float h, unsigned deep, unsigned rgb, unsigned hot)

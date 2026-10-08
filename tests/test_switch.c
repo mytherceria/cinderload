@@ -2852,6 +2852,8 @@ static void ViewTests(void)
     {
         static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
         memcpy(g_bgUV, uv, sizeof uv);
+        Check(g_saberStyle == (SABER_PULSE | SABER_RAW), "the blade's qualities: pulse and raw, his pick (7 Oct: \"merge 2 and 4\"), the others there to switch on");
+        g_saberStyle = 0;                                                /* (the blade itself, as it was, below) */
         g_ovOn = 0; g_logoOn = 0; g_class = 0; g_frameOn = 0;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
         ViewBuild(1000, 500, 0.0f, 0);
