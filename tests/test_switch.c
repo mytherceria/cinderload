@@ -3586,11 +3586,11 @@ static void TestShips(void)
 
 /* The wakes and the wind (his ask, 7 Oct: "a little white foam at the front where they part the waves", "a little
  * widening path in the water as they pass"; for a zeppelin "little effects to make it look like the wind is streaking
- * past them"): one transport, sailing a way of 200 pixels across a 1000 x 500 window heading f (the picture's u counted
+ * past them"): one transport, sailing a way of 300 pixels across a 1000 x 500 window heading f (the picture's u counted
  * twice, so 500 pixels to a height), waiting wait seconds at each end. */
 static void WakeOne(int kind, int f, float wait)
 {
-    float c = (float)cos(f * 22.5 * M_PI / 180), sn = (float)sin(f * 22.5 * M_PI / 180), du = 0.2f * c, dv = 0.4f * sn;
+    float c = (float)cos(f * 22.5 * M_PI / 180), sn = (float)sin(f * 22.5 * M_PI / 180), du = 0.3f * c, dv = 0.6f * sn;
     g_ships = 1; g_shipPts = 2;
     g_ship[0].kind = kind; g_ship[0].rgb = 0xFFFFFF; g_ship[0].first = 0; g_ship[0].n = 2; g_ship[0].phase = 0;
     g_shipU[0] = 0.5f - du / 2; g_shipV[0] = 0.5f - dv / 2; g_shipU[1] = 0.5f + du / 2; g_shipV[1] = 0.5f + dv / 2;
@@ -3615,6 +3615,29 @@ static float WakeReach(int b, int q0, int n, int j)
     int a = j < n - 1 ? 0 : 1, c = j < n - 1 ? 3 : 2;
     return sqrtf((v[c].x - v[a].x) * (v[c].x - v[a].x) + (v[c].y - v[a].y) * (v[c].y - v[a].y));
 }
+/* The most the way of a soft band (n points from quad q0 of batch b) turns between neighbouring pieces, in degrees; and
+ * how far it turns in all, into *total. */
+static float WakeKink(int b, int q0, int n, float *total)
+{
+    float most = 0, prev = 0, sum = 0;
+    int have = 0;
+    for (int j = 0; j + 1 < n; j++) {
+        const ViewVert *p = WakePt(b, q0, n, j), *q = WakePt(b, q0, n, j + 1);
+        float dx = q->x - p->x, dy = q->y - p->y, a = atan2f(dy, dx);
+        if (dx * dx + dy * dy < 1e-4f) continue;           /* (a piece of no length: where it ends) */
+        if (have) {
+            float d = a - prev;
+            while (d > (float)M_PI) d -= 2 * (float)M_PI;
+            while (d < -(float)M_PI) d += 2 * (float)M_PI;
+            sum += d;
+            d = fabsf(d) * 180 / (float)M_PI;
+            most = d > most ? d : most;
+        }
+        prev = a; have = 1;
+    }
+    *total = fabsf(sum) * 180 / (float)M_PI;
+    return most;
+}
 static void TestWakes(void)
 {
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
@@ -3626,7 +3649,7 @@ static void TestWakes(void)
         float hx = kShipHead[f][0], hy = kShipHead[f][1], wx = 500, wy = 250 + SHIP_WATER * hs;   /* its waterline's middle */
         WakeOne(0, f, 0);
         ViewListStart();
-        ShipsBuild(1000, 500, 2000, 0);                    /* half way out, 100 pixels from its turn: its whole wake made */
+        ShipsBuild(1000, 500, 3000, 0);                    /* half way out, 150 pixels from its turn: its whole wake made */
         if (g_vbN != 3 || g_vb[0].tex != -1 || g_vb[1].tex != VT_SPARK || g_vb[2].tex != VT_SHIPS ||
             g_vb[0].count != 4 * SHIP_WAKE_BANDS || g_vb[1].count != 4 * SHIP_WAKE_SPARKS ||
             !Near(g_vv[g_vb[2].first].u, (f * SHIP_FRAME + 0.5) / SHIP_SHEET_W, 1e-6)) { okFoam = okArms = okStern = 0; continue; }
@@ -3720,7 +3743,8 @@ static void TestWakes(void)
         const ViewVert *st0 = WakePt(0, lane, ln, 0), *stN = WakePt(0, lane, ln, ln - 1);   /* (and its stern's) */
         float sreach = sqrtf((stN->x - st0->x) * (stN->x - st0->x) + (stN->y - st0->y) * (stN->y - st0->y));
         okLeave &= far > 0 && far < 0.02f * 500 + 0.5f * hs && foamA > 0 && foamA < 0.5f * 255 && reach < 0.02f * 500 * 1.1f + 1 &&
-                   e->c[3] == 0 && sreach < 0.02f * 500 + 1 && stN->c[3] == 0 && st0->c[3] > 0;   /* (and soft where it ends) */
+                   e->c[3] == 0 && sreach < 0.02f * 500 + 1 && stN->c[3] == 0 && st0->c[3] > 0 &&   /* (and soft where it ends) */
+                   reach > 0.8f * 0.02f * 500 && sreach > 0.8f * 0.02f * 500;   /* (but all of that: never squeezed) */
     }
     Check(okFoam, "the foam at a ship's bow: ahead of its waterline along its frame's heading, for all 16 headings, at its prow and either side of it");
     Check(okArms, "a ship's wake: two arms from its bow along the way it came, parting at the Kelvin angle (19.5 degrees either side), widening and fading to nothing as they go, behind it, for all 16 headings");
@@ -3734,7 +3758,7 @@ static void TestWakes(void)
             memcpy(g_bgUV, zoomed ? nearUV : kWholeUV, sizeof kWholeUV);
             WakeOne(0, 0, 0);
             ViewListStart();
-            ShipsBuild(1000, 500, 2000, 0);
+            ShipsBuild(1000, 500, 3000, 0);
             for (int j = 0; j < ln; j++) {
                 float a = WakePt(0, lane, ln, j)->c[3];
                 if (zoomed && 3 * j <= ln) most = a > most ? a : most;
@@ -3742,9 +3766,9 @@ static void TestWakes(void)
             }
         }
         int moving, ok = most >= 80;                           /* (the whole world's: half its strength, all else the same) */
-        float way = ShipWay(0, 2.0f, &moving);
+        float way = ShipWay(0, 3.0f, &moving);
         ViewListStart();
-        ShipStern(0, 500, 250, 1000, 500, way, SHIP_STERN_LEN * hs, 1, 0, hs, 500, 2.0f, 1.0f, 0);
+        ShipStern(0, 500, 250, 1000, 500, way, (SHIP_STERN_LEN + SHIP_SMOOTH) * hs, (0.5f * SHIP_SMOOTH + 1) * hs, 1, 0, hs, 500, 3.0f, 1.0f, 0);
         for (int j = 0; j + 1 < ln; j++) ok &= fabsf(whole[j] - 0.5f * WakePt(0, 2 * SHIP_STERN_SEGS, ln, j)->c[3]) <= 1;
         ok &= whole[1] > 0;
         Check(ok, "the wake off a ship's stern: plain close in, half as strong with the whole world in view");
@@ -3777,6 +3801,72 @@ static void TestWakes(void)
         Check(g_vbN == 3 && Near(g_vv[g_vb[2].first].u, 0.5 / SHIP_SHEET_W, 1e-6) && my < by - 0.5f * (len - 20) && mx > bx - len &&
               tN->y < t0->y - 0.5f * (SHIP_STERN_LEN * hs - 20),
               "round a bend a ship's wakes follow the way it came, not straight back from its heading");
+        /* round a sharp corner (his note, 7 Oct: "the water wake behind boats abruptly changes direction when the boat
+         * turns when it should be curved"): 200 pixels east, then a right angle and 200 down; at each moment as it comes
+         * round, its arms and its stern's wake curve, turning only a few degrees from one piece to the next */
+        float u4[3] = { 0.3f, 0.5f, 0.5f }, v4[3] = { 0.5f, 0.5f, 0.9f };
+        for (int i = 0; i < 3; i++) { g_shipU[i] = u4[i]; g_shipV[i] = v4[i]; }
+        ShipsTime(2.0f);
+        g_ship[0].phase = 0;
+        float worst = 0, rounds = 0, tot;
+        for (int k = -4; k < 8; k++) {                     /* coming up to the corner, and 5 to 75 pixels past it */
+            ViewListStart();
+            ShipsBuild(1000, 500, (DWORD)((4 + (5 + 10 * k) / 50.0) * 1000), 0);
+            if (g_vbN != 3) { worst = 180; break; }
+            float m[3] = { WakeKink(0, 0, SHIP_WAKE_SEGS + 1, &tot), WakeKink(0, 2 * SHIP_WAKE_SEGS, SHIP_WAKE_SEGS + 1, &tot),
+                           WakeKink(0, lane, ln, &tot) };
+            rounds = tot > rounds ? tot : rounds;
+            for (int i = 0; i < 3; i++) worst = m[i] > worst ? m[i] : worst;
+        }
+        Check(worst <= 6 && rounds >= 45, "round a sharp corner a ship's wakes curve: its arms and its stern's wake turn no more than a few degrees from one piece to the next, and round the corner with it");
+        /* slowing into its dock (2 s waits at each end: arriving at 8 s): its wakes and foam fade with its way */
+        WakeOne(0, 0, 2.0f);
+        ViewListStart();
+        ShipsBuild(1000, 500, 7900, 0);
+        float armA = 0, sternA = 0, foamA = g_vv[g_vb[1].first + 4 * (2 * SHIP_CAPS + SHIP_STERN_FOAM)].c[3];
+        for (int j = 0; j < ln; j++) sternA = WakePt(0, lane, ln, j)->c[3] > sternA ? WakePt(0, lane, ln, j)->c[3] : sternA;
+        for (int j = 0; j <= SHIP_WAKE_SEGS; j++) armA = WakePt(0, 0, SHIP_WAKE_SEGS + 1, j)->c[3] > armA ? WakePt(0, 0, SHIP_WAKE_SEGS + 1, j)->c[3] : armA;
+        Check(g_vbN == 3 && armA > 0 && armA < 40 && sternA > 0 && sternA < 40 && foamA > 0 && foamA < 70,
+              "a ship slowing into its dock: its wakes and its foam fading with its way");
+        /* a tenth of a second from its dock its wake runs on evenly behind it (its smoothing looks no further on than
+         * the dock, and on past it as if straight on), back along its way */
+        ViewListStart();
+        ShipsBuild(1000, 500, 7800, 0);
+        int even = g_vbN == 3;
+        for (int j = 0; j < 8; j++) {
+            const ViewVert *p0 = WakePt(0, lane, ln, j), *p1 = WakePt(0, lane, ln, j + 1);
+            float dx = p1->x - p0->x, dy = p1->y - p0->y;
+            even &= Near(sqrtf(dx * dx + dy * dy), SHIP_STERN_LEN * hs / SHIP_STERN_SEGS, 0.05 * SHIP_STERN_LEN * hs / SHIP_STERN_SEGS) &&
+                    dx < 0 && fabsf(dy) < 0.02f * fabsf(dx);
+        }
+        Check(even, "coming into its dock a ship's wake runs on evenly behind it, back along its way");
+        /* on a steady curve (round a circle of 150 pixels) its wake leaves it along its way there, not lagging round it */
+        {
+            enum { CP = 48 };
+            g_ships = 1; g_shipPts = CP; g_ship[0].n = CP;
+            for (int i = 0; i < CP; i++) {
+                double a = 2 * M_PI * i / CP;
+                g_shipU[i] = 0.5f + 0.15f * (float)cos(a); g_shipV[i] = 0.5f + 0.3f * (float)sin(a); g_shipWait[i] = 0;
+            }
+            ShipsTime(2.0f);
+            g_ship[0].phase = 0;
+            float lag = 0;
+            for (int k = 0; k < 6; k++) {
+                DWORD now = 2000 + 437 * (DWORD)k;
+                ViewListStart();
+                ShipsBuild(1000, 500, now, 0);
+                int moving;
+                float w = ShipWay(0, (float)now / 1000, &moving), u, v;
+                ShipAt(0, w, &u, &v);
+                float rx = (u - 0.5f) * 1000, ry = (v - 0.5f) * 500, bx = ry, by = -rx;   /* (back round it: clockwise on screen) */
+                const ViewVert *p0 = WakePt(0, lane, ln, 0), *p1 = WakePt(0, lane, ln, 2);
+                float d = atan2f(p1->y - p0->y, p1->x - p0->x) - atan2f(by, bx);
+                while (d > (float)M_PI) d -= 2 * (float)M_PI;
+                while (d < -(float)M_PI) d += 2 * (float)M_PI;
+                lag = fabsf(d) > lag ? fabsf(d) : lag;
+            }
+            Check(lag * 180 / (float)M_PI < 4, "on a steady curve a ship's wake leaves it along its way there, not lagging round it");
+        }
     }
 
     /* the wind round a zeppelin: its ways bend out round the balloon and come together behind it */

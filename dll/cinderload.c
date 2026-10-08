@@ -3801,26 +3801,31 @@ static void LogoBuild(void)
  * the water as they pass", and for a zeppelin "little effects to make it look like the wind is streaking past them").
  * Sizes in sprite half sizes. The sheet's camera looks down at a slant: a hull's waterline is a little below its
  * frame's middle, and a hull heading up or down the screen is shorter on it than one heading across. */
-#define SHIP_WAKE_SEGS 8          /* a ship's bow wake: its two arms, each through this many pieces */
+#define SHIP_WAKE_SEGS 32         /* a ship's bow wake: its two arms, each through this many pieces */
 #define SHIP_WAKE_LEN  3.2f       /* behind its bow (shorter while the ship has come less far from its dock) */
 #define SHIP_KELVIN    0.3536f    /* its arms part at the Kelvin angle, 19.5 degrees either side of its way (the tangent) */
 #define SHIP_PART      0.06f      /* and are this far either side of its way at the bow */
 #define SHIP_FOAM      3          /* the foam at the bow: soft white splashes at the prow and either side of it */
 #define SHIP_CAPS      6          /* whitecaps along each arm, where the water is (they stay as the ship sails on) */
 #define SHIP_CAP_STEP  0.5f       /* that far apart along its way */
-#define SHIP_STERN_SEGS 14        /* the wake off its stern (his ask, 7 Oct: "the wake from the ship should also come off
+#define SHIP_STERN_SEGS 24        /* the wake off its stern (his ask, 7 Oct: "the wake from the ship should also come off
                                    * the stern"): a churned white trail, three lanes of it, each through this many pieces, */
 #define SHIP_STERN_LEN 4.4f       /* this long behind the transom (several hull lengths), */
 #define SHIP_BEAM      0.15f      /* the hull's half width there at the transom, */
 #define SHIP_STERN_W   0.32f      /* and widening by this much by its end; */
 #define SHIP_STERN_FOAM 26        /* foam in it, where the water is, */
 #define SHIP_STERN_STEP 0.165f    /* about that far apart along it; */
-#define SHIP_QUARTER_SEGS 4       /* and small waves off the stern's quarters, each through this many pieces, */
+#define SHIP_QUARTER_SEGS 6       /* and small waves off the stern's quarters, each through this many pieces, */
 #define SHIP_QUARTER_LEN 1.0f     /* this long, */
 #define SHIP_QUARTER   0.47f      /* parting at 25 degrees either side of its way (the tangent) */
 #define SHIP_WAKE_BANDS (4 * SHIP_WAKE_SEGS + 6 * SHIP_STERN_SEGS + 4 * SHIP_QUARTER_SEGS)   /* a ship's quads for them, */
 #define SHIP_WAKE_SPARKS (2 * SHIP_CAPS + SHIP_STERN_FOAM + SHIP_FOAM)                       /* and the soft spark's, */
 #define SHIP_WAKE_Q    (SHIP_WAKE_BANDS + SHIP_WAKE_SPARKS)   /* always (dark at its dock) */
+#define SHIP_SMOOTH    4.4f       /* the wakes follow the way it came smoothed over this much of it, so a turn is a curve
+                                   * (his note, 7 Oct: "the water wake behind boats abruptly changes direction when the boat
+                                   * turns when it should be curved"): the route's corners are sharp, its pieces short; */
+#define SHIP_ARM_TURN  2.5f       /* the bow wake's arms part across its way taken over this many times their spread
+                                   * there either side (so round the inside of a turn they never fold back on themselves) */
 #define SHIP_WATER     0.24f      /* the middle of a hull's waterline, below its frame's middle */
 #define SHIP_BOW_X     0.58f      /* its bow from there, heading across the screen, */
 #define SHIP_BOW_Y     0.42f      /* and heading up or down it; */
@@ -5203,6 +5208,41 @@ static float ShipGone(int r, float t0, float t1)
     float d = ShipWay(r, t1, &moving) - ShipWay(r, t0, &moving);
     return d < -0.5f * L ? d + L : (d < 0 ? 0 : d);              /* (round the loop's end; never a rounding's -0) */
 }
+/* How far transport r has come (heights) since it last left a dock, at its own time t: most at the most (0 at a dock). */
+static float ShipSince(int r, float t, float most)
+{
+    int f = g_ship[r].first, n = g_ship[r].n, lo = 0, hi = n - 1, moving;
+    float way = ShipWay(r, t, &moving);
+    while (lo < hi) {                                       /* the last point it reached (at a dock: no way since) */
+        int mid = (lo + hi + 1) / 2;
+        if (g_shipT[f + mid] <= t) lo = mid; else hi = mid - 1;
+    }
+    float gone = way - g_shipS[f + lo];
+    for (int k = 0; k < n && gone < most && !(g_shipWait[f + lo] > 0); k++) {   /* back past those it only passed */
+        int p = lo ? lo - 1 : n - 1;
+        gone += lo ? g_shipS[f + lo] - g_shipS[f + p] : g_ship[r].len - g_shipS[f + p];
+        lo = p;
+    }
+    return gone < most ? gone : most;
+}
+/* How far transport r has still to go (heights) to its next dock, at its own time t: most at the most. */
+static float ShipUntil(int r, float t, float most)
+{
+    int f = g_ship[r].first, n = g_ship[r].n, lo = 0, hi = n - 1, moving;
+    float way = ShipWay(r, t, &moving);
+    while (lo < hi) {                                       /* the last point it reached */
+        int mid = (lo + hi + 1) / 2;
+        if (g_shipT[f + mid] <= t) lo = mid; else hi = mid - 1;
+    }
+    int j = (lo + 1) % n;
+    float gone = (lo + 1 < n ? g_shipS[f + lo + 1] : g_ship[r].len) - way;
+    for (int k = 0; k < n && gone < most && !(g_shipWait[f + j] > 0); k++) {   /* on past those it only passes */
+        int q = (j + 1) % n;
+        gone += q ? g_shipS[f + q] - g_shipS[f + j] : g_ship[r].len - g_shipS[f + j];
+        j = q;
+    }
+    return gone < most ? gone : most;
+}
 /* How much transport r is under way at its own time t: 0 at its dock to 1, getting under way over SHIP_RAMP s as it
  * leaves and slowing over as long into its next dock (as far as it goes in that time, of what it goes at speed). */
 static float ShipGoing(int r, float t)
@@ -5243,18 +5283,74 @@ static void ShipEnd(int f, float cx, float cy, float hs, int back, float *x, flo
     *x = cx + k * kShipHead[f][0] * (back ? SHIP_STERN_X : SHIP_BOW_X) * hs;
     *y = cy + (SHIP_WATER + k * kShipHead[f][1] * (back ? SHIP_STERN_Y : SHIP_BOW_Y)) * hs;
 }
-/* The way ship r came (its centre at cx, cy on a W x H window, way along it), n points from ax, ay (its bow or its
- * transom) back along it to len pixels behind, never past where it left its dock (made pixels back): each point's
- * place x[], y[], how far back d[], and its left nx[], ny[] (from its neighbours; its frame f's heading where they meet). */
-static void ShipTrack(int r, float way, float W, float H, float cx, float cy, float ax, float ay, float len, float made,
-                      float ppu, int f, float hs, int n, float *x, float *y, float *d, float *nx, float *ny)
+/* The sum of transport r's place (u, v) along its way from s0 to s1 (s0 <= s1, less than a loop apart; either may be
+ * outside it), the length of the way times its mean place: exact along its straight pieces. */
+static void ShipSpan(int r, float s0, float s1, float *su, float *sv)
 {
+    float L = g_ship[r].len;
+    *su = *sv = 0;
+    if (!(L > 0) || !(s1 > s0)) return;
+    float k = MapFloor(s0 / L) * L;
+    s0 -= k; s1 -= k;                                       /* (s0 on its loop) */
+    int f = g_ship[r].first, n = g_ship[r].n, lo = 0, hi = n - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (g_shipS[f + mid] <= s0) lo = mid; else hi = mid - 1;
+    }
+    float at = s0;
+    for (int guard = 0; at < s1 && guard < 4 * n + 8; guard++) {
+        int i = f + lo, j = f + (lo + 1) % n;
+        float a = g_shipS[i], b = lo + 1 < n ? g_shipS[j] : L, e = s1 < b ? s1 : b;
+        if (e > at && b > a) {                              /* (this piece's share: its length times its middle) */
+            float m = 0.5f * ((at - a) + (e - a)) / (b - a);
+            *su += (g_shipU[i] + (g_shipU[j] - g_shipU[i]) * m) * (e - at);
+            *sv += (g_shipV[i] + (g_shipV[j] - g_shipV[i]) * m) * (e - at);
+        }
+        if (e > at) at = e;
+        if (at >= b && ++lo >= n) { lo = 0; at -= L; s1 -= L; }   /* (round the loop's end) */
+    }
+}
+/* Ship r's mean place over its way from d0 to d1 pixels behind it (ahead of it where they are less than 0; way along
+ * it, ppu pixels to a height), as if before it left its dock (made pixels back) it had come on straight the way it
+ * left, and past its next dock (ahead pixels on) it went on straight the way it comes in (an hs of each): so a wake
+ * just begun is as long as the way it has come, and one coming in never turns back on itself. */
+static void ShipMean(int r, float way, float d0, float d1, float made, float ahead, float ppu, float hs, float *u, float *v)
+{
+    float bu, bv, fu, fv, eu = 0, ev = 0, gu = 0, gv = 0, su = 0, sv = 0, qu, qv;
+    float dl = made < hs ? made : hs, al = ahead < hs ? ahead : hs;
+    ShipAt(r, way - made / ppu, &bu, &bv);                  /* (the dock it left, and the way it left it, */
+    ShipAt(r, way + ahead / ppu, &fu, &fv);                 /* the next, and the way it comes in: per pixel on) */
+    if (dl > 0.01f * hs) { ShipAt(r, way - (made - dl) / ppu, &qu, &qv); eu = (bu - qu) / dl; ev = (bv - qv) / dl; }
+    if (al > 0.01f * hs) { ShipAt(r, way + (ahead - al) / ppu, &qu, &qv); gu = (fu - qu) / al; gv = (fv - qv) / al; }
+    if (!(d1 - d0 > 0)) d1 = d0 + 0.001f * hs;
+    float a = d0 > -ahead ? d0 : -ahead, b = d1 < made ? d1 : made;   /* its way itself, */
+    if (b > a) { ShipSpan(r, way - b / ppu, way - a / ppu, &su, &sv); su *= ppu; sv *= ppu; }
+    float b0 = d0 > made ? d0 : made, f1 = d1 < -ahead ? d1 : -ahead;
+    if (d1 > b0) {                                          /* before it left, */
+        float mid = 0.5f * (b0 + d1) - made;
+        su += (d1 - b0) * (bu + eu * mid); sv += (d1 - b0) * (bv + ev * mid);
+    }
+    if (f1 > d0) {                                          /* and on past the next */
+        float mid = -ahead - 0.5f * (d0 + f1);
+        su += (f1 - d0) * (fu + gu * mid); sv += (f1 - d0) * (fv + gv * mid);
+    }
+    *u = su / (d1 - d0); *v = sv / (d1 - d0);
+}
+/* The way ship r came (way along it, on a W x H window), smoothed over SHIP_SMOOTH sprite half sizes of it about each
+ * place on it (ahead pixels on to its next dock), so a turn is a curve: n points from ax, ay (its bow or its transom)
+ * back along it to len pixels behind, never past where it left its dock (made pixels back): each point's place x[],
+ * y[], how far back d[], and its left nx[], ny[] (from its neighbours; its frame f's heading where they meet). */
+static void ShipTrack(int r, float way, float W, float H, float ax, float ay, float len, float made, float ahead, float ppu,
+                      int f, float hs, int n, float *x, float *y, float *d, float *nx, float *ny)
+{
+    float x0 = 0, y0 = 0, win = 0.5f * SHIP_SMOOTH * hs;
     for (int j = 0; j < n; j++) {
         float u, v, qx, qy, dd = len * (float)j / (float)(n - 1);
         d[j] = dd < made ? dd : made;
-        ShipAt(r, way - d[j] / ppu, &u, &v);
+        ShipMean(r, way, d[j] - win, d[j] + win, made, ahead, ppu, hs, &u, &v);   /* (the way about there) */
         ShipPixel(u, v, W, H, &qx, &qy);
-        x[j] = ax + qx - cx; y[j] = ay + qy - cy;
+        if (!j) { x0 = qx; y0 = qy; }
+        x[j] = ax + qx - x0; y[j] = ay + qy - y0;
     }
     for (int j = 0; j < n; j++) {
         int p = j > 0 ? j - 1 : j, q = j + 1 < n ? j + 1 : j;
@@ -5268,19 +5364,24 @@ static void ShipTrack(int r, float way, float W, float H, float cx, float cy, fl
  * from its bow, along the way it has come, two arms parting at the Kelvin angle, widening and fading as they go. The
  * foam lies where the water is (its lumps stay where they are made as the ship sails on). caps 0: the arms, always
  * 4 * SHIP_WAKE_SEGS quads; 1: the whitecaps along them, always 2 * SHIP_CAPS (the soft spark's); dark when it is still. */
-static void ShipWake(int r, float cx, float cy, float W, float H, float way, float made, float go, int f, float hs,
-                     float ppu, float T, int caps)
+static void ShipWake(int r, float cx, float cy, float W, float H, float way, float made, float ahead, float go, int f,
+                     float hs, float ppu, float T, int caps)
 {
     enum { N = SHIP_WAKE_SEGS + 1 };
     float bx, by, len = SHIP_WAKE_LEN * hs, x[N], y[N], d[N], nx[N], ny[N];
     ShipEnd(f, cx, cy, hs, 0, &bx, &by);
-    ShipTrack(r, way, W, H, cx, cy, bx, by, len, made, ppu, f, hs, N, x, y, d, nx, ny);
+    ShipTrack(r, way, W, H, bx, by, len, made, ahead, ppu, f, hs, N, x, y, d, nx, ny);
     float lx[N], ly[N], rx[N], ry[N], la[N], ra[N], lw[N];
     for (int j = 0; j < N; j++) {
         float k = d[j] / len, spread = SHIP_PART * hs + SHIP_KELVIN * d[j];
         float wpos = (way * ppu - d[j]) / hs, end = FireClamp((made - d[j]) / (0.4f * hs), 0, 1);   /* (soft where it ends) */
-        lx[j] = x[j] + nx[j] * spread; ly[j] = y[j] + ny[j] * spread;
-        rx[j] = x[j] - nx[j] * spread; ry[j] = y[j] - ny[j] * spread;
+        float h = SHIP_ARM_TURN * spread, u, v, ax, ay, bx2, by2, win = 0.5f * SHIP_SMOOTH * hs;
+        ShipMean(r, way, d[j] - h - win, d[j] - h + win, made, ahead, ppu, hs, &u, &v); ShipPixel(u, v, W, H, &ax, &ay);
+        ShipMean(r, way, d[j] + h - win, d[j] + h + win, made, ahead, ppu, hs, &u, &v); ShipPixel(u, v, W, H, &bx2, &by2);
+        float tx = ax - bx2, ty = ay - by2, l = SaberSqrt(tx * tx + ty * ty), ax2 = nx[j], ay2 = ny[j];
+        if (l > hs * 0.01f) { ax2 = -ty / l; ay2 = tx / l; }
+        lx[j] = x[j] + ax2 * spread; ly[j] = y[j] + ay2 * spread;
+        rx[j] = x[j] - ax2 * spread; ry[j] = y[j] - ay2 * spread;
         float fade = (1 - k) * SaberSqrt(1 - k);
         la[j] = go * end * 0.55f * fade * (0.6f + 0.4f * SaberNoise(wpos * 1.3f, T * 0.7f, (unsigned)r * 3 + 1));
         ra[j] = go * end * 0.55f * fade * (0.6f + 0.4f * SaberNoise(wpos * 1.3f + 17, T * 0.7f, (unsigned)r * 3 + 1));
@@ -5308,13 +5409,13 @@ static void ShipWake(int r, float cx, float cy, float W, float H, float way, flo
  * on), foam tumbling in it, and small waves parting off the stern's quarters; only as far back as it has come from its
  * dock. strong: how plain it is (subtler with the whole world in view). pass 0: the bands, always 6 * SHIP_STERN_SEGS +
  * 4 * SHIP_QUARTER_SEGS quads; 1: the foam, always SHIP_STERN_FOAM (the soft spark's); dark when it is still. */
-static void ShipStern(int r, float cx, float cy, float W, float H, float way, float made, float go, int f, float hs,
-                      float ppu, float T, float strong, int pass)
+static void ShipStern(int r, float cx, float cy, float W, float H, float way, float made, float ahead, float go, int f,
+                      float hs, float ppu, float T, float strong, int pass)
 {
     enum { N = SHIP_STERN_SEGS + 1, Q = SHIP_QUARTER_SEGS + 1 };
     float sx, sy, len = SHIP_STERN_LEN * hs, x[N], y[N], d[N], nx[N], ny[N], a0 = go * strong;
     ShipEnd(f, cx, cy, hs, 1, &sx, &sy);
-    ShipTrack(r, way, W, H, cx, cy, sx, sy, len, made, ppu, f, hs, N, x, y, d, nx, ny);
+    ShipTrack(r, way, W, H, sx, sy, len, made, ahead, ppu, f, hs, N, x, y, d, nx, ny);
     if (!pass) {
         for (int m = -1; m <= 1; m++) {                          /* a lane to one side, its middle, the other side */
             float lx[N], ly[N], la[N], lw[N];
@@ -5330,7 +5431,7 @@ static void ShipStern(int r, float cx, float cy, float W, float H, float way, fl
             ShipBand(lx, ly, la, lw, N);
         }
         float qx[Q], qy[Q], qd[Q], qnx[Q], qny[Q], ql = SHIP_QUARTER_LEN * hs;   /* the waves off its quarters */
-        ShipTrack(r, way, W, H, cx, cy, sx, sy, ql, made, ppu, f, hs, Q, qx, qy, qd, qnx, qny);
+        ShipTrack(r, way, W, H, sx, sy, ql, made, ahead, ppu, f, hs, Q, qx, qy, qd, qnx, qny);
         for (int side = -1; side <= 1; side += 2) {
             float lx[Q], ly[Q], la[Q], lw[Q];
             for (int j = 0; j < Q; j++) {
@@ -5436,7 +5537,7 @@ static void ShipsBuild(float W, float H, DWORD now, int kind)
     grow = FireClamp(grow, 1, SHIP_GROW);
     float hs = (kind ? ZEP_SIZE : SHIP_SIZE) * H * grow, ppu = vs > 0 ? H / vs : H, T = (float)(now % 3600000u) / 1000.0f;
     float strong = 0.5f + 0.5f * (grow - 1) / (SHIP_GROW - 1);  /* (the stern's wake: subtler with the whole world in view) */
-    static float px[SHIPS_MAX], py[SHIPS_MAX], way[SHIPS_MAX], made[SHIPS_MAX], go[SHIPS_MAX];
+    static float px[SHIPS_MAX], py[SHIPS_MAX], way[SHIPS_MAX], made[SHIPS_MAX], ahead[SHIPS_MAX], go[SHIPS_MAX];
     static int frame[SHIPS_MAX], moving[SHIPS_MAX], seen[SHIPS_MAX];
     for (int r = 0; r < g_ships; r++) {
         seen[r] = 0;
@@ -5452,22 +5553,25 @@ static void ShipsBuild(float W, float H, DWORD now, int kind)
         ShipPixel(ua, va, W, H, &ax, &ay); ShipPixel(ub, vb, W, H, &bx, &by);
         frame[r] = ShipFrame(bx - ax, by - ay);
         go[r] = moving[r] ? ShipGoing(r, t) : 0;
-        float back = SHIP_STERN_LEN * hs / ppu / g_shipSpeed;  /* (the seconds it takes to sail its longest wake's length) */
-        if (back > 0.5f * g_ship[r].cycle) back = 0.5f * g_ship[r].cycle;
-        made[r] = kind ? 0 : ShipGone(r, t - back, t) * ppu;    /* how much of its wakes there is: as far as it has come */
+        float most = (SHIP_STERN_LEN + SHIP_SMOOTH) * hs / ppu;  /* (its longest wake, and the way it is smoothed over) */
+        if (most > 0.5f * g_ship[r].len) most = 0.5f * g_ship[r].len;
+        made[r] = kind ? 0 : ShipSince(r, t, most) * ppu;       /* how much of its wakes there is: as far as it has come */
+        most = (0.5f * SHIP_SMOOTH + 1) * hs / ppu;             /* (and how far on its wakes' smoothing looks) */
+        if (most > 0.5f * g_ship[r].len) most = 0.5f * g_ship[r].len;
+        ahead[r] = kind ? 0 : ShipUntil(r, t, most) * ppu;
         seen[r] = 1;
     }
     if (!kind) {                                            /* the wakes, under all the ships, then the foam in them */
         for (int r = 0; r < g_ships; r++)
             if (seen[r]) {
-                ShipWake(r, px[r], py[r], W, H, way[r], made[r], go[r], frame[r], hs, ppu, T, 0);
-                ShipStern(r, px[r], py[r], W, H, way[r], made[r], go[r], frame[r], hs, ppu, T, strong, 0);
+                ShipWake(r, px[r], py[r], W, H, way[r], made[r], ahead[r], go[r], frame[r], hs, ppu, T, 0);
+                ShipStern(r, px[r], py[r], W, H, way[r], made[r], ahead[r], go[r], frame[r], hs, ppu, T, strong, 0);
             }
         if (g_viewTex[VT_SPARK])
             for (int r = 0; r < g_ships; r++)
                 if (seen[r]) {
-                    ShipWake(r, px[r], py[r], W, H, way[r], made[r], go[r], frame[r], hs, ppu, T, 1);
-                    ShipStern(r, px[r], py[r], W, H, way[r], made[r], go[r], frame[r], hs, ppu, T, strong, 1);
+                    ShipWake(r, px[r], py[r], W, H, way[r], made[r], ahead[r], go[r], frame[r], hs, ppu, T, 1);
+                    ShipStern(r, px[r], py[r], W, H, way[r], made[r], ahead[r], go[r], frame[r], hs, ppu, T, strong, 1);
                     ShipFoam(r, px[r], py[r], frame[r], go[r], hs, T);
                 }
     }
