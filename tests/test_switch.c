@@ -3293,6 +3293,110 @@ static void ViewTests(void)
     }
 }
 
+/* The ships and zeppelins (7 Oct 2026): their table read, their time-lapsed clock with its dock waits, each where its
+ * clock has it, turned to its way, sized to the zoom, in its own accent, with a wake behind a ship under way. */
+static unsigned ShipHex(float f) { union { float f; unsigned u; } c; c.f = f; return c.u; }
+static void TestShips(void)
+{
+    static char t[2048];
+    int n = snprintf(t, sizeof t,
+        "# the living map\nspeed 100\ndock 500\nt 0 c82828 A ship\n"
+        "p %08x %08x 2000\np %08x %08x 0\n"                                  /* docks at (0.2, 0.5) for 2 s of the game's */
+        "t 1 8a4ac8 A zeppelin\np %08x %08x 0\np %08x %08x 0\np %08x %08x 0\n"
+        "t 2 ffffff not a kind\np 0 0 0\np 3e800000 0 0\nt 0 123456 no way\np %08x %08x 0\n"   /* a bad kind, a one-point way: dropped */
+        "t 0 0000ff in the wrong order\np %08x %08x 0\np zz 1 0\np %08x %08x 0\n",
+        ShipHex(0.2f), ShipHex(0.5f), ShipHex(0.6f), ShipHex(0.5f),
+        ShipHex(0.3f), ShipHex(0.2f), ShipHex(0.3f), ShipHex(0.4f), ShipHex(0.4f), ShipHex(0.4f),
+        ShipHex(0.5f), ShipHex(0.5f), ShipHex(0.1f), ShipHex(0.1f), ShipHex(0.1f), ShipHex(0.2f));
+    ShipsParse(t, (unsigned)n);
+    int ok = g_ships == 3 && g_ship[0].kind == 0 && g_ship[0].rgb == 0xC82828 && g_ship[0].n == 2 && g_ship[1].kind == 1 &&
+             g_ship[1].rgb == 0x8A4AC8 && g_ship[1].n == 3 && g_ship[2].n == 2 && g_ship[2].rgb == 0x0000FF &&
+             Near(g_shipSpeed, 0.1, 1e-6) && Near(g_shipDock, 0.5, 1e-6) && Near(g_shipWait[g_ship[0].first], 2.0, 1e-6);
+    Check(ok, "the transports' table read: its speed and dock lines, each transport's kind and accent, its points and dock waits; a bad kind, a way of one point and a bad point left out");
+
+    /* the clock: the ship (speed 0.1 heights a second, the picture's u counted twice) waits 1 s at its dock (2 s of the
+     * game's at 500), sails 0.8 heights in 8 s, and back in 8 s: a cycle of 17 s */
+    ShipsTime(2.0f);
+    int moving = -1;
+    float w = ShipWay(0, 0.5f, &moving), u, v;
+    ok = Near(g_ship[0].len, 1.6, 1e-5) && Near(g_ship[0].cycle, 17, 1e-4) && Near(w, 0, 1e-6) && moving == 0;
+    w = ShipWay(0, 5.0f, &moving);                                         /* 4 s under way: half way out */
+    ShipAt(0, w, &u, &v);
+    ok &= moving == 1 && Near(w, 0.4, 1e-5) && Near(u, 0.4, 1e-5) && Near(v, 0.5, 1e-5);
+    w = ShipWay(0, 13.0f, &moving);                                        /* 4 s into the way back */
+    ShipAt(0, w, &u, &v);
+    ok &= moving == 1 && Near(u, 0.4, 1e-5);
+    ShipAt(0, w + 1.6f, &u, &v);                                           /* the way goes round */
+    ok &= Near(u, 0.4, 1e-4);
+    ok &= Near(g_ship[1].cycle * 0.1 * ZEP_FASTER, g_ship[1].len, 1e-4);   /* a zeppelin: quicker, never docking */
+    Check(ok, "the transports' clock: a dock's wait its share of the game's, then under way at the speed, out and back round its loop, a zeppelin quicker");
+
+    /* drawn: the whole world in view, the ship 4 s under way heading east, the zeppelin over it */
+    static const float whole[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };
+    memcpy(g_bgUV, whole, sizeof whole);
+    g_shipsOn = 1; g_viewTex[VT_SHIPS] = 1; g_viewTex[VT_SPARK] = 1;
+    g_ship[0].phase = 4.0f; g_ship[1].phase = 0; g_ship[2].phase = 0;
+    ViewListStart();
+    ShipsBuild(1000, 500, 1000, 0);                                        /* (now 1 s: the ship's clock at 5 s) */
+    int wakes = g_vbN >= 1 ? g_vb[0].count / 4 : 0;
+    ok = g_vbN == 2 && g_vb[0].tex == VT_SPARK && g_vb[0].add && wakes == 2 * SHIP_WAKE && g_vb[1].tex == VT_SHIPS &&
+         !g_vb[1].add && g_vb[1].count == 4 * 2 * 2;                       /* two ships under way: frame + accent each */
+    const ViewVert *q = g_vv + g_vb[1].first, *acc = q + 4;
+    float hs = SHIP_SIZE * 500;
+    ok &= Near((q[0].x + q[1].x) / 2, 400, 1e-2) && Near((q[0].y + q[2].y) / 2, 250, 1e-2) && Near(q[1].x - q[0].x, 2 * hs, 1e-3);
+    ok &= Near(q[0].u, 0.5 / 2048, 1e-6) && Near(q[1].u, 127.5 / 2048, 1e-6) && Near(q[0].v, 0.5 / 512, 1e-6);   /* east: frame 0 */
+    ok &= acc[0].c[0] == 0xC8 && acc[0].c[1] == 0x28 && acc[0].c[2] == 0x28 && acc[0].c[3] == 255 && q[0].c[0] == 255 &&
+          Near(acc[0].v, 128.5 / 512, 1e-6);                               /* its accent in red, from the accent row */
+    const ViewVert *wk = g_vv + g_vb[0].first;
+    ok &= wk[0].x < 400 && wk[0].c[3] > wk[4 * (SHIP_WAKE - 1)].c[3];      /* the wake behind it, fading */
+    /* on the way back the ship faces west (frame 8) */
+    ViewListStart();
+    ShipsBuild(1000, 500, 9000, 0);                                        /* (its clock at 13 s) */
+    q = g_vv + g_vb[g_vbN - 1].first;
+    ok &= Near(q[0].u, (8 * 128 + 0.5) / 2048, 1e-6);
+    Check(ok, "the ships drawn: each where its clock has it, in the frame of its heading (east out, west back), its accent over it in its own colour, a fading wake behind it");
+
+    /* docked: no wake; the zeppelins drawn in their own pass from their own rows, heading south down their way */
+    g_ship[0].phase = 0; g_ship[2].phase = 0;
+    ViewListStart();
+    ShipsBuild(1000, 500, 500, 0);                                         /* the ship's clock at 0.5 s: at its dock */
+    int dockedWake = 0;
+    for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_SPARK) dockedWake += g_vb[b].count / 4;
+    ok = dockedWake == SHIP_WAKE;                                          /* only the other ship's */
+    ViewListStart();
+    ShipsBuild(1000, 500, 100, 1);
+    q = g_vv + g_vb[0].first;
+    ok &= g_vbN == 1 && g_vb[0].tex == VT_SHIPS && g_vb[0].count == 8 && Near(q[0].v, (2 * 128 + 0.5) / 512, 1e-6) &&
+          Near(q[4].v, (3 * 128 + 0.5) / 512, 1e-6) && Near(q[0].u, (4 * 128 + 0.5) / 2048, 1e-6) &&
+          Near(q[1].x - q[0].x, 2 * ZEP_SIZE * 500, 1e-3) && q[4].c[0] == 0x8A;
+    Check(ok, "a ship at its dock leaves no wake; the zeppelins drawn on their own, from their own rows, turned down their way, in their colour");
+
+    /* zoomed in: bigger (as the square root of the zoom, capped), and a transport off screen not drawn */
+    static const float near[8] = { 0.35f, 0.6f, 0.45f, 0.6f, 0.35f, 0.4f, 0.45f, 0.4f };   /* a fifth of the height */
+    memcpy(g_bgUV, near, sizeof near);
+    g_ship[0].phase = 4.0f;                                                /* (under way again, at u 0.4: in view) */
+    ViewListStart();
+    ShipsBuild(1000, 500, 1000, 0);
+    int quads = 0;
+    for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_SHIPS) quads += g_vb[b].count / 4;
+    q = g_vv + g_vb[g_vbN - 1].first;
+    float grow = (float)sqrt(1 / 0.2);
+    ok = quads == 2 && Near(q[1].x - q[0].x, 2 * SHIP_SIZE * 500 * (grow < SHIP_GROW ? grow : SHIP_GROW), 1e-2);
+    static const float nearer[8] = { 0.38f, 0.55f, 0.42f, 0.55f, 0.38f, 0.45f, 0.42f, 0.45f };   /* a tenth: past the cap */
+    memcpy(g_bgUV, nearer, sizeof nearer);
+    ViewListStart();
+    ShipsBuild(1000, 500, 1000, 0);
+    q = g_vv + g_vb[g_vbN - 1].first;
+    ok &= sqrt(1 / 0.1) > SHIP_GROW && Near(q[1].x - q[0].x, 2 * SHIP_SIZE * 500 * SHIP_GROW, 1e-2);
+    memcpy(g_bgUV, whole, sizeof whole);
+    g_viewTex[VT_SHIPS] = 0;
+    ViewListStart();
+    ViewOverlayBuild(1000, 500, 1000);
+    for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_SHIPS;
+    Check(ok, "nearer in the transports grow (as the square root of the zoom, capped); one off screen is not drawn; without their sheet none are");
+    g_shipsOn = 0; g_ships = 0; g_viewTex[VT_SPARK] = 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -3434,6 +3538,7 @@ int main(int argc, char **argv)
         FireRealClient(argv[2]);
     }
 
+    TestShips();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }

@@ -3775,6 +3775,125 @@ static void LogoBuild(void)
     QuadPut(g_logoPos, g_logoUV, g_logoCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
 }
 
+/* ---- the ships and zeppelins (7 Oct 2026, his ask: "zeppelins and ships moving on their real routes") ----
+ * CinderLoad\routes.txt (transports.py, from the client's TaxiPathNode.dbc) and CinderShips.blp: each transport's way
+ * as a loop of points on the world map's picture, its dock waits, and its accent colour (his ask: "one zeppelin is red,
+ * another is purple"). Lines: `speed <n>` (thousandths of the picture's height a second), `dock <n>` (a dock's wait on
+ * screen, thousandths of the game's), `t <0 ship | 1 zeppelin> <rrggbb> <name>`, then its `p <u> <v> <wait ms>` (float
+ * bits in hex). Time-lapsed: they sail on the PC's own clock, so from one loading screen to the next each is further on
+ * its way (positions can never be live: the server runs each transport on its own clock). The sheet: rows ship, ship
+ * accent, zeppelin, zeppelin accent; 16 frames a row, frame k the heading k * 22.5 degrees clockwise from east. */
+#define SHIPS_PATH     "Interface\\Glues\\LoadingScreens\\CinderShips.blp"
+#define SHIPS_MAX      24
+#define SHIP_POINTS    8192
+#define SHIP_SHEET_W   2048.0f
+#define SHIP_SHEET_H   512.0f
+#define SHIP_FRAME     128.0f
+#define SHIP_SIZE      0.030f     /* a ship's frame, half of it, of the screen's height with the whole world in view */
+#define ZEP_SIZE       0.034f     /* a zeppelin's */
+#define SHIP_GROW      2.4f       /* as the view comes in they grow, as the square root of the zoom, to this at the most */
+#define ZEP_FASTER     1.3f       /* a zeppelin is quicker than a ship */
+#define SHIP_WAKE      6          /* the wake: soft white marks behind a ship under way */
+#define SHIP_WAKE_STEP 0.0045f    /* heights of the picture between them */
+#define SHIP_TURN      0.004f     /* heights each way along its way that a transport's heading is taken over */
+static struct { int kind, first, n; unsigned rgb; float len, cycle, phase; } g_ship[SHIPS_MAX];
+static float g_shipU[SHIP_POINTS], g_shipV[SHIP_POINTS], g_shipWait[SHIP_POINTS];   /* (the game's wait, seconds) */
+static float g_shipS[SHIP_POINTS], g_shipT[SHIP_POINTS];   /* the way to each point (heights), and when it is reached (s) */
+static int g_ships, g_shipPts, g_shipsOn;
+static float g_shipSpeed, g_shipDock, g_shipAsp;
+static void ShipsParse(const char *s, unsigned len)
+{
+    g_ships = g_shipPts = 0;
+    g_shipSpeed = 0.012f; g_shipDock = 0.04f;
+    int taking = 0;                                          /* points go to the transport just read (0 after a bad t line) */
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && s[end] != '\n') end++;
+        const char *l = s + at;
+        int n = (int)(end - at), i = 0, v[2];
+        unsigned b[3];
+        if (SndWord(l, n, &i, "speed") || (i = 0, SndWord(l, n, &i, "dock"))) {
+            int dock = l[i - 1] == 'k';
+            if (LblInt(l, n, &i, &v[0]) && v[0] > 0 && v[0] <= 1000) {
+                if (dock) g_shipDock = (float)v[0] / 1000.0f;
+                else g_shipSpeed = (float)v[0] / 1000.0f;
+            }
+        } else if ((i = 0, SndWord(l, n, &i, "t"))) {
+            taking = 0;
+            if (g_ships < SHIPS_MAX && LblInt(l, n, &i, &v[0]) && (v[0] == 0 || v[0] == 1) && MapHex(l, n, &i, &b[0]) &&
+                b[0] <= 0xFFFFFF) {
+                if (g_ships && g_ship[g_ships - 1].n < 2) g_ships--;          /* (a transport with no way: dropped) */
+                g_ship[g_ships].kind = v[0]; g_ship[g_ships].rgb = b[0];
+                g_ship[g_ships].first = g_shipPts; g_ship[g_ships].n = 0;
+                g_ships++;
+                taking = 1;
+            }
+        } else if ((i = 0, SndWord(l, n, &i, "p"))) {
+            if (taking && g_shipPts < SHIP_POINTS && MapHex(l, n, &i, &b[0]) && MapHex(l, n, &i, &b[1]) &&
+                LblInt(l, n, &i, &v[0]) && v[0] >= 0 && v[0] <= 600000) {
+                float u = MapBits(b[0]), vv = MapBits(b[1]);
+                if (u > -1 && u < 2 && vv > -1 && vv < 2) {
+                    g_shipU[g_shipPts] = u; g_shipV[g_shipPts] = vv; g_shipWait[g_shipPts] = (float)v[0] / 1000.0f;
+                    g_shipPts++; g_ship[g_ships - 1].n++;
+                }
+            }
+        }
+        at = end + 1;
+    }
+    if (g_ships && g_ship[g_ships - 1].n < 2) g_ships--;
+}
+static float SaberSqrt(float v);
+/* Each transport's clock: the way to each point and when it is reached, a dock's wait its g_shipDock of the game's,
+ * the picture's u counted asp times v (the picture is drawn at the screen's shape); and where each starts. */
+static void ShipsTime(float asp)
+{
+    g_shipAsp = asp;
+    for (int r = 0; r < g_ships; r++) {
+        float s = 0, t = 0, speed = g_shipSpeed * (g_ship[r].kind ? ZEP_FASTER : 1.0f);
+        int f = g_ship[r].first, n = g_ship[r].n;
+        for (int k = 0; k < n; k++) {
+            int i = f + k, j = f + (k + 1) % n;
+            g_shipS[i] = s; g_shipT[i] = t;
+            float du = (g_shipU[j] - g_shipU[i]) * asp, dv = g_shipV[j] - g_shipV[i], d = SaberSqrt(du * du + dv * dv);
+            s += d;
+            t += g_shipWait[i] * g_shipDock + d / speed;
+        }
+        g_ship[r].len = s; g_ship[r].cycle = t;
+        g_ship[r].phase = SeaRand((unsigned)r, 41) * t;
+    }
+}
+/* Where transport r is along its way at its own time t (seconds, 0 to its cycle): the way gone (heights), and 1 when
+ * it is under way (0 at a dock). */
+static float ShipWay(int r, float t, int *moving)
+{
+    int f = g_ship[r].first, n = g_ship[r].n, lo = 0, hi = n - 1;
+    while (lo < hi) {                                      /* the last point reached by t */
+        int mid = (lo + hi + 1) / 2;
+        if (g_shipT[f + mid] <= t) lo = mid; else hi = mid - 1;
+    }
+    int i = f + lo, j = f + (lo + 1) % n;
+    float leave = g_shipT[i] + g_shipWait[i] * g_shipDock, arrive = lo + 1 < n ? g_shipT[j] : g_ship[r].cycle;
+    float sEnd = lo + 1 < n ? g_shipS[j] : g_ship[r].len;
+    *moving = t >= leave && arrive > leave;
+    if (!*moving) return g_shipS[i];
+    return g_shipS[i] + (sEnd - g_shipS[i]) * FireClamp((t - leave) / (arrive - leave), 0, 1);
+}
+/* Transport r's place on the picture a way s along its loop (any s: it goes round). */
+static void ShipAt(int r, float s, float *u, float *v)
+{
+    float L = g_ship[r].len;
+    if (L > 0) { s -= (float)(int)(s / L) * L; if (s < 0) s += L; }
+    int f = g_ship[r].first, n = g_ship[r].n, lo = 0, hi = n - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (g_shipS[f + mid] <= s) lo = mid; else hi = mid - 1;
+    }
+    int i = f + lo, j = f + (lo + 1) % n;
+    float s1 = lo + 1 < n ? g_shipS[j] : L, k = s1 > g_shipS[i] ? (s - g_shipS[i]) / (s1 - g_shipS[i]) : 0;
+    *u = g_shipU[i] + (g_shipU[j] - g_shipU[i]) * k;
+    *v = g_shipV[i] + (g_shipV[j] - g_shipV[i]) * k;
+}
+
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -3964,6 +4083,18 @@ static void OverlayStart(void)
         g_glowOn = g_glowItems > 0 && gridOk;
         g_glowPick = -2;                                           /* nothing picked yet */
     }
+    g_shipsOn = 0;
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderShips")) {     /* the ships and zeppelins (the view's) */
+        unsigned char *text = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\routes.txt", &text, &len) == MPQ_OK && text)
+            ShipsParse((const char *)text, len);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        int m = g_map.m[0].ok ? 0 : 1;
+        float asp = g_map.m[m].bu != 0 ? g_map.m[m].bv / g_map.m[m].bu : 0;
+        if (asp < 0) asp = -asp;
+        if (g_ships && asp > 0.5f && asp < 5) { ShipsTime(asp); g_shipsOn = 1; }
+    }
     g_wavesOn = g_seaOn && BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderWaves");
     if (g_seaOn && BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderFlow")) {
         unsigned char *data = NULL;
@@ -3972,9 +4103,9 @@ static void OverlayStart(void)
             g_flowOn = FlowParse(data, len);
         if (data) HeapFree(GetProcessHeap(), 0, data);
     }
-    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn && !g_glowOn) return;
+    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn && !g_glowOn && !g_shipsOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
-        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = 0;
+        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = g_shipsOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
@@ -3989,6 +4120,12 @@ static void OverlayStart(void)
               (g_seaOn || g_marksOn || g_glowOn) && g_lblOn ? "," : "", g_lblOn ? " names and icons" : "",
               (g_seaOn || g_marksOn || g_glowOn || g_lblOn) && g_logoOn ? "," : "", g_logoOn ? " the RavenCraft logo at the top" : "");
     Log(m);
+    if (g_shipsOn) {
+        int z = 0;
+        for (int r = 0; r < g_ships; r++) z += g_ship[r].kind;
+        wsprintfA(m, "  the living map: %d ships and %d zeppelins on their routes (%d points), drawn by the view", g_ships - z, z, g_shipPts);
+        Log(m);
+    }
 }
 
 static float FillHeat(float d, float t, int k)
@@ -4346,7 +4483,7 @@ static int TextHas(const char *list, const char *name)
  * g_stepLock), drawn after it; kept for the fade. Pictures by slot: the world map, the overlay's sheets, the blade's
  * soft spark (made here, not read); g_viewTex holds OpenGL's name for each (0 while it has none). A batch is drawn
  * over what is under it, or added to it (add: light, the blade's glow). */
-enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SPARK, VT_COUNT };
+enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SPARK, VT_COUNT };
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -4354,8 +4491,8 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_SPARKS   14         /* sparks thrown back off its tip */
 #define SABER_QUADS    (8 * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + 2 + 1 + 5 * (256 + 3) + 3)   /* (the frame's: FRAME_TILES and the rest, and
                                                                                     * its shine: four more a piece) */
-#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS)
-#define VIEW_BATCHES   32
+#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE))
+#define VIEW_BATCHES   48
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
 static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
 static int g_vbN, g_vvN, g_vbFull;
@@ -4413,6 +4550,82 @@ static void ViewStrips(int tex, const float *pos, const float *uv, const unsigne
  * game's frame builds none of them (OverlayDraw stands down and only reads the class, which only the game's thread
  * may). A layer whose sheet OpenGL does not have is left out. No black band along the bottom (his call, 6 Oct 2026: the
  * map gets the screen); the logo is the blade's, on it (below). now: the view's clock. */
+/* The ships (kind 0) or the zeppelins (1) this frame, for a W x H window at the view's clock now: each where its
+ * time-lapsed clock has it, its frame the one of the 16 headings nearest its way on screen, its accent over it in its
+ * colour; a ship under way leaves a soft wake (drawn first, under every ship). They grow as the view comes in, as the
+ * square root of the zoom, SHIP_GROW at the most. */
+static const float kShipHead[16][2] = {
+    { 1.0f, 0.0f }, { 0.92388f, 0.38268f }, { 0.70711f, 0.70711f }, { 0.38268f, 0.92388f }, { 0.0f, 1.0f },
+    { -0.38268f, 0.92388f }, { -0.70711f, 0.70711f }, { -0.92388f, 0.38268f }, { -1.0f, 0.0f },
+    { -0.92388f, -0.38268f }, { -0.70711f, -0.70711f }, { -0.38268f, -0.92388f }, { 0.0f, -1.0f },
+    { 0.38268f, -0.92388f }, { 0.70711f, -0.70711f }, { 0.92388f, -0.38268f } };   /* (y down: clockwise on screen) */
+static DWORD SaberArgb(unsigned rgb, float a);               /* (the blade's, below: a colour and an alpha) */
+static int ShipFrame(float dx, float dy)
+{
+    int best = 0;
+    float most = -1e30f;
+    for (int k = 0; k < 16; k++) {
+        float d = dx * kShipHead[k][0] + dy * kShipHead[k][1];
+        if (d > most) { most = d; best = k; }
+    }
+    return best;
+}
+static void ShipQuad(int tex, int add, float x, float y, float h, float u0, float v0, float u1, float v1, DWORD c)
+{
+    ViewVert *q = ViewQuadMode(tex, add);
+    if (!q) return;
+    ViewVertSet(q, x - h, y - h, u0, v0, c); ViewVertSet(q + 1, x + h, y - h, u1, v0, c);
+    ViewVertSet(q + 2, x + h, y + h, u1, v1, c); ViewVertSet(q + 3, x - h, y + h, u0, v1, c);
+}
+/* Picture u, v as a pixel of the W x H window, y down (ViewToScreen's fractions are up from the bottom, as QuadPut's). */
+static void ShipPixel(float u, float v, float W, float H, float *x, float *y)
+{
+    float sx, sy;
+    ViewToScreen(u, v, &sx, &sy);
+    *x = sx * W; *y = (1 - sy) * H;
+}
+static void ShipsBuild(float W, float H, DWORD now, int kind)
+{
+    float vs = g_bgUV[1] - g_bgUV[5], grow = vs > 0 ? SaberSqrt(1.0f / vs) : 1;
+    grow = FireClamp(grow, 1, SHIP_GROW);
+    float hs = (kind ? ZEP_SIZE : SHIP_SIZE) * H * grow;
+    static float px[SHIPS_MAX], py[SHIPS_MAX], way[SHIPS_MAX];
+    static int frame[SHIPS_MAX], moving[SHIPS_MAX], seen[SHIPS_MAX];
+    for (int r = 0; r < g_ships; r++) {
+        seen[r] = 0;
+        if (g_ship[r].kind != kind || !(g_ship[r].cycle > 0)) continue;
+        DWORD cyc = (DWORD)(g_ship[r].cycle * 1000.0f), ph = (DWORD)(g_ship[r].phase * 1000.0f);
+        if (!cyc) continue;
+        float t = (float)((now + ph) % cyc) / 1000.0f, u, v, ua, va, ub, vb, ax, ay, bx, by;
+        way[r] = ShipWay(r, t, &moving[r]);
+        ShipAt(r, way[r], &u, &v);
+        ShipPixel(u, v, W, H, &px[r], &py[r]);
+        if (px[r] < -2 * hs || px[r] > W + 2 * hs || py[r] < -2 * hs || py[r] > H + 2 * hs) continue;   /* off screen */
+        ShipAt(r, way[r] - SHIP_TURN, &ua, &va); ShipAt(r, way[r] + SHIP_TURN, &ub, &vb);
+        ShipPixel(ua, va, W, H, &ax, &ay); ShipPixel(ub, vb, W, H, &bx, &by);
+        frame[r] = ShipFrame(bx - ax, by - ay);
+        seen[r] = 1;
+    }
+    if (!kind && g_viewTex[VT_SPARK])                       /* the wakes, under all the ships */
+        for (int r = 0; r < g_ships; r++) {
+            if (!seen[r] || !moving[r]) continue;
+            for (int k = 1; k <= SHIP_WAKE; k++) {
+                float u, v, x, y, a = 0.32f * (1 - (float)k / (SHIP_WAKE + 1));
+                ShipAt(r, way[r] - k * SHIP_WAKE_STEP, &u, &v);
+                ShipPixel(u, v, W, H, &x, &y);
+                ShipQuad(VT_SPARK, 1, x, y + hs * 0.25f, hs * (0.16f + 0.05f * k), 0, 0, 1, 1, SaberArgb(0xFFFFFF, a));
+            }
+        }
+    for (int r = 0; r < g_ships; r++) {
+        if (!seen[r]) continue;
+        float u0 = ((float)frame[r] * SHIP_FRAME + 0.5f) / SHIP_SHEET_W, u1 = ((float)(frame[r] + 1) * SHIP_FRAME - 0.5f) / SHIP_SHEET_W;
+        float row = (float)(kind * 2) * SHIP_FRAME;
+        ShipQuad(VT_SHIPS, 0, px[r], py[r], hs, u0, (row + 0.5f) / SHIP_SHEET_H, u1, (row + SHIP_FRAME - 0.5f) / SHIP_SHEET_H, 0xFFFFFFFFu);
+        ShipQuad(VT_SHIPS, 0, px[r], py[r], hs, u0, (row + SHIP_FRAME + 0.5f) / SHIP_SHEET_H, u1,
+                 (row + 2 * SHIP_FRAME - 0.5f) / SHIP_SHEET_H, 0xFF000000u | g_ship[r].rgb);
+    }
+}
+
 static DWORD g_ovViewAt;
 static void ViewOverlayBuild(float W, float H, DWORD now)
 {
@@ -4425,6 +4638,8 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
     if (g_marksOn && g_viewTex[VT_MARKS]) { MaelstromBuild(t); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
     if (g_flowOn && g_viewTex[VT_FLOW]) { FlowBuild(t, dt); ViewStrips(VT_FLOW, g_flPos, g_flUV, g_flCol, g_flQuads, W, H); }
     if (g_seaOn && g_viewTex[VT_SEA]) { GlintsBuild(t); ViewStrips(VT_SEA, g_glPos, g_glUV, g_glCol, g_glQuads, W, H); }
+    if (g_shipsOn && g_viewTex[VT_SHIPS]) ShipsBuild(W, H, now, 0);   /* the ships on the sea, then the zeppelins over all */
+    if (g_shipsOn && g_viewTex[VT_SHIPS]) ShipsBuild(W, H, now, 1);
     if (g_marksOn && g_viewTex[VT_MARKS]) { RippleBuild(t, now); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
     if (g_glowOn && g_viewTex[VT_GLOW]) {                        /* the arrival's subzone, or the round glow in its place */
         GlowBuild(now);
@@ -5229,7 +5444,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         static const struct { int slot, *on; const char *path; } kSheets[] = {
             { VT_SEA, &g_seaOn, SEA_PATH }, { VT_MARKS, &g_marksOn, MARKS_PATH }, { VT_WAVES, &g_wavesOn, WAVES_PATH },
             { VT_FLOW, &g_flowOn, FLOW_PATH }, { VT_GLOW, &g_glowOn, GLOW_PATH }, { VT_LABELS, &g_lblOn, LABELS_PATH },
-            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH } };
+            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH }, { VT_SHIPS, &g_shipsOn, SHIPS_PATH } };
         for (unsigned i = 0; i < sizeof kSheets / sizeof kSheets[0]; i++)
             if (*kSheets[i].on) mpq_read(&kIo, "patch-~.MPQ", kSheets[i].path, &g_view.blp[kSheets[i].slot], &g_view.len[kSheets[i].slot]);
     }
