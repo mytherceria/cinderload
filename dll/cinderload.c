@@ -3936,8 +3936,8 @@ static void SkyMixMake(void)
                 for (int m = 0; m < 3; m++) {
                     const unsigned char *e = g_skyCell + 13 * q[m], *s = e + 1 + 3 * (g_sky.season & 3);
                     int wet = s[0] > s[1] ? s[0] : s[1];
-                    int cov = e[0] > 100 ? 100 : e[0];          /* (cover as seen: 15% 4, 40% 24, 75% 52; the land between) */
-                    a[m] = k ? (wet * 255 / 40 > 255 ? 255 : wet * 255 / 40) : (cov * 4 / 5 > 8 ? (cov * 4 / 5 - 8) * 255 / 100 : 0);
+                    int cov = e[0] > 100 ? 100 : e[0];          /* (cover as seen: 15% none, 40% 14, 75% 37; the land between) */
+                    a[m] = k ? (wet * 255 / 40 > 255 ? 255 : wet * 255 / 40) : (cov * 13 / 20 > 12 ? (cov * 13 / 20 - 12) * 255 / 100 : 0);
                 }
                 h[k][at] = a[0] + 2 * a[1] + a[2];
             }
@@ -4015,25 +4015,25 @@ static void SkyWind(float v, float *east, float *north)
 #define CLOUD_N       256        /* the tile's side */
 #define CLOUD_TEX_W   1024       /* the sky's picture (VT_SKY): its three parts side by side */
 #define CLOUD_TEX_H   512
-#define CLOUD_TEXELS  135000     /* the low clouds' part, at the most this many texels (the other two a quarter each) */
+#define CLOUD_TEXELS  118000     /* the low clouds' part, at the most this many texels (the other two a quarter each) */
 #define CLOUD_PX_MIN  4.0f       /* and a texel never finer than this many pixels */
-#define CLOUD_MARGIN  0.08f      /* each part reaches this far past the screen (of its height): the view moves on */
+#define CLOUD_MARGIN  0.05f      /* each part reaches this far past the screen (of its height): the view moves on */
 #define CLOUD_SCALE   0.7f       /* the tile's width for the big shapes, heights of the picture */
-#define CLOUD_FINER   8.0f       /* the detail's tile this much smaller, */
+#define CLOUD_FINER   4.0f       /* the detail's tile this much smaller, */
 #define CLOUD_DETAIL  0.35f      /* this strong at the most */
 #define CLOUD_ALT_LO  SKY_ALT    /* the low clouds' height above the ground (heights of the picture), */
 #define CLOUD_ALT_HI  0.11f      /* the high clouds' */
 #define CLOUD_HI_WIND 1.6f       /* the winds up there this much stronger */
-#define CLOUD_HI_COMB 7.0f       /* the high clouds' tile this much longer along the wind than across */
-#define CLOUD_EPOCH   20.0f      /* seconds a field drifts, */
-#define CLOUD_MORPH   4.0f       /* the last this many of them morphing into the next */
+#define CLOUD_HI_COMB 5.0f       /* the high clouds' tile this much longer along the wind than across */
+#define CLOUD_EPOCH   22.0f      /* seconds a field drifts, */
+#define CLOUD_MORPH   3.0f       /* the last this many of them morphing into the next */
 #define CLOUD_EVERY   33u        /* ms: a new picture of the sky about 30 times a second */
 #define CLOUD_STALE   400u       /* ms: an older picture is not drawn (a new screen's first comes at once) */
 #define CLOUD_TILE    32         /* the parts drawn in squares of this many texels; the empty ones left out */
-#define CLOUD_SUN_U   -0.62f     /* the sun's ray from the ground: this far left (heights) */
-#define CLOUD_SUN_V   -0.55f     /* and up the picture for each height it climbs */
-#define CLOUD_SHADOW  0.5f       /* a thick cloud's shadow darkens the ground this much */
-#define CLOUD_HI_A    0.38f      /* and the high clouds are at the most this opaque */
+#define CLOUD_SUN_U   -0.36f     /* the sun's ray from the ground: this far left (heights) */
+#define CLOUD_SUN_V   -0.30f     /* and up the picture for each height it climbs (a high sun: shadows near their clouds) */
+#define CLOUD_SHADOW  0.34f      /* a thick cloud's shadow darkens the ground this much */
+#define CLOUD_HI_A    0.6f       /* and the high clouds are at the most this opaque (thin, bright wisps) */
 #define CLOUD_PARTS   3          /* 0 the shadows on the ground, 1 the low clouds, 2 the high */
 #define CLOUD_TILES   ((CLOUD_TEX_W / CLOUD_TILE) * (CLOUD_TEX_H / CLOUD_TILE))
 static unsigned g_cloudTile[CLOUD_N * CLOUD_N];          /* each texel: density | light << 16 */
@@ -4172,7 +4172,7 @@ static CloudPic g_cloudShown;
 static int g_cloudShownOk, g_cloudFront, g_cloudUpload;
 /* The picture being made (CloudBegin, then CloudWork a share of its rows at a time): the view it is for, its layers. */
 static struct {
-    int on, next, rows, detail, layout[4], kw[256], ks, kh;
+    int on, next, rows, detail, layout[4], kw[256], wl[256], ks, kh, ws, wh;
     CloudPic pic;
     float W, H, u0, vt, us, vs, asp, T, ax, ay, clear, r0, r1;
     float p[2], lift[2], fade[CLOUD_PARTS], sx[2], sy[2], hx[2], hy[2];
@@ -4199,8 +4199,8 @@ static void CloudTables(void)
         float flat = FireClamp((t - 0.62f) / 0.33f, 0, 1);                       /* the stratus: mostly cloud, flatter */
         g_cloudCon[i] = (int)(256 * (1 - 0.6f * flat) + 0.5f);
     }
-    static const float fair[3][3] = { { 98, 108, 130 }, { 206, 212, 226 }, { 255, 253, 247 } };   /* base, middle, lit */
-    static const float storm[3][3] = { { 54, 58, 72 }, { 118, 124, 140 }, { 196, 200, 212 } };
+    static const float fair[3][3] = { { 80, 88, 110 }, { 200, 206, 222 }, { 255, 253, 247 } };    /* base, middle, lit */
+    static const float storm[3][3] = { { 46, 50, 64 }, { 112, 118, 134 }, { 196, 200, 212 } };
     for (int s = 0; s < 16; s++)
         for (int l = 0; l < 64; l++) {
             float t = (float)l / 63, k = (float)s / 15, c[3];
@@ -4235,8 +4235,6 @@ static void CloudBegin(float W, float H, DWORD now)
     }
     float pass0 = FireClamp((hc - 1.6f * CLOUD_ALT_LO) / CLOUD_ALT_LO, 0, 1), pass1 = FireClamp((hc - 1.6f * CLOUD_ALT_HI) / CLOUD_ALT_HI, 0, 1);
     g_cj.fade[0] = pass0 * CLOUD_SHADOW; g_cj.fade[1] = pass0; g_cj.fade[2] = pass1 * CLOUD_HI_A;
-    float z = FireClamp((0.55f - vs) / 0.35f, 0, 1);         /* the detail as the view comes down */
-    g_cj.detail = (int)(CLOUD_DETAIL * 256 * z * z * (3 - 2 * z) + 0.5f);
     for (int o = 0; o < 2; o++) {
         float s = CLOUD_N / (CLOUD_SCALE / (o ? CLOUD_FINER : 1));
         g_cj.sx[o] = g_cj.sy[o] = s;
@@ -4279,6 +4277,10 @@ static void CloudBegin(float W, float H, DWORD now)
         g_cj.dx[o] = (unsigned)(int)(pic->part[1].du * g_cj.asp * g_cj.sx[o] * 65536.0f + 0.5f);
         g_cj.hdx[o] = (unsigned)(int)(pic->part[2].du * g_cj.asp * g_cj.hx[o] * 65536.0f + 0.5f);
     }
+    /* the detail as the view comes down: the finer tile in as soon as a texel shows its shapes (no more than 1.5 of its
+     * texels to one of ours), none while it would only speckle (3 or more) */
+    float z = FireClamp((3.0f - (float)g_cj.dx[1] / 65536.0f) / 1.5f, 0, 1), dk = CLOUD_DETAIL * z * z * (3 - 2 * z);
+    g_cj.detail = (int)(dk * 256 + 0.5f);
     float e, n;
     CloudWind(vt + vs / 2, &e, &n);
     pic->windU = e * SKY_WIND / g_cj.asp; pic->windV = -n * SKY_WIND;
@@ -4288,17 +4290,19 @@ static void CloudBegin(float W, float H, DWORD now)
         for (int b = 0; b < 2; b++) for (int i = 0; i < CLOUD_TEX_W * CLOUD_TEX_H; i++) g_cloudPx[b][i] = 0;
         for (int i = 0; i < 4; i++) g_cj.layout[i] = lay[i];
     }
-    /* the edges: as the light has them, but never sharper than a texel can show (a texel's change of density and a bit
-     * at the least: no stairs where the picture is magnified) */
+    /* the edges: as the light has them, but never sharper than the texels can show (a texel's usual change of density at
+     * the least; where the field is steeper, CloudRowMake widens them texel by texel) */
     float step0 = (float)g_cj.dx[0] / 65536.0f, step1 = (float)g_cj.dx[1] / 65536.0f * (float)g_cj.detail / 256.0f;
-    float least = 0.9f * g_cloudSteep * (step0 + 0.7f * step1);
+    float least = 1.0f * g_cloudSteep * (step0 + 0.7f * step1);
     for (int i = 0; i < 256; i++) {
         float w = g_cloudW[i] > least ? g_cloudW[i] : least;
         g_cj.kw[i] = (int)(64.0f / w + 0.5f);
+        g_cj.wl[i] = (int)(w * 65536.0f + 0.5f);
     }
-    float ws = 0.1f, wh = 0.3f, ls = 2 * least, lh = 1.15f * g_cloudSteep * (float)g_cj.hdx[0] / 65536.0f;
-    g_cj.ks = (int)(255.0f / (ws > ls ? ws : ls) + 0.5f);   /* the shadows' penumbra */
-    g_cj.kh = (int)(255.0f / (wh > lh ? wh : lh) + 0.5f);   /* the high clouds' wisps */
+    float ws = 0.07f, wh = 0.16f, ls = 2 * least, lh = 1.0f * g_cloudSteep * (float)g_cj.hdx[0] / 65536.0f;
+    ws = ws > ls ? ws : ls; wh = wh > lh ? wh : lh;
+    g_cj.ks = (int)(255.0f / ws + 0.5f); g_cj.ws = (int)(ws * 65536.0f + 0.5f);   /* the shadows' penumbra */
+    g_cj.kh = (int)(255.0f / wh + 0.5f); g_cj.wh = (int)(wh * 65536.0f + 0.5f);   /* the high clouds' wisps */
     g_cj.rows = h[0] + h[1] + h[2];
     g_cj.next = 0;
     g_cj.on = 1;
@@ -4343,45 +4347,52 @@ static void CloudRowMake(int k, int j)
     if (k == 0) { dx[0] = (unsigned)(int)(c->du * g_cj.asp * g_cj.sx[0] * 65536.0f + 0.5f); dx[1] = (unsigned)(int)(c->du * g_cj.asp * g_cj.sx[1] * 65536.0f + 0.5f); }
     x[0] = r.x[0][0]; y[0] = r.y[0][0]; x[1] = r.x[0][1]; y[1] = r.y[0][1];
     x[2] = r.x[1][0]; y[2] = r.y[1][0]; x[3] = r.x[1][1]; y[3] = r.y[1][1];
-    int detail = k == 1 ? g_cj.detail : 0;                    /* (the shadows' penumbra and the wisps need no detail) */
+    int detail = k == 1 ? g_cj.detail : 0;                    /* (the shadows their clouds' big shapes, under their
+                                                                         * penumbra; the wisps none) */
     int gx = (int)((cu * (float)g_sky.cols - 0.5f) * 256), dgx = (int)(c->du * (float)g_sky.cols * 256 + 0.5f);
     int gy = (int)((cv * (float)g_sky.rows - 0.5f) * 256);
+    static int above[CLOUD_TEX_W];                           /* (this part's row above: each texel's t) */
+    int prev = 0;
     unsigned cs0 = CloudCover(gx, gy), cs1 = cs0;
     for (int i = 0; i < w; i++) {
         if (!(i & 3)) { cs0 = cs1; cs1 = CloudCover(gx + 4 * dgx, gy); gx += 4 * dgx; }   /* (the grid every 4th texel) */
         unsigned f = (unsigned)(i & 3) * 64, cs = (cs0 * (256 - f) + cs1 * f) >> 8 & 0x00FF00FFu, px = 0;
-        int cov = (int)(cs & 255), a = 0;
+        int cov = (int)(cs & 255), a = 0, t = -32768, L = 128;
         if (cov) {
-            int thr = k == 2 ? (255 - 10 - cov * 3 / 10) << 8 : (255 - cov) << 8, L, n = CloudField(&r, x, y, detail, thr, &L);
-            if (k == 2) {                                  /* the high: thin, combed, where the sky is cloudy below */
-                int t = n - thr;
-                if (t > 0) {
-                    int idx = (t * g_cj.kh) >> 16;
-                    a = (g_cloudHiA[idx > 255 ? 255 : idx] * fade) >> 8;
-                    int lum = 222 + (L * 26 >> 8);              /* white, a little blue: 222..247, then 226.., 236.. */
-                    px = (unsigned)(lum * a >> 8) | (unsigned)((lum + 4) * a >> 8) << 8 | (unsigned)((lum + 8) * a >> 8) << 16;
-                }
+            int thr = k == 2 ? (255 - 4 - cov / 5) << 8 : (255 - cov) << 8;
+            t = CloudField(&r, x, y, detail, thr, &L) - thr;  /* (the density over the edge) */
+        }
+        /* how much it changes to the texel left and the one above: no edge sharper than three of those (a shader's
+         * fwidth), so the picture, magnified, never shows its texels as stairs */
+        int fl = i ? t - prev : 0, fu = j ? t - above[i] : 0;
+        if (fl < 0) fl = -fl;
+        if (fu < 0) fu = -fu;
+        int fw = 3 * (fl > fu ? fl : fu);
+        prev = t; above[i] = t;
+        if (t > 0) {
+            if (k == 2) {                                  /* the high: thin, combed, bright, where the sky is cloudy below */
+                int idx = fw > g_cj.wh ? t * 255 / fw : (t * g_cj.kh) >> 16;
+                a = (g_cloudHiA[idx > 255 ? 255 : idx] * fade) >> 8;
+                int lum = 236 + (L * 15 >> 8);              /* white, a little blue: 236..250, then +2, +5 */
+                px = (unsigned)(lum * a >> 8) | (unsigned)((lum + 2) * a >> 8) << 8 | (unsigned)((lum + 5) * a >> 8) << 16;
             } else {
-                int t = n - thr;
-                if (t > 0) {
-                    if (k == 0) {                          /* the shadow: the same cloud, its edge the penumbra */
-                        int idx = (t * g_cj.ks) >> 16;
-                        a = (g_cloudShadowA[idx > 255 ? 255 : idx] * fade) >> 8;
-                        px = (unsigned)(10 * a >> 8) | (unsigned)(16 * a >> 8) << 8 | (unsigned)(30 * a >> 8) << 16;
-                    } else {
-                        int idx = (t * g_cj.kw[L]) >> 16;
-                        a = (g_cloudA[idx > 255 ? 255 : idx] * fade) >> 8;
-                        int lit = 128 + (((L - 128) * g_cloudCon[cov]) >> 8);
-                        unsigned rgb = g_cloudPal[(cs >> 20) * 64 + (lit < 0 ? 0 : lit > 255 ? 255 : lit) / 4];
-                        px = ((rgb & 255) * (unsigned)a >> 8) | ((rgb >> 8 & 255) * (unsigned)a >> 8) << 8 | ((rgb >> 16 & 255) * (unsigned)a >> 8) << 16;
-                    }
-                    if (clearRow && a) {                    /* parting over the arrival (and no shadow falling on it) */
-                        int keep = CloudKeep(sx0 + (float)i * sdx, sy);
-                        if (k == 0) keep = keep * CloudKeep(gx0 + (float)i * gdx, gsy) >> 8;
-                        if (keep < 256) {
-                            a = a * keep >> 8;
-                            px = ((px & 0x00FF00FFu) * (unsigned)keep >> 8 & 0x00FF00FFu) | ((px >> 8 & 255) * (unsigned)keep >> 8) << 8;
-                        }
+                if (k == 0) {                              /* the shadow: the same cloud, its edge the penumbra */
+                    int idx = fw > g_cj.ws ? t * 255 / fw : (t * g_cj.ks) >> 16;
+                    a = (g_cloudShadowA[idx > 255 ? 255 : idx] * fade) >> 8;
+                    px = (unsigned)(10 * a >> 8) | (unsigned)(16 * a >> 8) << 8 | (unsigned)(30 * a >> 8) << 16;
+                } else {
+                    int idx = fw > g_cj.wl[L] ? t * 64 / fw : (t * g_cj.kw[L]) >> 16;
+                    a = (g_cloudA[idx > 255 ? 255 : idx] * fade) >> 8;
+                    int lit = 128 + (((L - 128) * g_cloudCon[cov]) >> 8);
+                    unsigned rgb = g_cloudPal[(cs >> 20) * 64 + (lit < 0 ? 0 : lit > 255 ? 255 : lit) / 4];
+                    px = ((rgb & 255) * (unsigned)a >> 8) | ((rgb >> 8 & 255) * (unsigned)a >> 8) << 8 | ((rgb >> 16 & 255) * (unsigned)a >> 8) << 16;
+                }
+                if (clearRow && a) {                        /* parting over the arrival (and no shadow falling on it) */
+                    int keep = CloudKeep(sx0 + (float)i * sdx, sy);
+                    if (k == 0) keep = keep * CloudKeep(gx0 + (float)i * gdx, gsy) >> 8;
+                    if (keep < 256) {
+                        a = a * keep >> 8;
+                        px = ((px & 0x00FF00FFu) * (unsigned)keep >> 8 & 0x00FF00FFu) | ((px >> 8 & 255) * (unsigned)keep >> 8) << 8;
                     }
                 }
             }

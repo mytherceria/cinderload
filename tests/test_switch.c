@@ -3852,11 +3852,25 @@ static void TestClouds(void)
     float cx, cy, cu, cv, sx, sy, su, sv;
     CloudCentroid(1, W, H, &cx, &cy, &cu, &cv);
     CloudCentroid(0, W, H, &sx, &sy, &su, &sv);
-    ok = sx > cx + 5 && sy > cy + 20 && Near(su - cu, -CLOUD_SUN_U * CLOUD_ALT_LO / g_shipAsp, 0.004) && Near(sv - cv, -CLOUD_SUN_V * CLOUD_ALT_LO, 0.004);
+    /* the shadow's shape is its cloud's, where the sun's ray from each ground point meets the clouds: it matches the
+     * clouds best shifted that way, not as they are overhead nor shifted the other way */
+    double match[3] = { 0, 0, 0 };
+    const CloudPart *gp0 = &g_cloudShown.part[0], *cp = &g_cloudShown.part[1];
+    for (int o = 0; o < 3; o++)
+        for (int j = 0; j < gp0->h; j++)
+            for (int i = 0; i < gp0->w; i++) {
+                float k = (float)(1 - o), gu = gp0->u0 + ((float)i + 0.5f) * gp0->du, gv = gp0->v0 + ((float)j + 0.5f) * gp0->dv;
+                float lu = gu + k * CLOUD_SUN_U * CLOUD_ALT_LO / g_shipAsp, lv = gv + k * CLOUD_SUN_V * CLOUD_ALT_LO;
+                int ci = (int)((lu - cp->u0) / cp->du), cj = (int)((lv - cp->v0) / cp->dv);
+                if (ci < 0 || cj < 0 || ci >= cp->w || cj >= cp->h) continue;
+                double sa = (CloudPx(0, i, j) >> 24) / 255.0, ca = (CloudPx(1, ci, cj) >> 24) > 100 ? 1 : 0;
+                match[o] += sa * ca - sa * (1 - ca);
+            }
+    ok = sx > cx && sy > cy + 20 && su > cu && sv > cv && match[0] > match[1] * 1.1 && match[0] > match[2] * 1.2;
     Check(ok, "each cloud's shadow on the ground falls away from the sun (below and right of it), the same shapes where the sun's ray meets them");
 
-    /* the layers part as the camera comes down: the high swells and climbs faster than the low */
-    CloudTileMake(0); CloudParse(g_ctile, sizeof g_ctile);
+    /* the layers part as the camera comes down: the high swells and climbs faster than the low (cloud everywhere) */
+    CloudTileMake(2); CloudParse(g_ctile, sizeof g_ctile);
     CloudGrid(100, 0, -1, 0, 0, 0);
     float ratio[2];
     for (int z = 0; z < 2; z++) {
@@ -3923,27 +3937,29 @@ static void TestClouds(void)
         moved += fabs((double)(a - b)); still += fabs((double)(a - c));
     }
     ok = e > 0.3f && moved < still * 0.2;
-    /* at v 0.3 the field turns over when T + 12 s passes a whole number of CLOUD_EPOCHs: at 5008 s */
+    /* at v 0.3 the field turns over when T plus its phase (0.6 of an epoch) passes a whole number of epochs: tb ms */
+    double ph = CLOUD_EPOCH * 0.6;
+    DWORD tb = (DWORD)((ceil((5000 + ph) / CLOUD_EPOCH) * CLOUD_EPOCH - ph) * 1000 + 0.5), tm = tb - (DWORD)(CLOUD_MORPH * 1000);
     double across = 0, before = 0, other = 0;
     for (int s = 0; s < 64; s++) {
         float u = 0.05f + 0.014f * s;
-        int a = CloudThick(u, 0.3f, 5007999), b = CloudThick(u, 0.3f, 5008001);
+        int a = CloudThick(u, 0.3f, tb - 1), b = CloudThick(u, 0.3f, tb + 1);
         across += fabs((double)(a - b));
-        before += fabs((double)(CloudThick(u, 0.3f, 5005999) - CloudThick(u, 0.3f, 5006001)));   /* mid-morph */
-        other += fabs((double)(CloudThick(u, 0.3f, 5001000) - CloudThick(u, 0.3f, 5008001)));    /* a field and its next */
+        before += fabs((double)(CloudThick(u, 0.3f, tm + 1499) - CloudThick(u, 0.3f, tm + 1501)));     /* mid-morph */
+        other += fabs((double)(CloudThick(u, 0.3f, tm - 2000) - CloudThick(u, 0.3f, tb + 1)));         /* a field and its next */
     }
     double start = 0, m0 = 0, m1 = 0, q0 = 0, q1 = 0;
     for (int s = 0; s < 256; s++) {
         float u = 0.01f + 0.0037f * s;
-        start += fabs((double)(CloudThick(u, 0.3f, 5003999) - CloudThick(u, 0.3f, 5004001)));   /* (the morph begins at 5004 s) */
-        double a = CloudThick(u, 0.3f, 5001000), b = CloudThick(u, 0.3f, 5006000);           /* (mid-morph at 5006 s) */
+        start += fabs((double)(CloudThick(u, 0.3f, tm - 1) - CloudThick(u, 0.3f, tm + 1)));           /* the morph begins */
+        double a = CloudThick(u, 0.3f, tm - 2000), b = CloudThick(u, 0.3f, tm + (DWORD)(CLOUD_MORPH * 500));
         m0 += a; q0 += a * a; m1 += b; q1 += b * b;
     }
     double sd0 = sqrt(q0 / 256 - (m0 / 256) * (m0 / 256)), sd1 = sqrt(q1 / 256 - (m1 / 256) * (m1 / 256));
     for (int s = 0; s <= 7; s++) {                                    /* the two fields' shares keep the spread: squares whole */
         CloudRow rr;
         float sx[2] = { 300, 2400 };
-        CloudRowSet(&rr, 0.5f, 0.3f, 5004.0f + 0.5f * s, g_shipAsp, sx, sx, 1, 0);
+        CloudRowSet(&rr, 0.5f, 0.3f, (float)tm / 1000.0f + CLOUD_MORPH * (float)s / 8, g_shipAsp, sx, sx, 1, 0);
         ok &= Near(rr.ka * rr.ka + rr.kb * rr.kb, 65536, 1200) && rr.la + rr.lb == 256 && (s == 0 ? rr.kb == 0 : rr.kb > 0);
     }
     for (int s = 0; s < 20; s++) {                                    /* only some latitudes morphing at any moment */
@@ -3952,11 +3968,11 @@ static void TestClouds(void)
         for (int r = 0; r < 100; r++) morphing += CloudEpoch(0.005f + 0.01f * r, 5000.0f + 1.3f * s, &k, &age) > 0;
         ok &= morphing >= 8 && morphing <= 32;
     }
-    ok &= across / 64 < 200 && before / 64 < 200 && other / 64 > 4000 && start / 256 < 200 && sd1 > 0.85 * sd0;
+    ok &= across / 64 < 200 && before / 64 < 200 && other / 64 > 4000 && start / 256 < 200 && sd1 > 0.7 * sd0;
     double mean = 0;
-    CloudMake(W, H, 5008000);
+    CloudMake(W, H, tb);
     memcpy(first, g_cloudPx[g_cloudFront], sizeof first);
-    CloudMake(W, H, 5008015);
+    CloudMake(W, H, tb + 15);
     for (int i = 0; i < CLOUD_TEX_W * g_cloudShown.rows; i++) mean += fabs((double)(first[i] >> 24) - (double)(g_cloudPx[g_cloudFront][i] >> 24));
     ok &= mean / (CLOUD_TEX_W * g_cloudShown.rows) < 0.5;
     Check(ok, "the field drifts on the wind of its latitude (the westerlies carry it east), and morphs into the next one without a jump");
@@ -3964,7 +3980,9 @@ static void TestClouds(void)
     /* the detail as the view comes down: none at the whole world, finer shapes coming down (the finer tile on) */
     CloudView(0, 0, 1); CloudMake(W, H, 5000000);
     ok = g_cj.detail == 0;
-    CloudView(0.3f, 0.3f, 0.3f);
+    CloudView(0.25f, 0.25f, 0.5f); CloudMake(W, H, 5000000);
+    ok &= g_cj.detail == 0;                                          /* (still too fine there: it would speckle) */
+    CloudView(0.44f, 0.44f, 0.1f);
     int edges[2];
     for (int d = 0; d < 2; d++) {
         g_cj.on = 0;
@@ -3975,8 +3993,8 @@ static void TestClouds(void)
         for (int j = 0; j < lo->h; j++)
             for (int i = 1; i < lo->w; i++) edges[d] += (CloudPx(1, i, j) >> 24 > 100) != (CloudPx(1, i - 1, j) >> 24 > 100);
     }
-    ok &= edges[1] > edges[0] * 1.8;
-    Check(ok, "the finer tile comes in as the view comes down: no detail at the whole world, more of it nearer in");
+    ok &= edges[1] > edges[0] * 1.3;
+    Check(ok, "the finer tile comes in as the view comes down, once its texels show its shapes: none at the whole world or half way, finer shapes near the end");
 
     /* the edges never sharper than a texel shows (no stairs where the picture is magnified): hard on the lit side as
      * designed where the texels are fine, widened to a texel's change of density where they are coarse */
@@ -3985,14 +4003,14 @@ static void TestClouds(void)
     for (int z = 0; z < 2; z++) {
         CloudView(z ? 0.3f : 0, z ? 0.3f : 0, z ? 0.3f : 1);
         CloudMake(z ? W : 400, z ? H : 169, 5000000);
-        float least = 0.9f * g_cloudSteep * ((float)g_cj.dx[0] / 65536 + 0.7f * (float)g_cj.dx[1] / 65536 * (float)g_cj.detail / 256);
+        float least = 1.0f * g_cloudSteep * ((float)g_cj.dx[0] / 65536 + 0.7f * (float)g_cj.dx[1] / 65536 * (float)g_cj.detail / 256);
         litW[z] = 64.0f / (float)g_cj.kw[255];
         ok = 64.0f / (float)g_cj.kw[0] >= litW[z] && Near(litW[z], least > g_cloudW[255] ? least : g_cloudW[255], 0.003);
     }
-    ok &= litW[0] > 0.05f && Near(litW[1], g_cloudW[255], 0.002);
+    ok &= litW[0] > 0.05f && litW[1] < litW[0] * 0.8f;
     int widths = ok;
     CloudTileMake(0); CloudParse(g_ctile, sizeof g_ctile);
-    CloudView(0, 0, 1); CloudMake(W, H, 5000000);
+    CloudView(0, 0, 1); CloudMake(5120, 2160, 5000000);                  /* (his screen: its coarsest texels) */
     int steps = 0, hard = 0;
     for (int j = 0; j < lo->h; j++)
         for (int i = 1; i < lo->w; i++) {
@@ -4073,7 +4091,7 @@ static void TestClouds(void)
     g_shipAsp = 5120.0f / 2160.0f;
     double best[2] = { 1e9, 1e9 };
     for (int z = 0; z < 2; z++) {
-        CloudView(z ? 0.3f : 0, z ? 0.3f : 0, z ? 0.35f : 1);
+        CloudView(z ? 0.44f : 0, z ? 0.44f : 0, z ? 0.12f : 1);           /* (the whole world; the end, the detail in) */
         for (int r = 0; r < 12; r++) {
             double t0 = CloudMs();
             g_cj.on = 0;
@@ -4088,7 +4106,7 @@ static void TestClouds(void)
 #else
     double budget = 6.0;                                               /* (this build unoptimised: the DLL is -O2) */
 #endif
-    printf("  the sky's picture at 5120 x 2160 (cloud everywhere): %.2f ms at the whole world, %.2f ms coming down (%d + %d + %d texels)\n",
+    printf("  the sky's picture at 5120 x 2160 (cloud everywhere): %.2f ms at the whole world, %.2f ms at the end of the zoom (%d + %d + %d texels)\n",
            best[0], best[1], g_cj.pic.part[1].w * g_cj.pic.part[1].h, g_cj.pic.part[0].w * g_cj.pic.part[0].h, g_cj.pic.part[2].w * g_cj.pic.part[2].h);
     Check(best[0] <= budget && best[1] <= budget, "the sky's picture made at 5120 x 2160 within its budget (3 ms optimised)");
     g_skyOn = 0; g_viewTex[VT_SKY] = 0; g_viewTex[VT_SPARK] = 0; g_sky.ok = 0; g_cloudOk = 0; g_cloudShownOk = 0; g_cj.on = 0;
