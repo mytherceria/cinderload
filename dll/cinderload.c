@@ -3905,7 +3905,7 @@ static void ShipAt(int r, float s, float *u, float *v)
  * a raining cloud in the tropics or over a wet zone throws lightning. It floats SKY_ALT above the map: its shadow on
  * the ground, the rain falling between, and as the view comes down it swells past and thins away. */
 #define SKY_PATH     "Interface\\Glues\\LoadingScreens\\CinderSky.blp"
-#define SKY_CLOUDS   70         /* clouds at once over the whole world */
+#define SKY_CLOUDS   56         /* clouds at once over the whole world */
 #define SKY_LIFE     26.0f      /* seconds a cloud lives (time-lapsed, as the ships) */
 #define SKY_FADE     5.0f       /* fading in and out over this much of it */
 #define SKY_WIND     0.006f     /* heights of the picture a second at the usual wind */
