@@ -90,6 +90,32 @@ static int GameUsesOpenGL(const char *cmd, const char *cfg)
     return ConfigApiIsOpenGL(cfg);
 }
 
+/* The game shows in a window of its own rather than holding the whole screen (slice 5, 9 Oct: on Windows itself a game
+ * in exclusive full screen would hide the view's window behind its own). As the 1.12 client decides it: -windowed on
+ * its command line makes a window; else the last SET gxWindow line of Config.wtf (cfg may be NULL), any value but "0"
+ * a window; with no such line the game takes the whole screen. */
+static int ConfigSaysWindow(const char *text)
+{
+    static const char key[] = "set gxwindow \"";
+    int win = 0;
+    for (const char *p = text; p && *p; p++) {
+        if (p != text && p[-1] != '\n') continue;
+        const char *s = p;
+        if (s == text && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s += 3;
+        while (*s == ' ' || *s == '\t') s++;
+        int i = 0;
+        while (key[i] && Lower(s[i]) == key[i]) i++;
+        if (key[i]) continue;
+        win = s[i] != '0' && s[i] != '"';                  /* the last line counts, as the game reads it */
+    }
+    return win;
+}
+static int GameIsWindowed(const char *cmd, const char *cfg)
+{
+    if (CommandLineSays(cmd, "-windowed")) return 1;
+    return ConfigSaysWindow(cfg);
+}
+
 /* The index of the nearest shape within SHAPE_TOLERANCE of w:h, or -1. available[i] says whether that shape's
  * archive is there; only those count. */
 static int ChooseShape(int w, int h, const int *available)

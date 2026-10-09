@@ -196,10 +196,43 @@ static void TakeOut(const char *dst, const char *marker, const char *oldMarker)
     }
 }
 
+/* Wine says so: its ntdll exports wine_get_version (Linux, the Steam Machine, a Mac's CrossOver and their kin). */
+static int RunsUnderWine(void)
+{
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    return nt && GetProcAddress(nt, "wine_get_version") != NULL;
+}
+
+/* Whether the view runs (slice 5, his "word, start slice 5", 9 Oct): on by default, and Data\CinderLoad\view-off.txt
+ * turns it off (the player's own switch, ahead of everything). On Windows itself a game holding the whole screen
+ * (exclusive full screen) would hide the view's window behind its own and leave the loading screen without its fire,
+ * labels and sea (the pre-release review, 8 Oct night, #8: untested), so there it stays off unless
+ * Data\CinderLoad\view.txt asks for it anyway, to try it. Under Wine the game's full screen is a window like any
+ * other. 1 to run; else 0 and *why, the reason for the log. */
+static int ViewWanted(int off, int on, int wine, int windowed, const char **why)
+{
+    if (off) { *why = "Data\\CinderLoad\\view-off.txt is there (delete it to have the view back)"; return 0; }
+    if (!wine && !windowed && !on) {
+        *why = "the game holds the whole screen on Windows (exclusive full screen), where the view's window would be "
+               "hidden behind it; in a window it shows (Data\\CinderLoad\\view.txt turns it on anyway, to try it)";
+        return 0;
+    }
+    return 1;
+}
+
 /* Puts the loading screens for this screen's shape in place as Data\patch-~.MPQ. 1 when ours are in place, so the
  * switch can go on. */
 static int g_scrW = 1920, g_scrH = 1080;        /* the screen, as Config.wtf (or the monitor) says */
 static int g_gameGL;                            /* the game draws with OpenGL (-opengl, or Config.wtf's gxApi) */
+static int g_gameWindowed;                      /* the game in a window of its own (-windowed, or Config.wtf's gxWindow) */
+/* The files and the platform ViewWanted weighs, outside the 32-bit part so the tests reach them. */
+static int ViewGate(const char **why)
+{
+    char flag[MAX_PATH];
+    int off = Join(flag, g_dir, "Data\\CinderLoad\\view-off.txt") && GetFileAttributesA(flag) != INVALID_FILE_ATTRIBUTES;
+    int on = Join(flag, g_dir, "Data\\CinderLoad\\view.txt") && GetFileAttributesA(flag) != INVALID_FILE_ATTRIBUTES;
+    return ViewWanted(off, on, RunsUnderWine(), g_gameWindowed, why);
+}
 static int g_surfW = 1920, g_surfH = 1080;      /* the surface the overlay is being built for, set by whoever builds it:
                                                  * the game's own frames, Config.wtf's size (theirs); the view, its own
                                                  * window's (a window smaller than the setting, or a resolution changed in
@@ -228,6 +261,7 @@ static int ChooseScreens(void)
         from = "the monitor";
     }
     g_gameGL = GameUsesOpenGL(GetCommandLineA(), text);
+    g_gameWindowed = GameIsWindowed(GetCommandLineA(), text);
     if (text) HeapFree(GetProcessHeap(), 0, text);
     if (w > 0 && h > 0) { g_scrW = g_surfW = w; g_scrH = g_surfH = h; }
     int pick = any ? ChooseShape(w, h, avail) : -1;
@@ -5430,7 +5464,8 @@ static int RevealBar(void)
  * froze 1.74 s. Slice 1 (this): the world map, zoomed, over the whole window, and a plain bar along its bottom; the
  * overlays, the fire and the ending's blur follow. Its picture is the pack's own CinderMap.blp, read with our MPQ reader
  * as the game starts, given to OpenGL as the DXT blocks it is made of (GL_EXT_texture_compression_s3tc), else decoded
- * here from no wider than VIEW_DECODE_MAX. Only while Data\CinderLoad\view.txt exists: delete it to turn this off. */
+ * here from no wider than VIEW_DECODE_MAX. On by default since slice 5 (9 Oct): Data\CinderLoad\view-off.txt turns it
+ * off, and on Windows itself it stays off while the game holds the whole screen (ViewWanted). */
 #define VIEW_FADE_MS    500     /* the view fades out over this as the screen goes */
 #define VIEW_DECODE_MAX 2048    /* a driver without DXT: the picture decoded from its first level no wider than this */
 #define BLP_LEVELS      16
@@ -8027,12 +8062,14 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         Sleep(5);
     }
 }
-/* At start: the view's thread, only while Data\CinderLoad\view.txt exists and the pack's world map zoom is on. */
+/* At start: the view's thread, as ViewWanted says (on by default since slice 5), while the pack's world map zoom is on. */
 static void ViewStart(void)
 {
-    char flag[MAX_PATH];
+    char m[400];
+    const char *why = "";
     const unsigned char *base = (const unsigned char *)GetModuleHandleA(NULL);
-    if (!Join(flag, g_dir, "Data\\CinderLoad\\view.txt") || GetFileAttributesA(flag) == INVALID_FILE_ATTRIBUTES) return;
+    if (!ViewGate(&why)) { wsprintfA(m, "view off: %s", why); Log(m); return; }
+    int wine = RunsUnderWine();
     if (!Readable(base + FIRE_LAYER_RVA, 8)) { Log("view off: the loading screen's numbers could not be read"); return; }
     if (!g_map.ok || !g_driftOn) { Log("view off: it draws the world map's zoom, and that is not on"); return; }
     InitializeCriticalSection(&g_stepLock);
@@ -8041,8 +8078,13 @@ static void ViewStart(void)
     HANDLE t = CreateThread(NULL, 0, ViewThread, (LPVOID)base, 0, NULL);
     if (!t) { InterlockedExchange(&g_viewOn, 0); InterlockedExchange(&g_viewLive, 0); Log("view off: its thread could not be started"); return; }
     CloseHandle(t);
-    Log("view on: on world map screens, its own window over the game, drawn with OpenGL on its own thread, which moves "
-        "the bar and the zoom while it shows (Data\\CinderLoad\\view.txt; delete it to turn this off)");
+    if (!wine && !g_gameWindowed)
+        Log("view on although the game holds the whole screen (Data\\CinderLoad\\view.txt asks for it): on world map "
+            "screens, its own window over the game; if a loading screen shows without its fire, labels and sea, delete "
+            "view.txt");
+    else
+        Log("view on: on world map screens, its own window over the game, drawn with OpenGL on its own thread, which "
+            "moves the bar and the zoom while it shows (Data\\CinderLoad\\view-off.txt turns it off)");
 }
 #else
 static void ViewStart(void) {}

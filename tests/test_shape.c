@@ -73,6 +73,23 @@ int main(void)
           GameUsesOpenGL("WoW.exe", "\xEF\xBB\xBFSET gxApi \"OpenGL\"\n"), "the last gxApi line counts; behind a UTF-8 mark too");
     Check(!GameUsesOpenGL("WoW.exe", "SET gxApi \"OpenGLx\"\n"), "a value only starting OpenGL: not OpenGL");
 
+    /* the game in a window (slice 5): -windowed first, then Config.wtf's last SET gxWindow; with neither, the whole screen */
+    Check(!GameIsWindowed("\"C:\\WoW\\WoW.exe\"", NULL) && !GameIsWindowed("WoW.exe", "SET gxResolution \"1920x1080\"\n"),
+          "no -windowed and no gxWindow line: the whole screen, as the 1.12 client has it");
+    Check(GameIsWindowed("WoW.exe", "SET gxWindow \"1\"\n") && !GameIsWindowed("WoW.exe", "SET gxWindow \"0\"\n"),
+          "gxWindow 1 a window, 0 the whole screen");
+    Check(GameIsWindowed("WoW.exe -windowed", "SET gxWindow \"0\"\n") && GameIsWindowed("WoW.exe -console -Windowed", NULL),
+          "-windowed beats Config.wtf; any case, among other flags");
+    Check(!GameIsWindowed("WoW.exe -windowedx", NULL) && !GameIsWindowed("C:\\x-windowed\\WoW.exe", NULL),
+          "-windowed is a whole word: not -windowedx, not a folder named x-windowed");
+    Check(!GameIsWindowed("WoW.exe", "SET gxWindow \"1\"\nSET gxWindow \"0\"\n") &&
+          GameIsWindowed("WoW.exe", "SET gxWindow \"0\"\r\n  set gxwindow \"1\"\r\n"),
+          "the last gxWindow line counts; indented, any case, CRLF");
+    Check(GameIsWindowed("WoW.exe", "\xEF\xBB\xBFSET gxWindow \"1\"\n"), "gxWindow behind a UTF-8 mark");
+    Check(!GameIsWindowed("WoW.exe", "SET gxWindow \"\"\n") && !GameIsWindowed("WoW.exe", "SET gxWindowX \"1\"\nSET gxMaximize \"1\"\n") &&
+          !GameIsWindowed("WoW.exe", "# SET gxWindow \"1\"\n"),
+          "an empty value, another setting, gxMaximize alone, a line not starting SET: the whole screen");
+
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }

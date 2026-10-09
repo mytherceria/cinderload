@@ -24,6 +24,7 @@ DWORD shim_ticks;
 int shim_vq;
 int shim_screen_w = 3440, shim_screen_h = 1440;
 char shim_cmdline[512] = "\"C:\\Games\\WoW\\WoW.exe\"";
+int shim_wine;
 
 static int fails, checks;
 static void Check(int cond, const char *what) { checks++; if (!cond) { printf("FAIL: %s\n", what); fails++; } }
@@ -5211,6 +5212,55 @@ static void TestTimeOfDay(void)
     Check(ok, "the client's minimap art read as it is: DXT3, its alpha four bits a texel");
 }
 
+/* Slice 5 (9 Oct): the view on by default. view-off.txt is the player's switch, ahead of all; on Windows itself a game
+ * holding the whole screen keeps it off, unless view.txt asks for it; under Wine, or in a window, it runs. */
+static void Unput(const char *rel) { char p[800]; snprintf(p, sizeof p, "%s%s", shim_gamedir, rel); remove(p); }
+static void TestViewDefault(void)
+{
+    const char *why = NULL;
+    Check(ViewWanted(0, 0, 1, 0, &why) && ViewWanted(0, 0, 0, 1, &why) && ViewWanted(0, 1, 0, 0, &why) &&
+          ViewWanted(0, 1, 1, 1, &why), "view: on under Wine, in a window, or asked for by view.txt");
+    why = NULL;
+    Check(!ViewWanted(0, 0, 0, 0, &why) && why && strstr(why, "exclusive full screen") && strstr(why, "view.txt"),
+          "view: off on Windows when the game holds the whole screen, and the log says why and what turns it on");
+    why = NULL;
+    Check(!ViewWanted(1, 0, 1, 1, &why) && why && strstr(why, "view-off.txt"), "view: view-off.txt turns it off under Wine, windowed");
+    why = NULL;
+    Check(!ViewWanted(1, 1, 0, 1, &why) && why && strstr(why, "view-off.txt"), "view: view-off.txt beats view.txt");
+
+    Fresh("view-default");
+    GameDir();
+    shim_wine = 0; g_gameWindowed = 0;
+    Check(!ViewGate(&why), "view gate: Windows, the whole screen, no files: off");
+    Put("Data/CinderLoad/view.txt", "x");
+    Check(ViewGate(&why), "view gate: view.txt there: on even so");
+    Put("Data/CinderLoad/view-off.txt", "x");
+    Check(!ViewGate(&why), "view gate: view-off.txt beats view.txt");
+    Unput("Data/CinderLoad/view.txt");
+    shim_wine = 1;
+    Check(!ViewGate(&why), "view gate: view-off.txt under Wine too");
+    Unput("Data/CinderLoad/view-off.txt");
+    Check(ViewGate(&why) && RunsUnderWine(), "view gate: under Wine with no files: on (Wine found by wine_get_version)");
+    shim_wine = 0;
+    Check(!RunsUnderWine(), "Wine: not without wine_get_version");
+    g_gameWindowed = 1;
+    Check(ViewGate(&why), "view gate: Windows in a window: on");
+
+    /* where g_gameWindowed comes from: the screen choice reads Config.wtf and the command line */
+    Put("WTF/Config.wtf", "SET gxResolution \"1920x1080\"\nSET gxWindow \"1\"\n");
+    g_gameWindowed = 0; ChooseScreens();
+    Check(g_gameWindowed == 1, "the screen choice: gxWindow 1 = a window");
+    Put("WTF/Config.wtf", "SET gxResolution \"1920x1080\"\n");
+    ChooseScreens();
+    Check(g_gameWindowed == 0, "the screen choice: no gxWindow line = the whole screen");
+    char keep[512];
+    strcpy(keep, shim_cmdline); strcat(shim_cmdline, " -windowed");
+    ChooseScreens();
+    Check(g_gameWindowed == 1, "the screen choice: -windowed = a window");
+    strcpy(shim_cmdline, keep);
+    g_gameWindowed = 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -5392,6 +5442,7 @@ int main(int argc, char **argv)
     TestSky();
     TestClouds();
     TestTimeOfDay();
+    TestViewDefault();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }

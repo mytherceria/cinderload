@@ -119,7 +119,9 @@ static BOOL FlushInstructionCache(HANDLE p, const void *at, size_t n) { (void)p;
 static HANDLE GetCurrentProcess(void) { return (HANDLE)1; }
 static BOOL DisableThreadLibraryCalls(HINSTANCE h) { (void)h; return TRUE; }
 typedef void (*FARPROC)(void);
-static FARPROC GetProcAddress(HMODULE h, const char *n) { (void)h; (void)n; return NULL; }
+extern int shim_wine;                                /* 1: ntdll exports wine_get_version, as under Wine */
+static FARPROC GetProcAddress(HMODULE h, const char *n)
+{ (void)h; return shim_wine && n && !strcmp(n, "wine_get_version") ? (FARPROC)(size_t)1 : NULL; }
 typedef DWORD (*LPTHREAD_START_ROUTINE)(LPVOID);
 static HANDLE CreateThread(void *sa, size_t st, LPTHREAD_START_ROUTINE f, LPVOID arg, DWORD fl, DWORD *id)
 { (void)sa; (void)st; (void)f; (void)arg; (void)fl; (void)id; shim_threads++; return (HANDLE)(long)1000; }
