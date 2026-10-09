@@ -3661,16 +3661,16 @@ static void LabelsParse(const char *s, unsigned len)
  * continent it says 'Eastern Kingdoms' in the top middle of the screen ... when you hover over an area, the name of that
  * area is in the top center of the screen ... do that on Cinderload in RavenCraft.io orange style font ... and write the
  * name of the continent, zone, etc. on the screen as you load in"; then "a bit bigger and more 3D like the W on the World
- * of Warcraft icon"). CinderTitles.blp (DXT5, 4096 x 4096: each title in Folkard as bevelled metal in ravencraft.io's
- * gold-to-coral gradient, a dark bronze rim, depth and a shadow; kit/zoom/titles.py) and CinderLoad\titles.txt:
+ * of Warcraft icon"). CinderTitles.blp (DXT5, 4096 x 4096: each title in Folkard capitals in ravencraft.io's gold-to-coral
+ * gradient, a light bevel, a thin dark rim, depth and a shadow; kit/zoom/titles.py) and CinderLoad\titles.txt:
  *   s <id> <x0> <y0> <x1> <y1>                      a title's rectangle on the sheet
  *   c <map> <sprite>                                 a continent's title
  *   z <map> <left> <right> <top> <bottom> <sprite>   a zone's (WorldMapArea's box, world yards, float bits in hex)
  *   i <instance map id> <sprite>                     a dungeon's, raid's or battleground's
  * The view shows the continent's as a screen begins and the zone's (the smallest box holding the arrival) or the
  * instance's once it has come in past TITLE_ZONE_H, each faded in over TITLE_FADE and crossfaded when it changes.
- * Then "the font looks too gold now.. use the same type of font we did for the class frames banners on the Ashandarei
- * discord server" (8 Oct): Friz Quadrata in capitals, the sheet's metal silver, drawn in the character's class colour. */
+ * His last word on the look (8 Oct): "it should use the orange font from the ravencraft.io page": the site's card titles
+ * (`folkard orange-text`, in capitals), the sheet in their own colours, drawn as they are. */
 #define TITLES_PATH   "Interface\\Glues\\LoadingScreens\\CinderTitles.blp"
 #define TITLE_SHEET_H 4096       /* the sheet is 4096 x 4096 (the titles 3D and bigger, his ask, 8 Oct) */
 #define TITLE_SPRITES 256
@@ -3679,7 +3679,6 @@ static void LabelsParse(const char *s, unsigned len)
 #define TITLE_ZONE_H  0.20f        /* the view's half height: the zone's name from here in */
 #define TITLE_FADE    0.6f         /* seconds */
 #define TITLE_TOP     0.035f       /* its top, down the screen */
-#define TITLE_LIFT    0.12f        /* the class colour this much toward white (the sheet's silver metal times it) */
 static struct { unsigned short x0, y0, x1, y1; } g_ttSpr[TITLE_SPRITES];
 static struct { int map; float l, r, t, b; int spr; } g_ttZone[TITLE_ZONES];
 static struct { int id, spr; } g_ttInst[TITLE_INSTS];
@@ -6431,9 +6430,7 @@ static void TitlePut(int spr, float W, float H, float a)
     float k = H / 2160.0f, w = (g_ttSpr[spr].x1 - g_ttSpr[spr].x0) * k, h = (g_ttSpr[spr].y1 - g_ttSpr[spr].y0) * k;
     float x0 = (W - w) * 0.5f, y0 = TITLE_TOP * H;
     float u0 = g_ttSpr[spr].x0 / 4096.0f, u1 = g_ttSpr[spr].x1 / 4096.0f, v0 = g_ttSpr[spr].y0 / (float)TITLE_SHEET_H, v1 = g_ttSpr[spr].y1 / (float)TITLE_SHEET_H;
-    LONG cl = g_class;                                          /* in the class's colour, as the guild's class banners (his */
-    unsigned rgb = SaberMix(SaberVivid(kClassColour[cl > 0 && cl < 12 ? cl : 0]), 0xFFFFFF, TITLE_LIFT);   /* ask, 8 Oct) */
-    DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | (rgb & 0xFFFFFFu);
+    DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu;     /* the sheet's own colours */
     ViewVertSet(q, x0, y0, u0, v0, c); ViewVertSet(q + 1, x0 + w, y0, u1, v0, c);
     ViewVertSet(q + 2, x0 + w, y0 + h, u1, v1, c); ViewVertSet(q + 3, x0, y0 + h, u0, v1, c);
 }
