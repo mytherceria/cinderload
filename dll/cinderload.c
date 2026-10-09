@@ -890,6 +890,9 @@ static volatile LONG g_screenWatch;      /* 1 once the fire's worker watches for
 static volatile LONG g_dispNew = 1;      /* the bar as shown: the next frame begins a new screen */
 static volatile LONG g_viewOn, g_viewSteps, g_gameSeq;   /* the view (below): on; its thread moves the bar and the zoom
                                                           * now; the game's loading frames drawn */
+static volatile LONG g_viewLive;         /* the view's thread is up and has not turned itself off (ViewOff) */
+static volatile LONG g_viewScreen;       /* the view's screens so far: the place's name begins again on each */
+#define VIEW_TAKE_MS 1500                /* a screen the view has not drawn by now is the game's own */
 static volatile LONG g_viewDrew;         /* the view has drawn this screen: the game's own bar under it stays dark, so its
                                           * fire never shows through the end's blur and dissolve (his 7 Oct load: "the old
                                           * lava loading bar" for half a second after the blade had faded) */
@@ -3426,8 +3429,9 @@ static void ClassStep(void)
     if (c) {
         unsigned e = list + picked * CHAR_SIZE, race = EntryByte(e + CHAR_RACE), level = EntryByte(e + CHAR_LEVEL);
         InterlockedExchange(&g_class, (LONG)c); InterlockedExchange(&g_classFrom, 1);
-        if (race >= 1 && race <= 31) InterlockedExchange(&g_race, (LONG)race);       /* (the zone's line: whose territory) */
-        if (level >= 1 && level <= 100) InterlockedExchange(&g_level, (LONG)level);  /* (and how its levels suit you) */
+        InterlockedExchange(&g_race, race >= 1 && race <= 31 ? (LONG)race : 0);       /* (the zone's line: whose territory; */
+        InterlockedExchange(&g_level, level >= 1 && level <= 100 ? (LONG)level : 0);  /* and how its levels suit you; none
+                                                                                  * rather than another character's) */
     }
     else if (g_class) InterlockedExchange(&g_classFrom, 2);
     InterlockedExchange(&g_classEntered, ClientWord(CHAR_ENTERED_VA, &entered) ? (LONG)EntryClass(entered) : 0);
@@ -4848,6 +4852,14 @@ static int CloudWork(int all)
     return g_cj.next >= g_cj.rows;
 }
 
+/* The view will draw this screen: it is up, and has drawn it or may yet (its first moments). The game's own frames leave
+ * out what the view draws its own way (the Maelstrom in strokes, the logo on its bar) only then: a screen the view does
+ * not take (not ours, the game's window not found, the view off) keeps them (fec62c8 left them out whenever the view had
+ * been started; the adversarial pass, 8 Oct night). */
+static int ViewWillDraw(DWORD now)
+{
+    return g_viewLive && (g_viewDrew || (LONG)(now - g_dispAt) < VIEW_TAKE_MS);
+}
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -4923,7 +4935,7 @@ static void OverlayDrawAll(void)
         WaveBuild(t);
         if (g_wvQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_wavesTex, 1, 0), g_wvPos, g_wvUV, g_wvCol, g_wvQuads);
     }
-    if (g_marksTex && !g_viewOn) {                                 /* the Maelstrom, on the sea and under its glints: with the
+    if (g_marksTex && !ViewWillDraw(now)) {                        /* the Maelstrom, on the sea and under its glints: with the
         MaelstromBuild(t);                                         * view on, its first frames show none, the view's strokes to come
                                                                    * (his note, 8 Oct: the old one showed at a load's start) */
         if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
@@ -4967,8 +4979,8 @@ static void OverlayDrawAll(void)
         BadgeBuild(now);
         if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
     }
-    if (g_logoOn && !g_viewOn && !g_logoTex && !g_logoTried) { g_logoTried = 1; g_logoTex = OverlayLoad(LOGO_PATH); }
-    if (g_logoTex && !g_viewOn) {                                  /* over everything else (with the view on, the logo is on its
+    if (g_logoOn && !ViewWillDraw(now) && !g_logoTex && !g_logoTried) { g_logoTried = 1; g_logoTex = OverlayLoad(LOGO_PATH); }
+    if (g_logoTex && !ViewWillDraw(now)) {                                  /* over everything else (with the view on, the logo is on its
                                                                    * bar, never at the top: his note, 8 Oct) */
         LogoBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_logoTex, 1, 0), g_logoPos, g_logoUV, g_logoCol, 1);
@@ -5504,7 +5516,8 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
                                                                                     * its shine: four more a piece) */
 #define VIEW_QUADS_MAX (2 + TITLE_QUADS_ROOM + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
 #define MAEL_QUADS_ROOM (2 + 200 * 14 + 90)   /* the Maelstrom's strokes (MAEL_QUADS, defined with them below) */
-#define TITLE_QUADS_ROOM (4 * 3 * TITLE_CHARS)  /* two titles and two lines at once at most, three layers a letter */
+#define TITLE_QUADS_ROOM (6 * 3 * TITLE_CHARS)  /* a name and its three-part line (the outgoing ones are gone before
+                                                  * the new come in), three layers a letter, and room to spare */
 #define VIEW_BATCHES   48
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
 static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
@@ -6514,8 +6527,8 @@ static int TitleWant(void)
             for (int k = 0; k < g_ttInsts; k++)
                 if (g_ttInst[k].id == id) return g_ttInst[k].title;
         if (id <= 1 && g_destMap >= 0) {
-            if (hw < TITLE_SUB_H) {
-                int g = GlowFind(g_destMap, g_destWX, g_destWY);
+            if (hw < TITLE_SUB_H) {                                /* the glow's own pick for this screen, so the two agree */
+                int g = g_glowFor == g_destSince && g_glowPick >= -1 ? g_glowPick : GlowFind(g_destMap, g_destWX, g_destWY);
                 if (g >= 0 && g_ttSub[g] >= 0) return g_ttSub[g];
             }
             int z = TitleZone(g_destMap, g_destWX, g_destWY);
@@ -6609,8 +6622,8 @@ static void TitleDraw(int t, float W, float H, float v, int line)
     if (lo == 0) { layer(t, 0, W, H, e * (1 - f)); layer(t, 1, W, H, e * (1 - f)); }
     else layer(t, 2, W, H, e * (1 - f));
 }
-typedef struct { int cur, prev; float prevV; DWORD at, last; } TitleState;
-static TitleState g_title = { -1, -1, 0, 0, 0 }, g_line = { -1, -1, 0, 0, 0 };
+typedef struct { int cur, prev; float prevV; DWORD at, last; LONG screen; } TitleState;
+static TitleState g_title = { -1, -1, 0, 0, 0, 0 }, g_line = { -1, -1, 0, 0, 0, 0 };
 /* How shown the outgoing and the incoming title are now: the outgoing goes from where it was over TITLE_OUT (sooner
  * when it was part shown), and only then does the new one come in, over TITLE_IN. */
 static void TitleVis(const TitleState *s, DWORD now, float *vp, float *vc)
@@ -6619,11 +6632,16 @@ static void TitleVis(const TitleState *s, DWORD now, float *vp, float *vc)
     *vp = s->prev >= 0 ? FireClamp(s->prevV - t / TITLE_OUT, 0, 1) : 0;
     *vc = s->cur >= 0 ? FireClamp((t - out) / TITLE_IN, 0, 1) : 0;
 }
-/* One step of a title's (or a line's) coming and going: a gap of over a second since its last frame is a new screen; a
- * change of what it wants sends the one showing out from where it is (or the one still going, on), then the new in. */
+/* One step of a title's (or a line's) coming and going: a new screen (the view's count of them; or a gap of over a
+ * second since its last frame) begins again with nothing shown, so the last screen's name never carries over however
+ * quick the next (the adversarial pass, 8 Oct night: half a second apart, the old zone's name and line showed whole);
+ * a change of what it wants sends the one showing out from where it is (or the one still going, on), then the new in. */
 static void TitleStep(TitleState *s, int want, DWORD now, float *vp, float *vc)
 {
-    if (!s->last || (LONG)(now - s->last) > 1000) { s->cur = s->prev = -1; s->prevV = 0; s->at = now; }
+    LONG screen = g_viewScreen;
+    if (!s->last || (LONG)(now - s->last) > 1000 || s->screen != screen) {
+        s->cur = s->prev = -1; s->prevV = 0; s->at = now; s->screen = screen;
+    }
     s->last = now;
     TitleVis(s, now, vp, vc);
     if (want != s->cur) {
@@ -6668,7 +6686,11 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
     if (dt < 0) dt = 0;
     if (dt > 0.25f) dt = 0.25f;                                  /* (a new screen, or a pause: no leap of the currents) */
     if (g_wavesOn && g_viewTex[VT_WAVES]) { WaveBuild(t); ViewStrips(VT_WAVES, g_wvPos, g_wvUV, g_wvCol, g_wvQuads, W, H); }
-    if (g_marksOn && g_viewTex[VT_SPARK]) MaelstromStrokes(W, H, t, dt);   /* the Maelstrom in strokes, or */
+    static float maelT;                                          /* the Maelstrom's own clock, from the screen's start */
+    static LONG maelScreen;                                      /* (the hour's wrap of t made its eye jump: 8 Oct night) */
+    if (maelScreen != g_viewScreen) { maelScreen = g_viewScreen; maelT = 0; }
+    maelT += dt;
+    if (g_marksOn && g_viewTex[VT_SPARK]) MaelstromStrokes(W, H, maelT, dt);   /* the Maelstrom in strokes, or */
     else if (g_marksOn && g_viewTex[VT_MARKS]) { MaelstromBuild(t); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
     if (g_flowOn && g_viewTex[VT_FLOW]) { FlowBuild(t, dt); ViewStrips(VT_FLOW, g_flPos, g_flUV, g_flCol, g_flQuads, W, H); }
     if (g_seaOn && g_viewTex[VT_SEA]) { GlintsBuild(t); ViewStrips(VT_SEA, g_glPos, g_glUV, g_glCol, g_glQuads, W, H); }
@@ -7792,6 +7814,7 @@ static DWORD ViewOff(const char *why)
     int held = StepLock();
     InterlockedExchange(&g_viewSteps, 0);
     StepUnlock(held);
+    InterlockedExchange(&g_viewLive, 0);                    /* (the game's frames draw all their own again) */
     if (g_view.win) ShowWindow(g_view.win, SW_HIDE);
     for (int i = 0; i < VT_COUNT; i++)
         if (g_view.blp[i]) { HeapFree(GetProcessHeap(), 0, g_view.blp[i]); g_view.blp[i] = NULL; }
@@ -7866,6 +7889,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             }
             if (!open) return ViewOff(why);
             showing = 1; built = 0;
+            InterlockedIncrement(&g_viewScreen);            /* (a new screen: the place's name begins again) */
             g_view.since = g_view.last = now; g_view.gap = 0; g_view.frames = 0;
             for (unsigned i = 0; i < sizeof g_slow; i++) ((unsigned char *)&g_slow)[i] = 0;
             ViewClockStart(now);
@@ -7930,8 +7954,9 @@ static void ViewStart(void)
     if (!g_map.ok || !g_driftOn) { Log("view off: it draws the world map's zoom, and that is not on"); return; }
     InitializeCriticalSection(&g_stepLock);
     InterlockedExchange(&g_viewOn, 1);                     /* before any loading frame: the game's thread locks from now */
+    InterlockedExchange(&g_viewLive, 1);
     HANDLE t = CreateThread(NULL, 0, ViewThread, (LPVOID)base, 0, NULL);
-    if (!t) { InterlockedExchange(&g_viewOn, 0); Log("view off: its thread could not be started"); return; }
+    if (!t) { InterlockedExchange(&g_viewOn, 0); InterlockedExchange(&g_viewLive, 0); Log("view off: its thread could not be started"); return; }
     CloseHandle(t);
     Log("view on: on world map screens, its own window over the game, drawn with OpenGL on its own thread, which moves "
         "the bar and the zoom while it shows (Data\\CinderLoad\\view.txt; delete it to turn this off)");

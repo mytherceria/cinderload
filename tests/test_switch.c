@@ -2037,6 +2037,13 @@ static void LiveTests(void)
             ti &= TitleWant() == 0;                                              /* in no box: the continent */
             g_destWX = -5950; g_destWY = -1050;
             ti &= TitleWant() == 5;                                              /* in a subzone, close in: its own */
+            {                                                                    /* the glow's pick for the screen holds */
+                DWORD since = g_destSince, gfor = g_glowFor; int pick = g_glowPick;
+                g_destSince = 777; g_glowFor = 777; g_glowPick = 0;
+                g_destWX = -5850;                                                /* (the arrival moved to no subzone) */
+                ti &= TitleWant() == 5;
+                g_destSince = since; g_glowFor = gfor; g_glowPick = pick; g_destWX = -5950;
+            }
             g_destWY = -950;
             ti &= TitleWant() == 3;                                              /* (its title, empty as it is) */
             g_destWX = -5850; g_destWY = -1050;
@@ -2112,6 +2119,11 @@ static void LiveTests(void)
             ti &= g_vvN == 24 && fabsf(g_vv[0].u - 80 / 1024.0f) < 1e-6f && fabsf(g_vv[8].u - 0) < 1e-6f;
             ViewListStart(); TitleBuild(5120, 2160, 106000);                     /* a new screen: come in again */
             ti &= g_vvN == 0;
+            ViewListStart(); TitleBuild(5120, 2160, 106400);
+            ti &= g_vvN > 0;                                                     /* (shown again) */
+            g_viewScreen++;                                                      /* the next screen, half a second on: */
+            ViewListStart(); TitleBuild(5120, 2160, 106900);
+            ti &= g_vvN == 0;                                                    /* nothing of the last one's name */
             g_viewTex[VT_TITLES] = tex; g_titlesOn = 0;
             g_destMap = keepMap; g_titleMapId = keepId; g_destWX = keepX; g_destWY = keepY;
             g_glowItems = keepItems; g_glowSprites = keepSprites; g_glowMap[0] = keepGlow[0]; g_glowMap[1] = keepGlow[1];
@@ -2212,6 +2224,23 @@ static void LiveTests(void)
             Check(zl, "the zone's line: read (bad lines out); the zone's through its subzones, a dungeon's, none wide or out of a zone; levels coloured as WoW colours a quest against yours, territory friendly, hostile or contested (neutral unknown); levels, separator, territory centred under the name, each its own colour; a dungeon's levels alone");
         }
 
+        /* the game's own frames leave the Maelstrom and the logo to the view only while it will draw the screen: up, and
+         * drawn it or in its first moments; a screen it has not taken by then, or the view off, keeps them (8 Oct night) */
+        {
+            LONG live = g_viewLive, drew = g_viewDrew;
+            DWORD at = g_dispAt;
+            g_dispAt = 50000;
+            g_viewLive = 0; g_viewDrew = 0;
+            int vw = !ViewWillDraw(50100);                                       /* the view off: the game's own */
+            g_viewLive = 1;
+            vw &= ViewWillDraw(50100) && ViewWillDraw(50000 + VIEW_TAKE_MS - 1); /* its first moments: the view's */
+            vw &= !ViewWillDraw(50000 + VIEW_TAKE_MS + 1);                       /* not taken by then: the game's own */
+            g_viewDrew = 1;
+            vw &= ViewWillDraw(90000);                                           /* drawn: the view's, however long */
+            g_viewLive = live; g_viewDrew = drew; g_dispAt = at;
+            Check(vw, "the game's frames leave the Maelstrom and logo to the view only while it will draw the screen");
+        }
+
         /* the swells bend round it, the more the nearer, and not at all beyond its reach */
         static const unsigned char allSea[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
                                                       255, 255, 255, 255, 255, 255, 255, 255 };
@@ -2298,7 +2327,7 @@ static void LiveTests(void)
         bd &= g_class == 8 && g_classFrom == 1 && g_classEntered == 8 && g_race == 7 && g_level == 23;
         Poke(CHAR_PICKED_VA, 0);
         ClassStep();
-        bd &= g_class == 1 && g_race == 7 && g_level == 23;               /* a bad race or level: the last kept */
+        bd &= g_class == 1 && g_race == 0 && g_level == 0;                /* a bad race or level: none, never another's */
         Poke(CHAR_PICKED_VA, 1);
         ClassStep();
         Poke(CHAR_PICKED_VA, 3);
