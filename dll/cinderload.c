@@ -3668,7 +3668,9 @@ static void LabelsParse(const char *s, unsigned len)
  *   z <map> <left> <right> <top> <bottom> <sprite>   a zone's (WorldMapArea's box, world yards, float bits in hex)
  *   i <instance map id> <sprite>                     a dungeon's, raid's or battleground's
  * The view shows the continent's as a screen begins and the zone's (the smallest box holding the arrival) or the
- * instance's once it has come in past TITLE_ZONE_H, each faded in over TITLE_FADE and crossfaded when it changes. */
+ * instance's once it has come in past TITLE_ZONE_H, each faded in over TITLE_FADE and crossfaded when it changes.
+ * Then "the font looks too gold now.. use the same type of font we did for the class frames banners on the Ashandarei
+ * discord server" (8 Oct): Friz Quadrata in capitals, the sheet's metal silver, drawn in the character's class colour. */
 #define TITLES_PATH   "Interface\\Glues\\LoadingScreens\\CinderTitles.blp"
 #define TITLE_SHEET_H 4096       /* the sheet is 4096 x 4096 (the titles 3D and bigger, his ask, 8 Oct) */
 #define TITLE_SPRITES 256
@@ -3677,6 +3679,7 @@ static void LabelsParse(const char *s, unsigned len)
 #define TITLE_ZONE_H  0.20f        /* the view's half height: the zone's name from here in */
 #define TITLE_FADE    0.6f         /* seconds */
 #define TITLE_TOP     0.035f       /* its top, down the screen */
+#define TITLE_LIFT    0.12f        /* the class colour this much toward white (the sheet's silver metal times it) */
 static struct { unsigned short x0, y0, x1, y1; } g_ttSpr[TITLE_SPRITES];
 static struct { int map; float l, r, t, b; int spr; } g_ttZone[TITLE_ZONES];
 static struct { int id, spr; } g_ttInst[TITLE_INSTS];
@@ -4823,8 +4826,9 @@ static void OverlayDrawAll(void)
         WaveBuild(t);
         if (g_wvQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_wavesTex, 1, 0), g_wvPos, g_wvUV, g_wvCol, g_wvQuads);
     }
-    if (g_marksTex) {                                              /* the Maelstrom, on the sea and under its glints */
-        MaelstromBuild(t);
+    if (g_marksTex && !g_viewOn) {                                 /* the Maelstrom, on the sea and under its glints: with the
+        MaelstromBuild(t);                                         * view on, its first frames show none, the view's strokes to come
+                                                                   * (his note, 8 Oct: the old one showed at a load's start) */
         if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
     }
     if (g_flowTex) {                                               /* the currents, over the waves */
@@ -4866,8 +4870,9 @@ static void OverlayDrawAll(void)
         BadgeBuild(now);
         if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
     }
-    if (g_logoOn && !g_logoTex && !g_logoTried) { g_logoTried = 1; g_logoTex = OverlayLoad(LOGO_PATH); }
-    if (g_logoTex) {                                               /* over everything else */
+    if (g_logoOn && !g_viewOn && !g_logoTex && !g_logoTried) { g_logoTried = 1; g_logoTex = OverlayLoad(LOGO_PATH); }
+    if (g_logoTex && !g_viewOn) {                                  /* over everything else (with the view on, the logo is on its
+                                                                   * bar, never at the top: his note, 8 Oct) */
         LogoBuild();
         OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_logoTex, 1, 0), g_logoPos, g_logoUV, g_logoCol, 1);
     }
@@ -6426,7 +6431,9 @@ static void TitlePut(int spr, float W, float H, float a)
     float k = H / 2160.0f, w = (g_ttSpr[spr].x1 - g_ttSpr[spr].x0) * k, h = (g_ttSpr[spr].y1 - g_ttSpr[spr].y0) * k;
     float x0 = (W - w) * 0.5f, y0 = TITLE_TOP * H;
     float u0 = g_ttSpr[spr].x0 / 4096.0f, u1 = g_ttSpr[spr].x1 / 4096.0f, v0 = g_ttSpr[spr].y0 / (float)TITLE_SHEET_H, v1 = g_ttSpr[spr].y1 / (float)TITLE_SHEET_H;
-    DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
+    LONG cl = g_class;                                          /* in the class's colour, as the guild's class banners (his */
+    unsigned rgb = SaberMix(SaberVivid(kClassColour[cl > 0 && cl < 12 ? cl : 0]), 0xFFFFFF, TITLE_LIFT);   /* ask, 8 Oct) */
+    DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | (rgb & 0xFFFFFFu);
     ViewVertSet(q, x0, y0, u0, v0, c); ViewVertSet(q + 1, x0 + w, y0, u1, v0, c);
     ViewVertSet(q + 2, x0 + w, y0 + h, u1, v1, c); ViewVertSet(q + 3, x0, y0 + h, u0, v1, c);
 }

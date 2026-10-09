@@ -2032,15 +2032,24 @@ static void LiveTests(void)
             unsigned todStyle = g_todStyle; float todAt = g_todAt; TodLight tod = g_tod;
             g_todStyle |= TOD_GRADE; g_todAt = 120;
             for (int c = 0; c < 3; c++) g_tod.west[c] = g_tod.east[c] = 0.4f;
+            unsigned char before[3] = { g_vv[4].c[0], g_vv[4].c[1], g_vv[4].c[2] };
             TodGrade(5120, 0, g_vvN);
-            ti &= g_vv[4].c[0] == 255 && g_vv[4].c[1] == 255 && g_vv[4].c[2] == 255;   /* not graded */
+            ti &= g_vv[4].c[0] == before[0] && g_vv[4].c[1] == before[1] && g_vv[4].c[2] == before[2];   /* not graded */
             g_todStyle = todStyle; g_todAt = todAt; g_tod = tod;
+            LONG keepClass = g_class;
+            g_class = 9;                                                         /* a warlock: the title in its purple */
+            ViewListStart(); TitleBuild(5120, 2160, 101700);
+            unsigned want = SaberMix(SaberVivid(kClassColour[9]), 0xFFFFFF, TITLE_LIFT);
+            ti &= g_vvN >= 4 && g_vv[g_vvN - 4].c[0] == (unsigned char)(want >> 16) &&
+                  g_vv[g_vvN - 4].c[1] == (unsigned char)(want >> 8) && g_vv[g_vvN - 4].c[2] == (unsigned char)want &&
+                  g_vv[g_vvN - 4].c[2] > g_vv[g_vvN - 4].c[1];
+            g_class = keepClass;
             ViewListStart(); TitleBuild(5120, 2160, 106000);                     /* a new screen: faded in again */
             ti &= g_vvN == 0;
             g_viewTex[VT_TITLES] = tex; g_titlesOn = 0;
             g_destMap = keepMap; g_titleMapId = keepId; g_destWX = keepX; g_destWY = keepY;
             memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-            Check(ti, "the place's name: titles.txt read (bad lines out); the continent wide, the smallest zone in close, a dungeon's own and its entrance's continent; faded in, crossfaded, begun again; top centre at the screen's scale; not graded by the hour");
+            Check(ti, "the place's name: titles.txt read (bad lines out); the continent wide, the smallest zone in close, a dungeon's own and its entrance's continent; faded in, crossfaded, begun again; top centre at the screen's scale; in the class's colour; not graded by the hour");
         }
 
         /* the swells bend round it, the more the nearer, and not at all beyond its reach */
