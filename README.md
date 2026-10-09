@@ -1,11 +1,12 @@
 # CinderLoad
 
-Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client: the world map zooms in on where you are going while the bar burns in your class's colour.
+Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client: a living map of Azeroth glides down to where you are going, while a blade of light fills in your class's colour between two silver ravens.
 
 - Every loading screen fills the whole screen instead of sitting in a 4:3 box: 16:10, 16:9, 21:9 and 32:9.
-- Every loading screen is the world map, stitched from the client's own map tiles. As the bar fills, the view zooms in on where you are arriving; for a dungeon, raid or battleground, on its entrance. Cities, zones with their levels, towns, flight paths and every instance entrance are marked, more of them as you get closer, and currents run across the sea.
-- The bar is a burning log, the fire uncovered as the bar fills, in your class's colour: Druid orange, Hunter green, Mage light blue, Paladin pink, Priest white, Rogue yellow, Shaman blue, Warlock purple, Warrior tan.
-- On 21:9 screens the loading screen is the world map's zoom, with one bar for every class, in that class's colour.
+- Every loading screen is the world map, stitched from the client's own map tiles. As the bar fills, the view zooms in on where you are arriving; for a dungeon, raid or battleground, on its entrance. Cities, zones with their levels, towns, flight paths and every instance entrance are marked, more of them as you get closer.
+- The place's name appears across the top as you arrive: the continent, the zone, then the part of the zone you land in. Under the zone's name is its level range, coloured against your level as the game colours quests, and whose territory it is.
+- The map is alive. Ships and zeppelins sail their real routes, currents run across the sea and into the Maelstrom, clouds drift with each zone's usual rain, snow or sand, and the light follows the realm's clock, from dawn to night.
+- The bar is a blade of light in your class's colour: Druid orange, Hunter green, Mage light blue, Paladin pink, Priest white, Rogue yellow, Shaman blue, Warlock purple, Warrior tan. Two silver ravens stand at its ends, in honour of RavenCraft.
 - The sounds are built at run time from your own client's sound files (none are shipped).
 - Everything is checked against your WoW.exe first and changed in memory only. If anything differs, that part stays off and Logs/CinderLoad.log says why. WoW.exe on disk is never changed.
 
@@ -23,6 +24,13 @@ To remove: delete CinderLoad.dll, its dlls.txt line, the folder Data/CinderLoad,
 
 Check the files against SHA256SUMS on the release.
 
+## The living map's window
+
+The living map, the place's name, the ships, the weather and the blade are drawn in a window of CinderLoad's own, over the game, while a loading screen shows. It is on by default.
+
+- To turn it off, create an empty file Data/CinderLoad/view-off.txt. The loading screens then keep the world map's zoom, drawn by the game, with a burning log for the bar.
+- On Windows, when the game holds the whole screen (exclusive full screen), it stays off, because its window would be hidden behind the game's. Run the game in a window (SET gxWindow "1" in WTF/Config.wtf, or -windowed) to have it, or create Data/CinderLoad/view.txt to try it anyway. Under Wine and Proton (Linux, SteamOS, a Mac) it runs either way.
+
 ## Build
 
 - `dll/build.sh [out.dll]`: the DLL, with mingw-w64 (i686) and no C runtime.
@@ -33,7 +41,7 @@ Check the files against SHA256SUMS on the release.
 
 ## Credits
 
-The world map is stitched from the client's own map tiles. The bar is drawn from code. Releases before 0.2.0 carried wallpapers from Turtle WoW's commissioned art by Lionel Schramm, Misho Tenev, Stonegut and Ghor.
+The world map is stitched from the client's own map tiles. The ravens are the game's own raven model, cast in silver, and the bar's rails are Undercity's iron, both from the client. Releases before 0.2.0 carried wallpapers from Turtle WoW's commissioned art by Lionel Schramm, Misho Tenev, Stonegut and Ghor.
 
 ## License
 
