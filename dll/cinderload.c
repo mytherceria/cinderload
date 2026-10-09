@@ -2174,6 +2174,8 @@ static float MapLn(float x)
 #define CHAR_ENTERED_VA 0xB41DF4
 #define CHAR_SIZE       0x120
 #define CHAR_CLASS      0x101
+#define CHAR_RACE       0x100
+#define CHAR_LEVEL      0x108
 #define CHAR_MAP        0x38
 #define CHAR_X          0x44
 #define CHAR_Y          0x48
@@ -3371,6 +3373,7 @@ static void FlowBuild(float t, float dt)
  * where each screen's came from, and what the entered character's own entry says, to learn which holds. */
 #define BADGE_PX        36.0f   /* the gold ring's half size on a 2160-tall screen (bigger reads better) */
 static volatile LONG g_class, g_classFrom, g_classEntered;   /* the class (0 none); 1 the list, 2 kept; the entry's own */
+static volatile LONG g_race, g_level;                        /* the same character's race and level (0 none), kept so */
 static const struct { DWORD rva; int n; unsigned char bytes[8]; const char *what; } kClassCode[] = {
     { 0x0732E2, 6, { 0x3B, 0x05, 0x40, 0x21, 0xB4, 0x00 }, "GetCharacterInfo's count" },
     { 0x0732EE, 6, { 0x8B, 0x15, 0x44, 0x21, 0xB4, 0x00 }, "GetCharacterInfo's list" },
@@ -3380,7 +3383,9 @@ static const struct { DWORD rva; int n; unsigned char bytes[8]; const char *what
     { 0x06B539, 5, { 0xA3, 0xF4, 0x1D, 0xB4, 0x00 }, "entering the world's character" },
     { 0x1B4435, 6, { 0x8D, 0x46, 0x38, 0x50, 0x8B, 0xCF }, "the character list's map at +0x38" },
     { 0x1B4440, 6, { 0x8D, 0x4E, 0x44, 0x51, 0x8B, 0xCF }, "its x at +0x44" },
-    { 0x1B444B, 6, { 0x8D, 0x56, 0x48, 0x52, 0x8B, 0xCF }, "its y at +0x48" } };
+    { 0x1B444B, 6, { 0x8D, 0x56, 0x48, 0x52, 0x8B, 0xCF }, "its y at +0x48" },
+    { 0x073308, 7, { 0x0F, 0xB6, 0x87, 0x00, 0x01, 0x00, 0x00 }, "GetCharacterInfo's race at +0x100" },
+    { 0x07337A, 7, { 0x0F, 0xB6, 0x87, 0x08, 0x01, 0x00, 0x00 }, "GetCharacterInfo's level at +0x108" } };
 #define CLASS_CODE ((int)(sizeof kClassCode / sizeof kClassCode[0]))
 
 /* 1 when every place the class's addresses were read from holds the bytes it did in the client this was made for. */
@@ -3403,6 +3408,13 @@ static unsigned EntryClass(unsigned entry)
     return ClassOk(c) ? c : 0;
 }
 
+/* A byte of the character list at client address a, or 0. */
+static unsigned EntryByte(unsigned a)
+{
+    const unsigned char *p = ClientAt(a);
+    return a && p && Readable(p, 1) ? *(volatile const unsigned char *)p : 0;
+}
+
 /* The game's thread, each frame of a map screen: the class as the list says, else the one kept. */
 static void ClassStep(void)
 {
@@ -3411,7 +3423,12 @@ static void ClassStep(void)
     if (ClientWord(CHAR_COUNT_VA, &count) && ClientWord(CHAR_LIST_VA, &list) && ClientWord(CHAR_PICKED_VA, &picked) &&
         list && count > 0 && count <= 64 && picked < count)
         c = EntryClass(list + picked * CHAR_SIZE);
-    if (c) { InterlockedExchange(&g_class, (LONG)c); InterlockedExchange(&g_classFrom, 1); }
+    if (c) {
+        unsigned e = list + picked * CHAR_SIZE, race = EntryByte(e + CHAR_RACE), level = EntryByte(e + CHAR_LEVEL);
+        InterlockedExchange(&g_class, (LONG)c); InterlockedExchange(&g_classFrom, 1);
+        if (race >= 1 && race <= 31) InterlockedExchange(&g_race, (LONG)race);       /* (the zone's line: whose territory) */
+        if (level >= 1 && level <= 100) InterlockedExchange(&g_level, (LONG)level);  /* (and how its levels suit you) */
+    }
     else if (g_class) InterlockedExchange(&g_classFrom, 2);
     InterlockedExchange(&g_classEntered, ClientWord(CHAR_ENTERED_VA, &entered) ? (LONG)EntryClass(entered) : 0);
 }
@@ -3699,6 +3716,17 @@ static struct { int id, title; } g_ttInst[TITLE_INSTS];
 static short g_ttSub[GLOW_SPRITES];                             /* a glow's subzone title, -1 none */
 static int g_ttTitles, g_ttPoolN, g_ttLetters, g_ttSheetW, g_ttSheetH, g_ttBase, g_ttZones, g_ttInsts, g_ttSubs;
 static int g_ttCont[2] = { -1, -1 }, g_titlesOn;
+/* The zone's line under its name (his "word, build the zone level line", 8 Oct night): its levels, coloured against yours
+ * as WoW colours a quest, and its territory as WoW's own zone text says it (GlobalStrings' "Contested Territory", "%s
+ * Territory"; ZoneText.xml's colours), in Friz Quadrata, white on the sheet and tinted here:
+ *   B <baseline> <gap>                             its baseline under TITLE_TOP; the gap either side of the separator
+ *   y <territory> <title>                          the territory's words: 0 contested, 1 Alliance, 2 Horde
+ *   j <title>                                      the separator between the levels and the territory
+ *   v <title> <levels> <low> <high> <territory>    a zone's or dungeon's line (levels -1, territory -1: none)
+ *   r <race> <faction>                             a race's faction, 1 Alliance or 2 Horde */
+static struct { short lv, low, high; signed char terr, on; } g_ttLine[TITLE_MAX];
+static int g_ttTerr[3] = { -1, -1, -1 }, g_ttSep = -1, g_ttLineBase, g_ttLineGap, g_ttLines;
+static unsigned char g_ttFaction[32];
 
 static void TitlesParse(const char *s, unsigned len)
 {
@@ -3707,6 +3735,10 @@ static void TitlesParse(const char *s, unsigned len)
     for (int c = 0; c < TITLE_LETTERS; c++)
         for (int l = 0; l < 4; l++) g_ttLet[c][l].x1 = 0;
     for (int g = 0; g < GLOW_SPRITES; g++) g_ttSub[g] = -1;
+    for (int t = 0; t < TITLE_MAX; t++) g_ttLine[t].on = 0;
+    for (int r = 0; r < 32; r++) g_ttFaction[r] = 0;
+    g_ttTerr[0] = g_ttTerr[1] = g_ttTerr[2] = g_ttSep = -1;
+    g_ttLineBase = g_ttLineGap = g_ttLines = 0;
     for (unsigned at = 0; at < len;) {
         unsigned end = at;
         while (end < len && s[end] != '\n') end++;
@@ -3763,6 +3795,25 @@ static void TitlesParse(const char *s, unsigned len)
                    v[0] >= 0 && v[0] < GLOW_SPRITES && v[1] >= 0 && v[1] < g_ttTitles) {
             if (g_ttSub[v[0]] < 0) g_ttSubs++;
             g_ttSub[v[0]] = (short)v[1];
+        } else if (n > 2 && l[0] == 'B' && MapSpace(l[1]) && LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) &&
+                   v[0] > 0 && v[0] < 2000 && v[1] >= 0 && v[1] < 1000) {
+            g_ttLineBase = v[0]; g_ttLineGap = v[1];
+        } else if (n > 2 && l[0] == 'y' && MapSpace(l[1]) && LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) &&
+                   v[0] >= 0 && v[0] < 3 && v[1] >= 0 && v[1] < g_ttTitles) {
+            g_ttTerr[v[0]] = v[1];
+        } else if (n > 2 && l[0] == 'j' && MapSpace(l[1]) && LblInt(l, n, &i, &v[0]) && v[0] >= 0 && v[0] < g_ttTitles) {
+            g_ttSep = v[0];
+        } else if (n > 2 && l[0] == 'v' && MapSpace(l[1])) {
+            while (k < 5 && LblInt(l, n, &i, &v[k])) k++;
+            if (k == 5 && v[0] >= 0 && v[0] < g_ttTitles && v[1] >= -1 && v[1] < g_ttTitles && v[2] >= 0 && v[3] >= v[2] &&
+                v[3] <= 255 && v[4] >= -1 && v[4] < 3 && (v[1] >= 0 || v[4] >= 0)) {
+                if (!g_ttLine[v[0]].on) g_ttLines++;
+                g_ttLine[v[0]].lv = (short)v[1]; g_ttLine[v[0]].low = (short)v[2]; g_ttLine[v[0]].high = (short)v[3];
+                g_ttLine[v[0]].terr = (signed char)v[4]; g_ttLine[v[0]].on = 1;
+            }
+        } else if (n > 2 && l[0] == 'r' && MapSpace(l[1]) && LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) &&
+                   v[0] > 0 && v[0] < 32 && (v[1] == 1 || v[1] == 2)) {
+            g_ttFaction[v[0]] = (unsigned char)v[1];
         }
         at = end + 1;
     }
@@ -5053,8 +5104,8 @@ static void OverlayStart(void)
               (g_seaOn || g_marksOn || g_glowOn || g_lblOn) && g_logoOn ? "," : "", g_logoOn ? " the RavenCraft logo at the top" : "");
     Log(m);
     if (g_titlesOn) {
-        wsprintfA(m, "  the place's name, top centre: %d titles (%d zones, %d dungeons, raids and battlegrounds, %d subzones), set out from %d letters, drawn by the view",
-                  g_ttTitles, g_ttZones, g_ttInsts, g_ttSubs, g_ttLetters);
+        wsprintfA(m, "  the place's name, top centre: %d titles (%d zones, %d dungeons, raids and battlegrounds, %d subzones), set out from %d letters; %d with a line of levels and territory; drawn by the view",
+                  g_ttTitles, g_ttZones, g_ttInsts, g_ttSubs, g_ttLetters, g_ttLines);
         Log(m);
     }
     if (g_shipsOn) {
@@ -5453,7 +5504,7 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
                                                                                     * its shine: four more a piece) */
 #define VIEW_QUADS_MAX (2 + TITLE_QUADS_ROOM + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
 #define MAEL_QUADS_ROOM (2 + 200 * 14 + 90)   /* the Maelstrom's strokes (MAEL_QUADS, defined with them below) */
-#define TITLE_QUADS_ROOM (2 * 3 * TITLE_CHARS)  /* two titles at once at most, three layers a letter at most */
+#define TITLE_QUADS_ROOM (4 * 3 * TITLE_CHARS)  /* two titles and two lines at once at most, three layers a letter */
 #define VIEW_BATCHES   48
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
 static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
@@ -6473,14 +6524,12 @@ static int TitleWant(void)
     }
     return cont == 0 || cont == 1 ? g_ttCont[cont] : -1;
 }
-/* One layer of a title's letters, at alpha a: centred on its ink, its baseline g_ttBase under TITLE_TOP, each letter on a
- * whole pixel; sizes for a 2160-tall screen, scaled to this one. */
-static void TitleLayer(int t, int layer, float W, float H, float a)
+/* One layer of a title's letters, its first pen at x0 on baseline yb (screen pixels), at scale k, tint rgb and alpha a;
+ * each letter on a whole pixel. */
+static void TitleLetters(int t, int layer, float x0, float yb, float k, DWORD rgb, float a)
 {
-    if (a <= 0.004f) return;
-    float k = H / 2160.0f, x0 = (W - (g_ttTitle[t].right - g_ttTitle[t].left) * k) * 0.5f - g_ttTitle[t].left * k;
-    float yb = TITLE_TOP * H + g_ttBase * k, sw = (float)g_ttSheetW, sh = (float)g_ttSheetH;
-    DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu;     /* the sheet's own colours */
+    float sw = (float)g_ttSheetW, sh = (float)g_ttSheetH;
+    DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | (rgb & 0xFFFFFFu);
     for (int i = 0; i < g_ttTitle[t].n; i++) {
         int code = g_ttPool[g_ttTitle[t].first + i].code;
         if (!g_ttLet[code][layer].x1) continue;
@@ -6494,48 +6543,121 @@ static void TitleLayer(int t, int layer, float W, float H, float a)
         ViewVertSet(q + 2, x + w, y + h, u1, v1, c); ViewVertSet(q + 3, x, y + h, u0, v1, c);
     }
 }
+/* A layer of a title: centred on its ink, its baseline g_ttBase under TITLE_TOP, in the sheet's own colours. */
+static void TitleLayer(int t, int layer, float W, float H, float a)
+{
+    if (a <= 0.004f) return;
+    float k = H / 2160.0f;
+    TitleLetters(t, layer, (W - (g_ttTitle[t].right - g_ttTitle[t].left) * k) * 0.5f - g_ttTitle[t].left * k,
+                 TITLE_TOP * H + g_ttBase * k, k, 0xFFFFFFu, a);
+}
+#define LINE_NEUTRAL 0xFFEDC2u   /* ZoneText.xml's own when there is no territory to colour by (1.0, 0.9294, 0.7607) */
+/* The levels' colour, as WoW colours a quest against your level (red five and more above you, orange three, yellow in
+ * reach, green below, grey once the whole range is grey to you: the grey level of 1.12's experience); neutral when your
+ * level is not known. */
+static DWORD LineLevelColour(int low, int high)
+{
+    int L = (int)g_level;
+    if (L <= 0) return LINE_NEUTRAL;
+    int grey = L <= 5 ? 0 : L <= 39 ? L - 5 - L / 10 : L <= 59 ? L - 1 - L / 5 : L - 12;
+    if (low - L >= 5) return 0xFF1A1Au;
+    if (low - L >= 3) return 0xFF8040u;
+    if (high >= L - 2) return 0xFFFF00u;
+    if (high > grey) return 0x40BF40u;
+    return 0x808080u;
+}
+/* The territory's colour, as ZoneText.xml: friendly green, hostile red, contested orange; neutral when your faction is
+ * not known. */
+static DWORD LineTerrColour(int terr)
+{
+    if (terr == 0) return 0xFFB300u;
+    int f = g_race > 0 && g_race < 32 ? g_ttFaction[g_race] : 0;
+    if (!f) return LINE_NEUTRAL;
+    return f == terr ? 0x1AFF1Au : 0xFF1A1Au;
+}
+/* A layer of title t's line, centred under it: its levels, the separator, its territory, each in its own colour. */
+static void LineLayer(int t, int layer, float W, float H, float a)
+{
+    if (a <= 0.004f || t < 0 || t >= g_ttTitles || !g_ttLine[t].on) return;
+    int lv = g_ttLine[t].lv, terr = g_ttLine[t].terr, tt = terr >= 0 ? g_ttTerr[terr] : -1, sep = lv >= 0 && tt >= 0 ? g_ttSep : -1;
+    int part[3] = { lv, sep, tt };
+    DWORD col[3] = { LineLevelColour(g_ttLine[t].low, g_ttLine[t].high), LINE_NEUTRAL, LineTerrColour(terr) };
+    float k = H / 2160.0f, gap = g_ttLineGap * k, total = 0;
+    for (int i = 0; i < 3; i++)
+        if (part[i] >= 0) total += (g_ttTitle[part[i]].right - g_ttTitle[part[i]].left) * k + (i == 1 ? 2 * gap : 0);
+    float x = (W - total) * 0.5f, yb = TITLE_TOP * H + g_ttLineBase * k;
+    for (int i = 0; i < 3; i++) {
+        if (part[i] < 0) continue;
+        if (i == 1) x += gap;
+        TitleLetters(part[i], layer, x - g_ttTitle[part[i]].left * k, yb, k, col[i], a);
+        x += (g_ttTitle[part[i]].right - g_ttTitle[part[i]].left) * k + (i == 1 ? gap : 0);
+    }
+}
 /* A title at v, 0 gone to 1 shown: as it comes in it fades in and comes into focus together, as it goes it blurs and
  * fades. The blur runs through the sheet's three steps (sharp: backs then faces; a little; a lot), the blurrier of the two
  * either side drawn first and the sharper over it. */
-static void TitleDraw(int t, float W, float H, float v)
+static void TitleDraw(int t, float W, float H, float v, int line)
 {
     if (t < 0 || t >= g_ttTitles || v <= 0) return;
+    void (*layer)(int, int, float, float, float) = line ? LineLayer : TitleLayer;
     float e = FireClamp(v, 0, 1);
     e = e * e * (3 - 2 * e);
     float p = (1 - e) * 2;                                        /* the blur: 0 sharp, 1 a little, 2 a lot */
     int lo = p >= 1 ? 1 : 0;
     float f = p - lo;
-    if (f > 0.004f) TitleLayer(t, lo + 2, W, H, e * f);          /* the blurrier */
-    if (lo == 0) { TitleLayer(t, 0, W, H, e * (1 - f)); TitleLayer(t, 1, W, H, e * (1 - f)); }
-    else TitleLayer(t, 2, W, H, e * (1 - f));
+    if (f > 0.004f) layer(t, lo + 2, W, H, e * f);               /* the blurrier */
+    if (lo == 0) { layer(t, 0, W, H, e * (1 - f)); layer(t, 1, W, H, e * (1 - f)); }
+    else layer(t, 2, W, H, e * (1 - f));
 }
-static struct { int cur, prev; float prevV; DWORD at, last; } g_title = { -1, -1, 0, 0, 0 };
+typedef struct { int cur, prev; float prevV; DWORD at, last; } TitleState;
+static TitleState g_title = { -1, -1, 0, 0, 0 }, g_line = { -1, -1, 0, 0, 0 };
 /* How shown the outgoing and the incoming title are now: the outgoing goes from where it was over TITLE_OUT (sooner
  * when it was part shown), and only then does the new one come in, over TITLE_IN. */
-static void TitleVis(DWORD now, float *vp, float *vc)
+static void TitleVis(const TitleState *s, DWORD now, float *vp, float *vc)
 {
-    float t = (float)(LONG)(now - g_title.at) / 1000.0f, out = g_title.prevV * TITLE_OUT;
-    *vp = g_title.prev >= 0 ? FireClamp(g_title.prevV - t / TITLE_OUT, 0, 1) : 0;
-    *vc = g_title.cur >= 0 ? FireClamp((t - out) / TITLE_IN, 0, 1) : 0;
+    float t = (float)(LONG)(now - s->at) / 1000.0f, out = s->prevV * TITLE_OUT;
+    *vp = s->prev >= 0 ? FireClamp(s->prevV - t / TITLE_OUT, 0, 1) : 0;
+    *vc = s->cur >= 0 ? FireClamp((t - out) / TITLE_IN, 0, 1) : 0;
+}
+/* One step of a title's (or a line's) coming and going: a gap of over a second since its last frame is a new screen; a
+ * change of what it wants sends the one showing out from where it is (or the one still going, on), then the new in. */
+static void TitleStep(TitleState *s, int want, DWORD now, float *vp, float *vc)
+{
+    if (!s->last || (LONG)(now - s->last) > 1000) { s->cur = s->prev = -1; s->prevV = 0; s->at = now; }
+    s->last = now;
+    TitleVis(s, now, vp, vc);
+    if (want != s->cur) {
+        if (*vc >= *vp) { s->prev = s->cur; s->prevV = *vc; }
+        else s->prevV = *vp;
+        s->cur = want; s->at = now;
+        TitleVis(s, now, vp, vc);
+    }
+}
+/* The line this frame wants: the zone's (through its subzones too, so it stays put while the name below changes) or the
+ * dungeon's, once the view has come in past TITLE_ZONE_H; -1 for none. */
+static int LineWant(void)
+{
+    int id = g_titleMapId, t = -1;
+    if (!g_ttLines || (g_bgUV[1] - g_bgUV[5]) * 0.5f >= TITLE_ZONE_H) return -1;
+    if (id > 1) {
+        for (int k = 0; k < g_ttInsts; k++)
+            if (g_ttInst[k].id == id) { t = g_ttInst[k].title; break; }
+    } else if (g_destMap >= 0)
+        t = TitleZone(g_destMap, g_destWX, g_destWY);
+    return t >= 0 && g_ttLine[t].on ? t : -1;
 }
 /* The place's name, top centre: come in as a screen begins (a gap of over a second since the last frame is a new
  * screen), the old blurred out and then the new brought in when the title it wants changes. */
 static void TitleBuild(float W, float H, DWORD now)
 {
     if (!g_titlesOn || !g_viewTex[VT_TITLES]) return;
-    if (!g_title.last || (LONG)(now - g_title.last) > 1000) { g_title.cur = g_title.prev = -1; g_title.prevV = 0; g_title.at = now; }
-    g_title.last = now;
-    int want = TitleWant();
     float vp, vc;
-    TitleVis(now, &vp, &vc);
-    if (want != g_title.cur) {
-        if (vc >= vp) { g_title.prev = g_title.cur; g_title.prevV = vc; }   /* the one showing goes out from where it is */
-        else g_title.prevV = vp;                                           /* the one still going out goes on */
-        g_title.cur = want; g_title.at = now;
-        TitleVis(now, &vp, &vc);
-    }
-    TitleDraw(g_title.prev, W, H, vp);
-    TitleDraw(g_title.cur, W, H, vc);
+    TitleStep(&g_title, TitleWant(), now, &vp, &vc);
+    TitleDraw(g_title.prev, W, H, vp, 0);
+    TitleDraw(g_title.cur, W, H, vc, 0);
+    TitleStep(&g_line, LineWant(), now, &vp, &vc);                /* the zone's line under it */
+    TitleDraw(g_line.prev, W, H, vp, 1);
+    TitleDraw(g_line.cur, W, H, vc, 1);
 }
 
 static void ViewOverlayBuild(float W, float H, DWORD now)

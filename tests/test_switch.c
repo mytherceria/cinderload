@@ -2120,6 +2120,98 @@ static void LiveTests(void)
             Check(ti, "the place's name: titles.txt read (bad lines out, a bad title kept empty); the continent wide, the smallest zone in close, the subzone closer still, a dungeon's own and its entrance's continent; set out letter by letter at the top centre at the screen's scale; into focus as it fades in, blurred out before the next, a part-shown one going from where it was; begun again; in the sheet's own colours for any class; not graded by the hour");
         }
 
+        /* the zone's line under its name (8 Oct night, his "word, build the zone level line"): read (bad lines out); the
+         * zone's through its subzones, the dungeon's, none wide or with no line; the levels coloured as WoW colours a
+         * quest against your level, the territory as its zone text (friendly, hostile, contested; neutral unknown); set
+         * out levels, separator, territory, centred under the title at the line's baseline, each in its own colour */
+        {
+            char tt[2400];
+            snprintf(tt, sizeof tt, "S 1024 512 90\n"
+                     "L 65 0 0 0 40 60 -5 -80\nL 65 1 40 0 80 60 -5 -80\nL 65 2 80 0 130 70 -10 -85\nL 65 3 130 0 190 80 -15 -90\n"
+                     "L 128 0 0 100 40 150 -3 -40\nL 128 1 40 100 80 150 -3 -40\nL 128 2 80 100 130 160 -8 -45\nL 128 3 130 100 190 170 -13 -50\n"
+                     "T 0 -5 35 1 65 0\nT 1 -5 75 2 65 0 65 40\nT 2 -5 35 1 65 0\nT 3 -5 35 1 65 0\n"
+                     "T 4 -3 67 2 128 0 128 30\nT 5 -3 97 3 128 0 128 30 128 60\nT 6 -3 97 3 128 0 128 30 128 60\n"
+                     "T 7 -3 97 3 128 0 128 30 128 60\nT 8 -3 37 1 128 0\n"
+                     "c 0 0\nz 0 %08x %08x %08x %08x 1\ni 36 3\nB 245 33\nB 0 33\n"
+                     "y 0 5\ny 1 6\ny 2 7\ny 3 5\nj 8\n"
+                     "v 1 4 1 10 1\nv 3 4 17 26 -1\nv 2 -1 0 0 -1\nv 0 4 5 1 0\nv 9 4 1 10 1\n"
+                     "r 1 1\nr 2 2\nr 40 1\nr 3 3\n",
+                     FBits(0), FBits(-2000), FBits(-4000), FBits(-6000));
+            TitlesParse(tt, (unsigned)strlen(tt));
+            int zl = g_ttTitles == 9 && g_ttLines == 2 && g_ttTerr[0] == 5 && g_ttTerr[1] == 6 && g_ttTerr[2] == 7 && g_ttSep == 8 &&
+                     g_ttLineBase == 245 && g_ttLineGap == 33 && g_ttFaction[1] == 1 && g_ttFaction[2] == 2 && g_ttFaction[3] == 0 &&
+                     g_ttLine[1].on && g_ttLine[3].on && !g_ttLine[2].on && !g_ttLine[0].on;
+            int keepMap = g_destMap, keepId = g_titleMapId;
+            float keepX = g_destWX, keepY = g_destWY;
+            g_titlesOn = 1;
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            g_titleMapId = 0; g_destMap = 0; g_destWX = -5000; g_destWY = -1000;
+            zl &= LineWant() == -1;                                              /* wide: none */
+            g_bgUV[0] = g_bgUV[4] = 0.47f; g_bgUV[2] = g_bgUV[6] = 0.53f;          /* in close (past the subzone's step too) */
+            g_bgUV[5] = g_bgUV[7] = 0.34f; g_bgUV[1] = g_bgUV[3] = 0.54f;
+            zl &= LineWant() == 1;                                               /* the zone's, the subzone or not */
+            {
+                int keepItems = g_glowItems, keepSprites = g_glowSprites;
+                unsigned short keepCell = g_glowCells[0];
+                __typeof__(g_glowMap[0]) keepGlow[2] = { g_glowMap[0], g_glowMap[1] };
+                const char *gt = "s 0 0 0 64 32\ng 0 3ecccccd 3f000000 3eeb851f 3f07ae14\n";
+                GlowParse(gt, (unsigned)strlen(gt));
+                unsigned char gb[6 + 18 + 2] = { 'C', 'G', 'L', 'W', 1, 0, 0, 0 };
+                float cell = 100, gx0 = -5050, gy0 = -1050;
+                memcpy(gb + 8, &cell, 4); memcpy(gb + 12, &gx0, 4); memcpy(gb + 16, &gy0, 4);
+                gb[20] = 1; gb[22] = 1; gb[24] = 1; gb[25] = 0;
+                g_ttSub[0] = 2;                                                  /* (the subzone: glow 0, title 2) */
+                zl &= GlowGridParse(gb, sizeof gb) && TitleWant() == 2 && LineWant() == 1;   /* a subzone's name, the zone's line */
+                g_glowItems = keepItems; g_glowSprites = keepSprites; g_glowMap[0] = keepGlow[0]; g_glowMap[1] = keepGlow[1];
+                g_glowCells[0] = keepCell;
+            }
+            g_destWX = 100;
+            zl &= LineWant() == -1;                                              /* in no zone */
+            g_titleMapId = 36;
+            zl &= LineWant() == 3;                                               /* a dungeon's */
+            g_titleMapId = 0; g_destWX = -5000;
+            /* the levels' colours: red 5 and more above you, orange 3, yellow in reach, green below, grey all grey */
+            g_level = 0;  zl &= LineLevelColour(1, 10) == LINE_NEUTRAL;
+            g_level = 1;  zl &= LineLevelColour(10, 20) == 0xFF1A1Au;
+            g_level = 7;  zl &= LineLevelColour(10, 20) == 0xFF8040u;
+            g_level = 5;  zl &= LineLevelColour(1, 10) == 0xFFFF00u;
+            g_level = 13; zl &= LineLevelColour(1, 10) == 0x40BF40u;
+            g_level = 25; zl &= LineLevelColour(1, 10) == 0x808080u;
+            g_level = 60; zl &= LineLevelColour(45, 50) == 0x40BF40u && LineLevelColour(40, 48) == 0x808080u && LineLevelColour(60, 60) == 0xFFFF00u;
+            g_level = 5;  zl &= LineLevelColour(10, 20) == 0xFF1A1Au;                 /* the edges: five above, red */
+            g_level = 6;  zl &= LineLevelColour(10, 20) == 0xFF8040u;                 /* four, orange */
+            g_level = 8;  zl &= LineLevelColour(10, 20) == 0xFFFF00u;                 /* two, yellow */
+            g_level = 12; zl &= LineLevelColour(1, 10) == 0xFFFF00u;                  /* the top two below you: yellow */
+            g_level = 25; zl &= LineLevelColour(1, 18) == 0x808080u && LineLevelColour(1, 19) == 0x40BF40u;   /* grey at 18 */
+            /* the territory's: contested orange always; friendly green, hostile red once the race is known */
+            g_race = 0; zl &= LineTerrColour(0) == 0xFFB300u && LineTerrColour(1) == LINE_NEUTRAL;
+            g_race = 1; zl &= LineTerrColour(1) == 0x1AFF1Au && LineTerrColour(2) == 0xFF1A1Au;
+            g_race = 2; zl &= LineTerrColour(1) == 0xFF1A1Au && LineTerrColour(2) == 0x1AFF1Au;
+            /* drawn: a dwarf-ish Alliance character of level 5 in an Alliance zone of 1-10 */
+            g_race = 1; g_level = 5;
+            unsigned tex = g_viewTex[VT_TITLES];
+            g_viewTex[VT_TITLES] = 9;
+            g_title.last = g_line.last = 0;
+            ViewListStart(); TitleBuild(5120, 2160, 200000);
+            zl &= g_vvN == 0;
+            ViewListStart(); TitleBuild(5120, 2160, 200400);
+            zl &= g_vvN == 64 &&                                                 /* the name's 4 quads, the line's 12 */
+                  fabsf(g_vv[16].x - 2422) < 0.01f && fabsf(g_vv[16].y - 281) < 0.01f &&      /* the levels first, centred */
+                  g_vv[16].c[0] == 255 && g_vv[16].c[1] == 255 && g_vv[16].c[2] == 0 &&       /* yellow: in reach */
+                  fabsf(g_vv[24].x - 2525) < 0.01f && g_vv[24].c[0] == 255 && g_vv[24].c[1] == 237 && g_vv[24].c[2] == 194 &&
+                  fabsf(g_vv[28].x - 2598) < 0.01f && g_vv[28].c[0] == 26 && g_vv[28].c[1] == 255 && g_vv[28].c[2] == 26 &&
+                  fabsf(g_vv[40].x - 2422) < 0.01f && fabsf(g_vv[40].u - 40 / 1024.0f) < 1e-6f;   /* all backs, then faces */
+            g_titleMapId = 36;                                                   /* a dungeon: its levels alone, no separator */
+            ViewListStart(); TitleBuild(5120, 2160, 210000);
+            ViewListStart(); TitleBuild(5120, 2160, 210400);
+            zl &= g_vvN == 8 + 16 && fabsf(g_vv[8].x - 2525) < 0.01f && g_vv[8].c[0] == 255 && g_vv[8].c[1] == 26;   /* (17-26 at 5: red) */
+            g_viewTex[VT_TITLES] = tex; g_titlesOn = 0;
+            g_race = g_level = 0;
+            g_destMap = keepMap; g_titleMapId = keepId; g_destWX = keepX; g_destWY = keepY;
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            Check(zl, "the zone's line: read (bad lines out); the zone's through its subzones, a dungeon's, none wide or out of a zone; levels coloured as WoW colours a quest against yours, territory friendly, hostile or contested (neutral unknown); levels, separator, territory centred under the name, each its own colour; a dungeon's levels alone");
+        }
+
         /* the swells bend round it, the more the nearer, and not at all beyond its reach */
         static const unsigned char allSea[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
                                                       255, 255, 255, 255, 255, 255, 255, 255 };
@@ -2197,8 +2289,18 @@ static void LiveTests(void)
         shim_module[0x8A0000 - 0x400000 + 1 * 0x120 + 0x101] = 8;
         shim_module[0x8A0000 - 0x400000 + 2 * 0x120 + 0x101] = 6;     /* no class 6 in 1.12 */
         shim_module[0x8A0000 - 0x400000 + 3 * 0x120 + 0x101] = 4;     /* past the list's end: never read */
+        shim_module[0x8A0000 - 0x400000 + 1 * 0x120 + 0x100] = 7;     /* the mage a gnome, level 23 (the zone's line) */
+        shim_module[0x8A0000 - 0x400000 + 1 * 0x120 + 0x108] = 23;
+        shim_module[0x8A0000 - 0x400000 + 0 * 0x120 + 0x100] = 0;     /* the first: no race, a level past any */
+        shim_module[0x8A0000 - 0x400000 + 0 * 0x120 + 0x108] = 200;
+        g_race = g_level = 0;
         ClassStep();
-        bd &= g_class == 8 && g_classFrom == 1 && g_classEntered == 8;
+        bd &= g_class == 8 && g_classFrom == 1 && g_classEntered == 8 && g_race == 7 && g_level == 23;
+        Poke(CHAR_PICKED_VA, 0);
+        ClassStep();
+        bd &= g_class == 1 && g_race == 7 && g_level == 23;               /* a bad race or level: the last kept */
+        Poke(CHAR_PICKED_VA, 1);
+        ClassStep();
         Poke(CHAR_PICKED_VA, 3);
         ClassStep();
         bd &= g_class == 8 && g_classFrom == 2;                          /* a pick past the end: not read */
@@ -2251,8 +2353,11 @@ static void LiveTests(void)
         memcpy(&at[0], kClassCode[0].bytes + 2, 4); memcpy(&at[1], kClassCode[1].bytes + 2, 4);
         memcpy(&at[2], kClassCode[4].bytes + 1, 4); memcpy(&at[3], kClassCode[5].bytes + 1, 4);
         bd &= at[0] == CHAR_COUNT_VA && at[1] == CHAR_LIST_VA && at[2] == CHAR_PICKED_VA && at[3] == CHAR_ENTERED_VA &&
-              (kClassCode[3].bytes[3] | kClassCode[3].bytes[4] << 8) == CHAR_CLASS && 9 * (1 << kClassCode[2].bytes[5]) == CHAR_SIZE;
-        Check(bd, "the badge: the class from the list (a bad byte never taken, kept when the list goes); shadow, icon, ring at the arrival; the ring alone without; off when the code moved");
+              (kClassCode[3].bytes[3] | kClassCode[3].bytes[4] << 8) == CHAR_CLASS && 9 * (1 << kClassCode[2].bytes[5]) == CHAR_SIZE &&
+              (kClassCode[9].bytes[3] | kClassCode[9].bytes[4] << 8) == CHAR_RACE &&
+              (kClassCode[10].bytes[3] | kClassCode[10].bytes[4] << 8) == CHAR_LEVEL;
+        g_race = g_level = 0;
+        Check(bd, "the badge: the class from the list (a bad byte never taken, kept when the list goes), its race and level with it; shadow, icon, ring at the arrival; the ring alone without; off when the code moved");
     }
 
     /* his find, 4 Oct: three characters in three places all showed at Alterac (the game's arrival read 0, 0 at a login).
