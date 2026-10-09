@@ -1978,6 +1978,71 @@ static void LiveTests(void)
             Check(sm, "the Maelstrom in strokes: a vortex (nearer the eye, faster; anticlockwise), drained inward and made anew, steady over a minute; in the world's place and size, the halo first, soft across; the eye wandering, the rim still; gone close in and without the spark");
         }
 
+        /* the place's name, top centre (8 Oct, his ask): titles.txt read (bad lines left out); the continent's as a
+         * screen begins, the zone's (the smallest box holding the arrival) once in past TITLE_ZONE_H, a dungeon's by its
+         * map and the continent of its entrance before that; faded in, crossfaded on a change, begun again on a new
+         * screen; top centre at the screen's scale; not graded by the hour */
+        {
+            char tt[700];
+            snprintf(tt, sizeof tt, "# t\ns 0 0 0 400 100\ns 1 400 0 700 100\ns 2 0 100 300 200\ns 3 300 100 600 200\n"
+                     "s 4 0 200 500 300\ns 9 0 0 10 10\nc 0 0\nc 1 1\nc 2 1\n"
+                     "z 0 %08x %08x %08x %08x 2\nz 0 %08x %08x %08x %08x 3\nz 0 %08x %08x %08x %08x 7\ni 36 4\ni 1 4\n",
+                     FBits(0), FBits(-2000), FBits(-4000), FBits(-6000),
+                     FBits(-800), FBits(-1200), FBits(-4800), FBits(-5200),
+                     FBits(0), FBits(-10), FBits(0), FBits(-10));
+            TitlesParse(tt, (unsigned)strlen(tt));
+            int ti = g_ttSprites == 5 && g_ttCont[0] == 0 && g_ttCont[1] == 1 && g_ttZones == 2 && g_ttInsts == 1;
+            int keepMap = g_destMap, keepId = g_titleMapId;
+            float keepX = g_destWX, keepY = g_destWY;
+            g_titlesOn = 1;
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            g_titleMapId = 0; g_destMap = -1;
+            ti &= TitleWant() == 0;
+            g_bgUV[0] = g_bgUV[4] = 0.4f; g_bgUV[2] = g_bgUV[6] = 0.6f;            /* in close, h = 0.1 */
+            g_bgUV[5] = g_bgUV[7] = 0.34f; g_bgUV[1] = g_bgUV[3] = 0.54f;
+            ti &= TitleWant() == 0;                                              /* the arrival not yet known */
+            g_destMap = 0; g_destWX = -5000; g_destWY = -1000;
+            ti &= TitleWant() == 3;                                              /* in both boxes: the smaller */
+            g_destWX = -4500; g_destWY = -500;
+            ti &= TitleWant() == 2;
+            g_destWX = 100; g_destWY = 100;
+            ti &= TitleWant() == 0;                                              /* in no box: the continent */
+            g_titleMapId = 36; g_destMap = 0;
+            ti &= TitleWant() == 4;                                              /* a dungeon: its own */
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            ti &= TitleWant() == 0;                                              /* wide: its entrance's continent */
+            g_titleMapId = 1; g_destMap = 1;
+            ti &= TitleWant() == 1;
+            unsigned tex = g_viewTex[VT_TITLES];
+            g_viewTex[VT_TITLES] = 9;
+            g_title.last = 0;
+            ViewListStart(); TitleBuild(5120, 2160, 100000);
+            ti &= g_vvN == 0;                                                    /* the first frame: not yet shown */
+            ViewListStart(); TitleBuild(5120, 2160, 100300);
+            ti &= g_vvN == 4 && g_vb[g_vbN - 1].tex == VT_TITLES && g_vv[3].c[3] > 60 && g_vv[3].c[3] < 200 &&
+                  fabsf(g_vv[0].x - (5120 - 300) / 2.0f) < 0.5f && fabsf(g_vv[0].y - 0.035f * 2160) < 0.5f &&
+                  fabsf(g_vv[2].y - g_vv[0].y - 100) < 0.5f && fabsf(g_vv[1].x - g_vv[0].x - 300) < 0.5f;
+            ViewListStart(); TitleBuild(2560, 1080, 100900);                     /* full, and at half the screen half the size */
+            ti &= g_vvN == 4 && g_vv[0].c[3] == 255 && fabsf(g_vv[2].y - g_vv[0].y - 50) < 0.5f;
+            g_titleMapId = 0; g_destMap = 0;
+            ViewListStart(); TitleBuild(5120, 2160, 101200);                     /* a change: the old still shown, */
+            ti &= g_vvN == 4 && g_vv[0].c[3] == 255 && fabsf(g_vv[1].x - g_vv[0].x - 300) < 0.5f;
+            ViewListStart(); TitleBuild(5120, 2160, 101500);                     /* then both, crossing */
+            ti &= g_vvN == 8;
+            unsigned todStyle = g_todStyle; float todAt = g_todAt; TodLight tod = g_tod;
+            g_todStyle |= TOD_GRADE; g_todAt = 120;
+            for (int c = 0; c < 3; c++) g_tod.west[c] = g_tod.east[c] = 0.4f;
+            TodGrade(5120, 0, g_vvN);
+            ti &= g_vv[4].c[0] == 255 && g_vv[4].c[1] == 255 && g_vv[4].c[2] == 255;   /* not graded */
+            g_todStyle = todStyle; g_todAt = todAt; g_tod = tod;
+            ViewListStart(); TitleBuild(5120, 2160, 106000);                     /* a new screen: faded in again */
+            ti &= g_vvN == 0;
+            g_viewTex[VT_TITLES] = tex; g_titlesOn = 0;
+            g_destMap = keepMap; g_titleMapId = keepId; g_destWX = keepX; g_destWY = keepY;
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            Check(ti, "the place's name: titles.txt read (bad lines out); the continent wide, the smallest zone in close, a dungeon's own and its entrance's continent; faded in, crossfaded, begun again; top centre at the screen's scale; not graded by the hour");
+        }
+
         /* the swells bend round it, the more the nearer, and not at all beyond its reach */
         static const unsigned char allSea[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
                                                       255, 255, 255, 255, 255, 255, 255, 255 };

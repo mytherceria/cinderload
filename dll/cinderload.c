@@ -2181,6 +2181,7 @@ static unsigned g_destSnap[3];                                  /* the game's ar
 static volatile LONG g_destEnd[3], g_destEndOk;                 /* the game's arrival as the last screen ended */
 static int g_destWay;                                           /* how MapDest knew it (the screen's log line) */
 static int g_destMap = -1;
+static int g_titleMapId = -1;                                   /* the screen's map (BAR_MAP_VA), as MapDest last read it */
 static float g_destWX, g_destWY;                                /* the arrival in world yards, once known */
 static int g_classSure;                                         /* the character list's code is all there (below) */
 
@@ -2247,6 +2248,7 @@ static int MapDest(float *du, float *dv, float *hEnd, float p)
     unsigned id, dm, xb, yb, e, c, xb2, yb2;
     float ex, ey;
     if (!ClientWord(BAR_MAP_VA, &id)) return 0;
+    g_titleMapId = (int)id;
     g_destWay = 1;
     if (id > 1)                                      /* a dungeon, raid or battleground: its entrance, from the start */
         return MapEntrance(id, &c, &ex, &ey) && MapPlace(c, ex, ey, du, dv, hEnd);
@@ -2503,6 +2505,7 @@ static void DriftStep(float p, DWORD now)
         g_viewU = g_viewV = g_viewH = 0.5f;
         g_destOk = 0;
         g_destMap = -1;
+        g_titleMapId = -1;
         g_settleTo = 0;
         InterlockedExchange(&g_destKnownPct, -1);
         ArrivalSnap();
@@ -3652,6 +3655,81 @@ static void LabelsParse(const char *s, unsigned len)
         }
         at = end + 1;
     }
+}
+
+/* ---- the place's name, top centre (8 Oct 2026, his ask: "take a note from how as you hover over the right hand
+ * continent it says 'Eastern Kingdoms' in the top middle of the screen ... when you hover over an area, the name of that
+ * area is in the top center of the screen ... do that on Cinderload in RavenCraft.io orange style font ... and write the
+ * name of the continent, zone, etc. on the screen as you load in"). CinderTitles.blp (DXT5, 4096 x 2048: each title in
+ * Folkard, ravencraft.io's gold-to-coral gradient, outlined and shadowed; kit/zoom/titles.py) and CinderLoad\titles.txt:
+ *   s <id> <x0> <y0> <x1> <y1>                      a title's rectangle on the sheet
+ *   c <map> <sprite>                                 a continent's title
+ *   z <map> <left> <right> <top> <bottom> <sprite>   a zone's (WorldMapArea's box, world yards, float bits in hex)
+ *   i <instance map id> <sprite>                     a dungeon's, raid's or battleground's
+ * The view shows the continent's as a screen begins and the zone's (the smallest box holding the arrival) or the
+ * instance's once it has come in past TITLE_ZONE_H, each faded in over TITLE_FADE and crossfaded when it changes. */
+#define TITLES_PATH   "Interface\\Glues\\LoadingScreens\\CinderTitles.blp"
+#define TITLE_SPRITES 256
+#define TITLE_ZONES   256
+#define TITLE_INSTS   128
+#define TITLE_ZONE_H  0.20f        /* the view's half height: the zone's name from here in */
+#define TITLE_FADE    0.6f         /* seconds */
+#define TITLE_TOP     0.035f       /* its top, down the screen */
+static struct { unsigned short x0, y0, x1, y1; } g_ttSpr[TITLE_SPRITES];
+static struct { int map; float l, r, t, b; int spr; } g_ttZone[TITLE_ZONES];
+static struct { int id, spr; } g_ttInst[TITLE_INSTS];
+static int g_ttSprites, g_ttZones, g_ttInsts, g_ttCont[2] = { -1, -1 }, g_titlesOn;
+
+static void TitlesParse(const char *s, unsigned len)
+{
+    g_ttSprites = g_ttZones = g_ttInsts = 0;
+    g_ttCont[0] = g_ttCont[1] = -1;
+    for (unsigned at = 0; at < len;) {
+        unsigned end = at;
+        while (end < len && s[end] != '\n') end++;
+        const char *l = s + at;
+        int n = (int)(end - at), i = 2, a, b, c, d, e;
+        unsigned hl, hr, ht, hb;
+        if (n > 2 && l[0] == 's' && MapSpace(l[1]) && LblInt(l, n, &i, &a) && LblInt(l, n, &i, &b) &&
+            LblInt(l, n, &i, &c) && LblInt(l, n, &i, &d) && LblInt(l, n, &i, &e) && a == g_ttSprites &&
+            a < TITLE_SPRITES && b >= 0 && c >= 0 && d > b && e > c && d <= 4096 && e <= 2048) {
+            g_ttSpr[a].x0 = (unsigned short)b; g_ttSpr[a].y0 = (unsigned short)c;
+            g_ttSpr[a].x1 = (unsigned short)d; g_ttSpr[a].y1 = (unsigned short)e;
+            g_ttSprites++;
+        } else if (n > 2 && l[0] == 'c' && MapSpace(l[1]) && LblInt(l, n, &i, &a) && LblInt(l, n, &i, &b) &&
+                   (a == 0 || a == 1) && b >= 0 && b < g_ttSprites) {
+            g_ttCont[a] = b;
+        } else if (n > 2 && l[0] == 'z' && MapSpace(l[1]) && g_ttZones < TITLE_ZONES && LblInt(l, n, &i, &a) &&
+                   MapHex(l, n, &i, &hl) && MapHex(l, n, &i, &hr) && MapHex(l, n, &i, &ht) && MapHex(l, n, &i, &hb) &&
+                   LblInt(l, n, &i, &b) && (a == 0 || a == 1) && b >= 0 && b < g_ttSprites) {
+            float fl = MapBits(hl), fr = MapBits(hr), ft = MapBits(ht), fb = MapBits(hb);
+            if (MapFinite(fl) && MapFinite(fr) && MapFinite(ft) && MapFinite(fb) && fl != fr && ft != fb) {
+                g_ttZone[g_ttZones].map = a; g_ttZone[g_ttZones].spr = b;
+                g_ttZone[g_ttZones].l = fl; g_ttZone[g_ttZones].r = fr; g_ttZone[g_ttZones].t = ft; g_ttZone[g_ttZones].b = fb;
+                g_ttZones++;
+            }
+        } else if (n > 2 && l[0] == 'i' && MapSpace(l[1]) && g_ttInsts < TITLE_INSTS && LblInt(l, n, &i, &a) &&
+                   LblInt(l, n, &i, &b) && a > 1 && b >= 0 && b < g_ttSprites) {
+            g_ttInst[g_ttInsts].id = a; g_ttInst[g_ttInsts].spr = b;
+            g_ttInsts++;
+        }
+        at = end + 1;
+    }
+}
+
+/* The zone's title at world x, y on continent map (the smallest box holding it), or -1. */
+static int TitleZone(int map, float x, float y)
+{
+    int best = -1;
+    float area = 0;
+    for (int k = 0; k < g_ttZones; k++) {
+        float y0 = g_ttZone[k].l < g_ttZone[k].r ? g_ttZone[k].l : g_ttZone[k].r, y1 = g_ttZone[k].l + g_ttZone[k].r - y0;
+        float x0 = g_ttZone[k].t < g_ttZone[k].b ? g_ttZone[k].t : g_ttZone[k].b, x1 = g_ttZone[k].t + g_ttZone[k].b - x0;
+        if (g_ttZone[k].map != map || x < x0 || x > x1 || y < y0 || y > y1) continue;
+        float a = (x1 - x0) * (y1 - y0);
+        if (best < 0 || a < area) { best = g_ttZone[k].spr; area = a; }
+    }
+    return best;
 }
 
 /* This frame's quads, from the view (g_bgUV): into g_lblPos / g_lblUV / g_lblCol as strips of LBL_BATCH quads, each
@@ -4857,6 +4935,15 @@ static void OverlayStart(void)
         g_glowOn = g_glowItems > 0 && gridOk;
         g_glowPick = -2;                                           /* nothing picked yet */
     }
+    g_titlesOn = 0;
+    if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderTitles")) {     /* the place's name, top centre (the view's) */
+        unsigned char *text = NULL;
+        unsigned len = 0;
+        if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\titles.txt", &text, &len) == MPQ_OK && text)
+            TitlesParse((const char *)text, len);
+        if (text) HeapFree(GetProcessHeap(), 0, text);
+        g_titlesOn = g_ttSprites > 0 && (g_ttCont[0] >= 0 || g_ttCont[1] >= 0 || g_ttZones || g_ttInsts);
+    }
     g_shipsOn = 0;
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderShips")) {     /* the ships and zeppelins (the view's) */
         unsigned char *text = NULL;
@@ -4895,9 +4982,9 @@ static void OverlayStart(void)
             g_flowOn = FlowParse(data, len);
         if (data) HeapFree(GetProcessHeap(), 0, data);
     }
-    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn && !g_glowOn && !g_shipsOn && !g_skyOn) return;
+    if (!g_seaOn && !g_lblOn && !g_logoOn && !g_marksOn && !g_glowOn && !g_shipsOn && !g_skyOn && !g_titlesOn) return;
     if (!OverlayCallsHold((const unsigned char *)GetModuleHandleA(NULL))) {
-        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = g_shipsOn = g_skyOn = 0;
+        g_seaOn = g_lblOn = g_logoOn = g_marksOn = g_glowOn = g_wavesOn = g_flowOn = g_shipsOn = g_skyOn = g_titlesOn = 0;
         Log("overlay off: the calls it draws with are not where they are in the client it was made for");
         return;
     }
@@ -4912,6 +4999,11 @@ static void OverlayStart(void)
               (g_seaOn || g_marksOn || g_glowOn) && g_lblOn ? "," : "", g_lblOn ? " names and icons" : "",
               (g_seaOn || g_marksOn || g_glowOn || g_lblOn) && g_logoOn ? "," : "", g_logoOn ? " the RavenCraft logo at the top" : "");
     Log(m);
+    if (g_titlesOn) {
+        wsprintfA(m, "  the place's name, top centre: %d titles (%d zones, %d dungeons, raids and battlegrounds), drawn by the view",
+                  g_ttSprites, g_ttZones, g_ttInsts);
+        Log(m);
+    }
     if (g_shipsOn) {
         int z = 0;
         for (int r = 0; r < g_ships; r++) z += g_ship[r].kind;
@@ -5286,7 +5378,7 @@ static int TextHas(const char *list, const char *name)
  * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
-       VT_COUNT };
+       VT_TITLES, VT_COUNT };
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -5306,7 +5398,7 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_QUADS    ((6 + SABER_BANDS) * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + SABER_DROPS + SABER_BLOOMS + 2 + 1 + 5 * (256 + 3) + 3 + ORB_GLOWS + \
                         SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS)   /* (the frame's: FRAME_TILES and the rest, and
                                                                                     * its shine: four more a piece) */
-#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
+#define VIEW_QUADS_MAX (2 + 2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
 #define MAEL_QUADS_ROOM (2 + 200 * 14 + 90)   /* the Maelstrom's strokes (MAEL_QUADS, defined with them below) */
 #define VIEW_BATCHES   48
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
@@ -6077,6 +6169,7 @@ static void TodGrade(float W, int first, int last)
     for (int c = 0; c < 3; c++) avg[c] = (we[c] + ea[c]) / 2 > 0.2f ? (we[c] + ea[c]) / 2 : 0.2f;
     for (int b = 0; b < g_vbN; b++) {
         int t = g_vb[b].tex, half = t == VT_LABELS || t == VT_MARKS || t == VT_GLOW, rel = t == VT_SKY;
+        if (t == VT_TITLES) continue;                            /* the place's name is the screen's, not the world's */
         for (int i = g_vb[b].first; i < g_vb[b].first + g_vb[b].count; i++) {
             if (i < first || i >= last || (i >= g_todCityFrom && i < g_todCityTo)) continue;
             float k = FireClamp(g_vv[i].x / W, 0, 1);
@@ -6305,6 +6398,51 @@ static void MaelstromStrokes(float W, float H, float t, float dt)
     ViewVertSet(q + 2, ex + er, ey + er, 1, 1, ec); ViewVertSet(q + 3, ex - er, ey + er, 0, 1, ec);
 }
 
+/* The title this frame wants: the zone's or instance's once the view has come in past TITLE_ZONE_H and the place is
+ * known, else the continent's; -1 for none. */
+static int TitleWant(void)
+{
+    int id = g_titleMapId, cont = id == 0 || id == 1 ? id : g_destMap;
+    float h = (g_bgUV[1] - g_bgUV[5]) * 0.5f;
+    if (h < TITLE_ZONE_H) {
+        if (id > 1)
+            for (int k = 0; k < g_ttInsts; k++)
+                if (g_ttInst[k].id == id) return g_ttInst[k].spr;
+        if (id <= 1 && g_destMap >= 0) {
+            int z = TitleZone(g_destMap, g_destWX, g_destWY);
+            if (z >= 0) return z;
+        }
+    }
+    return cont == 0 || cont == 1 ? g_ttCont[cont] : -1;
+}
+static struct { int cur, prev; DWORD at, last; } g_title = { -1, -1, 0, 0 };
+static void TitlePut(int spr, float W, float H, float a)
+{
+    if (spr < 0 || spr >= g_ttSprites || a <= 0.004f) return;
+    ViewVert *q = ViewQuadMode(VT_TITLES, 0);
+    if (!q) return;
+    float k = H / 2160.0f, w = (g_ttSpr[spr].x1 - g_ttSpr[spr].x0) * k, h = (g_ttSpr[spr].y1 - g_ttSpr[spr].y0) * k;
+    float x0 = (W - w) * 0.5f, y0 = TITLE_TOP * H;
+    float u0 = g_ttSpr[spr].x0 / 4096.0f, u1 = g_ttSpr[spr].x1 / 4096.0f, v0 = g_ttSpr[spr].y0 / 2048.0f, v1 = g_ttSpr[spr].y1 / 2048.0f;
+    DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
+    ViewVertSet(q, x0, y0, u0, v0, c); ViewVertSet(q + 1, x0 + w, y0, u1, v0, c);
+    ViewVertSet(q + 2, x0 + w, y0 + h, u1, v1, c); ViewVertSet(q + 3, x0, y0 + h, u0, v1, c);
+}
+/* The place's name, top centre: faded in as a screen begins (a gap of over a second since the last frame is a new
+ * screen), crossfaded when the title it wants changes. */
+static void TitleBuild(float W, float H, DWORD now)
+{
+    if (!g_titlesOn || !g_viewTex[VT_TITLES]) return;
+    if (!g_title.last || (LONG)(now - g_title.last) > 1000) { g_title.cur = g_title.prev = -1; g_title.at = now; }
+    g_title.last = now;
+    int want = TitleWant();
+    if (want != g_title.cur) { g_title.prev = g_title.cur; g_title.cur = want; g_title.at = now; }
+    float k = FireClamp((float)(LONG)(now - g_title.at) / (1000.0f * TITLE_FADE), 0, 1);
+    k = k * k * (3 - 2 * k);
+    TitlePut(g_title.prev, W, H, 1 - k);
+    TitlePut(g_title.cur, W, H, k);
+}
+
 static void ViewOverlayBuild(float W, float H, DWORD now)
 {
     if (!g_ovOn || !g_mapShown) return;
@@ -6329,6 +6467,7 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
     }
     if (g_lblOn && g_viewTex[VT_LABELS]) { LabelsBuild(); ViewStrips(VT_LABELS, g_lblPos, g_lblUV, g_lblCol, g_lblQuads, W, H); }
     if (g_marksOn && g_viewTex[VT_MARKS]) { BadgeBuild(now); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
+    TitleBuild(W, H, now);                                       /* the place's name, over all */
 }
 
 /* ---- the blade (6 Oct 2026, his design: "one really nice bar") ----
@@ -7456,7 +7595,8 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         static const struct { int slot, *on; const char *path; } kSheets[] = {
             { VT_SEA, &g_seaOn, SEA_PATH }, { VT_MARKS, &g_marksOn, MARKS_PATH }, { VT_WAVES, &g_wavesOn, WAVES_PATH },
             { VT_FLOW, &g_flowOn, FLOW_PATH }, { VT_GLOW, &g_glowOn, GLOW_PATH }, { VT_LABELS, &g_lblOn, LABELS_PATH },
-            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH }, { VT_SHIPS, &g_shipsOn, SHIPS_PATH } };
+            { VT_LOGO, &g_logoOn, LOGO_PATH }, { VT_FRAME, &g_frameOn, FRAME_PATH }, { VT_SHIPS, &g_shipsOn, SHIPS_PATH },
+            { VT_TITLES, &g_titlesOn, TITLES_PATH } };
         for (unsigned i = 0; i < sizeof kSheets / sizeof kSheets[0]; i++)
             if (*kSheets[i].on) mpq_read(&kIo, "patch-~.MPQ", kSheets[i].path, &g_view.blp[kSheets[i].slot], &g_view.len[kSheets[i].slot]);
     }
