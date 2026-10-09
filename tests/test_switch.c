@@ -5252,7 +5252,17 @@ static void TestViewDefault(void)
     Check(g_gameWindowed == 1, "the screen choice: gxWindow 1 = a window");
     Put("WTF/Config.wtf", "SET gxResolution \"1920x1080\"\n");
     ChooseScreens();
-    Check(g_gameWindowed == 0, "the screen choice: no gxWindow line = the whole screen");
+    Check(g_gameWindowed == 0, "the screen choice: no gxWindow line, a client with another default: the whole screen");
+    shim_module[GXWINDOW_DEFAULT_VA - 0x400000u] = 0xEB; shim_module[GXWINDOW_DEFAULT_VA - 0x400000u + 1] = 0x05;
+    ChooseScreens();
+    Check(g_gameWindowed == 1, "the screen choice: no gxWindow line in RavenCraft's client (its default \"1\"): a window");
+    Put("WTF/Config.wtf", "SET gxResolution \"1920x1080\"\nSET gxWindow \"0\"\n");
+    ChooseScreens();
+    Check(g_gameWindowed == 0, "the screen choice: gxWindow 0 in RavenCraft's client: the whole screen");
+    shim_module[GXWINDOW_DEFAULT_VA - 0x400000u + 1] = 0x06;
+    Put("WTF/Config.wtf", "SET gxResolution \"1920x1080\"\n");
+    ChooseScreens();
+    Check(g_gameWindowed == 0, "the screen choice: other bytes where the default is chosen: the whole screen");
     char keep[512];
     strcpy(keep, shim_cmdline); strcat(shim_cmdline, " -windowed");
     ChooseScreens();

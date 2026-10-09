@@ -91,13 +91,16 @@ static int GameUsesOpenGL(const char *cmd, const char *cfg)
 }
 
 /* The game shows in a window of its own rather than holding the whole screen (slice 5, 9 Oct: on Windows itself a game
- * in exclusive full screen would hide the view's window behind its own). As the 1.12 client decides it: -windowed on
- * its command line makes a window; else the last SET gxWindow line of Config.wtf (cfg may be NULL), any value but "0"
- * a window; with no such line the game takes the whole screen. */
-static int ConfigSaysWindow(const char *text)
+ * in exclusive full screen would hide the view's window behind its own). As the 1.12 client decides it: -fullscreen
+ * on its command line takes the whole screen, -windowed makes a window; else the last SET gxWindow line of Config.wtf
+ * (cfg may be NULL), "0" the whole screen and any other value a window. With no such line, the client's own default
+ * (byDefault): the client writes only values that differ from its defaults, and RavenCraft's WoW.exe registers
+ * gxWindow as "1", so there a missing line means a window (the pre-release attack, 9 Oct: read as the whole screen,
+ * the view would have stayed off for nearly every Windows player). */
+static int ConfigWindowLine(const char *text)              /* -1 no SET gxWindow line; else 0 or 1, the last one's */
 {
     static const char key[] = "set gxwindow \"";
-    int win = 0;
+    int win = -1;
     for (const char *p = text; p && *p; p++) {
         if (p != text && p[-1] != '\n') continue;
         const char *s = p;
@@ -110,10 +113,12 @@ static int ConfigSaysWindow(const char *text)
     }
     return win;
 }
-static int GameIsWindowed(const char *cmd, const char *cfg)
+static int GameIsWindowed(const char *cmd, const char *cfg, int byDefault)
 {
+    if (CommandLineSays(cmd, "-fullscreen")) return 0;
     if (CommandLineSays(cmd, "-windowed")) return 1;
-    return ConfigSaysWindow(cfg);
+    int line = ConfigWindowLine(cfg);
+    return line < 0 ? byDefault : line;
 }
 
 /* The index of the nearest shape within SHAPE_TOLERANCE of w:h, or -1. available[i] says whether that shape's

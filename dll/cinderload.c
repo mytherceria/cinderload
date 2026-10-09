@@ -220,6 +220,17 @@ static int ViewWanted(int off, int on, int wine, int windowed, const char **why)
     return 1;
 }
 
+/* The client's own default for gxWindow, for a Config.wtf without the line: RavenCraft's WoW.exe always registers it
+ * as "1", a window (at VA 0x63A86A it jumps past the "0": EB 05; the pre-release attack, 9 Oct). Other bytes there: the
+ * whole screen, the safe reading for the view. */
+#define GXWINDOW_DEFAULT_VA 0x63A86Au
+static int Readable(const unsigned char *at, int n);
+static int WindowByDefault(void)
+{
+    const unsigned char *at = (const unsigned char *)GetModuleHandleA(NULL) + (GXWINDOW_DEFAULT_VA - 0x400000u);
+    return Readable(at, 2) && at[0] == 0xEB && at[1] == 0x05;
+}
+
 /* Puts the loading screens for this screen's shape in place as Data\patch-~.MPQ. 1 when ours are in place, so the
  * switch can go on. */
 static int g_scrW = 1920, g_scrH = 1080;        /* the screen, as Config.wtf (or the monitor) says */
@@ -261,7 +272,7 @@ static int ChooseScreens(void)
         from = "the monitor";
     }
     g_gameGL = GameUsesOpenGL(GetCommandLineA(), text);
-    g_gameWindowed = GameIsWindowed(GetCommandLineA(), text);
+    g_gameWindowed = GameIsWindowed(GetCommandLineA(), text, WindowByDefault());
     if (text) HeapFree(GetProcessHeap(), 0, text);
     if (w > 0 && h > 0) { g_scrW = g_surfW = w; g_scrH = g_surfH = h; }
     int pick = any ? ChooseShape(w, h, avail) : -1;
