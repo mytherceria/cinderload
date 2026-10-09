@@ -1921,6 +1921,63 @@ static void LiveTests(void)
         ml &= g_mkQuads == 0;
         Check(ml, "the Maelstrom: the world's place and size, square on screen, a quarter turn anticlockwise in a quarter of MAEL_TURN, gone close in");
 
+        /* the Maelstrom in strokes (8 Oct, his asks): a vortex, the strokes near the eye turning faster than those at
+         * the rim, anticlockwise; drained slowly inward and made anew at the rim, the spread holding steady over a
+         * minute; drawn by the view with the soft spark, in the world's place and size, the halo first, every stroke
+         * soft across its width; gone close in, and nothing without the spark */
+        {
+            int sm = 1;
+            unsigned spark = g_viewTex[VT_SPARK];
+            g_mlInit = 0; g_mlSeed = 12345u;
+            MaelStep(0);
+            g_ml[0].r = 0.4f; g_ml[0].th = 0; g_ml[0].age = 5;
+            g_ml[1].r = 1.4f; g_ml[1].th = 0; g_ml[1].age = 5;
+            MaelStep(1.0f);
+            sm &= g_ml[1].th > 0 && g_ml[0].th > 2.5f * g_ml[1].th;
+            sm &= g_ml[0].r < 0.4f && g_ml[1].r < 1.4f && g_ml[1].r > 1.4f * 0.9f;
+            for (int i = 0; i < 600; i++) MaelStep(0.1f);
+            int inner = 0, out = 0;
+            float mid = SaberSqrt(MAEL_R_IN * MAEL_R_OUT);
+            for (int i = 0; i < MAEL_STROKES; i++) {
+                if (g_ml[i].r < MAEL_R_IN || g_ml[i].r > MAEL_R_OUT) out++;
+                if (g_ml[i].r < mid) inner++;
+            }
+            sm &= !out && inner > MAEL_STROKES * 3 / 10 && inner < MAEL_STROKES * 7 / 10;
+            g_viewTex[VT_SPARK] = 7;
+            g_scrW = 5120; g_scrH = 2160;
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            ViewListStart();
+            MaelstromStrokes(5120, 2160, 0, 0);
+            float cx = 0.5f * 5120, cy = 0.44f * 2160, rp = 0.068f * 2160;
+            int quads = g_vvN / 4, far = 0, soft = 1;
+            for (int i = 0; i < g_vvN; i++) {
+                float dx = g_vv[i].x - cx, dy = g_vv[i].y - cy;
+                if (dx * dx + dy * dy > (2.6f * rp) * (2.6f * rp)) far++;
+            }
+            for (int i = 4; i < g_vvN - 4; i++) soft &= g_vv[i].u == 0.5f && (g_vv[i].v == 0 || g_vv[i].v == 1);
+            sm &= g_vbN == 1 && g_vb[0].tex == VT_SPARK && g_vb[0].add == 0 && quads > MAEL_CURL_SEGS + 100 &&
+                  quads <= MAEL_QUADS && !far && soft;
+            sm &= fabsf(g_vv[0].x - (cx - 1.55f * rp)) < 0.5f && fabsf(g_vv[2].y - (cy + 1.55f * rp)) < 0.5f && g_vv[0].c[3] < 100;
+            float e0x = (g_vv[g_vvN - 4].x + g_vv[g_vvN - 2].x) / 2, e0y = (g_vv[g_vvN - 4].y + g_vv[g_vvN - 2].y) / 2;
+            ViewListStart();
+            MaelstromStrokes(5120, 2160, 1.2f, 0);                          /* a moment on: the eye has wandered, the rim has not */
+            float e1x = (g_vv[g_vvN - 4].x + g_vv[g_vvN - 2].x) / 2, e1y = (g_vv[g_vvN - 4].y + g_vv[g_vvN - 2].y) / 2;
+            float moved = SaberSqrt((e1x - e0x) * (e1x - e0x) + (e1y - e0y) * (e1y - e0y));
+            sm &= moved > 0.02f * rp && moved < 0.3f * rp && fabsf(g_vv[0].x - (cx - 1.55f * rp)) < 0.5f;
+            g_bgUV[0] = g_bgUV[4] = 0.4f; g_bgUV[2] = g_bgUV[6] = 0.6f;    /* zoomed in, h = 0.1 */
+            g_bgUV[5] = g_bgUV[7] = 0.34f; g_bgUV[1] = g_bgUV[3] = 0.54f;
+            ViewListStart();
+            MaelstromStrokes(5120, 2160, 0, 0);
+            sm &= g_vvN == 0;
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+            g_viewTex[VT_SPARK] = 0;
+            ViewListStart();
+            MaelstromStrokes(5120, 2160, 0, 0);
+            sm &= g_vvN == 0;
+            g_viewTex[VT_SPARK] = spark;
+            Check(sm, "the Maelstrom in strokes: a vortex (nearer the eye, faster; anticlockwise), drained inward and made anew, steady over a minute; in the world's place and size, the halo first, soft across; the eye wandering, the rim still; gone close in and without the spark");
+        }
+
         /* the swells bend round it, the more the nearer, and not at all beyond its reach */
         static const unsigned char allSea[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
                                                       255, 255, 255, 255, 255, 255, 255, 255 };

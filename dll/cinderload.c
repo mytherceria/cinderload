@@ -5306,7 +5306,8 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_QUADS    ((6 + SABER_BANDS) * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + SABER_DROPS + SABER_BLOOMS + 2 + 1 + 5 * (256 + 3) + 3 + ORB_GLOWS + \
                         SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS)   /* (the frame's: FRAME_TILES and the rest, and
                                                                                     * its shine: four more a piece) */
-#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
+#define VIEW_QUADS_MAX (2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
+#define MAEL_QUADS_ROOM (2 + 200 * 14 + 90)   /* the Maelstrom's strokes (MAEL_QUADS, defined with them below) */
 #define VIEW_BATCHES   48
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
 static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
@@ -6149,6 +6150,161 @@ static void TodDiscBuild(float W, float H)
 }
 
 static DWORD g_ovViewAt;
+/* ---- the Maelstrom in strokes (8 Oct 2026, his asks: "make ours look way better and turn more like a real maelstrom
+ * whirlpool would", then "incorporate more of the screenshots ... zoom way in and look at the way the lines are drawn") --
+ * The WoW world map draws its whirlpool in tapered brush strokes laid along the spiral like feathers, short near the
+ * eye and longer outward, the outermost flying off as long thin whips, one unbroken curl at the centre, on a pale halo.
+ * Here each stroke MOVES as water in a vortex does: round at the speed its distance from the eye allows (MaelOmega:
+ * faster the nearer), and drained slowly inward (MAEL_INFLOW); it fades out near the eye as a new one fades in at the
+ * rim, and they are spread evenly in the log of their distance, which is what such a drain leaves behind, so the
+ * picture holds steady however long the screen shows. Sizes are in Maelstrom radii (g_mael.r), the strokes drawn with
+ * the blade's soft spark across their width so their edges are soft. The design, step for step, is
+ * living-map/maelstrom-v1/strokes.py; the film beside it is what he saw. Only the view draws it; drawn by the game
+ * (the view off) the Maelstrom is still the turned sprite (MaelstromBuild). */
+#define MAEL_STROKES     200
+#define MAEL_SEGS        14         /* pieces along a stroke */
+#define MAEL_CURL_SEGS   90         /* along the curl */
+#define MAEL_R_IN        0.27f      /* the strokes live between these, */
+#define MAEL_R_OUT       1.70f
+#define MAEL_R_SPAWN     1.25f      /* are born out from here, */
+#define MAEL_W0          0.60f      /* turn at MAEL_W0 / (r + 0.08) radians a second, */
+#define MAEL_INFLOW      0.075f     /* and drain inward at this much of their distance a second */
+#define MAEL_CURL_TURNS  2.6f
+#define MAEL_CURL_OUT    0.26f
+#define MAEL_CURL_SPIN   4.2f       /* the curl's spin, radians a second (his note, 8 Oct: "the center should spin faster") */
+#define MAEL_FLECKS      0.32f      /* this share of the strokes are short bright flecks of foam ("a bit more foam") */
+#define MAEL_WIDE        1.7f       /* the soft spark's light is narrower than the quad: the stroke's quad this much wider */
+#define MAEL_INK         0xC4E0ECu  /* the strokes' pale ink, as the coast lines' */
+#define MAEL_HALO        0x3E687Cu  /* the lighter water under it */
+#define MAEL_EYE         0x08141Eu
+#define MAEL_QUADS       (2 + MAEL_STROKES * MAEL_SEGS + MAEL_CURL_SEGS)
+typedef char MaelRoomCheck[MAEL_QUADS <= MAEL_QUADS_ROOM ? 1 : -1];   /* the view's list has room for them all */
+static struct { float r, th, len, w, k, age, fleck; } g_ml[MAEL_STROKES];
+static int g_mlInit;
+static unsigned g_mlSeed = 12345u;
+
+static float MaelRand(void)
+{
+    g_mlSeed ^= g_mlSeed << 13; g_mlSeed ^= g_mlSeed >> 17; g_mlSeed ^= g_mlSeed << 5;
+    return (float)(g_mlSeed >> 8) / 16777216.0f;
+}
+static float MaelOmega(float r) { return MAEL_W0 / (r + 0.08f); }
+static float MaelPow(float x, float p) { return x > 0 ? (float)FireExp((double)(p * MapLn(x))) : 0; }
+
+/* Stroke i, made anew: anywhere between MAEL_R_IN and MAEL_R_OUT (born 0, the screen's first frame), or out at the rim
+ * (born 1, one drained into the eye); evenly in the log of the distance either way. */
+static void MaelSpawn(int i, int born)
+{
+    float lo = MapLn(born ? MAEL_R_SPAWN : MAEL_R_IN), hi = MapLn(MAEL_R_OUT);
+    float r = (float)FireExp((double)(lo + (hi - lo) * MaelRand()));
+    g_ml[i].r = r;
+    g_ml[i].th = 6.2831853f * MaelRand();
+    g_ml[i].len = (0.45f + 0.70f * MaelRand()) * (0.50f + 0.45f * r);          /* longer further out (radians) */
+    g_ml[i].w = (0.010f + 0.012f * MaelRand()) * (0.80f + 0.30f * (r < 1.4f ? r : 1.4f));
+    g_ml[i].k = 0.06f + 0.10f * MaelRand() + (r > 1.3f ? 0.22f * MaelRand() : 0);   /* the tail lies further out */
+    g_ml[i].fleck = 1;
+    if (MaelRand() < MAEL_FLECKS) { g_ml[i].len *= 0.30f; g_ml[i].w *= 0.85f; g_ml[i].fleck = 1.25f; }
+    g_ml[i].age = born ? 0 : 5;
+}
+static void MaelStep(float dt)
+{
+    if (!g_mlInit) {
+        for (int i = 0; i < MAEL_STROKES; i++) MaelSpawn(i, 0);
+        g_mlInit = 1;
+    }
+    for (int i = 0; i < MAEL_STROKES; i++) {
+        g_ml[i].th += MaelOmega(g_ml[i].r) * dt;
+        g_ml[i].r -= MAEL_INFLOW * g_ml[i].r * dt;
+        g_ml[i].age += dt;
+        if (g_ml[i].r < MAEL_R_IN) MaelSpawn(i, 1);
+    }
+}
+static float MaelAlpha(int i)
+{
+    float r = g_ml[i].r;
+    float a = FireClamp(g_ml[i].age / 0.9f, 0, 1);                             /* fading in at the rim, */
+    a *= FireClamp((r - MAEL_R_IN) / 0.14f, 0, 1);                             /* out at the eye, */
+    a *= FireClamp((MAEL_R_OUT + 0.15f - r) / 0.35f, 0, 1);                    /* soft at the far edge */
+    return FireClamp(a * 0.80f * g_ml[i].fleck * (0.55f + 0.45f * FireClamp(1.2f / (r > 0.4f ? r : 0.4f), 0, 1)), 0, 1);
+}
+
+/* The eye wanders (his note, 8 Oct: "move around slightly wobbling like it's alive and wants to eat your ship"): a point
+ * r radii out is moved ox, oy radii (y up) at time t, the middle in slow uneven circles while the rim stays put, and every
+ * few seconds a lunge further. */
+static void MaelWobble(float t, float r, float *ox, float *oy)
+{
+    float lunge = 1 + 0.9f * MaelPow(FireClamp(SeaSin(0.85f * t), 0, 1), 6);
+    float k = (float)FireExp((double)(-r / 0.55f)) * lunge;
+    *ox = (0.060f * SeaSin(1.30f * t) + 0.030f * SeaSin(2.90f * t + 1.7f)) * k;
+    *oy = (0.055f * SeaCos(1.10f * t + 0.4f) + 0.030f * SeaSin(3.30f * t)) * k;
+}
+
+/* A ribbon through n + 1 points (radius, angle, half width; Maelstrom radii) about cx, cy (pixels, rp pixels a radius),
+ * wobbling as at time t, soft across its width (the spark's middle column), in colour argb. */
+static void MaelRibbon(const float *pr, const float *pa, const float *pw, int n, float cx, float cy, float rp, float t, DWORD argb)
+{
+    for (int i = 0; i < n; i++) {
+        ViewVert *q = ViewQuadMode(VT_SPARK, 0);
+        if (!q) return;
+        for (int e = 0; e < 2; e++) {                                         /* this end, then the next */
+            int j = i + e;
+            float c = SeaCos(pa[j]), s = SeaSin(pa[j]);
+            float ox, oy;
+            MaelWobble(t, pr[j], &ox, &oy);
+            float x = cx + (pr[j] * c + ox) * rp, y = cy - (pr[j] * s + oy) * rp, hw = pw[j] * rp * MAEL_WIDE;
+            ViewVertSet(q + (e ? 1 : 0), x + c * hw, y - s * hw, 0.5f, 0, argb);      /* the outer edge */
+            ViewVertSet(q + (e ? 2 : 3), x - c * hw, y + s * hw, 0.5f, 1, argb);      /* the inner */
+        }
+    }
+}
+
+static void MaelstromStrokes(float W, float H, float t, float dt)
+{
+    float fade = SeaFade((g_bgUV[2] - g_bgUV[0]) * 0.5f);
+    if (!g_mael.ok || fade <= 0.01f || !g_viewTex[VT_SPARK]) return;
+    MaelStep(dt);
+    float sx, sy;
+    ViewToScreen(g_mael.u, g_mael.v, &sx, &sy);
+    float cx = sx * W, cy = (1 - sy) * H, rp = g_mael.r / (g_bgUV[1] - g_bgUV[5]) * H;
+    float reach = rp * (MAEL_R_OUT + 0.8f);
+    if (cx + reach < 0 || cx - reach > W || cy + reach < 0 || cy - reach > H) return;
+    ViewVert *q = ViewQuadMode(VT_SPARK, 0);                                   /* the halo */
+    if (!q) return;
+    float hr = 1.55f * rp, ha = 0.30f * fade;
+    DWORD hc = (DWORD)(ha * 255.0f + 0.5f) << 24 | MAEL_HALO;
+    ViewVertSet(q, cx - hr, cy - hr, 0, 0, hc); ViewVertSet(q + 1, cx + hr, cy - hr, 1, 0, hc);
+    ViewVertSet(q + 2, cx + hr, cy + hr, 1, 1, hc); ViewVertSet(q + 3, cx - hr, cy + hr, 0, 1, hc);
+    float pr[MAEL_CURL_SEGS + 1], pa[MAEL_CURL_SEGS + 1], pw[MAEL_CURL_SEGS + 1];
+    for (int i = 0; i < MAEL_STROKES; i++) {                                   /* the strokes */
+        float a = MaelAlpha(i) * fade;
+        if (a <= 0.02f) continue;
+        for (int j = 0; j <= MAEL_SEGS; j++) {
+            float s = (float)j / MAEL_SEGS, phi = (s - 1) * g_ml[i].len;
+            pr[j] = g_ml[i].r * (float)FireExp((double)(-g_ml[i].k * phi));
+            pa[j] = g_ml[i].th + phi;
+            pw[j] = g_ml[i].w * MaelPow(SeaSin(3.14159265f * s), 0.75f) * (0.65f + 0.35f * s);   /* pointed both ends */
+        }
+        MaelRibbon(pr, pa, pw, MAEL_SEGS, cx, cy, rp, t, (DWORD)(a * 255.0f + 0.5f) << 24 | MAEL_INK);
+    }
+    float rot = MAEL_CURL_SPIN * t;                                            /* the unbroken curl at the centre */
+    for (int j = 0; j <= MAEL_CURL_SEGS; j++) {
+        float s = (float)j / MAEL_CURL_SEGS;
+        pr[j] = 0.035f + (MAEL_CURL_OUT - 0.035f) * s;
+        pa[j] = rot - s * MAEL_CURL_TURNS * 6.2831853f;
+        pw[j] = 0.020f * (0.25f + 0.75f * SeaSin((s * 1.4f < 1 ? s * 1.4f : 1) * 1.5707963f)) *
+                (1 - 0.5f * (s > 0.8f ? (s - 0.8f) / 0.2f : 0));
+    }
+    MaelRibbon(pr, pa, pw, MAEL_CURL_SEGS, cx, cy, rp, t, (DWORD)(0.92f * fade * 255.0f + 0.5f) << 24 | MAEL_INK);
+    q = ViewQuadMode(VT_SPARK, 0);                                             /* a little depth at the very middle */
+    if (!q) return;
+    float er = 0.11f * rp, eox, eoy;
+    MaelWobble(t, 0, &eox, &eoy);
+    float ex = cx + eox * rp, ey = cy - eoy * rp;
+    DWORD ec = (DWORD)(0.6f * fade * 255.0f + 0.5f) << 24 | MAEL_EYE;
+    ViewVertSet(q, ex - er, ey - er, 0, 0, ec); ViewVertSet(q + 1, ex + er, ey - er, 1, 0, ec);
+    ViewVertSet(q + 2, ex + er, ey + er, 1, 1, ec); ViewVertSet(q + 3, ex - er, ey + er, 0, 1, ec);
+}
+
 static void ViewOverlayBuild(float W, float H, DWORD now)
 {
     if (!g_ovOn || !g_mapShown) return;
@@ -6157,7 +6313,8 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
     if (dt < 0) dt = 0;
     if (dt > 0.25f) dt = 0.25f;                                  /* (a new screen, or a pause: no leap of the currents) */
     if (g_wavesOn && g_viewTex[VT_WAVES]) { WaveBuild(t); ViewStrips(VT_WAVES, g_wvPos, g_wvUV, g_wvCol, g_wvQuads, W, H); }
-    if (g_marksOn && g_viewTex[VT_MARKS]) { MaelstromBuild(t); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
+    if (g_marksOn && g_viewTex[VT_SPARK]) MaelstromStrokes(W, H, t, dt);   /* the Maelstrom in strokes, or */
+    else if (g_marksOn && g_viewTex[VT_MARKS]) { MaelstromBuild(t); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
     if (g_flowOn && g_viewTex[VT_FLOW]) { FlowBuild(t, dt); ViewStrips(VT_FLOW, g_flPos, g_flUV, g_flCol, g_flQuads, W, H); }
     if (g_seaOn && g_viewTex[VT_SEA]) { GlintsBuild(t); ViewStrips(VT_SEA, g_glPos, g_glUV, g_glCol, g_glQuads, W, H); }
     TodCityBuild(W, H, now);                                     /* the capitals' lights by night */
