@@ -3660,8 +3660,9 @@ static void LabelsParse(const char *s, unsigned len)
 /* ---- the place's name, top centre (8 Oct 2026, his ask: "take a note from how as you hover over the right hand
  * continent it says 'Eastern Kingdoms' in the top middle of the screen ... when you hover over an area, the name of that
  * area is in the top center of the screen ... do that on Cinderload in RavenCraft.io orange style font ... and write the
- * name of the continent, zone, etc. on the screen as you load in"). CinderTitles.blp (DXT5, 4096 x 2048: each title in
- * Folkard, ravencraft.io's gold-to-coral gradient, outlined and shadowed; kit/zoom/titles.py) and CinderLoad\titles.txt:
+ * name of the continent, zone, etc. on the screen as you load in"; then "a bit bigger and more 3D like the W on the World
+ * of Warcraft icon"). CinderTitles.blp (DXT5, 4096 x 4096: each title in Folkard as bevelled metal in ravencraft.io's
+ * gold-to-coral gradient, a dark bronze rim, depth and a shadow; kit/zoom/titles.py) and CinderLoad\titles.txt:
  *   s <id> <x0> <y0> <x1> <y1>                      a title's rectangle on the sheet
  *   c <map> <sprite>                                 a continent's title
  *   z <map> <left> <right> <top> <bottom> <sprite>   a zone's (WorldMapArea's box, world yards, float bits in hex)
@@ -3669,6 +3670,7 @@ static void LabelsParse(const char *s, unsigned len)
  * The view shows the continent's as a screen begins and the zone's (the smallest box holding the arrival) or the
  * instance's once it has come in past TITLE_ZONE_H, each faded in over TITLE_FADE and crossfaded when it changes. */
 #define TITLES_PATH   "Interface\\Glues\\LoadingScreens\\CinderTitles.blp"
+#define TITLE_SHEET_H 4096       /* the sheet is 4096 x 4096 (the titles 3D and bigger, his ask, 8 Oct) */
 #define TITLE_SPRITES 256
 #define TITLE_ZONES   256
 #define TITLE_INSTS   128
@@ -3692,7 +3694,7 @@ static void TitlesParse(const char *s, unsigned len)
         unsigned hl, hr, ht, hb;
         if (n > 2 && l[0] == 's' && MapSpace(l[1]) && LblInt(l, n, &i, &a) && LblInt(l, n, &i, &b) &&
             LblInt(l, n, &i, &c) && LblInt(l, n, &i, &d) && LblInt(l, n, &i, &e) && a == g_ttSprites &&
-            a < TITLE_SPRITES && b >= 0 && c >= 0 && d > b && e > c && d <= 4096 && e <= 2048) {
+            a < TITLE_SPRITES && b >= 0 && c >= 0 && d > b && e > c && d <= 4096 && e <= TITLE_SHEET_H) {
             g_ttSpr[a].x0 = (unsigned short)b; g_ttSpr[a].y0 = (unsigned short)c;
             g_ttSpr[a].x1 = (unsigned short)d; g_ttSpr[a].y1 = (unsigned short)e;
             g_ttSprites++;
@@ -6423,7 +6425,7 @@ static void TitlePut(int spr, float W, float H, float a)
     if (!q) return;
     float k = H / 2160.0f, w = (g_ttSpr[spr].x1 - g_ttSpr[spr].x0) * k, h = (g_ttSpr[spr].y1 - g_ttSpr[spr].y0) * k;
     float x0 = (W - w) * 0.5f, y0 = TITLE_TOP * H;
-    float u0 = g_ttSpr[spr].x0 / 4096.0f, u1 = g_ttSpr[spr].x1 / 4096.0f, v0 = g_ttSpr[spr].y0 / 2048.0f, v1 = g_ttSpr[spr].y1 / 2048.0f;
+    float u0 = g_ttSpr[spr].x0 / 4096.0f, u1 = g_ttSpr[spr].x1 / 4096.0f, v0 = g_ttSpr[spr].y0 / (float)TITLE_SHEET_H, v1 = g_ttSpr[spr].y1 / (float)TITLE_SHEET_H;
     DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu;
     ViewVertSet(q, x0, y0, u0, v0, c); ViewVertSet(q + 1, x0 + w, y0, u1, v0, c);
     ViewVertSet(q + 2, x0 + w, y0 + h, u1, v1, c); ViewVertSet(q + 3, x0, y0 + h, u0, v1, c);
