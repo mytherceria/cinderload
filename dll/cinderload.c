@@ -3661,61 +3661,108 @@ static void LabelsParse(const char *s, unsigned len)
  * continent it says 'Eastern Kingdoms' in the top middle of the screen ... when you hover over an area, the name of that
  * area is in the top center of the screen ... do that on Cinderload in RavenCraft.io orange style font ... and write the
  * name of the continent, zone, etc. on the screen as you load in"; then "a bit bigger and more 3D like the W on the World
- * of Warcraft icon"). CinderTitles.blp (DXT5, 4096 x 4096: each title in Folkard capitals in ravencraft.io's gold-to-coral
- * gradient, a light bevel, a thin dark rim, depth and a shadow; kit/zoom/titles.py) and CinderLoad\titles.txt:
- *   s <id> <x0> <y0> <x1> <y1>                      a title's rectangle on the sheet
- *   c <map> <sprite>                                 a continent's title
- *   z <map> <left> <right> <top> <bottom> <sprite>   a zone's (WorldMapArea's box, world yards, float bits in hex)
- *   i <instance map id> <sprite>                     a dungeon's, raid's or battleground's
- * The view shows the continent's as a screen begins and the zone's (the smallest box holding the arrival) or the
- * instance's once it has come in past TITLE_ZONE_H, each faded in over TITLE_FADE and crossfaded when it changes.
+ * of Warcraft icon"; and at night a third, "currently it only have 2 levels of zoom for the text that comes up at the top,
+ * i wish it had a 3rd like this one should have Kharanos for the 3rd zoom").
  * His last word on the look (8 Oct): "it should use the orange font from the ravencraft.io page": the site's card titles
- * (`folkard orange-text`, in capitals), the sheet in their own colours, drawn as they are. */
+ * (`folkard orange-text`, in capitals) with a light bevel, a thin dark rim, depth and a shadow, in their own colours.
+ * Set out letter by letter (8 Oct night: the subzones are 700 names, five sheets drawn whole): CinderTitles.blp holds each
+ * letter once in four layers (0 its back: shadow, depth and rim; 1 its face; 2 the whole letter a little blurred; 3 a lot
+ * blurred), kit/zoom/titles.py says where each letter's pen goes, and CinderLoad\titles.txt says:
+ *   S <width> <height> <baseline>                     the sheet's size; the baseline's depth under the titles' top
+ *   L <code> <layer> <x0> <y0> <x1> <y1> <ox> <oy>    a letter's layer on the sheet; its top left from the pen
+ *   T <id> <left> <right> <n> <code> <x> ...          a title: its ink's left and right, then n letters and their pens
+ *   c <map> <title>                                   a continent's title
+ *   z <map> <left> <right> <top> <bottom> <title>     a zone's (WorldMapArea's box, world yards, float bits in hex)
+ *   i <instance map id> <title>                       a dungeon's, raid's or battleground's
+ *   a <glow> <title>                                  a subzone's: the arrival's glow (glow.txt's g line by number)
+ * The view shows the continent's as a screen begins, the zone's (the smallest box holding the arrival) or the instance's
+ * once it has come in past TITLE_ZONE_H, and the subzone's as the arrival's glow comes up (TITLE_SUB_H, halfway through
+ * the glow's own rise). A change (his ask: "the text blur and fade out and then fade in and come unblurred fairly
+ * rapidly"): the old one blurs and fades out over TITLE_OUT, then the new fades in over TITLE_IN, coming into focus. */
 #define TITLES_PATH   "Interface\\Glues\\LoadingScreens\\CinderTitles.blp"
-#define TITLE_SHEET_H 4096       /* the sheet is 4096 x 4096 (the titles 3D and bigger, his ask, 8 Oct) */
-#define TITLE_SPRITES 256
+#define TITLE_LETTERS 256          /* a letter's code is a byte */
+#define TITLE_MAX     1024
+#define TITLE_POOL    24576        /* the letters of every title */
+#define TITLE_CHARS   48           /* a title's letters at most (the kit's own TITLE_CHARS) */
 #define TITLE_ZONES   256
 #define TITLE_INSTS   128
 #define TITLE_ZONE_H  0.20f        /* the view's half height: the zone's name from here in */
-#define TITLE_FADE    0.6f         /* seconds */
-#define TITLE_TOP     0.035f       /* its top, down the screen */
-static struct { unsigned short x0, y0, x1, y1; } g_ttSpr[TITLE_SPRITES];
-static struct { int map; float l, r, t, b; int spr; } g_ttZone[TITLE_ZONES];
-static struct { int id, spr; } g_ttInst[TITLE_INSTS];
-static int g_ttSprites, g_ttZones, g_ttInsts, g_ttCont[2] = { -1, -1 }, g_titlesOn;
+#define TITLE_SUB_H   ((GLOW_FROM + GLOW_FULL) * 0.5f)   /* the view's half width: the subzone's from here in */
+#define TITLE_OUT     0.22f        /* seconds: the old name blurs and fades out, */
+#define TITLE_IN      0.32f        /* then the new one fades in, coming into focus */
+#define TITLE_TOP     0.035f       /* the titles' top, down the screen */
+static struct { unsigned short x0, y0, x1, y1; short ox, oy; } g_ttLet[TITLE_LETTERS][4];   /* x1 0: no such layer */
+static struct { int first, n; short left, right; } g_ttTitle[TITLE_MAX];
+static struct { unsigned char code; short x; } g_ttPool[TITLE_POOL];
+static struct { int map; float l, r, t, b; int title; } g_ttZone[TITLE_ZONES];
+static struct { int id, title; } g_ttInst[TITLE_INSTS];
+static short g_ttSub[GLOW_SPRITES];                             /* a glow's subzone title, -1 none */
+static int g_ttTitles, g_ttPoolN, g_ttLetters, g_ttSheetW, g_ttSheetH, g_ttBase, g_ttZones, g_ttInsts, g_ttSubs;
+static int g_ttCont[2] = { -1, -1 }, g_titlesOn;
 
 static void TitlesParse(const char *s, unsigned len)
 {
-    g_ttSprites = g_ttZones = g_ttInsts = 0;
+    g_ttTitles = g_ttPoolN = g_ttLetters = g_ttSheetW = g_ttSheetH = g_ttBase = g_ttZones = g_ttInsts = g_ttSubs = 0;
     g_ttCont[0] = g_ttCont[1] = -1;
+    for (int c = 0; c < TITLE_LETTERS; c++)
+        for (int l = 0; l < 4; l++) g_ttLet[c][l].x1 = 0;
+    for (int g = 0; g < GLOW_SPRITES; g++) g_ttSub[g] = -1;
     for (unsigned at = 0; at < len;) {
         unsigned end = at;
         while (end < len && s[end] != '\n') end++;
         const char *l = s + at;
-        int n = (int)(end - at), i = 2, a, b, c, d, e;
+        int n = (int)(end - at), i = 2, v[8], k = 0;
         unsigned hl, hr, ht, hb;
-        if (n > 2 && l[0] == 's' && MapSpace(l[1]) && LblInt(l, n, &i, &a) && LblInt(l, n, &i, &b) &&
-            LblInt(l, n, &i, &c) && LblInt(l, n, &i, &d) && LblInt(l, n, &i, &e) && a == g_ttSprites &&
-            a < TITLE_SPRITES && b >= 0 && c >= 0 && d > b && e > c && d <= 4096 && e <= TITLE_SHEET_H) {
-            g_ttSpr[a].x0 = (unsigned short)b; g_ttSpr[a].y0 = (unsigned short)c;
-            g_ttSpr[a].x1 = (unsigned short)d; g_ttSpr[a].y1 = (unsigned short)e;
-            g_ttSprites++;
-        } else if (n > 2 && l[0] == 'c' && MapSpace(l[1]) && LblInt(l, n, &i, &a) && LblInt(l, n, &i, &b) &&
-                   (a == 0 || a == 1) && b >= 0 && b < g_ttSprites) {
-            g_ttCont[a] = b;
-        } else if (n > 2 && l[0] == 'z' && MapSpace(l[1]) && g_ttZones < TITLE_ZONES && LblInt(l, n, &i, &a) &&
+        if (n > 2 && l[0] == 'S' && MapSpace(l[1])) {
+            while (k < 3 && LblInt(l, n, &i, &v[k])) k++;
+            if (k == 3 && !g_ttSheetW && v[0] >= 64 && v[0] <= 8192 && v[1] >= 64 && v[1] <= 8192 && v[2] >= 0 && v[2] <= 1000) {
+                g_ttSheetW = v[0]; g_ttSheetH = v[1]; g_ttBase = v[2];
+            }
+        } else if (n > 2 && l[0] == 'L' && MapSpace(l[1]) && g_ttSheetW) {
+            while (k < 8 && LblInt(l, n, &i, &v[k])) k++;
+            if (k == 8 && v[0] > 0 && v[0] < TITLE_LETTERS && v[1] >= 0 && v[1] < 4 && v[2] >= 0 && v[3] >= 0 &&
+                v[4] > v[2] && v[5] > v[3] && v[4] <= g_ttSheetW && v[5] <= g_ttSheetH && v[6] > -1000 && v[6] < 1000 &&
+                v[7] > -1000 && v[7] < 1000) {
+                g_ttLet[v[0]][v[1]].x0 = (unsigned short)v[2]; g_ttLet[v[0]][v[1]].y0 = (unsigned short)v[3];
+                g_ttLet[v[0]][v[1]].x1 = (unsigned short)v[4]; g_ttLet[v[0]][v[1]].y1 = (unsigned short)v[5];
+                g_ttLet[v[0]][v[1]].ox = (short)v[6]; g_ttLet[v[0]][v[1]].oy = (short)v[7];
+                g_ttLetters++;
+            }
+        } else if (n > 2 && l[0] == 'T' && MapSpace(l[1])) {
+            while (k < 4 && LblInt(l, n, &i, &v[k])) k++;
+            if (k == 4 && v[0] == g_ttTitles && g_ttTitles < TITLE_MAX) {     /* a bad title is kept, empty: the next keep their numbers */
+                int ok = v[3] > 0 && v[3] <= TITLE_CHARS && g_ttPoolN + v[3] <= TITLE_POOL && v[1] > -30000 && v[2] < 30000 &&
+                         v[2] > v[1], m = 0;
+                for (; ok && m < v[3]; m++) {
+                    int code, x;
+                    ok = LblInt(l, n, &i, &code) && LblInt(l, n, &i, &x) && code > 0 && code < TITLE_LETTERS && x > -30000 && x < 30000;
+                    if (ok) { g_ttPool[g_ttPoolN + m].code = (unsigned char)code; g_ttPool[g_ttPoolN + m].x = (short)x; }
+                }
+                g_ttTitle[g_ttTitles].first = g_ttPoolN; g_ttTitle[g_ttTitles].n = ok ? v[3] : 0;
+                g_ttTitle[g_ttTitles].left = (short)(ok ? v[1] : 0); g_ttTitle[g_ttTitles].right = (short)(ok ? v[2] : 0);
+                if (ok) g_ttPoolN += v[3];
+                g_ttTitles++;
+            }
+        } else if (n > 2 && l[0] == 'c' && MapSpace(l[1]) && LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) &&
+                   (v[0] == 0 || v[0] == 1) && v[1] >= 0 && v[1] < g_ttTitles) {
+            g_ttCont[v[0]] = v[1];
+        } else if (n > 2 && l[0] == 'z' && MapSpace(l[1]) && g_ttZones < TITLE_ZONES && LblInt(l, n, &i, &v[0]) &&
                    MapHex(l, n, &i, &hl) && MapHex(l, n, &i, &hr) && MapHex(l, n, &i, &ht) && MapHex(l, n, &i, &hb) &&
-                   LblInt(l, n, &i, &b) && (a == 0 || a == 1) && b >= 0 && b < g_ttSprites) {
+                   LblInt(l, n, &i, &v[1]) && (v[0] == 0 || v[0] == 1) && v[1] >= 0 && v[1] < g_ttTitles) {
             float fl = MapBits(hl), fr = MapBits(hr), ft = MapBits(ht), fb = MapBits(hb);
             if (MapFinite(fl) && MapFinite(fr) && MapFinite(ft) && MapFinite(fb) && fl != fr && ft != fb) {
-                g_ttZone[g_ttZones].map = a; g_ttZone[g_ttZones].spr = b;
+                g_ttZone[g_ttZones].map = v[0]; g_ttZone[g_ttZones].title = v[1];
                 g_ttZone[g_ttZones].l = fl; g_ttZone[g_ttZones].r = fr; g_ttZone[g_ttZones].t = ft; g_ttZone[g_ttZones].b = fb;
                 g_ttZones++;
             }
-        } else if (n > 2 && l[0] == 'i' && MapSpace(l[1]) && g_ttInsts < TITLE_INSTS && LblInt(l, n, &i, &a) &&
-                   LblInt(l, n, &i, &b) && a > 1 && b >= 0 && b < g_ttSprites) {
-            g_ttInst[g_ttInsts].id = a; g_ttInst[g_ttInsts].spr = b;
+        } else if (n > 2 && l[0] == 'i' && MapSpace(l[1]) && g_ttInsts < TITLE_INSTS && LblInt(l, n, &i, &v[0]) &&
+                   LblInt(l, n, &i, &v[1]) && v[0] > 1 && v[1] >= 0 && v[1] < g_ttTitles) {
+            g_ttInst[g_ttInsts].id = v[0]; g_ttInst[g_ttInsts].title = v[1];
             g_ttInsts++;
+        } else if (n > 2 && l[0] == 'a' && MapSpace(l[1]) && LblInt(l, n, &i, &v[0]) && LblInt(l, n, &i, &v[1]) &&
+                   v[0] >= 0 && v[0] < GLOW_SPRITES && v[1] >= 0 && v[1] < g_ttTitles) {
+            if (g_ttSub[v[0]] < 0) g_ttSubs++;
+            g_ttSub[v[0]] = (short)v[1];
         }
         at = end + 1;
     }
@@ -3731,7 +3778,7 @@ static int TitleZone(int map, float x, float y)
         float x0 = g_ttZone[k].t < g_ttZone[k].b ? g_ttZone[k].t : g_ttZone[k].b, x1 = g_ttZone[k].t + g_ttZone[k].b - x0;
         if (g_ttZone[k].map != map || x < x0 || x > x1 || y < y0 || y > y1) continue;
         float a = (x1 - x0) * (y1 - y0);
-        if (best < 0 || a < area) { best = g_ttZone[k].spr; area = a; }
+        if (best < 0 || a < area) { best = g_ttZone[k].title; area = a; }
     }
     return best;
 }
@@ -4948,7 +4995,7 @@ static void OverlayStart(void)
         if (mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\titles.txt", &text, &len) == MPQ_OK && text)
             TitlesParse((const char *)text, len);
         if (text) HeapFree(GetProcessHeap(), 0, text);
-        g_titlesOn = g_ttSprites > 0 && (g_ttCont[0] >= 0 || g_ttCont[1] >= 0 || g_ttZones || g_ttInsts);
+        g_titlesOn = g_ttTitles > 0 && g_ttLetters > 0 && (g_ttCont[0] >= 0 || g_ttCont[1] >= 0 || g_ttZones || g_ttInsts || g_ttSubs);
     }
     g_shipsOn = 0;
     if (BarHasTexture("Interface\\Glues\\LoadingScreens\\CinderShips")) {     /* the ships and zeppelins (the view's) */
@@ -5006,8 +5053,8 @@ static void OverlayStart(void)
               (g_seaOn || g_marksOn || g_glowOn || g_lblOn) && g_logoOn ? "," : "", g_logoOn ? " the RavenCraft logo at the top" : "");
     Log(m);
     if (g_titlesOn) {
-        wsprintfA(m, "  the place's name, top centre: %d titles (%d zones, %d dungeons, raids and battlegrounds), drawn by the view",
-                  g_ttSprites, g_ttZones, g_ttInsts);
+        wsprintfA(m, "  the place's name, top centre: %d titles (%d zones, %d dungeons, raids and battlegrounds, %d subzones), set out from %d letters, drawn by the view",
+                  g_ttTitles, g_ttZones, g_ttInsts, g_ttSubs, g_ttLetters);
         Log(m);
     }
     if (g_shipsOn) {
@@ -5404,8 +5451,9 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_QUADS    ((6 + SABER_BANDS) * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + SABER_DROPS + SABER_BLOOMS + 2 + 1 + 5 * (256 + 3) + 3 + ORB_GLOWS + \
                         SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS)   /* (the frame's: FRAME_TILES and the rest, and
                                                                                     * its shine: four more a piece) */
-#define VIEW_QUADS_MAX (2 + 2 + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
+#define VIEW_QUADS_MAX (2 + TITLE_QUADS_ROOM + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
 #define MAEL_QUADS_ROOM (2 + 200 * 14 + 90)   /* the Maelstrom's strokes (MAEL_QUADS, defined with them below) */
+#define TITLE_QUADS_ROOM (2 * 3 * TITLE_CHARS)  /* two titles at once at most, three layers a letter at most */
 #define VIEW_BATCHES   48
 static ViewVert g_vv[VIEW_QUADS_MAX * 4];
 static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES];   /* tex: a VT_ slot, or -1 for plain colour */
@@ -6404,49 +6452,90 @@ static void MaelstromStrokes(float W, float H, float t, float dt)
     ViewVertSet(q + 2, ex + er, ey + er, 1, 1, ec); ViewVertSet(q + 3, ex - er, ey + er, 0, 1, ec);
 }
 
-/* The title this frame wants: the zone's or instance's once the view has come in past TITLE_ZONE_H and the place is
- * known, else the continent's; -1 for none. */
+/* The title this frame wants: the subzone's as the arrival's glow comes up, the zone's or instance's once the view has
+ * come in past TITLE_ZONE_H and the place is known, else the continent's; -1 for none. */
 static int TitleWant(void)
 {
     int id = g_titleMapId, cont = id == 0 || id == 1 ? id : g_destMap;
-    float h = (g_bgUV[1] - g_bgUV[5]) * 0.5f;
+    float h = (g_bgUV[1] - g_bgUV[5]) * 0.5f, hw = (g_bgUV[2] - g_bgUV[0]) * 0.5f;   /* (the glow's measure, the width) */
     if (h < TITLE_ZONE_H) {
         if (id > 1)
             for (int k = 0; k < g_ttInsts; k++)
-                if (g_ttInst[k].id == id) return g_ttInst[k].spr;
+                if (g_ttInst[k].id == id) return g_ttInst[k].title;
         if (id <= 1 && g_destMap >= 0) {
+            if (hw < TITLE_SUB_H) {
+                int g = GlowFind(g_destMap, g_destWX, g_destWY);
+                if (g >= 0 && g_ttSub[g] >= 0) return g_ttSub[g];
+            }
             int z = TitleZone(g_destMap, g_destWX, g_destWY);
             if (z >= 0) return z;
         }
     }
     return cont == 0 || cont == 1 ? g_ttCont[cont] : -1;
 }
-static struct { int cur, prev; DWORD at, last; } g_title = { -1, -1, 0, 0 };
-static void TitlePut(int spr, float W, float H, float a)
+/* One layer of a title's letters, at alpha a: centred on its ink, its baseline g_ttBase under TITLE_TOP, each letter on a
+ * whole pixel; sizes for a 2160-tall screen, scaled to this one. */
+static void TitleLayer(int t, int layer, float W, float H, float a)
 {
-    if (spr < 0 || spr >= g_ttSprites || a <= 0.004f) return;
-    ViewVert *q = ViewQuadMode(VT_TITLES, 0);
-    if (!q) return;
-    float k = H / 2160.0f, w = (g_ttSpr[spr].x1 - g_ttSpr[spr].x0) * k, h = (g_ttSpr[spr].y1 - g_ttSpr[spr].y0) * k;
-    float x0 = (W - w) * 0.5f, y0 = TITLE_TOP * H;
-    float u0 = g_ttSpr[spr].x0 / 4096.0f, u1 = g_ttSpr[spr].x1 / 4096.0f, v0 = g_ttSpr[spr].y0 / (float)TITLE_SHEET_H, v1 = g_ttSpr[spr].y1 / (float)TITLE_SHEET_H;
+    if (a <= 0.004f) return;
+    float k = H / 2160.0f, x0 = (W - (g_ttTitle[t].right - g_ttTitle[t].left) * k) * 0.5f - g_ttTitle[t].left * k;
+    float yb = TITLE_TOP * H + g_ttBase * k, sw = (float)g_ttSheetW, sh = (float)g_ttSheetH;
     DWORD c = (DWORD)(FireClamp(a, 0, 1) * 255.0f + 0.5f) << 24 | 0xFFFFFFu;     /* the sheet's own colours */
-    ViewVertSet(q, x0, y0, u0, v0, c); ViewVertSet(q + 1, x0 + w, y0, u1, v0, c);
-    ViewVertSet(q + 2, x0 + w, y0 + h, u1, v1, c); ViewVertSet(q + 3, x0, y0 + h, u0, v1, c);
+    for (int i = 0; i < g_ttTitle[t].n; i++) {
+        int code = g_ttPool[g_ttTitle[t].first + i].code;
+        if (!g_ttLet[code][layer].x1) continue;
+        ViewVert *q = ViewQuadMode(VT_TITLES, 0);
+        if (!q) return;
+        float x = (float)(int)(x0 + (g_ttPool[g_ttTitle[t].first + i].x + g_ttLet[code][layer].ox) * k + 0.5f);
+        float y = (float)(int)(yb + g_ttLet[code][layer].oy * k + 0.5f);
+        float w = (g_ttLet[code][layer].x1 - g_ttLet[code][layer].x0) * k, h = (g_ttLet[code][layer].y1 - g_ttLet[code][layer].y0) * k;
+        float u0 = g_ttLet[code][layer].x0 / sw, u1 = g_ttLet[code][layer].x1 / sw, v0 = g_ttLet[code][layer].y0 / sh, v1 = g_ttLet[code][layer].y1 / sh;
+        ViewVertSet(q, x, y, u0, v0, c); ViewVertSet(q + 1, x + w, y, u1, v0, c);
+        ViewVertSet(q + 2, x + w, y + h, u1, v1, c); ViewVertSet(q + 3, x, y + h, u0, v1, c);
+    }
 }
-/* The place's name, top centre: faded in as a screen begins (a gap of over a second since the last frame is a new
- * screen), crossfaded when the title it wants changes. */
+/* A title at v, 0 gone to 1 shown: as it comes in it fades in and comes into focus together, as it goes it blurs and
+ * fades. The blur runs through the sheet's three steps (sharp: backs then faces; a little; a lot), the blurrier of the two
+ * either side drawn first and the sharper over it. */
+static void TitleDraw(int t, float W, float H, float v)
+{
+    if (t < 0 || t >= g_ttTitles || v <= 0) return;
+    float e = FireClamp(v, 0, 1);
+    e = e * e * (3 - 2 * e);
+    float p = (1 - e) * 2;                                        /* the blur: 0 sharp, 1 a little, 2 a lot */
+    int lo = p >= 1 ? 1 : 0;
+    float f = p - lo;
+    if (f > 0.004f) TitleLayer(t, lo + 2, W, H, e * f);          /* the blurrier */
+    if (lo == 0) { TitleLayer(t, 0, W, H, e * (1 - f)); TitleLayer(t, 1, W, H, e * (1 - f)); }
+    else TitleLayer(t, 2, W, H, e * (1 - f));
+}
+static struct { int cur, prev; float prevV; DWORD at, last; } g_title = { -1, -1, 0, 0, 0 };
+/* How shown the outgoing and the incoming title are now: the outgoing goes from where it was over TITLE_OUT (sooner
+ * when it was part shown), and only then does the new one come in, over TITLE_IN. */
+static void TitleVis(DWORD now, float *vp, float *vc)
+{
+    float t = (float)(LONG)(now - g_title.at) / 1000.0f, out = g_title.prevV * TITLE_OUT;
+    *vp = g_title.prev >= 0 ? FireClamp(g_title.prevV - t / TITLE_OUT, 0, 1) : 0;
+    *vc = g_title.cur >= 0 ? FireClamp((t - out) / TITLE_IN, 0, 1) : 0;
+}
+/* The place's name, top centre: come in as a screen begins (a gap of over a second since the last frame is a new
+ * screen), the old blurred out and then the new brought in when the title it wants changes. */
 static void TitleBuild(float W, float H, DWORD now)
 {
     if (!g_titlesOn || !g_viewTex[VT_TITLES]) return;
-    if (!g_title.last || (LONG)(now - g_title.last) > 1000) { g_title.cur = g_title.prev = -1; g_title.at = now; }
+    if (!g_title.last || (LONG)(now - g_title.last) > 1000) { g_title.cur = g_title.prev = -1; g_title.prevV = 0; g_title.at = now; }
     g_title.last = now;
     int want = TitleWant();
-    if (want != g_title.cur) { g_title.prev = g_title.cur; g_title.cur = want; g_title.at = now; }
-    float k = FireClamp((float)(LONG)(now - g_title.at) / (1000.0f * TITLE_FADE), 0, 1);
-    k = k * k * (3 - 2 * k);
-    TitlePut(g_title.prev, W, H, 1 - k);
-    TitlePut(g_title.cur, W, H, k);
+    float vp, vc;
+    TitleVis(now, &vp, &vc);
+    if (want != g_title.cur) {
+        if (vc >= vp) { g_title.prev = g_title.cur; g_title.prevV = vc; }   /* the one showing goes out from where it is */
+        else g_title.prevV = vp;                                           /* the one still going out goes on */
+        g_title.cur = want; g_title.at = now;
+        TitleVis(now, &vp, &vc);
+    }
+    TitleDraw(g_title.prev, W, H, vp);
+    TitleDraw(g_title.cur, W, H, vc);
 }
 
 static void ViewOverlayBuild(float W, float H, DWORD now)

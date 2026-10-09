@@ -1978,37 +1978,78 @@ static void LiveTests(void)
             Check(sm, "the Maelstrom in strokes: a vortex (nearer the eye, faster; anticlockwise), drained inward and made anew, steady over a minute; in the world's place and size, the halo first, soft across; the eye wandering, the rim still; gone close in and without the spark");
         }
 
-        /* the place's name, top centre (8 Oct, his ask): titles.txt read (bad lines left out); the continent's as a
-         * screen begins, the zone's (the smallest box holding the arrival) once in past TITLE_ZONE_H, a dungeon's by its
-         * map and the continent of its entrance before that; faded in, crossfaded on a change, begun again on a new
-         * screen; top centre at the screen's scale; not graded by the hour */
+        /* the place's name, top centre (8 Oct, his asks): titles.txt read (bad lines left out; a bad title kept empty so the
+         * next keep their numbers); the continent's as a screen begins, the zone's (the smallest box holding the arrival)
+         * once in past TITLE_ZONE_H, the subzone's (the arrival's glow) once in past TITLE_SUB_H, a dungeon's by its map
+         * and the continent of its entrance before that; set out letter by letter (backs, then faces) at the top centre at
+         * the screen's scale; coming in: faded in and into focus together through the blurred layers; a change: the old
+         * blurred and faded out over TITLE_OUT, only then the new; a change part way: the old goes on from where it was;
+         * begun again on a new screen; in the sheet's own colours for any class; not graded by the hour */
         {
-            char tt[700];
-            snprintf(tt, sizeof tt, "# t\ns 0 0 0 400 100\ns 1 400 0 700 100\ns 2 0 100 300 200\ns 3 300 100 600 200\n"
-                     "s 4 0 200 500 300\ns 9 0 0 10 10\nc 0 0\nc 1 1\nc 2 1\n"
-                     "z 0 %08x %08x %08x %08x 2\nz 0 %08x %08x %08x %08x 3\nz 0 %08x %08x %08x %08x 7\ni 36 4\ni 1 4\n",
+            char tt[2400];
+            snprintf(tt, sizeof tt, "# t\nS 1024 512 90\nS 2048 2048 10\n"
+                     "L 65 0 0 0 40 60 -5 -80\nL 65 1 40 0 80 60 -5 -80\nL 65 2 80 0 130 70 -10 -85\nL 65 3 130 0 190 80 -15 -90\n"
+                     "L 66 0 200 0 240 60 -5 -80\nL 66 1 240 0 280 60 -5 -80\nL 66 2 280 0 330 70 -10 -85\nL 66 3 330 0 390 80 -15 -90\n"
+                     "L 0 0 0 0 10 10 0 0\nL 65 4 0 0 10 10 0 0\nL 67 0 1000 0 1100 10 0 0\n"
+                     "T 0 -5 35 1 65 0\nT 1 -5 35 1 66 0\nT 2 -5 75 2 65 0 66 40\nT 3 -5 75 2 65 0 300 40\nT 9 -5 35 1 65 0\n"
+                     "T 4 -5 75 2 66 0 65 40\nT 5 -5 115 3 66 0 65 40 66 80\nT 6 -5 75 2 65 0 65 40\n"
+                     "c 0 0\nc 1 1\nc 2 1\n"
+                     "z 0 %08x %08x %08x %08x 2\nz 0 %08x %08x %08x %08x 4\nz 0 %08x %08x %08x %08x 7\ni 36 6\ni 1 6\n"
+                     "a 0 5\na 1 3\na 5000 5\na 0 99\n",
                      FBits(0), FBits(-2000), FBits(-4000), FBits(-6000),
                      FBits(-800), FBits(-1200), FBits(-4800), FBits(-5200),
                      FBits(0), FBits(-10), FBits(0), FBits(-10));
             TitlesParse(tt, (unsigned)strlen(tt));
-            int ti = g_ttSprites == 5 && g_ttCont[0] == 0 && g_ttCont[1] == 1 && g_ttZones == 2 && g_ttInsts == 1;
+            int ti = g_ttTitles == 7 && g_ttLetters == 8 && g_ttSheetW == 1024 && g_ttSheetH == 512 && g_ttBase == 90 &&
+                     g_ttCont[0] == 0 && g_ttCont[1] == 1 && g_ttZones == 2 && g_ttInsts == 1 && g_ttSubs == 2 &&
+                     g_ttTitle[3].n == 0 && g_ttTitle[5].n == 3 && g_ttSub[0] == 5 && g_ttSub[1] == 3 && g_ttSub[2] == -1;
+            /* the arrival's glow: a grid of 2 x 2 cells of 100 yards from x -6000, y -1100: the first row subzones 1, 2 */
+            int keepItems = g_glowItems, keepSprites = g_glowSprites;
+            unsigned short keepCells[4];
+            memcpy(keepCells, g_glowCells, sizeof keepCells);
+            __typeof__(g_glowMap[0]) keepGlow[2] = { g_glowMap[0], g_glowMap[1] };
+            { const char *t = "s 0 0 0 64 32\ng 0 3ecccccd 3f000000 3eeb851f 3f07ae14\ng 0 3eeb851f 3f000000 3ef5c28f 3f051eb8\n";
+              GlowParse(t, (unsigned)strlen(t)); }
+            {
+                unsigned char gb[6 + 18 + 8];
+                float cell = 100, gx0 = -6000, gy0 = -1100;
+                memcpy(gb, "CGLW\1\0", 6); gb[6] = 0; gb[7] = 0;
+                memcpy(gb + 8, &cell, 4); memcpy(gb + 12, &gx0, 4); memcpy(gb + 16, &gy0, 4);
+                gb[20] = 2; gb[21] = 0; gb[22] = 2; gb[23] = 0;
+                unsigned char cells[8] = { 1, 0, 2, 0, 0, 0, 0, 0 };
+                memcpy(gb + 24, cells, 8);
+                ti &= GlowGridParse(gb, sizeof gb) && g_glowItems == 2;
+            }
             int keepMap = g_destMap, keepId = g_titleMapId;
             float keepX = g_destWX, keepY = g_destWY;
             g_titlesOn = 1;
             memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
             g_titleMapId = 0; g_destMap = -1;
             ti &= TitleWant() == 0;
-            g_bgUV[0] = g_bgUV[4] = 0.4f; g_bgUV[2] = g_bgUV[6] = 0.6f;            /* in close, h = 0.1 */
+            g_bgUV[0] = g_bgUV[4] = 0.4f; g_bgUV[2] = g_bgUV[6] = 0.6f;            /* in close, h = 0.1, its width too */
             g_bgUV[5] = g_bgUV[7] = 0.34f; g_bgUV[1] = g_bgUV[3] = 0.54f;
             ti &= TitleWant() == 0;                                              /* the arrival not yet known */
             g_destMap = 0; g_destWX = -5000; g_destWY = -1000;
-            ti &= TitleWant() == 3;                                              /* in both boxes: the smaller */
+            ti &= TitleWant() == 4;                                              /* in both boxes: the smaller */
             g_destWX = -4500; g_destWY = -500;
             ti &= TitleWant() == 2;
             g_destWX = 100; g_destWY = 100;
             ti &= TitleWant() == 0;                                              /* in no box: the continent */
+            g_destWX = -5950; g_destWY = -1050;
+            ti &= TitleWant() == 5;                                              /* in a subzone, close in: its own */
+            g_destWY = -950;
+            ti &= TitleWant() == 3;                                              /* (its title, empty as it is) */
+            g_destWX = -5850; g_destWY = -1050;
+            ti &= TitleWant() == 2;                                              /* a cell of no subzone: the zone's */
+            g_destWX = -5950;
+            g_bgUV[0] = g_bgUV[4] = 0.35f; g_bgUV[2] = g_bgUV[6] = 0.65f;          /* not yet that close: the zone's */
+            ti &= TitleWant() == 2;
+            g_bgUV[0] = g_bgUV[4] = 0.4f; g_bgUV[2] = g_bgUV[6] = 0.6f;
+            g_glowMap[0].ok = 0;
+            ti &= TitleWant() == 2;                                              /* no glow: the zone's */
+            g_glowMap[0].ok = 1;
             g_titleMapId = 36; g_destMap = 0;
-            ti &= TitleWant() == 4;                                              /* a dungeon: its own */
+            ti &= TitleWant() == 6;                                              /* a dungeon: its own */
             memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
             ti &= TitleWant() == 0;                                              /* wide: its entrance's continent */
             g_titleMapId = 1; g_destMap = 1;
@@ -2018,17 +2059,39 @@ static void LiveTests(void)
             g_title.last = 0;
             ViewListStart(); TitleBuild(5120, 2160, 100000);
             ti &= g_vvN == 0;                                                    /* the first frame: not yet shown */
-            ViewListStart(); TitleBuild(5120, 2160, 100300);
-            ti &= g_vvN == 4 && g_vb[g_vbN - 1].tex == VT_TITLES && g_vv[3].c[3] > 60 && g_vv[3].c[3] < 200 &&
-                  fabsf(g_vv[0].x - (5120 - 300) / 2.0f) < 0.5f && fabsf(g_vv[0].y - 0.035f * 2160) < 0.5f &&
-                  fabsf(g_vv[2].y - g_vv[0].y - 100) < 0.5f && fabsf(g_vv[1].x - g_vv[0].x - 300) < 0.5f;
-            ViewListStart(); TitleBuild(2560, 1080, 100900);                     /* full, and at half the screen half the size */
-            ti &= g_vvN == 4 && g_vv[0].c[3] == 255 && fabsf(g_vv[2].y - g_vv[0].y - 50) < 0.5f;
+            ViewListStart(); TitleBuild(5120, 2160, 100080);                     /* coming in: a lot blurred, then a little */
+            ti &= g_vvN == 8 && g_vb[g_vbN - 1].tex == VT_TITLES && fabsf(g_vv[0].u - 330 / 1024.0f) < 1e-6f &&
+                  fabsf(g_vv[4].u - 280 / 1024.0f) < 1e-6f && g_vv[0].c[3] > 20 && g_vv[0].c[3] < 35 && g_vv[4].c[3] < 20;
+            ViewListStart(); TitleBuild(5120, 2160, 100160);                     /* halfway: the little blur alone */
+            ti &= g_vvN == 4 && fabsf(g_vv[0].u - 280 / 1024.0f) < 1e-6f && g_vv[0].c[3] > 120 && g_vv[0].c[3] < 136 &&
+                  fabsf(g_vv[0].x - (2545 - 10)) < 0.01f && fabsf(g_vv[0].y - 81) < 0.01f &&
+                  fabsf(g_vv[2].x - g_vv[0].x - 50) < 0.01f && fabsf(g_vv[2].y - g_vv[0].y - 70) < 0.01f &&
+                  fabsf(g_vv[2].v - 70 / 512.0f) < 1e-6f;
+            ViewListStart(); TitleBuild(5120, 2160, 100400);                     /* in: sharp, its back then its face */
+            ti &= g_vvN == 8 && fabsf(g_vv[0].u - 200 / 1024.0f) < 1e-6f && fabsf(g_vv[4].u - 240 / 1024.0f) < 1e-6f &&
+                  g_vv[0].c[3] == 255 && g_vv[4].c[3] == 255 && fabsf(g_vv[0].x - 2540) < 0.01f && fabsf(g_vv[0].y - 86) < 0.01f;
+            ViewListStart(); TitleBuild(2560, 1080, 100500);                     /* at half the screen, half the size */
+            ti &= g_vvN == 8 && fabsf(g_vv[0].x - 1270) < 0.01f && fabsf(g_vv[0].y - 43) < 0.01f &&
+                  fabsf(g_vv[2].x - g_vv[0].x - 20) < 0.01f && fabsf(g_vv[2].y - g_vv[0].y - 30) < 0.01f;
             g_titleMapId = 0; g_destMap = 0;
-            ViewListStart(); TitleBuild(5120, 2160, 101200);                     /* a change: the old still shown, */
-            ti &= g_vvN == 4 && g_vv[0].c[3] == 255 && fabsf(g_vv[1].x - g_vv[0].x - 300) < 0.5f;
-            ViewListStart(); TitleBuild(5120, 2160, 101500);                     /* then both, crossing */
-            ti &= g_vvN == 8;
+            ViewListStart(); TitleBuild(5120, 2160, 101000);                     /* a change: the old still there, sharp, */
+            ti &= g_vvN == 8 && fabsf(g_vv[0].u - 200 / 1024.0f) < 1e-6f && g_vv[0].c[3] == 255;
+            ViewListStart(); TitleBuild(5120, 2160, 101110);                     /* blurring as it fades, the new not yet */
+            ti &= g_vvN == 4 && fabsf(g_vv[0].u - 280 / 1024.0f) < 1e-6f && g_vv[0].c[3] > 120 && g_vv[0].c[3] < 136;
+            ViewListStart(); TitleBuild(5120, 2160, 101225);
+            ti &= g_vvN == 0;                                                    /* the old gone, the new about to come */
+            ViewListStart(); TitleBuild(5120, 2160, 101380);
+            ti &= g_vvN == 4 && fabsf(g_vv[0].u - 80 / 1024.0f) < 1e-6f;           /* the new, halfway in */
+            g_bgUV[0] = g_bgUV[4] = 0.4f; g_bgUV[2] = g_bgUV[6] = 0.6f;            /* and on in to the zone, part way: */
+            g_bgUV[5] = g_bgUV[7] = 0.34f; g_bgUV[1] = g_bgUV[3] = 0.54f;
+            g_destWX = -4500; g_destWY = -500;
+            ViewListStart(); TitleBuild(5120, 2160, 101390);
+            ViewListStart(); TitleBuild(5120, 2160, 101450);                     /* the part-shown one goes from where it was */
+            ti &= g_vvN == 8 && fabsf(g_vv[0].u - 130 / 1024.0f) < 1e-6f && fabsf(g_vv[4].u - 80 / 1024.0f) < 1e-6f;
+            ViewListStart(); TitleBuild(5120, 2160, 101900);
+            ti &= g_vvN == 16 && g_vv[0].c[3] == 255 && g_vv[15].c[3] == 255 &&   /* the zone's two letters: backs, then faces */
+                  fabsf(g_vv[0].u - 0) < 1e-6f && fabsf(g_vv[4].u - 200 / 1024.0f) < 1e-6f && fabsf(g_vv[8].u - 40 / 1024.0f) < 1e-6f &&
+                  fabsf(g_vv[4].x - g_vv[0].x - 40) < 0.01f;
             unsigned todStyle = g_todStyle; float todAt = g_todAt; TodLight tod = g_tod;
             g_todStyle |= TOD_GRADE; g_todAt = 120;
             for (int c = 0; c < 3; c++) g_tod.west[c] = g_tod.east[c] = 0.4f;
@@ -2038,15 +2101,23 @@ static void LiveTests(void)
             g_todStyle = todStyle; g_todAt = todAt; g_tod = tod;
             LONG keepClass = g_class;
             g_class = 9;                                                         /* any class: the sheet's own colours */
-            ViewListStart(); TitleBuild(5120, 2160, 101700);
+            ViewListStart(); TitleBuild(5120, 2160, 101950);
             ti &= g_vvN >= 4 && g_vv[g_vvN - 4].c[0] == 255 && g_vv[g_vvN - 4].c[1] == 255 && g_vv[g_vvN - 4].c[2] == 255;
             g_class = keepClass;
-            ViewListStart(); TitleBuild(5120, 2160, 106000);                     /* a new screen: faded in again */
+            memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);                            /* out again: the continent's, */
+            ViewListStart(); TitleBuild(5120, 2160, 102000);
+            g_titleMapId = 1; g_destMap = 1;                                     /* and before the zone's has gone, Kalimdor's: */
+            ViewListStart(); TitleBuild(5120, 2160, 102050);
+            ViewListStart(); TitleBuild(5120, 2160, 102100);                     /* the zone's goes on going, no jump */
+            ti &= g_vvN == 24 && fabsf(g_vv[0].u - 80 / 1024.0f) < 1e-6f && fabsf(g_vv[8].u - 0) < 1e-6f;
+            ViewListStart(); TitleBuild(5120, 2160, 106000);                     /* a new screen: come in again */
             ti &= g_vvN == 0;
             g_viewTex[VT_TITLES] = tex; g_titlesOn = 0;
             g_destMap = keepMap; g_titleMapId = keepId; g_destWX = keepX; g_destWY = keepY;
+            g_glowItems = keepItems; g_glowSprites = keepSprites; g_glowMap[0] = keepGlow[0]; g_glowMap[1] = keepGlow[1];
+            memcpy(g_glowCells, keepCells, sizeof keepCells);
             memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-            Check(ti, "the place's name: titles.txt read (bad lines out); the continent wide, the smallest zone in close, a dungeon's own and its entrance's continent; faded in, crossfaded, begun again; top centre at the screen's scale; in the sheet's own colours for any class; not graded by the hour");
+            Check(ti, "the place's name: titles.txt read (bad lines out, a bad title kept empty); the continent wide, the smallest zone in close, the subzone closer still, a dungeon's own and its entrance's continent; set out letter by letter at the top centre at the screen's scale; into focus as it fades in, blurred out before the next, a part-shown one going from where it was; begun again; in the sheet's own colours for any class; not graded by the hour");
         }
 
         /* the swells bend round it, the more the nearer, and not at all beyond its reach */
