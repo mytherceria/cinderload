@@ -30,6 +30,17 @@ int main(void)
     Check(!ParseResolution("SET gxResolution \"10x10\"\n", &w, &h), "an impossible size");
     Check(!ParseResolution("# SET gxResolution \"1920x1080\"\n", &w, &h), "not at the start of a line");
     Check(!ParseResolution("", &w, &h), "an empty file");
+    w = h = 0;
+    Check(ParseResolution("\xEF\xBB\xBFSET gxResolution \"2560x1080\"\r\n", &w, &h) && w == 2560 && h == 1080,
+          "the only line behind the file's UTF-8 mark");
+    w = h = 0;
+    Check(ParseResolution("SET gxWindow \"1\"\n  \tSET gxResolution \"3440x1440\"\n", &w, &h) && w == 3440 && h == 1440,
+          "spaces and a tab before the SET");
+    w = h = 0;
+    Check(ParseResolution("SET gxResolution \"1920x1080\"\n   ", &w, &h) && w == 1920, "spaces at the very end: no read past it");
+    Check(!ParseResolution("\xEF", &w, &h) && !ParseResolution("\xEF\xBB", &w, &h) && !ParseResolution("  ", &w, &h),
+          "a mark cut short, blanks only: nothing, and no read past the end");
+    Check(!ParseResolution("x\xEF\xBB\xBFSET gxResolution \"2560x1080\"\n", &w, &h), "a mark anywhere but the start: not one");
 
     Check(Is(Pick(5120, 2160), "21x9"), "5K2K is 21x9");
     Check(Is(Pick(3440, 1440), "21x9"), "Alienware 3440x1440 is 21x9");
@@ -48,6 +59,19 @@ int main(void)
     int only21[SHAPE_COUNT] = { 0, 0, 1, 0 };
     Check(ChooseShape(1920, 1080, only21) == -1, "16:9 with only the ultrawide archive: none, not a stretched one");
     Check(ChooseShape(3440, 1440, only21) == 2, "ultrawide with only the ultrawide archive");
+
+    /* the game on OpenGL: -d3d first, then -opengl, then Config.wtf's last SET gxApi */
+    Check(!GameUsesOpenGL("\"C:\\WoW\\WoW.exe\"", NULL) && !GameUsesOpenGL("", "SET gxApi \"D3D\"\n"), "Direct3D by default");
+    Check(GameUsesOpenGL("\"C:\\WoW\\WoW.exe\" -opengl", NULL) && GameUsesOpenGL("WoW.exe -OpenGL -console", NULL),
+          "-opengl on the command line, any case, among other flags");
+    Check(!GameUsesOpenGL("WoW.exe -opengl -d3d", "SET gxApi \"OpenGL\"\n"), "-d3d beats both");
+    Check(!GameUsesOpenGL("WoW.exe -openglx", NULL) && !GameUsesOpenGL("C:\\x-opengl\\WoW.exe", NULL),
+          "a flag is a whole word: not -openglx, not a folder named x-opengl");
+    Check(GameUsesOpenGL("WoW.exe", "SET gxResolution \"1920x1080\"\n  set gxapi \"opengl\"\r\n"),
+          "Config.wtf's gxApi, indented, any case");
+    Check(!GameUsesOpenGL("WoW.exe", "SET gxApi \"OpenGL\"\nSET gxApi \"D3D\"\n") &&
+          GameUsesOpenGL("WoW.exe", "\xEF\xBB\xBFSET gxApi \"OpenGL\"\n"), "the last gxApi line counts; behind a UTF-8 mark too");
+    Check(!GameUsesOpenGL("WoW.exe", "SET gxApi \"OpenGLx\"\n"), "a value only starting OpenGL: not OpenGL");
 
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;

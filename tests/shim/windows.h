@@ -104,6 +104,8 @@ static char *lstrcpyA(char *d, const char *s) { return strcpy(d, s); }
 static char *lstrcatA(char *d, const char *s) { return strcat(d, s); }
 static int wsprintfA(char *out, const char *fmt, ...) { va_list a; va_start(a, fmt); int n = vsprintf(out, fmt, a); va_end(a); return n; }
 static int GetSystemMetrics(int i) { return i == SM_CXSCREEN ? shim_screen_w : shim_screen_h; }
+extern char shim_cmdline[512];                       /* the game's command line, as GetCommandLineA gives it */
+static char *GetCommandLineA(void) { return shim_cmdline; }
 extern int shim_vq;                                  /* VirtualQuery's calls, so a test can see one was not made */
 static size_t VirtualQuery(const void *at, MEMORY_BASIC_INFORMATION *m, size_t n)
 {

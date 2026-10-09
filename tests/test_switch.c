@@ -23,6 +23,7 @@ int shim_threads;
 DWORD shim_ticks;
 int shim_vq;
 int shim_screen_w = 3440, shim_screen_h = 1440;
+char shim_cmdline[512] = "\"C:\\Games\\WoW\\WoW.exe\"";
 
 static int fails, checks;
 static void Check(int cond, const char *what) { checks++; if (!cond) { printf("FAIL: %s\n", what); fails++; } }
@@ -1865,14 +1866,14 @@ static void LiveTests(void)
         Start();
         lg &= g_ovOn && g_logoOn && g_seaOn && LogSays("overlay on: glints on the open sea, the RavenCraft logo at the top");
         float asp = 1016.0f / 480.0f;
-        g_scrW = 5120; g_scrH = 2160;                                 /* his 21:9: LOGO_H tall, its own shape */
+        g_scrW = g_surfW = 5120; g_scrH = g_surfH = 2160;                                 /* his 21:9: LOGO_H tall, its own shape */
         LogoBuild();
         float w = g_logoPos[3] - g_logoPos[0], h = g_logoPos[7] - g_logoPos[1];
         lg &= fabsf(h - LOGO_H) < 1e-5f && fabsf(w * 5120 / (h * 2160) - asp) < 1e-3f &&
               fabsf((g_logoPos[0] + g_logoPos[3]) / 2 - 0.5f) < 1e-6f && fabsf(g_logoPos[7] - (1 - LOGO_TOP)) < 1e-6f &&
               g_logoUV[0] == 4.0f / 1024 && g_logoUV[2] == 1020.0f / 1024 && g_logoUV[1] == 484.0f / 512 &&
               g_logoUV[5] == 4.0f / 512 && g_logoCol[0] == 0xFFFFFFFFu;
-        g_scrW = 2560; g_scrH = 1600;                                 /* 16:10: narrowed to LOGO_W, still its own shape */
+        g_scrW = g_surfW = 2560; g_scrH = g_surfH = 1600;                                 /* 16:10: narrowed to LOGO_W, still its own shape */
         LogoBuild();
         w = g_logoPos[3] - g_logoPos[0]; h = g_logoPos[7] - g_logoPos[1];
         lg &= fabsf(w - LOGO_W) < 1e-5f && h < LOGO_H && fabsf(w * 2560 / (h * 1600) - asp) < 1e-3f;
@@ -1901,7 +1902,7 @@ static void LiveTests(void)
         Check(mk, "marks.txt read (an id past 31, a rectangle past the sheet, a radius of half the world left out); the marks on, in the log");
 
         /* the Maelstrom: in the world's place and size, square on screen, turning anticlockwise, gone close in */
-        g_scrW = 5120; g_scrH = 2160;
+        g_scrW = g_surfW = 5120; g_scrH = g_surfH = 2160;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         MaelstromBuild(0);
         float k = 2160.0f / 5120, hs = 0.068f;                         /* the whole world: a picture height is the screen's */
@@ -1944,7 +1945,7 @@ static void LiveTests(void)
             }
             sm &= !out && inner > MAEL_STROKES * 3 / 10 && inner < MAEL_STROKES * 7 / 10;
             g_viewTex[VT_SPARK] = 7;
-            g_scrW = 5120; g_scrH = 2160;
+            g_scrW = g_surfW = 5120; g_scrH = g_surfH = 2160;
             memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
             ViewListStart();
             MaelstromStrokes(5120, 2160, 0, 0);
@@ -2224,6 +2225,37 @@ static void LiveTests(void)
             Check(zl, "the zone's line: read (bad lines out); the zone's through its subzones, a dungeon's, none wide or out of a zone; levels coloured as WoW colours a quest against yours, territory friendly, hostile or contested (neutral unknown); levels, separator, territory centred under the name, each its own colour; a dungeon's levels alone");
         }
 
+        /* the world's first frame: the view waits for it (the blur on, none seen yet, under VIEW_WORLD_WAIT_MS); a screen
+         * that faded with none seen all session teaches it the hook is blind, and it waits no more (8 Oct night) */
+        {
+            LONG blurOn = g_blurOn, frames = g_worldFrames, blind = g_worldBlind;
+            g_blurOn = 1; g_worldBlind = 0; g_worldFrames = 0;
+            int wf = !ViewFadeDue(1000, 900, 0) && ViewFadeDue(900 + VIEW_WORLD_WAIT_MS, 900, 0);
+            g_worldFrames = 5;
+            wf &= !ViewWorldBlind(5) && !g_worldBlind;                           /* frames seen this session: not blind */
+            wf &= ViewFadeDue(1000, 900, 4);                                     /* (one seen since it went: due) */
+            g_worldFrames = 0;
+            wf &= ViewWorldBlind(0) && g_worldBlind && !ViewWorldBlind(0);       /* none all session: blind, once */
+            wf &= ViewFadeDue(1000, 900, 0);                                     /* and then due at once */
+            g_blurOn = blurOn; g_worldFrames = frames; g_worldBlind = blind;
+            Check(wf, "the world's first frame: waited for, up to VIEW_WORLD_WAIT_MS; a screen that faded with no frame of the game seen all session makes the view fade as each screen goes from then on");
+        }
+
+        /* vsync promised but not kept: thirty frames in a row under 2 ms and the view paces itself; one slower frame
+         * starts the count again; a 500 Hz screen's 2 ms frames never count (8 Oct night) */
+        {
+            int fast = 0, decided = 0, at = -1;
+            for (int f = 0; f < 29; f++) decided |= ViewSpinStep(&fast, 1);
+            int vs = !decided;
+            ViewSpinStep(&fast, 5);                                              /* a slow one: start again */
+            for (int f = 0; f < 40 && at < 0; f++) if (ViewSpinStep(&fast, 0)) at = f;
+            vs &= at == 29;
+            fast = 0; decided = 0;
+            for (int f = 0; f < 200; f++) decided |= ViewSpinStep(&fast, 2);    /* 500 Hz, waiting as it should */
+            vs &= !decided;
+            Check(vs, "vsync promised but not kept: thirty frames in a row quicker than any screen and the view paces itself; a slower frame starts the count again; 500 Hz never counts");
+        }
+
         /* the game's own frames leave the Maelstrom and the logo to the view only while it will draw the screen: up, and
          * drawn it or in its first moments; a screen it has not taken by then, or the view off, keeps them (8 Oct night) */
         {
@@ -2245,7 +2277,7 @@ static void LiveTests(void)
         static const unsigned char allSea[8 + 16] = { 'C', 'S', 'E', 'A', 4, 0, 4, 0, 255, 255, 255, 255, 255, 255, 255, 255,
                                                       255, 255, 255, 255, 255, 255, 255, 255 };
         SeaParse(allSea, sizeof allSea);
-        g_scrW = 3840; g_scrH = 2160;
+        g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         g_mael.u = 0.5f; g_mael.v = 0.5f; g_mael.r = 0.08f; g_mael.ok = 1;
         float nearOn = WaveLight(0.5f * 1.778f + 0.04f, 0.53f, 20.0f, 0.35f, 1.778f), farOn = WaveLight(0.1f, 0.1f, 20.0f, 0.35f, 1.778f);
@@ -2340,7 +2372,7 @@ static void LiveTests(void)
         Poke(CHAR_PICKED_VA, 1); Poke(CHAR_COUNT_VA, 0);                /* the list gone: kept, and said so */
         ClassStep();
         bd &= g_class == 8 && g_classFrom == 2;
-        g_scrW = 3840; g_scrH = 2160;
+        g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         g_destOk = 0;
         BadgeBuild(90000);
@@ -2539,7 +2571,7 @@ static void LiveTests(void)
      * their cells the same size on screen at the whole world and at half of it (the next octave), drifting; none without sea.bin */
     {
         SeaParse(kSeaBin, sizeof kSeaBin);                               /* the left half land, the right half sea */
-        g_scrW = 3840; g_scrH = 2160;
+        g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);                       /* the whole world: one octave */
         WaveBuild(20.0f);
         int wv = g_wvQuads > 50 && g_wvQuads <= WAVE_QUADS, landLit = 0, uvOut = 0, slots = g_wvQuads * 6 - 2;
@@ -2599,7 +2631,7 @@ static void LiveTests(void)
         FlowAt(0.37f, 0.81f, &cx, &cv);
         fl &= fabsf(cx - 1.0f) < 1e-5f && cv == 0;
         SeaParse(allSea2, sizeof allSea2);
-        g_scrW = 3840; g_scrH = 2160;
+        g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         g_mael.ok = 0;
         memset(g_drop, 0, sizeof g_drop);
@@ -2663,7 +2695,7 @@ static void LiveTests(void)
         FlowBinMake(0.6f, 10, 0);                                                /* a tenth of it everywhere... */
         memcpy(g_flowCell, kFlowBin + 16, 32);                                   /* ...keeping the usual as it was */
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-        g_scrW = 3840; g_scrH = 2160;
+        g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160;
         memset(g_drop, 0, sizeof g_drop);
         g_drop[0].u = 0.3f; g_drop[0].v = 0.5f; g_drop[0].age = 1; g_drop[0].life = 100; g_drop[0].live = 1;
         for (int f = 0; f < 50; f++) FlowBuild(0, 0.02f);
@@ -2696,7 +2728,7 @@ static void LiveTests(void)
         /* a drop come from slow water into fast: its head's stretch in the fast shade, the stretches behind in the slow one */
         {
             memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-            g_scrW = 3840; g_scrH = 2160; g_mael.ok = 0;
+            g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160; g_mael.ok = 0;
             memset(g_drop, 0, sizeof g_drop);
             for (int i = 1; i < FLOW_DROPS; i++) g_drop[i].live = 0;
             g_drop[0].u = 0.875f; g_drop[0].v = 0.875f; g_drop[0].age = 1; g_drop[0].life = 100; g_drop[0].live = 1;
@@ -2711,7 +2743,7 @@ static void LiveTests(void)
 
         FlowBinMake(0.6f, 100, 0); FlowParse(kFlowBin, sizeof kFlowBin);
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
-        g_scrW = 3840; g_scrH = 2160; g_mael.ok = 0;
+        g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160; g_mael.ok = 0;
         memset(g_drop, 0, sizeof g_drop);
         for (int i = 1; i < FLOW_DROPS; i++) { g_drop[i].u = 0.95f; g_drop[i].v = 0.95f; g_drop[i].live = 1; g_drop[i].dying = 1;
                                                g_drop[i].age = 0; g_drop[i].life = 1000; }    /* parked out of the way */
@@ -2941,6 +2973,10 @@ static void LiveTests(void)
               g_presentBack == pa + 6 && LogSays("blur on:");
         PresentSetup();                                                 /* again in the same process: ours, kept */
         bl &= g_blurOn;
+        memcpy(pa, kPresent, sizeof kPresent); g_gameGL = 1;            /* the game on OpenGL: never set, and the view */
+        PresentSetup();                                                 /* fades as each screen goes */
+        bl &= !g_blurOn && pa[0] == kPresent[0] && LogSays("blur off: the game draws with OpenGL");
+        g_gameGL = 0;
         memcpy(pa, kPresent, sizeof kPresent); pa[8] ^= 1;              /* another client: never set */
         PresentSetup();
         bl &= !g_blurOn && LogSays("blur off: the game's present is not where it was read");
@@ -2989,7 +3025,7 @@ static void LiveTests(void)
     /* the glints: only where the sea is open, never more than there are, held where they appeared, a steady size, none close in */
     {
         SeaParse(kSeaBin, sizeof kSeaBin);
-        g_scrW = 3840; g_scrH = 2160;                                    /* its own screen, whatever ran before */
+        g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160;                                    /* its own screen, whatever ran before */
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         memset(g_glint, 0, sizeof g_glint);
         int gl = 1, most = 0, seen = 0, held = 1, crest = 0;
@@ -3039,7 +3075,7 @@ static void LiveTests(void)
         LabelsParse(tb, (unsigned)strlen(tb));
     }
     int lbl = g_lblSprites == 2 && g_lblItems == 2;                   /* an out-of-order sprite, a bad item, a band upside down */
-    g_scrW = 3840; g_scrH = 2160;
+    g_scrW = g_surfW = 3840; g_scrH = g_surfH = 2160;
     memcpy(g_bgUV, kWholeUV, sizeof kWholeUV); /* the whole world: h = 0.5 */
     LabelsBuild();
     lbl &= g_lblQuads == 1 && fabsf((g_lblPos[0] + g_lblPos[3]) / 2 - 0.5f) < 1e-5f &&
@@ -3611,7 +3647,9 @@ static void ViewTests(void)
         ok &= g_destOk && g_viewH < 0.5f;
         /* the view takes them: from here its frames (7 ms) step them, the game's frame only notes its facts */
         t += 7;
+        g_scrW = g_surfW = 1920; g_scrH = g_surfH = 1080;                /* Config.wtf's 16:9, the window 2:1: */
         ok &= ViewStep(p, t, 1000, 500) && g_viewSteps == 1 && g_stepLock.held == 0 && g_vbN >= 1 && g_vb[0].tex == VT_MAP;
+        ok &= g_surfW == 1000 && g_surfH == 500 && g_scrW == 1920 && g_scrH == 1080;   /* built for the window it draws */
         DWORD at = g_dispAt;
         float d = g_disp, h = g_viewH;
         LONG frames = g_frmCount;
@@ -3767,7 +3805,7 @@ static void ViewTests(void)
         PackLive(1 | 2 | 4 | 8 | 32 | 64, 0);
         Start();
         int ok = g_ovOn && g_seaOn && g_logoOn && g_marksOn;
-        g_mapShown = 1; g_scrW = 1000; g_scrH = 500;
+        g_mapShown = 1; g_scrW = g_surfW = 1000; g_scrH = g_surfH = 500;
         memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
         g_viewTex[VT_MAP] = g_viewTex[VT_MARKS] = g_viewTex[VT_SEA] = g_viewTex[VT_LOGO] = 1;
@@ -5204,6 +5242,40 @@ int main(int argc, char **argv)
     Put(UW, "AAAA"); Put(ACTIVE, "FOREIGNXX"); Put(MARK, "21x9 4"); Put("WTF/Config.wtf", RES("5120x2160"));
     Start();
     Check(Is(ACTIVE, "FOREIGNXX") && !On(), "a file that replaced ours (other size than recorded): left alone");
+
+    /* an earlier one of ours whose ownership record is gone (deleted by hand or by a launcher's repair; the adversarial
+     * pass, 8 Oct night): known by what is in it (CinderLoad\bars.txt since 0.1.5), or by its exact size for the five
+     * releases before; replaced with the right pack where this screen has one, never removed where it has none */
+    {
+        static const char *const nm[] = { "CinderLoad\\bars.txt", "Interface\\Glues\\LoadingScreens\\LoadScreenDeadmines.blp" };
+        static const char *const dt[] = { "default arcane\r\n", "BLP2old" };
+        static const unsigned ln[] = { 16, 7 };
+        CryptInit();                                    /* (the test archives' names hashed as the game hashes them) */
+        Fresh("lost-marker");
+        Put(UW, "AAAA"); Put("WTF/Config.wtf", RES("5120x2160"));
+        MakeMpq(ACTIVE, 2, nm, dt, ln);
+        Start();
+        int lm = Is(ACTIVE, "AAAA") && Is(MARK, "21x9 4") && On() && LogSays("ownership record is gone");
+        Fresh("lost-marker-no-shape");
+        Put(UW, "AAAA"); Put("WTF/Config.wtf", RES("1024x768"));
+        MakeMpq(ACTIVE, 2, nm, dt, ln);
+        const char *before = Get(ACTIVE); char keep[64]; memcpy(keep, before, sizeof keep);
+        Start();
+        lm &= Get(ACTIVE) && !memcmp(Get(ACTIVE), keep, sizeof keep) && !On();   /* no shape here: left alone */
+        Fresh("lost-marker-0.1.0");                     /* a 0.1.0 pack: the game's own names only, its exact size */
+        Put(UW, "AAAA"); Put("WTF/Config.wtf", RES("5120x2160"));
+        MakeMpq(ACTIVE, 1, nm + 1, dt + 1, ln + 1);
+        { char p[700]; snprintf(p, sizeof p, "%s%s", shim_gamedir, ACTIVE); lm &= !truncate(p, 56937150); }
+        Start();
+        lm &= Is(ACTIVE, "AAAA") && On();
+        Fresh("lost-marker-other-size");                /* the same, one byte off every release: someone else's */
+        Put(UW, "AAAA"); Put("WTF/Config.wtf", RES("5120x2160"));
+        MakeMpq(ACTIVE, 1, nm + 1, dt + 1, ln + 1);
+        { char p[700]; snprintf(p, sizeof p, "%s%s", shim_gamedir, ACTIVE); lm &= !truncate(p, 56937151); }
+        Start();
+        lm &= !Is(ACTIVE, "AAAA") && !On() && LogSays("not ours");
+        Check(lm, "an earlier pack of ours with its record gone: known by its bars.txt or a release's exact size, replaced where this screen has a shape, left alone where it has none; one byte off: someone else's");
+    }
 
     Fresh("update");
     Put(UW, "BBBBBB"); Put(ACTIVE, "AAAA"); Put(MARK, "21x9 4"); Put("WTF/Config.wtf", RES("3440x1440"));

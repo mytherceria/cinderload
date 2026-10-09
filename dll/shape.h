@@ -21,17 +21,23 @@ static const struct { const char *name; int num, den; } kShapes[] = {
 static char Lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
 
 /* The resolution in a Config.wtf's text (NUL-terminated): the last SET gxResolution "WxH" line, as the game reads
- * the file top to bottom. 1 and *w, *h set when found and sane. */
+ * the file top to bottom. 1 and *w, *h set when found and sane. A line may begin with spaces or tabs, and the file
+ * with a UTF-8 byte-order mark (an editor's; the adversarial pass, 8 Oct night: either hid the line, and the monitor's
+ * size picked the shape). The game writes the file clean again when it exits. */
 static int ParseResolution(const char *text, int *w, int *h)
 {
     static const char key[] = "set gxresolution \"";
     int found = 0;
     for (const char *p = text; *p; p++) {
         if (p != text && p[-1] != '\n') continue;          /* only at the start of a line */
+        const char *s = p;
+        if (s == text && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
+            s += 3;                                         /* the file's UTF-8 mark */
+        while (*s == ' ' || *s == '\t') s++;
         int i = 0;
-        while (key[i] && Lower(p[i]) == key[i]) i++;
+        while (key[i] && Lower(s[i]) == key[i]) i++;
         if (key[i]) continue;
-        const char *q = p + i;
+        const char *q = s + i;
         long a = 0, b = 0;
         int da = 0, db = 0;
         while (*q >= '0' && *q <= '9' && da < 6) { a = a * 10 + (*q++ - '0'); da++; }
@@ -43,6 +49,45 @@ static int ParseResolution(const char *text, int *w, int *h)
         found = 1;
     }
     return found;
+}
+
+/* The game draws with OpenGL rather than Direct3D (the adversarial pass, 8 Oct night: its present is not the one the
+ * blur hooks, so the view waited out its 3 seconds over the live world after every screen). As the 1.12 client decides
+ * it: -d3d on its command line forces Direct3D, -opengl OpenGL; else the last SET gxApi line of Config.wtf (cfg may be
+ * NULL), "OpenGL" in any case. A flag is a whole word of the command line. */
+static int CommandLineSays(const char *cmd, const char *flag)
+{
+    for (const char *p = cmd; p && *p; p++) {
+        if (p != cmd && p[-1] != ' ' && p[-1] != '\t') continue;
+        int i = 0;
+        while (flag[i] && Lower(p[i]) == flag[i]) i++;
+        if (!flag[i] && (!p[i] || p[i] == ' ' || p[i] == '\t')) return 1;
+    }
+    return 0;
+}
+static int ConfigApiIsOpenGL(const char *text)
+{
+    static const char key[] = "set gxapi \"", gl[] = "opengl\"";
+    int is = 0;
+    for (const char *p = text; p && *p; p++) {
+        if (p != text && p[-1] != '\n') continue;
+        const char *s = p;
+        if (s == text && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s += 3;
+        while (*s == ' ' || *s == '\t') s++;
+        int i = 0;
+        while (key[i] && Lower(s[i]) == key[i]) i++;
+        if (key[i]) continue;
+        int j = 0;
+        while (gl[j] && Lower(s[i + j]) == gl[j]) j++;
+        is = !gl[j];                                        /* the last line counts, as the game reads it */
+    }
+    return is;
+}
+static int GameUsesOpenGL(const char *cmd, const char *cfg)
+{
+    if (CommandLineSays(cmd, "-d3d")) return 0;
+    if (CommandLineSays(cmd, "-opengl")) return 1;
+    return ConfigApiIsOpenGL(cfg);
 }
 
 /* The index of the nearest shape within SHAPE_TOLERANCE of w:h, or -1. available[i] says whether that shape's

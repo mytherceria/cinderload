@@ -184,6 +184,7 @@ static void WriteText(const char *path, const char *text)
 }
 
 static int ClientIsOurs(void);
+static int ArchiveIsOurs(const char *dst);       /* (below, with the archive reader) */
 
 /* Takes our archive out: only once it is really gone is the ownership record dropped, so a file that could not be
  * deleted (another client has it open) is still known as ours next time. */
@@ -198,6 +199,11 @@ static void TakeOut(const char *dst, const char *marker, const char *oldMarker)
 /* Puts the loading screens for this screen's shape in place as Data\patch-~.MPQ. 1 when ours are in place, so the
  * switch can go on. */
 static int g_scrW = 1920, g_scrH = 1080;        /* the screen, as Config.wtf (or the monitor) says */
+static int g_gameGL;                            /* the game draws with OpenGL (-opengl, or Config.wtf's gxApi) */
+static int g_surfW = 1920, g_surfH = 1080;      /* the surface the overlay is being built for, set by whoever builds it:
+                                                 * the game's own frames, Config.wtf's size (theirs); the view, its own
+                                                 * window's (a window smaller than the setting, or a resolution changed in
+                                                 * game, made round things oval: the adversarial pass, 8 Oct night) */
 static int ChooseScreens(void)
 {
     char dst[MAX_PATH], marker[MAX_PATH], oldMarker[MAX_PATH], cfg[MAX_PATH], src[MAX_PATH], tmp[MAX_PATH], m[320];
@@ -221,8 +227,9 @@ static int ChooseScreens(void)
         h = GetSystemMetrics(SM_CYSCREEN);
         from = "the monitor";
     }
+    g_gameGL = GameUsesOpenGL(GetCommandLineA(), text);
     if (text) HeapFree(GetProcessHeap(), 0, text);
-    if (w > 0 && h > 0) { g_scrW = w; g_scrH = h; }
+    if (w > 0 && h > 0) { g_scrW = g_surfW = w; g_scrH = g_surfH = h; }
     int pick = any ? ChooseShape(w, h, avail) : -1;
     int client = ClientIsOurs();
     if (!client) pick = -1;              /* never put widened screens in place where the switch cannot go on */
@@ -242,6 +249,12 @@ static int ChooseScreens(void)
     int ours = !haveDst || MarkerMatches(marker, dst) || MarkerMatches(oldMarker, dst);
     for (int i = 0; !ours && i < SHAPE_COUNT; i++)
         if (avail[i] && VariantPath(src, i) && SameContent(src, dst)) ours = 1;
+    if (!ours && pick >= 0 && ArchiveIsOurs(dst)) {   /* an earlier one of ours, its record gone: replaced, never removed */
+        ours = 1;
+        wsprintfA(m, "screen %dx%d (from %s): Data\\patch-~.MPQ is an earlier CinderLoad archive whose ownership record "
+                  "is gone, so the %s loading screens go in its place", w, h, from, kShapes[pick].name);
+        Log(m);
+    }
     if (!ours) {
         wsprintfA(m, "screen %dx%d (from %s): Data\\patch-~.MPQ is not ours, so it is left alone and the switch stays off",
                   w, h, from);
@@ -1847,6 +1860,31 @@ static int BarHasTexture(const char *path)
 static void *IoAllocSmall(void *ctx, unsigned size) { return size > 4 * BAR_TEXT_MAX ? NULL : IoAlloc(ctx, size); }
 static const mpq_io kIoSmall = { IoAllocSmall, IoRelease, IoOpen, IoReadAt, IoSize, IoClose, NULL };
 
+/* Our own archive, known by what is in it, for when its ownership record is gone (Data\patch-~.cinderload deleted by
+ * hand or by a launcher's repair, or a pack copied in by hand; the adversarial pass, 8 Oct night: until now it counted
+ * as someone else's for good, and the stale pack stayed in place). Every pack since 0.1.5 carries CinderLoad\bars.txt;
+ * the five releases before it (0.1.0 to 0.1.4) carried only the game's own loading screens, so theirs are known by
+ * their exact sizes, and only as archives. Used only where this screen has a shape, to put the right pack in its
+ * place: a pack copied in by hand for a screen with none is left alone, as before. */
+static const DWORD kOldPackSizes[] = {
+    49021325, 51015189, 51029602,           /* 32x9: 0.1.2-0.1.4, 0.1.0, 0.1.1 */
+    54744778, 56937150, 56951563,           /* 21x9 */
+    60735410, 63329453, 63343866,           /* 16x9 */
+    63619834, 66417818, 66432231 };         /* 16x10 */
+static int ArchiveIsOurs(const char *dst)
+{
+    unsigned char *d = NULL;
+    unsigned len = 0;
+    int r = mpq_read(&kIoSmall, "patch-~.MPQ", "CinderLoad\\bars.txt", &d, &len);
+    if (d) HeapFree(GetProcessHeap(), 0, d);
+    if (r == MPQ_OK || r == MPQ_E_EMPTY) return 1;
+    if (r != MPQ_E_NOT_FOUND) return 0;     /* not an archive at all, or not one this reader can read: not known */
+    DWORD size = FileSize(dst);
+    for (unsigned i = 0; i < sizeof kOldPackSizes / sizeof kOldPackSizes[0]; i++)
+        if (size == kOldPackSizes[i]) return 1;
+    return 0;
+}
+
 /* The world map's table and picture, out of Data\patch-~.MPQ. */
 static void MapLoad(void)
 {
@@ -2882,7 +2920,7 @@ static float SeaRand(unsigned a, unsigned b) { return (float)(SeaHash(a * 0x9E37
 static void GlintsBuild(float t)
 {
     float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
-    float fade = SeaFade((u1 - u0) * 0.5f), k = (float)g_scrH / 2160.0f;
+    float fade = SeaFade((u1 - u0) * 0.5f), k = (float)g_surfH / 2160.0f;
     g_glQuads = 0;
     if (!g_seaW || fade <= 0.01f) return;
     for (int g = 0; g < GLINTS; g++) {
@@ -2893,7 +2931,7 @@ static void GlintsBuild(float t)
             unsigned id = (unsigned)g * 7919u + (unsigned)n;
             float u = u0 + (u1 - u0) * SeaRand(id, 3), v = vt + (vb - vt) * SeaRand(id, 4);
             g_glint[g].u = u; g_glint[g].v = v; g_glint[g].cycle = n; g_glint[g].set = 1;
-            g_glint[g].on = SeaAt(u, v) > 0.6f && SwellAt(u * (float)g_scrW / (float)g_scrH, v, t) > GLINT_CREST;
+            g_glint[g].on = SeaAt(u, v) > 0.6f && SwellAt(u * (float)g_surfW / (float)g_surfH, v, t) > GLINT_CREST;
         }
         if (!g_glint[g].on || age >= GLINT_LIFE) continue;
         float e = SeaSin(3.14159265f * age / GLINT_LIFE);
@@ -2901,7 +2939,7 @@ static void GlintsBuild(float t)
         float a = e * fade * 0.9f;
         if (a < 0.01f) continue;
         float sx = (g_glint[g].u - u0) / (u1 - u0), sy = 1 - (g_glint[g].v - vt) / (vb - vt);
-        float px = GLINT_PX * k * (0.55f + 0.45f * e), sw = px / (float)g_scrW, sh = px / (float)g_scrH;
+        float px = GLINT_PX * k * (0.55f + 0.45f * e), sw = px / (float)g_surfW, sh = px / (float)g_surfH;
         if (sx + sw / 2 < 0 || sx - sw / 2 > 1 || sy + sh / 2 < 0 || sy - sh / 2 > 1) continue;
         float x[4] = { sx - sw / 2, sx + sw / 2, sx - sw / 2, sx + sw / 2 }, y[4] = { sy - sh / 2, sy - sh / 2, sy + sh / 2, sy + sh / 2 };
         static const float tu[4] = { 0, 0.5f, 0, 0.5f }, tv[4] = { 1, 1, 0, 0 };
@@ -2984,7 +3022,7 @@ static void MarkPut(int id, float sx, float sy, float hs, float ang, float alpha
 static void MarkPutTint(int id, float sx, float sy, float hs, float ang, float alpha, unsigned rgb)
 {
     if (id < 0 || id >= MARKS_SPRITES || !g_mark[id].ok || alpha <= 0.004f || g_mkQuads >= MARKS_FRAME) return;
-    float k = (float)g_scrH / (float)g_scrW, c = SeaCos(ang), sn = SeaSin(ang), reach = hs * 1.42f;
+    float k = (float)g_surfH / (float)g_surfW, c = SeaCos(ang), sn = SeaSin(ang), reach = hs * 1.42f;
     if (sx + reach * k < 0 || sx - reach * k > 1 || sy + reach < 0 || sy - reach > 1) return;
     static const float cx[4] = { -1, 1, -1, 1 }, cy[4] = { -1, -1, 1, 1 };
     float x[4], y[4];
@@ -3092,7 +3130,7 @@ static void WaveBuild(float t)
 {
     g_wvQuads = 0;
     if (!g_seaW) return;
-    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1], vh = vb - vt, asp = (float)g_scrW / (float)g_scrH;
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1], vh = vb - vt, asp = (float)g_surfW / (float)g_surfH;
     if (!(vh > 0.001f)) return;
     float f = vh < 1 ? MapLn(1 / vh) / 0.6931472f : 0;
     int n0 = (int)f;
@@ -3306,12 +3344,12 @@ static void FlowBuild(float t, float dt)
 {
     g_flQuads = 0;
     if (!g_flowW || !g_seaW) return;
-    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1], vh = vb - vt, asp = (float)g_scrW / (float)g_scrH;
+    float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1], vh = vb - vt, asp = (float)g_surfW / (float)g_surfH;
     if (!(vh > 0.001f)) return;
     (void)t;
     if (dt > 0.25f) dt = 0.25f;
     float mx = g_mael.u, mv = g_mael.v, mr2 = g_mael.ok ? (0.3f * g_mael.r) * (0.3f * g_mael.r) : -1;
-    float k = (float)g_scrH / (float)g_scrW;
+    float k = (float)g_surfH / (float)g_surfW;
     for (int c = 0; c < FLOW_GRID_X * FLOW_GRID_Y; c++) g_flowCrowd[c] = 0;
     int alive = 0;
     for (int i = 0; i < FLOW_DROPS; i++) {
@@ -3843,7 +3881,7 @@ static int TitleZone(int map, float x, float y)
 static void LabelsBuild(void)
 {
     float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
-    float hk = (u1 - u0) * 500.0f, k = (float)g_scrH / 2160.0f;
+    float hk = (u1 - u0) * 500.0f, k = (float)g_surfH / 2160.0f;
     int q = 0;
     for (int it = 0; it < g_lblItems && q < LBL_FRAME; it++) {
         float hi = g_lblItem[it].hmax, lo = g_lblItem[it].hmin;
@@ -3854,8 +3892,8 @@ static void LabelsBuild(void)
         if (a <= 0.01f) continue;
         float sx = (g_lblItem[it].u - u0) / (u1 - u0), sy = 1 - (g_lblItem[it].v - vt) / (vb - vt);
         int s = g_lblItem[it].spr;
-        float sw = (g_lblSpr[s].x1 - g_lblSpr[s].x0) * k / (float)g_scrW, sh = (g_lblSpr[s].y1 - g_lblSpr[s].y0) * k / (float)g_scrH;
-        sy -= g_lblItem[it].dy * k / (float)g_scrH;
+        float sw = (g_lblSpr[s].x1 - g_lblSpr[s].x0) * k / (float)g_surfW, sh = (g_lblSpr[s].y1 - g_lblSpr[s].y0) * k / (float)g_surfH;
+        sy -= g_lblItem[it].dy * k / (float)g_surfH;
         if (sx + sw / 2 < 0 || sx - sw / 2 > 1 || sy + sh / 2 < 0 || sy - sh / 2 > 1) continue;
         float x[4] = { sx - sw / 2, sx + sw / 2, sx - sw / 2, sx + sw / 2 }, y[4] = { sy - sh / 2, sy - sh / 2, sy + sh / 2, sy + sh / 2 };
         float tu0 = g_lblSpr[s].x0 / LBL_SHEET_W, tu1 = g_lblSpr[s].x1 / LBL_SHEET_W;
@@ -3970,7 +4008,7 @@ static void LogoParse(const char *s, unsigned len)
 /* The logo's one quad for this screen: top centre, LOGO_H tall unless that would make it wider than LOGO_W. */
 static void LogoBuild(void)
 {
-    float h = LOGO_H, w = h * g_logo.aspect * (float)g_scrH / (float)g_scrW;
+    float h = LOGO_H, w = h * g_logo.aspect * (float)g_surfH / (float)g_surfW;
     if (w > LOGO_W) { h *= LOGO_W / w; w = LOGO_W; }
     float top = 1 - LOGO_TOP, x[4] = { 0.5f - w / 2, 0.5f + w / 2, 0.5f - w / 2, 0.5f + w / 2 };
     float y[4] = { top - h, top - h, top, top }, tu[4] = { g_logo.tu0, g_logo.tu1, g_logo.tu0, g_logo.tu1 };
@@ -4922,6 +4960,7 @@ void WINAPI OverlayDraw(void)
 static void OverlayDrawAll(void)
 {
     DWORD now = GetTickCount();
+    g_surfW = g_scrW; g_surfH = g_scrH;                              /* (built for the game's own frame) */
     float t = (float)(now % 3600000u) / 1000.0f;
     static DWORD last;
     float dt = last ? (float)(now - last) / 1000.0f : 0;
@@ -5198,6 +5237,18 @@ void WINAPI RevealFill(const float *v)
     g_fillCount = n2;
 }
 
+/* Vsync that is promised but not kept (a driver set to force it off: NVIDIA's "force off", AMD's "always off", Mesa's
+ * vblank_mode=0; the adversarial pass, 8 Oct night): wglSwapIntervalEXT says yes, the swaps never wait, and the view
+ * spins thousands of frames a second on a core during the very load it smooths. VIEW_SPIN_FRAMES frames in a row each
+ * under VIEW_SPIN_MS (quicker than any screen refreshes) and the view paces itself by the clock from then on. 1 the
+ * frame it decides. */
+#define VIEW_SPIN_MS     2
+#define VIEW_SPIN_FRAMES 30
+static int ViewSpinStep(int *fast, DWORD frameMs)
+{
+    if (frameMs >= VIEW_SPIN_MS) { *fast = 0; return 0; }
+    return ++*fast == VIEW_SPIN_FRAMES;
+}
 #if defined(__i386__)
 /* The vertex setup: ecx = corners, edx = their positions, and eleven arguments above the return address (at entry:
  * colours at [esp+16], their stride at [esp+20], texture coordinates at [esp+32]). For the fill entry (esi at the
@@ -7336,6 +7387,7 @@ static int ViewStepLocked(float p, DWORD now, float W, float H)
     float s = BarStep(p, now);
     if (g_driftOn) DriftStep(s, now);
     g_viewShown = s;
+    if (W >= 1 && H >= 1) { g_surfW = (int)W; g_surfH = (int)H; }   /* (built for the view's own window) */
     ViewBuild(W, H, s, now);
     return 1;
 }
@@ -7380,10 +7432,19 @@ static DWORD ViewClock(DWORD real)
  * with seen of them then: 1 when its fade may begin, once the game has shown the world, or with no way to see that (no
  * present hook), or after VIEW_WORLD_WAIT_MS. */
 #define VIEW_WORLD_WAIT_MS 3000
-static volatile LONG g_worldFrames;
+static volatile LONG g_worldFrames, g_worldBlind;
 static int ViewFadeDue(DWORD now, DWORD goneAt, LONG seen)
 {
-    return !g_blurOn || g_worldFrames != seen || (LONG)(now - goneAt) >= VIEW_WORLD_WAIT_MS;
+    return !g_blurOn || g_worldBlind || g_worldFrames != seen || (LONG)(now - goneAt) >= VIEW_WORLD_WAIT_MS;
+}
+/* A screen faded with no frame of the world seen, and none seen all session (not even the character list's): the hook
+ * is blind (the game's frames go out some other way than the present it hooked), so from now on the view fades as each
+ * screen goes rather than waiting out VIEW_WORLD_WAIT_MS over the live world (8 Oct night). 1 when it is learnt. */
+static int ViewWorldBlind(LONG seen)
+{
+    if (g_worldBlind || g_worldFrames != seen || g_worldFrames) return 0;
+    InterlockedExchange(&g_worldBlind, 1);
+    return 1;
 }
 
 #ifdef __i386__
@@ -7461,7 +7522,7 @@ static struct {
 } gl;
 static HINSTANCE g_inst;
 static struct {
-    HWND win; HDC dc; HGLRC rc; int w, h, vsync, s3tc, maxTex;
+    HWND win; HDC dc; HGLRC rc; int w, h, vsync, s3tc, maxTex, fast;   /* fast: frames in a row quicker than any screen */
     unsigned char *blp[VT_COUNT]; unsigned len[VT_COUNT];      /* each picture's file, read as the game starts, until
                                                                  * OpenGL has it */
     DWORD since, last, gap, frames;
@@ -7635,10 +7696,20 @@ static int ViewAlpha(BYTE a)
     if (!(ex & WS_EX_LAYERED)) SetWindowLongA(g_view.win, GWL_EXSTYLE, ex | WS_EX_LAYERED);
     return SetLayeredWindowAttributes(g_view.win, 0, a, LWA_ALPHA) != 0;
 }
-static void ViewOpaque(void)
+/* The mouse goes through to the game the whole time the view shows (the adversarial pass, 8 Oct night: it did only
+ * during the fade, so a button let go over a loading screen never reached the game, and mouselook or turning could
+ * stick). The system passes the mouse over a window only when it is both layered and WS_EX_TRANSPARENT (HTTRANSPARENT
+ * passes only to windows of its own thread, and the game's window is another thread's), so the view is layered at full
+ * alpha from just before it shows, as its fade already makes it, after its OpenGL is set up on a plain window. 0 when
+ * the system will not have it: then it is plain again, and whole, as before. */
+static int ViewClickThrough(void)
 {
     LONG ex = GetWindowLongA(g_view.win, GWL_EXSTYLE);
-    if (ex & WS_EX_LAYERED) SetWindowLongA(g_view.win, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
+    if ((ex & (WS_EX_LAYERED | WS_EX_TRANSPARENT)) != (WS_EX_LAYERED | WS_EX_TRANSPARENT))
+        SetWindowLongA(g_view.win, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT);
+    if (SetLayeredWindowAttributes(g_view.win, 0, 255, LWA_ALPHA)) return 1;
+    SetWindowLongA(g_view.win, GWL_EXSTYLE, (ex | WS_EX_TRANSPARENT) & ~WS_EX_LAYERED);
+    return 0;
 }
 
 static BOOL CALLBACK ViewFind(HWND h, LPARAM lp)
@@ -7688,7 +7759,6 @@ static int ViewOpen(const char **why)
     else
         SetWindowPos(g_view.win, NULL, o.x, o.y, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
     if (!g_view.win) { *why = "its window could not be made"; return 0; }
-    ViewOpaque();                                        /* whole again after the last screen's fade */
     if (!g_view.rc) {                                    /* once: the window's pixel format and an OpenGL context */
         if (!GlLoad()) { *why = "opengl32.dll or gdi32.dll is missing a call it needs"; return 0; }
         g_view.dc = GetDC(g_view.win);
@@ -7730,6 +7800,11 @@ static int ViewOpen(const char **why)
         Log(m);
     }
     g_view.w = w; g_view.h = h;
+    static int clickLogged;                              /* whole again after the last screen's fade, and the mouse through */
+    if (!ViewClickThrough() && !clickLogged) {
+        clickLogged = 1;
+        Log("  the view: the system would not make its window layered, so the mouse stops at it while it shows");
+    }
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
     return 1;
 }
@@ -7862,6 +7937,9 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             wsprintfA(m, "  the view: the world showed %lu ms after the screen went%s", (unsigned long)(now - waitAt),
                       g_worldFrames != worldSeen ? "" : ", or no frame of it was seen and it faded anyway");
             Log(m);
+            if (ViewWorldBlind(worldSeen))
+                Log("  the view: no frame of the game's has been seen all session (its frames go out another way than "
+                    "the present hooked), so from now on it fades as each screen goes");
             waitAt = 0;
             fadeAt = now ? now : 1;
         }
@@ -7909,6 +7987,11 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             if (!ViewFrame(&t4, &t5)) return ViewOff("its OpenGL frame could not be shown");
             if (!g_view.vsync) Sleep(4);
             DWORD t = ViewNow();
+            if (g_view.vsync && ViewSpinStep(&g_view.fast, t - t0)) {
+                g_view.vsync = 0;                           /* (promised, not kept: paced by the clock from here) */
+                Log("  the view: its frames came quicker than any screen refreshes (the driver keeps vsync off), so it "
+                    "paces itself by the clock from now on");
+            }
             part[0] = t1 - t0; part[1] = t2 - t1; part[2] = t3 - t2; part[3] = t4 - t3; part[4] = t5 - t4; part[5] = t - t5;
             ViewSlowKeep(t - t0, part, quiet > 0 ? (DWORD)quiet : 0);
             if (t - g_view.last > g_view.gap) g_view.gap = t - g_view.last;
@@ -8142,6 +8225,11 @@ static void PresentSetup(void)
     unsigned char *base = (unsigned char *)GetModuleHandleA(NULL), *at = base + (PRESENT_VA - 0x400000u);
     InterlockedExchange(&g_blurOn, 0);
     if (g_blurMs <= 0 || !g_holdOn) return;
+    if (g_gameGL) {                                              /* (its frames go out through OpenGL, never this present) */
+        Log("blur off: the game draws with OpenGL, whose frames the present it hooks never sees, so screens end as the game "
+            "ends them and the view fades as each screen goes");
+        return;
+    }
     unsigned ours = (unsigned)((ULONG_PTR)PresentStub - (ULONG_PTR)(at + 5));
     int mine = Readable(at, (int)sizeof kPresent) && at[0] == 0xE9 && Rd32(at + 1) == ours && at[5] == 0x90 &&
                Same(at + 6, kPresent + 6, (int)sizeof kPresent - 6);
