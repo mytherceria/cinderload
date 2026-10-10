@@ -5591,7 +5591,7 @@ static int TextHas(const char *list, const char *name)
  * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
-       VT_TITLES, VT_COUNT };
+       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_COUNT };   /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client) */
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -7397,6 +7397,178 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     }
 }
 
+/* ---- vanilla's own bar (the parchment style's, slice 1; his pick 10 Oct 2026, "b4", after four rounds of mocks) ----
+ * The client's own loading-bar frame and glass (Interface\Glues\LoadingBar, read from its archives, never shipped) at
+ * the art's own proportions, 512 x 64 texels at the UI's height scale (a texel H / 768 pixels: 720 x 90 on a 1080-tall
+ * screen), centred across the window, its centre VBAR_CY of the height up from the bottom (the client's own place for
+ * it). The fill: the class's colour, flat, with raw heat and no white (his "b4"): a slow heat drifts along the channel
+ * toward the tip, dark where it is cool and the class's colour at full where it is hot, never whiter than it. Its
+ * leading edge lit from within, a faint halo past it in the dark (his (b), 10 Oct); full, a last sweep runs the bar and
+ * the metal flashes in the class's light. No spark, no pulse, no surges, no crackle (his calls). Until the parchment
+ * map is built, Data\CinderLoad\bar-vanilla.txt puts it in place of the blade. */
+#define VBAR_BORDER_PATH "Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp"
+#define VBAR_GLASS_PATH  "Interface\\Glues\\LoadingBar\\Loading-BarGlass.blp"
+#define VBAR_TEX_W    512           /* the frame and the glass: 512 x 64 texels */
+#define VBAR_TEX_H    64
+#define VBAR_UI_H     768.0f        /* a texel is the window's height over this */
+#define VBAR_CY       0.075f        /* its centre this far up from the bottom, of the height (the client's table, VA 0x7FFD34) */
+#define VBAR_C0       28            /* the channel behind the frame, in texels (a little under the metal, which hides */
+#define VBAR_C1       484           /* the fill's ends): left, right, */
+#define VBAR_R0       18            /* top, */
+#define VBAR_R1       46            /* bottom */
+#define VBAR_COL      4.0f          /* the fill's columns, this many texels wide, */
+#define VBAR_ROWS     7             /* and its bands, top to bottom */
+#define VBAR_DRIFT    20.0f         /* the heat drifts toward the tip this many texels a second */
+#define VBAR_MID      0.54f         /* the heat's middle, and how far its noise is spread either side of it (fitted to */
+#define VBAR_SPREAD   1.19f         /* his mock's: dark about an eighth of the fill, at full colour about two fifths) */
+#define VBAR_EDGE     22.0f         /* the lit edge: how far back it reaches (texels), */
+#define VBAR_HALO     10.0f         /* its halo: how far into the dark, */
+#define VBAR_HALO_MAX 30.0f         /* drawn at the most this far */
+#define VBAR_SWEEP_S  0.6f          /* full: the last sweep runs the channel in this long (s), */
+#define VBAR_SWEEP_W  36.0f         /* this wide (texels), */
+#define VBAR_FLASH_AT 0.5f          /* the metal flashes this long after it filled, */
+#define VBAR_FLASH_S  0.45f         /* fading in about this long, */
+#define VBAR_FLASH    1.8f          /* this bright (the frame added this many times over, at its first) */
+static int g_vbarAsked, g_barVanilla;   /* bar-vanilla.txt is there; and its pictures reached OpenGL: the view draws it */
+static DWORD g_vbFullAt;                /* the view's clock as it filled (0 while it is filling) */
+
+/* Where it sits in a W x H window: a texel's size (*s) and its top left (*x0, *y0). */
+static void VBarLayout(float W, float H, float *s, float *x0, float *y0)
+{
+    float k = H / VBAR_UI_H;
+    if (VBAR_TEX_W * k > 0.96f * W) k = 0.96f * W / VBAR_TEX_W;   /* (a window narrower than 2:3: as wide as fits) */
+    *s = k; *x0 = (W - VBAR_TEX_W * k) / 2; *y0 = H - VBAR_CY * H - VBAR_TEX_H * k / 2;
+}
+/* The heat at x texels along the channel and y down it, t s on: two octaves of value noise, drifting toward the tip,
+ * about 0 to 1 (nine tenths of it between a fifth and 0.86, as in his mock). */
+static float VBarHeat(float x, float y, float t)
+{
+    float u = x - VBAR_DRIFT * t;
+    float n = (SaberNoise(u / 100.0f, y / 14.0f, 131) + 0.5f * SaberNoise(u / 50.0f, y / 7.0f + 7.3f, 137)) / 1.5f;
+    return VBAR_MID + (n - 0.5f) * VBAR_SPREAD;
+}
+/* How lit the fill is at a heat, times the class's colour: deep where it is cool, past 1 where it is hot (the colour then
+ * clipped at full, never whitened: his "b4"). The mock's own curve. */
+static float VBarLevel(float heat)
+{
+    float k = FireClamp((heat - 0.20f) / 0.65f, 0, 1), g = 0.30f + 0.70f * k * k * (3 - 2 * k);
+    return 0.03f + 1.02f * FireClamp((g - 0.42f) * 1.75f + 0.42f, 0, 1);
+}
+static unsigned VBarRgb(const float *c)
+{
+    unsigned out = 0;
+    for (int i = 0; i < 3; i++) out = out << 8 | (unsigned)(int)(FireClamp(c[i], 0, 1) * 255 + 0.5f);
+    return out;
+}
+/* The fill's colour at x texels along the channel, y down it: its heat in the class's colour, the lit edge near the
+ * front, and full, the last sweep (sw: its place, or a long way off). */
+static unsigned VBarFill(float x, float y, float t, float front, float sw, const float *tint, const float *hot, float edgeK)
+{
+    float l = VBarLevel(VBarHeat(x, y, t)), c[3];
+    float d = (x - front) / VBAR_EDGE, e = (float)FireExp(-(double)(d * d)) * edgeK;
+    float q = (x - sw) / VBAR_SWEEP_W, S = FireClamp(0.7f * 1.2f * (float)FireExp(-(double)(q * q)), 0, 0.9f);
+    for (int i = 0; i < 3; i++) {
+        c[i] = FireClamp(tint[i] * l, 0, 1);
+        c[i] += (hot[i] - c[i]) * e;                                   /* (b): the edge lit from within */
+        float h2 = FireClamp(hot[i] * 1.15f, 0, 1);
+        c[i] += (h2 - c[i]) * S;                                       /* full: the last sweep */
+    }
+    return VBarRgb(c);
+}
+static void VBarBuild(float W, float H, float shown, DWORD now)
+{
+    LONG cl = g_class;
+    unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0];
+    float tint[3] = { (float)(base >> 16 & 255) / 255, (float)(base >> 8 & 255) / 255, (float)(base & 255) / 255 }, hot[3], glow[3], dark[3] = { 0.05f, 0.05f, 0.05f };
+    float glow2[3];                                                  /* (the flash: the edge's light, a little brighter) */
+    for (int i = 0; i < 3; i++) { hot[i] = FireClamp(tint[i] * 0.55f + 0.50f, 0, 1); glow[i] = FireClamp(tint[i] * 1.1f, 0, 1); glow2[i] = FireClamp(hot[i] * 1.1f, 0, 1); }
+    float s, bx, by, t = (float)(now % 3600000u) / 1000.0f;
+    VBarLayout(W, H, &s, &bx, &by);
+    float span = (float)(VBAR_C1 - VBAR_C0), front = FireClamp(shown, 0, 1) * span;   /* (texels along the channel) */
+    float cx0 = bx + VBAR_C0 * s, ry0 = by + VBAR_R0 * s, rh = (float)(VBAR_R1 - VBAR_R0) / VBAR_ROWS;
+    if (shown >= 1) { if (!g_vbFullAt) g_vbFullAt = now ? now : 1; } else g_vbFullAt = 0;
+    float age = g_vbFullAt ? (float)(LONG)(now - g_vbFullAt) / 1000.0f : -1;
+    float sw = age >= 0 && age < VBAR_SWEEP_S * 1.25f ? age / VBAR_SWEEP_S * span : -1e6f;
+    float flash = age >= VBAR_FLASH_AT ? VBAR_FLASH * 0.75f * (float)FireExp(-(double)(age - VBAR_FLASH_AT) / VBAR_FLASH_S) : 0;
+    float edgeK = 0.62f + 0.08f * SeaSin(t * 2 * 3.14159265f / 1.7f);
+    /* the dark channel, its whole length */
+    {
+        float x[4] = { cx0, cx0 + span * s, cx0 + span * s, cx0 }, y[4] = { ry0, ry0, by + VBAR_R1 * s, by + VBAR_R1 * s };
+        DWORD c[4] = { 0xFF0D0D0Du, 0xFF0D0D0Du, 0xFF0D0D0Du, 0xFF0D0D0Du };
+        SaberPut(-1, 0, x, y, c, NULL);
+    }
+    /* the fill: columns VBAR_COL texels wide up to the front, VBAR_ROWS bands each, each corner its own colour */
+    for (float xa = 0; xa < front - 0.001f; xa += VBAR_COL) {
+        float xb = xa + VBAR_COL < front ? xa + VBAR_COL : front;
+        for (int r = 0; r < VBAR_ROWS; r++) {
+            float ya = r * rh, yb = (r + 1) * rh;
+            float x[4] = { cx0 + xa * s, cx0 + xb * s, cx0 + xb * s, cx0 + xa * s };
+            float y[4] = { ry0 + ya * s, ry0 + ya * s, ry0 + yb * s, ry0 + yb * s };
+            DWORD c[4] = { 0xFF000000u | VBarFill(xa, ya, t, front, sw, tint, hot, edgeK), 0xFF000000u | VBarFill(xb, ya, t, front, sw, tint, hot, edgeK),
+                           0xFF000000u | VBarFill(xb, yb, t, front, sw, tint, hot, edgeK), 0xFF000000u | VBarFill(xa, yb, t, front, sw, tint, hot, edgeK) };
+            SaberPut(-1, 0, x, y, c, NULL);
+        }
+    }
+    /* (b): the halo past the front, into the dark channel, in columns two texels wide */
+    float reach = span - front < VBAR_HALO_MAX ? span - front : VBAR_HALO_MAX;
+    for (float xa = 0; xa < reach - 0.001f; xa += 2) {
+        float xb = xa + 2 < reach ? xa + 2 : reach, k[2] = { xa / VBAR_HALO, xb / VBAR_HALO }, c2[2][3];
+        for (int j = 0; j < 2; j++)
+            for (int i = 0; i < 3; i++) c2[j][i] = dark[i] + (glow[i] - dark[i]) * 0.55f * (float)FireExp(-(double)(k[j] * k[j]));
+        float x[4] = { cx0 + (front + xa) * s, cx0 + (front + xb) * s, cx0 + (front + xb) * s, cx0 + (front + xa) * s };
+        float y[4] = { ry0, ry0, by + VBAR_R1 * s, by + VBAR_R1 * s };
+        DWORD c[4] = { 0xFF000000u | VBarRgb(c2[0]), 0xFF000000u | VBarRgb(c2[1]), 0xFF000000u | VBarRgb(c2[1]), 0xFF000000u | VBarRgb(c2[0]) };
+        SaberPut(-1, 0, x, y, c, NULL);
+    }
+    /* the glass over the channel only (its faint haze past the metal is no part of the bar), then the frame over it, then
+     * (full) the frame again, added, in the class's light: the flash */
+    float ex = bx + VBAR_TEX_W * s, ey = by + VBAR_TEX_H * s;
+    ViewRect(VT_VGLASS, cx0, ry0, cx0 + span * s, by + VBAR_R1 * s, (float)VBAR_C0 / VBAR_TEX_W, (float)VBAR_R0 / VBAR_TEX_H,
+             (float)VBAR_C1 / VBAR_TEX_W, (float)VBAR_R1 / VBAR_TEX_H, 0xFFFFFFFFu);
+    ViewRect(VT_VBORDER, bx, by, ex, ey, 0, 0, 1, 1, 0xFFFFFFFFu);
+    for (float f = flash; f > 0.004f; f -= 1) {                         /* (past 1: the frame added once more) */
+        ViewVert *q = ViewQuadMode(VT_VBORDER, 1);
+        if (!q) break;
+        DWORD c = SaberArgb(VBarRgb(glow2), f < 1 ? f : 1);
+        ViewVertSet(q, bx, by, 0, 0, c); ViewVertSet(q + 1, ex, by, 1, 0, c);
+        ViewVertSet(q + 2, ex, ey, 1, 1, c); ViewVertSet(q + 3, bx, ey, 0, 1, c);
+    }
+}
+
+/* One of the client's own pictures, read only: the newest copy across its archives, in the order the client lets them
+ * win (patch-~, ours, passed over; a zero-length stub passed over), then base, its last word. 1, and where it came
+ * from, when it was read; 0, and why not. */
+static int ClientPicture(const char *path, const char *base, unsigned char **out, unsigned *len, const char **from)
+{
+    static const char kOrder[] = "ZYXWVUTSRQPONMLKJIHGFEDCBA98765432";
+    static char arch[16];
+    *from = "in none of the client's archives";
+    for (int a = 0; a <= (int)sizeof kOrder; a++) {
+        if (a < (int)sizeof kOrder - 1) { lstrcpyA(arch, "patch-?.MPQ"); arch[6] = kOrder[a]; }
+        else lstrcpyA(arch, a == (int)sizeof kOrder - 1 ? "patch.MPQ" : base);
+        int r = mpq_read(&kIo, arch, path, out, len);
+        if (r == MPQ_E_NOT_FOUND || r == MPQ_E_NO_ARCHIVE || r == MPQ_E_EMPTY) continue;
+        if (r != MPQ_OK) { *from = "unreadable"; return 0; }       /* (the newest copy decides) */
+        *from = arch;
+        return 1;
+    }
+    return 0;
+}
+/* Vanilla's own bar asked for (Data\CinderLoad\bar-vanilla.txt, until the parchment style picks it): its frame and glass
+ * read into the view's files (blp, len: by picture slot), each logged. */
+static void VBarRead(unsigned char **blp, unsigned *len)
+{
+    char flag[MAX_PATH], m[300];
+    g_vbarAsked = Join(flag, g_dir, "Data\\CinderLoad\\bar-vanilla.txt") && Exists(flag);
+    if (!g_vbarAsked) return;
+    static const struct { int slot; const char *path; } kPics[2] = { { VT_VBORDER, VBAR_BORDER_PATH }, { VT_VGLASS, VBAR_GLASS_PATH } };
+    for (int i = 0; i < 2; i++) {
+        const char *from;
+        int ok = ClientPicture(kPics[i].path, "interface.MPQ", &blp[kPics[i].slot], &len[kPics[i].slot], &from);
+        wsprintfA(m, "  the view's bar: %s %s %s", kPics[i].path, ok ? "read from" : "not read:", from);
+        Log(m);
+    }
+}
 /* W x H pixels at the view's clock now: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its
  * top left, [2], [3] its bottom right), the overlay over it, and the blade, its tip the bar as shown. */
 static void ViewBuild(float W, float H, float shown, DWORD now)
@@ -7407,7 +7579,8 @@ static void ViewBuild(float W, float H, float shown, DWORD now)
     ViewOverlayBuild(W, H, now);
     TodGrade(W, 0, g_vvN);                                      /* the world, lit by it */
     TodDiscBuild(W, H);                                         /* its sun or moon */
-    SaberBuild(W, H, shown, now);
+    if (g_barVanilla) VBarBuild(W, H, shown, now);               /* vanilla's own bar (bar-vanilla.txt), */
+    else SaberBuild(W, H, shown, now);                          /* or the blade */
 }
 
 /* The view's thread, a screen up and the view not open: 1 once the game's first frame of it has begun it (seen: the
@@ -7837,6 +8010,13 @@ static int ViewOpen(const char **why)
         Log(m);
         Log(ViewSparkUp() ? "  the view's blade: one bar for every class, in its colour; its spark given to OpenGL"
                           : "  the view's blade: its spark was not given to OpenGL; the blade has no tip, sparks or light on the logo");
+        if (g_vbarAsked) {
+            g_barVanilla = g_viewTex[VT_VBORDER] && g_viewTex[VT_VGLASS];
+            Log(g_barVanilla ? "  the view's bar: vanilla's own in place of the blade (Data\\CinderLoad\\bar-vanilla.txt): its frame and glass "
+                               "the client's, its fill the class's colour, dark where the heat is cool and full where it is hot"
+                             : "  the view's bar: Data\\CinderLoad\\bar-vanilla.txt asks for vanilla's own, but its frame or glass did not "
+                               "reach OpenGL; the blade instead");
+        }
         if (g_skyOn)
             Log(ViewSkyUp() ? "  the view's sky: its clouds' picture made with OpenGL, given anew about 30 times a second"
                             : "  the view's sky: OpenGL would not make its clouds' picture; the weather is left out");
@@ -7963,6 +8143,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
     }
     if (g_todStyle & TOD_DISC)                          /* the client's own sun and moon, from its minimap (read only) */
         mpq_read(&kIo, "interface.MPQ", TOD_PATH, &g_view.blp[VT_TIME], &g_view.len[VT_TIME]);
+    VBarRead(g_view.blp, g_view.len);                   /* vanilla's own bar, when bar-vanilla.txt asks for it (read only) */
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
     LONG seen = g_gameSeq, worldSeen = 0;
     DWORD fadeAt = 0, waitAt = 0;

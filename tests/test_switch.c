@@ -5271,6 +5271,164 @@ static void TestViewDefault(void)
     g_gameWindowed = 0;
 }
 
+/* Vanilla's own bar (the parchment style's, slice 1; his pick 10 Oct 2026, "b4", after four rounds of mocks): the
+ * client's frame and glass at the art's own proportions, 512 x 64 texels at H / 768, centred, its centre 0.075 of the
+ * height up (the client's own); the fill the class's colour with raw heat and no white, the edge lit and a halo past
+ * it, full a sweep and the metal's flash; no spark (his "no spark"); bar-vanilla.txt asks for it, the client's newest
+ * copies read, ours passed over. */
+static int VBarPure(const ViewVert *v, unsigned rgb, float *k)       /* a corner in the class's colour, k of it, no white mixed in */
+{
+    float r = (float)(rgb >> 16 & 255), g = (float)(rgb >> 8 & 255), b = (float)(rgb & 255), m = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    float c[3] = { v->c[0], v->c[1], v->c[2] }, t[3] = { r, g, b }, top = m == r ? c[0] : m == g ? c[1] : c[2];
+    *k = top / m;
+    for (int i = 0; i < 3; i++) if (fabsf(c[i] - t[i] * *k) > 1.6f || c[i] > t[i] * 1.06f + 1) return 0;   /* (hot: up to 1.05 of it, as his mock) */
+    return 1;
+}
+static void TestVanillaBar(void)
+{
+    float s, bx, by;
+    VBarLayout(1920, 1080, &s, &bx, &by);
+    int ok = Near(s, 1080.0 / 768, 1e-5) && Near(bx, 600, 1e-3) && Near(by + 32 * s, 1080 - 81, 1e-3);
+    VBarLayout(5120, 2160, &s, &bx, &by);
+    ok &= Near(512 * s, 1440, 1e-2) && Near(64 * s, 180, 1e-2) && Near(bx, 1840, 1e-2) && Near(by + 32 * s, 2160 - 162, 1e-2);
+    VBarLayout(600, 1000, &s, &bx, &by);
+    ok &= Near(512 * s, 576, 1e-2) && Near(bx, 12, 1e-2);
+    Check(ok, "vanilla's bar: the art's own proportions at the UI's height scale (720 x 90 at 1080, 1440 x 180 on his 2160), centred, its centre the client's own 0.075 of the height up; a window narrower than 2:3, as wide as it fits");
+
+    /* the heat: it drifts toward the tip, its shape kept; deep and full both in it, as in his mock */
+    int drift = 1, dark = 0, full = 0, n = 0;
+    for (int i = 0; i < 40; i++) {
+        float x = 11.0f * i, y = (float)(i % 29), t = 0.37f * i;
+        drift &= Near(VBarHeat(x + VBAR_DRIFT * 1.5f, y, t + 1.5f), VBarHeat(x, y, t), 1e-4);
+    }
+    drift &= !Near(VBarHeat(0, 0, 0), VBarHeat(60, 0, 0), 0.02) || !Near(VBarHeat(0, 0, 0), VBarHeat(130, 9, 0), 0.02);
+    for (int t = 0; t < 40; t++) for (int x = 0; x < 456; x += 4) for (int y = 0; y <= 28; y += 7) {
+        float l = VBarLevel(VBarHeat((float)x, (float)y, t * 3.7f));
+        dark += l < 0.35f; full += l >= 1.0f; n++;
+    }
+    Check(drift && dark > n / 14 && dark < n / 5 && full > n / 4 && full < n / 2,
+          "vanilla's bar: its heat drifts toward the tip, its shape kept; dark over about an eighth of the fill and the class's colour at full over about two fifths (his mock's)");
+
+    /* a warlock's at 60%: the map, then the channel, the fill and the halo, the glass over the channel, the frame */
+    static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
+    memcpy(g_bgUV, uv, sizeof uv);
+    g_ovOn = 0; g_logoOn = 0; g_frameOn = 0; g_class = 9;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    g_barVanilla = 1; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1; g_vbFullAt = 0;
+    ViewBuild(1920, 1080, 0.6f, 5000);
+    VBarLayout(1920, 1080, &s, &bx, &by);
+    float front = 0.6f * 456, cx0 = bx + 28 * s;
+    int cols = (int)(front / 4) + 1, fillQ = cols * VBAR_ROWS, haloQ = 15;
+    const ViewVert *gl = g_vv + g_vb[2].first, *bd = g_vv + g_vb[3].first, *ch = g_vv + g_vb[1].first;
+    ok = g_vbN == 4 && g_vb[0].tex == VT_MAP && g_vb[1].tex == -1 && !g_vb[1].add && g_vb[1].count == 4 * (1 + fillQ + haloQ) &&
+         g_vb[2].tex == VT_VGLASS && !g_vb[2].add && g_vb[2].count == 4 && g_vb[3].tex == VT_VBORDER && !g_vb[3].add && g_vb[3].count == 4 &&
+         Near(bd[0].x, 600, 1e-3) && Near(bd[2].x, 1320, 1e-3) && Near(bd[0].y, by, 1e-3) && Near(bd[2].y, by + 90, 1e-3) &&
+         bd[0].u == 0 && bd[0].v == 0 && bd[2].u == 1 && bd[2].v == 1 && bd[0].c[0] == 255 && bd[0].c[3] == 255 &&
+         Near(gl[0].x, cx0, 1e-3) && Near(gl[2].x, cx0 + 456 * s, 1e-3) && Near(gl[0].y, by + 18 * s, 1e-3) && Near(gl[2].y, by + 46 * s, 1e-3) &&
+         Near(gl[0].u, 28.0 / 512, 1e-6) && Near(gl[2].u, 484.0 / 512, 1e-6) && Near(gl[0].v, 18.0 / 64, 1e-6) && Near(gl[2].v, 46.0 / 64, 1e-6) &&
+         Near(ch[0].x, cx0, 1e-3) && Near(ch[1].x, cx0 + 456 * s, 1e-3) && ch[0].c[0] == 13 && ch[0].c[3] == 255;
+    const ViewVert *last = ch + 4 * fillQ;                             /* (the last column's quad, its bottom band) */
+    ok &= Near(last[1].x, cx0 + front * s, 1e-2) && Near(ch[4].x, cx0, 1e-3);
+    Check(ok, "vanilla's bar, filling: the map, then its dark channel, the fill in columns up to the front and a halo past it, the client's glass over the channel only and its frame over all; no blade, no spark, nothing else");
+
+    /* the fill: the class's colour, k of it, never whiter (his "b4"), away from the lit edge; deep and full both seen */
+    int pure = 1, edge = 0, halo = 0;
+    float kmin = 9, kmax = 0;
+    for (int f = 0; f < 6; f++) {
+        ViewBuild(1920, 1080, 0.6f, 5000 + 12000 * (DWORD)f);
+        ch = g_vv + g_vb[1].first;
+        for (int q = 1; q <= fillQ; q++)
+            for (int j = 0; j < 4; j++) {
+                const ViewVert *v = ch + 4 * q + j;
+                float k, xt = (v->x - cx0) / s;
+                if (xt > front - 3 * VBAR_EDGE) continue;
+                pure &= VBarPure(v, 0x9482C9, &k);
+                if (k < kmin) kmin = k;
+                if (k > kmax) kmax = k;
+            }
+        const ViewVert *tip = ch + 4 * fillQ + 1;                        /* the front: the edge lit from within (paler) */
+        edge += (tip->c[0] + tip->c[1]) / (float)tip->c[2] > (148.0f + 130.0f) / 201.0f + 0.08f;
+        const ViewVert *h0 = ch + 4 * (1 + fillQ), *hn = ch + 4 * (fillQ + haloQ) + 1;   /* the halo: lit at the front, dark at its end */
+        halo += h0->c[2] > 13 + 40 && h0->c[2] > h0->c[1] && hn->c[0] <= 14 && hn->c[2] <= 16;
+    }
+    Check(pure && kmin < 0.35f && kmax > 0.99f, "vanilla's bar: the fill is the class's colour, dark where the heat is cool and at full where it is hot, never whiter than the class's colour (his \"b4\": no white)");
+    Check(edge == 6 && halo == 6, "vanilla's bar: (b) its front lit from within, paler, and a faint halo in the class's light past it, fading to the dark channel");
+
+    /* the same for every class, only its colour: a hunter's at the same moment */
+    ViewBuild(1920, 1080, 0.6f, 5000);
+    static ViewVert wl[4 * 600];
+    int nv = g_vb[1].count < 4 * 600 ? g_vb[1].count : 4 * 600;
+    memcpy(wl, g_vv + g_vb[1].first, sizeof(ViewVert) * (size_t)nv);
+    g_class = 3;
+    ViewBuild(1920, 1080, 0.6f, 5000);
+    int same = g_vb[1].count == nv, recol = 0;
+    for (int i = 0; same && i < nv; i++) {
+        same &= wl[i].x == g_vv[g_vb[1].first + i].x && wl[i].y == g_vv[g_vb[1].first + i].y;
+        recol |= memcmp(wl[i].c, g_vv[g_vb[1].first + i].c, 4) != 0;
+    }
+    Check(same && recol, "vanilla's bar: the same for every class, only its colour the class's (a hunter's where the warlock's was)");
+
+    /* full: a last sweep runs the channel, then the frame flashes in the class's light, then settles; a new screen afresh */
+    g_class = 9;
+    ViewBuild(1920, 1080, 0.9f, 10000);
+    ViewBuild(1920, 1080, 1.0f, 10500);                                  /* it fills */
+    ViewBuild(1920, 1080, 1.0f, 10700);                                  /* 0.2 s on: the sweep a third of the way */
+    ch = g_vv + g_vb[1].first;
+    cols = 456 / 4;
+    int swept = 0, calm = 1;
+    for (int q = 1; q <= cols * VBAR_ROWS; q++) {
+        const ViewVert *v = ch + 4 * q;
+        float k, xt = (v->x - cx0) / s;
+        if (fabsf(xt - 152) < 8) swept |= !VBarPure(v, 0x9482C9, &k);
+        if (xt > 260 && xt < 456 - 3 * VBAR_EDGE) calm &= VBarPure(v, 0x9482C9, &k);
+    }
+    int noFlash = g_vbN == 4;
+    ViewBuild(1920, 1080, 1.0f, 11100);                                  /* 0.6 s on: the flash */
+    int flash = g_vbN == 5 && g_vb[4].tex == VT_VBORDER && g_vb[4].add == 1 && g_vb[4].count == 8 && g_vv[g_vb[4].first].c[3] == 255;
+    ViewBuild(1920, 1080, 1.0f, 14500);                                  /* 4 s on: settled */
+    int settled = g_vbN == 4;
+    ViewBuild(1920, 1080, 0.3f, 15000);                                  /* a new screen */
+    Check(swept && calm && noFlash && flash && settled && g_vbFullAt == 0,
+          "vanilla's bar, full: a last sweep runs the channel (paler where it passes, the class's colour elsewhere), then the frame flashes in the class's light (added, past full strength: twice), then settles; a new screen begins it afresh");
+
+    g_barVanilla = 0;
+    ViewBuild(1920, 1080, 0.6f, 5000);
+    int blade = 1;
+    for (int b = 0; b < g_vbN; b++) blade &= g_vb[b].tex != VT_VBORDER && g_vb[b].tex != VT_VGLASS;
+    Check(blade, "vanilla's bar off (no bar-vanilla.txt, or its pictures never reached OpenGL): the blade as it was");
+    g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 0; g_class = 0; g_vbFullAt = 0;
+
+    /* reading it: only when bar-vanilla.txt is there; each picture the client's newest copy, ours (patch-~) and a
+     * zero-length stub passed over, the base archive its last word; the log says where each came from */
+    static const char *const names[2] = { VBAR_BORDER_PATH, VBAR_GLASS_PATH };
+    unsigned char *vblp[VT_COUNT] = { 0 };
+    unsigned vlen[VT_COUNT] = { 0 };
+    Fresh("vanilla-bar");
+    GameDir();
+    VBarRead(vblp, vlen);
+    ok = !g_vbarAsked && !vblp[VT_VBORDER] && !vblp[VT_VGLASS];
+    Put("Data/CinderLoad/bar-vanilla.txt", "");
+    static const char *const inBase[2] = { "base-border", "base-glass" }, *const inFive[1] = { "patch5-border" };
+    static const char *const ours[2] = { "ours-border", "ours-glass" }, *const stub[1] = { "" };
+    MakeMpq("Data/interface.MPQ", 2, names, inBase, NULL);
+    MakeMpq("Data/patch-5.MPQ", 1, names, inFive, NULL);
+    MakeMpq("Data/patch-~.MPQ", 2, names, ours, NULL);
+    MakeMpq("Data/patch-9.MPQ", 1, names + 1, stub, NULL);
+    VBarRead(vblp, vlen);
+    ok &= g_vbarAsked && vblp[VT_VBORDER] && vlen[VT_VBORDER] == 13 && !memcmp(vblp[VT_VBORDER], "patch5-border", 13) &&
+          vblp[VT_VGLASS] && vlen[VT_VGLASS] == 10 && !memcmp(vblp[VT_VGLASS], "base-glass", 10) &&
+          LogSays("Loading-BarBorder.blp read from patch-5.MPQ") && LogSays("Loading-BarGlass.blp read from interface.MPQ");
+    for (int i = VT_VBORDER; i <= VT_VGLASS; i++) { if (vblp[i]) HeapFree(GetProcessHeap(), 0, vblp[i]); vblp[i] = NULL; }
+    Fresh("vanilla-bar-ours-only");
+    GameDir();
+    Put("Data/CinderLoad/bar-vanilla.txt", "");
+    MakeMpq("Data/patch-~.MPQ", 2, names, ours, NULL);
+    VBarRead(vblp, vlen);
+    ok &= g_vbarAsked && !vblp[VT_VBORDER] && !vblp[VT_VGLASS] && LogSays("not read: in none of the client's archives");
+    g_vbarAsked = 0;
+    Check(ok, "vanilla's bar read: only when Data/CinderLoad/bar-vanilla.txt is there; the client's newest copy of each picture (patch-5 over the base), ours and a zero-length stub passed over; none of the client's: not read, and the log says so");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -5453,6 +5611,7 @@ int main(int argc, char **argv)
     TestClouds();
     TestTimeOfDay();
     TestViewDefault();
+    TestVanillaBar();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
