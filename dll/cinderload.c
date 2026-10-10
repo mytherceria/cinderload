@@ -3691,6 +3691,17 @@ static void GlowBuild(DWORD now)
 __attribute__((used)) float g_blackPos[4 * 3];
 __attribute__((used)) float g_blackUV[4 * 2];
 __attribute__((used)) unsigned g_blackCol[4];
+/* The whole screen black (his note, 10 Oct: the game's own world map showed for an eighth of a second before the
+ * parchment, in his recording): with the parchment on, the game's own frames of a screen, the ones before the view takes
+ * it over, show nothing of the living map's picture, so the screen goes black, then the dark paper. */
+static int g_parchAsked;                         /* (the parchment's, below: Data\\CinderLoad\\parchment.txt is there) */
+static void ParchBlackBuild(void)
+{
+    static const float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, 1, 1 };
+    static const float tu[4] = { SEA_SQUARE_U, SEA_SQUARE_U, SEA_SQUARE_U, SEA_SQUARE_U };
+    static const float tv[4] = { SEA_DEEP_V, SEA_DEEP_V, SEA_DEEP_V, SEA_DEEP_V };
+    QuadPut(g_blackPos, g_blackUV, g_blackCol, 0, x, y, tu, tv, 0xFFFFFFFFu);
+}
 static void BarBlackBuild(void)
 {
     static const float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, BAR_BLACK_H, BAR_BLACK_H };
@@ -5010,6 +5021,14 @@ static void OverlayDrawAll(void)
     static DWORD last;
     float dt = last ? (float)(now - last) / 1000.0f : 0;
     last = now;
+    if (g_parchAsked && ViewWillDraw(now)) {                      /* the parchment coming: none of the living map, black */
+        if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
+        if (g_seaTex) {
+            ParchBlackBuild();
+            OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_blackPos, g_blackUV, g_blackCol, 1);
+        }
+        return;
+    }
     if (g_lblOn && !g_lblTex && !g_lblTried) { g_lblTried = 1; g_lblTex = OverlayLoad(LABELS_PATH); }   /* the biggest: first */
     if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
     if (g_marksOn && !g_marksTex && !g_marksTried) { g_marksTried = 1; g_marksTex = OverlayLoad(MARKS_PATH); }

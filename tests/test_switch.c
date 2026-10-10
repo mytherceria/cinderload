@@ -5589,6 +5589,10 @@ static void TestParchment(void)
     ok &= g_vbN == 0;
     g_parchOn = 1;
     Check(ok, "a screen's first frame, made at once as the view opens: the dark paper and the empty bar for the parchment, nothing for the living map; never the last screen's frame");
+    ParchBlackBuild();                                               /* the game's own frames before the view's: black */
+    ok = g_blackPos[0] == 0 && g_blackPos[1] == 0 && g_blackPos[3] == 1 && g_blackPos[4] == 0 && g_blackPos[6] == 0 && g_blackPos[7] == 1 &&
+         g_blackPos[9] == 1 && g_blackPos[10] == 1 && g_blackUV[0] == SEA_SQUARE_U && g_blackUV[1] == SEA_DEEP_V && g_blackCol[0] == 0xFFFFFFFFu;
+    Check(ok, "with the parchment on, the game's own frames of a screen before the view's are black from corner to corner (the sea sheet's deep square), none of the living map's picture");
     g_destWX = -9300;                                                  /* (another arrival, its painting not up for it yet) */
     ViewBuild(1920, 1080, 0.5f, 20000);
     ok = g_vb[0].tex == -1 && g_vb[0].count >= 4 * Q;                  /* (the bar's channel joins the paper's batch) */
