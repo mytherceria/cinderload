@@ -1452,23 +1452,41 @@ static void LiveTests(void)
                   g_frmShown == 100;
         Check(steady, "the bar as shown: lumps followed at an even pace, a stall eased into, a leap after a pause glided, no dip, full at the end; its pause logged");
         /* the view stepping it (his 7 Oct load: the game paused at 54%, then its bar read 100% and froze there two
-         * seconds; the bar shown leapt from 52% to full in one frame): it runs the rest at its fastest, smoothly, and is
-         * full well inside the freeze */
+         * seconds; the bar shown leapt from 52% to full in one frame; then, 10 Oct, "the bar loads all of a sudden from half
+         * to full, the bar should load at an even rate all the way up to 100% with no stutters or jumps"): it goes on at an
+         * even rate on the clock, from where it was, never back, full EVEN_EARLY_MS before the world is due */
         g_disp = g_dispV = g_dispRate = g_dispMax = 0; g_dispAt = 0;
         t = 500000; last = 0;
         for (int f = 0; f < 300 && last < 0.52f; f++) { t += 20; p = 0.54f * f / 299.0f + 0.3f; if (p > 0.54f) p = 0.54f; last = DisplayStep(p, t); }
         InterlockedExchange(&g_viewSteps, 1);
-        float from = last, step = 0, full = 0;
-        for (int f = 1; f <= 100 && !full; f++) {
+        g_evenOn = 0; g_evenU = 0; g_evenEndAt = 0;
+        LONG fzv = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS;
+        LONG tailv = g_blurOn && g_blurMs > HOLD_TAIL_MS ? g_blurMs : HOLD_TAIL_MS;
+        g_planEndAt = t + 2000;
+        DWORD due = g_planEndAt + (DWORD)tailv + (DWORD)fzv + VIEW_WORLD_GAP_MS - EVEN_EARLY_MS;
+        float from = last, step = 0, least = 1, full = 0, back = 0;
+        for (int f = 1; f <= 1200 && !full; f++) {
             t += 7;
             float d = DisplayStep(1, t);
             if (d - last > step) step = d - last;
+            if (d < 1 && d - last < least) least = d - last;
+            if (d < last) back = 1;
             last = d;
-            if (d > 0.999f) full = f * 0.007f;
+            if (d > 0.999f) full = (float)(LONG)(t - due) + 10000;      /* (ms from when it was due, offset to stay non-zero) */
         }
+        /* the game behind its plan (stalled at 54% long past it): the view's bar creeps on, slower, never full before the game's */
+        g_disp = g_dispV = g_dispRate = g_dispMax = 0; g_dispAt = 0; g_evenOn = 0; g_evenU = 0; g_evenEndAt = 0;
+        DisplayStep(0.54f, t += 7);
+        g_planEndAt = t + 500;
+        float slow = 0;
+        for (int f = 0; f < 1500; f++) { t += 7; slow = DisplayStep(0.54f, t); }    /* (ten seconds stalled) */
+        int waited = slow <= EVEN_WAIT + 1e-6f && slow > 0.9f;
+        for (int f = 0; f < 600 && slow < 0.999f; f++) { t += 7; slow = DisplayStep(1, t); }
+        waited &= slow > 0.999f;
         InterlockedExchange(&g_viewSteps, 0);
-        Check(from < 0.6f && step <= DISP_FASTEST * 0.007f + 1e-5f && full > 0.2f && full < 0.7f,
-              "the view's bar when the game's leaps to 100% and freezes: it runs the rest at its fastest, a frame at a time, full in about half a second (no leap from 52% to full)");
+        Check(waited, "the view's bar with the game behind its plan: on, slower, never full before the game's bar is, then full");
+        Check(from < 0.6f && !back && fabsf(full - 10000) <= 30 && step < 1.6f * least && step < 0.01f,
+              "the view's bar when the game's leaps to 100% and freezes: on at an even rate from where it was (never back, no step much bigger than another), full EVEN_EARLY_MS before the world is due (no leap from half to full)");
     }
     /* his three logins (4 Oct) paused 0.2 to 0.6 s at 41, 44, 50 and 54%, the game drawing nothing: a bar moving steadily
      * comes out of a pause where its pace would have taken it (no lag to hurry back from), and a long freeze counts
@@ -3665,19 +3683,24 @@ static void ViewTests(void)
         ok &= ViewStep(p, t + 1, 1000, 500) && g_disp == d0 && fabsf(g_viewH - h0) < 1e-6f && g_drift == dr && g_dispAt == t + 4;
         t += 4;
         /* the game stalls 0.6 s (a big add-on file): no frame of its own, its bar where it was; the view's go on, every
-         * one of them a step closer, the bar never more than DISP_LEAD past the game's */
+         * one of them a step closer, and its bar on at an even rate (his rule, 10 Oct: "the bar should load at an even rate
+         * all the way up to 100% with no stutters or jumps"), never full before the game's */
         DWORD stall = t;
         int moving = 1, steps = 0;
-        float lastH = g_viewH, lastU = g_viewU, most = 0;
+        float lastH = g_viewH, lastU = g_viewU, most = 0, lastS = g_viewShown, dMin = 1, dMax = 0;
         while (t - stall < 600) {
             t += 7;
             ViewStep(p, t, 1000, 500);
             if (t - stall <= 300) moving &= g_viewH < lastH && g_viewU != lastU;
             lastH = g_viewH; lastU = g_viewU;
+            float dS = g_viewShown - lastS;
+            if (dS < dMin) dMin = dS;
+            if (dS > dMax) dMax = dS;
+            lastS = g_viewShown;
             if (g_viewShown > most) most = g_viewShown;
             steps++;
         }
-        ok &= moving && steps > 80 && most <= p + DISP_LEAD + 1e-5f && most > p;
+        ok &= moving && steps > 80 && most <= EVEN_WAIT && dMin > 0 && dMax < 1.25f * dMin;   /* (on through the stall, evenly) */
         t += 7;
         GameStep(0.55f, t);                                              /* the game's next frame: its own hitch, logged */
         ok &= g_hitchN == 1 && g_hitchMs[0] + g_hitchMs[1] + g_hitchMs[2] + g_hitchMs[3] + g_hitchMs[4] + g_hitchMs[5] >= 600 &&
@@ -3687,6 +3710,12 @@ static void ViewTests(void)
         t += 7; ViewStep(1.0f, t, 1000, 500);                            /* (the plan's on: timed) */
         PutFloat(HOLD_BAR_VA, 1.0f);
         g_holdFrame = TestHoldFrame; g_holdOn = 1; g_testFrames = 0; shim_ticks = t;
+        {                                                                /* (the plan a second and a half past the floor: held to it, never hurried) */
+            LONG fzh = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, bl = g_blurOn && g_blurMs > 0 ? g_blurMs : 0;
+            DWORD floorAt = g_scrStartAt + (DWORD)(g_holdMs - fzh - bl > 0 ? g_holdMs - fzh - bl : 0);
+            g_planEndAt = ((LONG)(floorAt - t) > 0 ? floorAt : t) + 1500;
+        }
+        DWORD planWas = g_planEndAt;
         HoldFrame();
         ok &= g_testFrames > 1 && g_stepLock.held == 0 && g_settleTo != 0;
         /* with the view, its last glide lands as the world appears (the hold's end, the machine's freeze, the world's moment
@@ -3696,7 +3725,8 @@ static void ViewTests(void)
             LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS;
             DWORD land = g_settleTo, at2 = shim_ticks;
             float hEnd = g_destH / BLUR_PUSH, lastH = 1;
-            ok &= g_settleView == 1 && (LONG)(land - at2) >= fz + VIEW_WORLD_GAP_MS - 24 && (LONG)(land - at2) <= fz + VIEW_WORLD_GAP_MS;
+            ok &= g_settleView == 1 && (LONG)(land - planWas) >= fz + VIEW_WORLD_GAP_MS && g_evenEndAt == land;   /* (with the view, no
+                                                               * hurry to settle: on to the plan, his 10 Oct "it rushes"; the even bar lands with it) */
             ViewStep(1.0f, at2, 1000, 500);
             ok &= g_viewH > hEnd * 1.3f;                                      /* the push still to come at the hold's end */
             int down = 1;

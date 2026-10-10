@@ -1475,6 +1475,10 @@ static volatile LONG g_fullMs, g_endFreezeMs, g_screenLogin;    /* this screen: 
 static volatile LONG g_holdMs = HOLD_MS;                        /* the floor (map.txt "hold"), 0 for none */
 static volatile LONG g_holdN, g_holdLast;                       /* holds made, and the last one's ms (the log) */
 static DWORD g_scrStartAt, g_planEndAt;                         /* this screen: its first frame, when its plan ends */
+#define VIEW_WORLD_GAP_MS 400   /* the world shows this long after the screen goes (his loads, 4-5 Oct: 378 to 394 ms) */
+static DWORD g_evenEndAt;                                       /* the view's even bar: when the world shows, once the hold knows */
+static float g_evenU;                                           /* ... and the bar as it shows it */
+static int g_evenOn;                                            /* (the view has stepped it this screen) */
 static float g_planU;                                           /* the plan's bar, 0..1 */
 static int g_screenKind, g_holdDone, g_timed;                   /* later (1) or first (0); held already; on the plan */
 static volatile LONG g_blurMs = BLUR_MS, g_blurDim = BLUR_DIM, g_blurOn;   /* map.txt's blur; the present's hook set */
@@ -2445,6 +2449,7 @@ static void GameFacts(float p, DWORD now)
         InterlockedExchange(&g_fullMs, 0);
         InterlockedExchange(&g_endFreezeMs, 0);
         g_screenKind = g_zoomScreens > 0;                             /* (DriftStep counts this screen after) */
+        g_evenU = 0; g_evenEndAt = 0; g_evenOn = 0;                   /* (the view's even bar starts again) */
         g_holdDone = 0;
         g_settleView = 0;
         g_planU = 0;
@@ -2483,6 +2488,31 @@ static void GameFacts(float p, DWORD now)
     g_gameAt = now;
 }
 
+/* The view's bar at an even rate (his rule, 10 Oct: "the bar should load at an even rate all the way up to 100% with no
+ * stutters or jumps"; the game's own bar sits near half and then leaps, and following it, the view's bar and its camera
+ * rushed): on the clock, not the game's bar, aimed at the moment the world shows (the plan's end, the hold's tail, this
+ * machine's freeze at the end, the world's moment after: known exactly once the hold has it), full EVEN_EARLY_MS before
+ * it so its last sweep and flash play out; each frame on at the pace that lands it then, so a later end only slows it
+ * and never jumps it. The game behind its plan: kept EVEN_AHEAD_MS ahead, slower, and never past EVEN_WAIT until the
+ * game's bar is full. Only while the view draws (the game's own frames stop in its stalls). */
+#define EVEN_EARLY_MS  900
+#define EVEN_AHEAD_MS  1500
+#define EVEN_WAIT      0.97f
+static float EvenStep(DWORD gap, DWORD now, float from)
+{
+    if (!g_evenOn) { g_evenOn = 1; if (from > g_evenU) g_evenU = from; }   /* (from the bar as the view takes it: never back) */
+    LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS;
+    LONG tail = g_blurOn && g_blurMs > HOLD_TAIL_MS ? g_blurMs : HOLD_TAIL_MS;
+    DWORD end = g_evenEndAt ? g_evenEndAt : g_planEndAt + (DWORD)tail + (DWORD)fz + VIEW_WORLD_GAP_MS;
+    end -= EVEN_EARLY_MS;
+    int done = g_dispMax >= 0.999f;
+    if (!done && (LONG)(end - now) < EVEN_AHEAD_MS) end = now + EVEN_AHEAD_MS;
+    LONG left = (LONG)(end - now);
+    if (gap > 0) g_evenU = left <= 0 ? 1 : g_evenU + (1 - g_evenU) * (float)gap / (float)(left + (LONG)gap);
+    if (!done && g_evenU > EVEN_WAIT) g_evenU = EVEN_WAIT;
+    return g_evenU;
+}
+
 /* The thread that moves the bar (the game's, or the view's while it shows): the bar as shown for the game's p (0..1) at
  * now, a step on from the last. */
 static float BarStep(float p, DWORD now)
@@ -2499,7 +2529,7 @@ static float BarStep(float p, DWORD now)
     if (dt > DISP_GAP_MAX) dt = DISP_GAP_MAX;
     float rise = p > g_dispMax ? p - g_dispMax : 0;
     if (p > g_dispMax) g_dispMax = p;
-    if (dt <= 0) return g_timed && g_planU < g_disp ? g_planU : g_disp;
+    if (dt <= 0) return g_viewSteps ? g_evenU : g_timed && g_planU < g_disp ? g_planU : g_disp;
     /* through the time since the last frame at the pace it had: a pause is crossed as if the bar had moved through it,
      * never at the catching-up pace the leap after it would ask for (that was his "freezes, then jumps up a ways") */
     float d = g_disp + g_dispV * dt, cap = g_dispMax + DISP_LEAD < 1 ? g_dispMax + DISP_LEAD : 1;
@@ -2517,6 +2547,7 @@ static float BarStep(float p, DWORD now)
                                                                        * runs the rest at its fastest instead of leaping
                                                                        * there (his 7 Oct load: 52% to full in one frame) */
     float shown = g_timed && g_planU < g_disp ? g_planU : g_disp;    /* on the plan: never ahead of it, nor of the game */
+    if (g_viewSteps) shown = EvenStep(gap, now, shown);              /* (the view's: even, on the clock) */
     InterlockedExchange(&g_frmShown, (LONG)(shown * 100 + 0.5f));
     return shown;
 }
@@ -2553,7 +2584,6 @@ static DWORD g_destSince;                                       /* when it becam
 static float g_destU, g_destV, g_destH;
 static DWORD g_settleFrom, g_settleTo;                          /* the hold's glide in (see HoldFrame), 0 for none */
 static float g_settleU, g_settleV, g_settleH;                   /* ... from the view as the game finished */
-#define VIEW_WORLD_GAP_MS 400   /* the world shows this long after the screen goes (his loads, 4-5 Oct: 378 to 394 ms) */
 #define SETTLE_NEAR     0.02f      /* of the zoom (in its even steps) or of the view's width: landed already */
 
 /* The fire's worker, when a screen has gone (the loading screen's layer cleared): the next screen starts from the
@@ -2723,7 +2753,8 @@ static void HoldFrame(void)
     LONG blur = g_blurOn && g_blurMs > 0 ? g_blurMs : 0;             /* the ending, inside the floor */
     LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, floor = g_holdMs - fz - blur;
     DWORD floorAt = g_scrStartAt + (DWORD)(floor > 0 ? floor : 0), settleAt = now + HOLD_SETTLE_MS;
-    DWORD planAt = (LONG)(g_planEndAt - settleAt) < 0 ? g_planEndAt : settleAt;   /* the plan, hurried to settle */
+    DWORD planAt = g_viewSteps || (LONG)(g_planEndAt - settleAt) < 0 ? g_planEndAt : settleAt;   /* the plan, hurried to settle
+                                                                       * (not with the view: its bar is even, and rushes no more) */
     DWORD endAt = (LONG)(floorAt - planAt) > 0 ? floorAt : planAt;                 /* but never before the floor */
     /* The view still out as the game finishes (his clip, 4 Oct 22:04: the game sat near half, then finished in a
      * rush; the zoom, never ahead of the game, was still over the zone, and the blur came on there and froze). It
@@ -2762,6 +2793,7 @@ static void HoldFrame(void)
         g_settleTo = stopAt + (DWORD)(fz > 0 ? fz : 0) + VIEW_WORLD_GAP_MS;
         g_settleView = 1;
     }
+    if (g_viewSteps) g_evenEndAt = stopAt + (DWORD)(fz > 0 ? fz : 0) + VIEW_WORLD_GAP_MS;   /* the even bar's end, known */
     StepUnlock(held);                                             /* never held through the frames: the view goes on */
     if (!hold) return;
     for (int f = 0; f < HOLD_FRAMES && (LONG)(stopAt - now) > 0 && now - start < HOLD_MAX_MS; f++) {
