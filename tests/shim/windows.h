@@ -97,7 +97,8 @@ static void GetLocalTime(SYSTEMTIME *t) { memset(t, 0, sizeof *t); }
 static SYSTEMTIME shim_utc;                                   /* UTC as GetSystemTime gives it (the tests set it) */
 static void GetSystemTime(SYSTEMTIME *t) { *t = shim_utc; }
 static HANDLE GetProcessHeap(void) { return (HANDLE)1; }
-static void *HeapAlloc(HANDLE h, DWORD f, size_t n) { (void)h; (void)f; return malloc(n); }
+#define HEAP_ZERO_MEMORY 0x00000008
+static void *HeapAlloc(HANDLE h, DWORD f, size_t n) { (void)h; return (f & HEAP_ZERO_MEMORY) ? calloc(1, n) : malloc(n); }
 static BOOL HeapFree(HANDLE h, DWORD f, void *p) { (void)h; (void)f; free(p); return TRUE; }
 static int lstrlenA(const char *s) { return (int)strlen(s); }
 static char *lstrcpyA(char *d, const char *s) { return strcpy(d, s); }

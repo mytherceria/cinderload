@@ -5591,7 +5591,8 @@ static int TextHas(const char *list, const char *name)
  * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
-       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_COUNT };   /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client) */
+       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_COUNT };   /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client;
+                                                                 * VT_PARCH: the parchment, painted here from the client's map) */
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -7559,7 +7560,8 @@ static int ClientPicture(const char *path, const char *base, unsigned char **out
 static void VBarRead(unsigned char **blp, unsigned *len)
 {
     char flag[MAX_PATH], m[300];
-    g_vbarAsked = Join(flag, g_dir, "Data\\CinderLoad\\bar-vanilla.txt") && Exists(flag);
+    g_vbarAsked = (Join(flag, g_dir, "Data\\CinderLoad\\bar-vanilla.txt") && Exists(flag)) ||   /* (the parchment brings it too) */
+                  (Join(flag, g_dir, "Data\\CinderLoad\\parchment.txt") && Exists(flag));
     if (!g_vbarAsked) return;
     static const struct { int slot; const char *path; } kPics[2] = { { VT_VBORDER, VBAR_BORDER_PATH }, { VT_VGLASS, VBAR_GLASS_PATH } };
     for (int i = 0; i < 2; i++) {
@@ -7569,11 +7571,284 @@ static void VBarRead(unsigned char **blp, unsigned *len)
         Log(m);
     }
 }
+/* ---- the parchment (the vanilla-plus style's map; his "fix it", 10 Oct 2026, having seen only the living map under the
+ * new bar) ----
+ * The zone you arrive in, painted as the client's own world map paints it (Interface\WorldMap\<zone>, read from its
+ * archives: the HD patch's 512-px tiles where it is installed), every overlay piece laid on (the whole zone painted;
+ * only the pieces this character has found is a later slice), the tiles' seams blended, by candlelight at all times,
+ * the view easing in toward where you arrive, vanilla's own bar under it. No names, no arrow, no ships, no weather (his
+ * calls). The painting is made on the view's thread, outside the step lock, once a screen's arrival is known; until
+ * then the paper is dark. Data\CinderLoad\parchment.txt asks for it, until it is the default. */
+#define PARCH_ZONES     256
+#define PARCH_PIECES    1024
+#define PARCH_NX        32            /* the painting drawn as a mesh this many quads across, */
+#define PARCH_NY        16            /* and this many down (the candle's light on its corners) */
+#define PARCH_FADE_MS   400           /* the painting comes up over this once it is made */
+#define PARCH_ZOOM      1.30f         /* how far in the view eases over the load (1: the zone across the window) */
+#define PARCH_SEAM      12            /* a tile seam's colour step spread this far either side (texels, times the tiles' size over 256) */
+#define PARCH_MAP_W     1002          /* the world map's own picture, of its 1024 x 768 (times the same) */
+#define PARCH_MAP_H     668
+typedef struct { int id, map, area; char name[40]; float l, r, t, b; } ParchZone;
+typedef struct { int zone, w, h, ox, oy; char tex[40]; } ParchPiece;
+static ParchZone g_pz[PARCH_ZONES];
+static ParchPiece g_pp[PARCH_PIECES];
+static int g_pzN, g_ppN, g_parchAsked, g_parchOn;
+static unsigned char *g_parchPx;             /* the painting being made (RGBA, g_parchTW square), until given to OpenGL */
+static int g_parchTW, g_parchK, g_parchPieces;   /* its texture's size, its tiles' size over 256 (1, or 2 in HD), its pieces */
+static int g_parchZone = -1, g_parchMade = -1;   /* the zone on OpenGL (-1 none), and the one in g_parchPx */
+static DWORD g_parchAt;                      /* the view's clock as it came up (each screen, once its arrival is known) */
+static int g_parchForMap = -2;               /* the arrival it was put up for (map, world x, y) */
+static float g_parchForX, g_parchForY;
+static float g_parchU = 0.5f, g_parchV = 0.5f;   /* the arrival on it (0..1 across the map's own picture) */
+
+/* A WDBC table whole: its rows, fields, row size and strings; 0 when it is not one. */
+static int DbcTable(const unsigned char *d, unsigned n, unsigned *rows, unsigned *fields, unsigned *size, const unsigned char **rec,
+                    const char **str, unsigned *strLen)
+{
+    if (!d || n < 20 || d[0] != 'W' || d[1] != 'D' || d[2] != 'B' || d[3] != 'C') return 0;
+    *rows = Rd32(d + 4); *fields = Rd32(d + 8); *size = Rd32(d + 12); *strLen = Rd32(d + 16);
+    if (*fields < 1 || *size < 4 * *fields || *size > 4096 || *rows > 100000 ||
+        20ull + (unsigned long long)*rows * *size + *strLen > n) return 0;
+    *rec = d + 20; *str = (const char *)(d + 20 + *rows * *size);
+    return 1;
+}
+static void DbcString(const char *str, unsigned strLen, unsigned off, char *out, int cap)
+{
+    int i = 0;
+    while (off < strLen && str[off] && i < cap - 1) out[i++] = str[off++];
+    out[i] = 0;
+}
+static float DbcFloat(const unsigned char *p) { union { unsigned u; float f; } c; c.u = Rd32(p); return c.f; }
+
+/* The zones' boxes (WorldMapArea.dbc: id, map, area, its folder's name, left, right, top, bottom in world yards) and their
+ * overlay pieces (WorldMapOverlay.dbc: the zone, the picture's name, its width and height and its place on the map), from
+ * the files' bytes. */
+static void ParchTables(const unsigned char *wma, unsigned wn, const unsigned char *wmo, unsigned on)
+{
+    unsigned rows, fields, size, sl;
+    const unsigned char *rec;
+    const char *str;
+    g_pzN = g_ppN = 0;
+    if (DbcTable(wma, wn, &rows, &fields, &size, &rec, &str, &sl) && fields >= 8)
+        for (unsigned i = 0; i < rows && g_pzN < PARCH_ZONES; i++) {
+            const unsigned char *r = rec + i * size;
+            ParchZone *z = &g_pz[g_pzN];
+            z->id = (int)Rd32(r); z->map = (int)Rd32(r + 4); z->area = (int)Rd32(r + 8);
+            DbcString(str, sl, Rd32(r + 12), z->name, sizeof z->name);
+            z->l = DbcFloat(r + 16); z->r = DbcFloat(r + 20); z->t = DbcFloat(r + 24); z->b = DbcFloat(r + 28);
+            if (z->name[0] && z->l > z->r && z->t > z->b) g_pzN++;
+        }
+    if (DbcTable(wmo, on, &rows, &fields, &size, &rec, &str, &sl) && fields >= 13)
+        for (unsigned i = 0; i < rows && g_ppN < PARCH_PIECES; i++) {
+            const unsigned char *r = rec + i * size;
+            ParchPiece *p = &g_pp[g_ppN];
+            p->zone = (int)Rd32(r + 4);
+            DbcString(str, sl, Rd32(r + 32), p->tex, sizeof p->tex);
+            p->w = (int)Rd32(r + 36); p->h = (int)Rd32(r + 40); p->ox = (int)Rd32(r + 44); p->oy = (int)Rd32(r + 48);
+            if (p->tex[0] && p->w > 0 && p->h > 0 && p->w <= 1024 && p->h <= 768 && p->ox >= 0 && p->oy >= 0) g_ppN++;
+        }
+}
+/* The zone (not a continent: area 0) on map whose box holds world x, y, the smallest where boxes overlap; else that map's
+ * continent; -1 when neither. */
+static int ParchFind(int map, float x, float y)
+{
+    int best = -1, cont = -1;
+    float ba = 0;
+    for (int i = 0; i < g_pzN; i++) {
+        const ParchZone *z = &g_pz[i];
+        if (z->map != map) continue;
+        if (!z->area) { if (cont < 0) cont = i; continue; }
+        if (!(y <= z->l && y >= z->r && x <= z->t && x >= z->b)) continue;
+        float a = (z->l - z->r) * (z->t - z->b);
+        if (best < 0 || a < ba) { best = i; ba = a; }
+    }
+    return best >= 0 ? best : cont;
+}
+
+/* One of the zone's pictures, read and decoded (its first level) into a w x h RGBA buffer of its own: NULL when it
+ * cannot be had (a missing piece is left out). */
+static unsigned char *ParchTile(const char *folder, const char *name, int n, unsigned *w, unsigned *h)
+{
+    char path[160];
+    unsigned char *d = NULL, *out = NULL;
+    unsigned len = 0;
+    const char *from;
+    BlpInfo b;
+    wsprintfA(path, "Interface\\WorldMap\\%s\\%s%d.blp", folder, name, n);
+    if (!ClientPicture(path, "interface.MPQ", &d, &len, &from)) return NULL;
+    if (BlpParse(d, len, &b) && b.w <= 1024 && b.h <= 1024 &&
+        (out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)b.w * b.h * 4)) != NULL) {
+        if (b.dxt) DxtDecode(d + b.off[0], b.w, b.h, b.dxt, out);
+        else BlpPalDecode(d, &b, 0, b.w, b.h, out);
+        *w = b.w; *h = b.h;
+    }
+    HeapFree(GetProcessHeap(), 0, d);
+    return out;
+}
+/* src (sw x sh RGBA) over the painting at x, y, as far as cw x ch of it, blended by its alpha (opaque when solid). */
+static void ParchPut(const unsigned char *src, unsigned sw, unsigned sh, int x, int y, int cw, int ch, int solid)
+{
+    for (int j = 0; j < ch && j < (int)sh; j++) {
+        int py = y + j;
+        if (py < 0 || py >= g_parchTW) continue;
+        for (int i = 0; i < cw && i < (int)sw; i++) {
+            int px = x + i;
+            if (px < 0 || px >= g_parchTW) continue;
+            const unsigned char *s = src + 4 * ((unsigned)j * sw + (unsigned)i);
+            unsigned char *o = g_parchPx + 4 * ((unsigned)py * (unsigned)g_parchTW + (unsigned)px);
+            unsigned a = solid ? 255u : s[3];
+            for (int c = 0; c < 3; c++) o[c] = (unsigned char)((s[c] * a + o[c] * (255u - a) + 127u) / 255u);
+            o[3] = 255;
+        }
+    }
+}
+/* The tiles' seams blended (the HD patch's zone tiles jump in brightness at their edges): each seam's colour step,
+ * smoothed along it, spread over PARCH_SEAM texels either side, half each way; the columns' seams, then the rows'. */
+static float g_seamD[2048], g_seamS[2048];
+static void ParchSeams(int T, int vw, int vh)
+{
+    int R = PARCH_SEAM * g_parchK, rad = 6 * g_parchK, W = g_parchTW;
+    for (int dir = 0; dir < 2; dir++)                              /* 0: columns' seams (x = T, 2T, ...), 1: rows' */
+        for (int at = T; at < (dir ? vh : vw) - 1; at += T)
+            for (int c = 0; c < 3; c++) {
+                int n = dir ? vw : vh;
+                for (int k = 0; k < n; k++) {
+                    const unsigned char *a = g_parchPx + 4 * (dir ? (unsigned)(at * W + k) : (unsigned)(k * W + at));
+                    const unsigned char *b = g_parchPx + 4 * (dir ? (unsigned)((at - 1) * W + k) : (unsigned)(k * W + at - 1));
+                    g_seamD[k] = (float)a[c] - (float)b[c];
+                }
+                for (int pass = 0; pass < 3; pass++) {             /* smoothed along the seam (three box passes) */
+                    float sum = 0;
+                    int cnt = 0;
+                    for (int k = -rad; k < n + rad; k++) {
+                        int in = k + rad, out = k - rad - 1;
+                        if (in >= 0 && in < n) { sum += g_seamD[in]; cnt++; }
+                        if (out >= 0 && out < n) { sum -= g_seamD[out]; cnt--; }
+                        if (k >= 0 && k < n) g_seamS[k] = cnt ? sum / (float)cnt : 0;
+                    }
+                    for (int k = 0; k < n; k++) g_seamD[k] = g_seamS[k];
+                }
+                for (int k = 0; k < n; k++)
+                    for (int i = 0; i < R; i++) {
+                        float d = g_seamD[k] * 0.5f * (1 - (float)i / (float)R);
+                        int p1 = at + i, p0 = at - 1 - i;
+                        if (p0 < 0 || p1 >= (dir ? vh : vw)) continue;
+                        unsigned char *q1 = g_parchPx + 4 * (dir ? (unsigned)(p1 * W + k) : (unsigned)(k * W + p1)) + c;
+                        unsigned char *q0 = g_parchPx + 4 * (dir ? (unsigned)(p0 * W + k) : (unsigned)(k * W + p0)) + c;
+                        *q1 = (unsigned char)(int)FireClamp((float)*q1 - d, 0, 255);
+                        *q0 = (unsigned char)(int)FireClamp((float)*q0 + d, 0, 255);
+                    }
+            }
+}
+/* Zone z's painting into g_parchPx (its base's twelve tiles, the seams blended, every overlay piece laid on): 1 when
+ * made, 0 and why not. */
+static int ParchMake(int z, const char **why)
+{
+    const ParchZone *Z = &g_pz[z];
+    if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
+    g_parchMade = -1; g_parchPieces = 0;
+    int T = 0, have = 0;
+    for (int i = 1; i <= 12; i++) {
+        unsigned w = 0, h = 0;
+        unsigned char *t = ParchTile(Z->name, Z->name, i, &w, &h);
+        if (!t) continue;
+        if (!T) {                                                  /* the first tile sets the size: 256, or 512 in HD */
+            if (w != h || (w != 256 && w != 512)) { HeapFree(GetProcessHeap(), 0, t); *why = "its tiles are not 256 or 512 square"; return 0; }
+            T = (int)w; g_parchK = T / 256; g_parchTW = 4 * T;
+            g_parchPx = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)g_parchTW * (SIZE_T)g_parchTW * 4);
+            if (!g_parchPx) { HeapFree(GetProcessHeap(), 0, t); *why = "no memory for it"; return 0; }
+        }
+        if ((int)w == T && (int)h == T) { ParchPut(t, w, h, ((i - 1) % 4) * T, ((i - 1) / 4) * T, T, T, 1); have++; }
+        HeapFree(GetProcessHeap(), 0, t);
+    }
+    if (have < 12) { *why = "its twelve tiles are not all in the client's archives"; return 0; }
+    ParchSeams(T, PARCH_MAP_W * g_parchK, PARCH_MAP_H * g_parchK);
+    for (int p = 0; p < g_ppN; p++) {                             /* the overlay pieces, as the world map lays them */
+        const ParchPiece *P = &g_pp[p];
+        if (P->zone != Z->id) continue;
+        int pw = P->w * g_parchK, ph = P->h * g_parchK, nw = (P->w + 255) / 256, nh = (P->h + 255) / 256;
+        for (int j = 0; j < nh; j++)
+            for (int q = 0; q < nw; q++) {
+                unsigned w = 0, h = 0;
+                unsigned char *t = ParchTile(Z->name, P->tex, j * nw + q + 1, &w, &h);
+                if (!t) continue;
+                int cw = pw - q * T < T ? pw - q * T : T, chh = ph - j * T < T ? ph - j * T : T;
+                ParchPut(t, w, h, P->ox * g_parchK + q * T, P->oy * g_parchK + j * T, cw, chh, 0);
+                HeapFree(GetProcessHeap(), 0, t);
+            }
+        g_parchPieces++;
+    }
+    g_parchMade = z;
+    return 1;
+}
+/* The candle's light at x, y in a W x H window (0.34 at the darkest, 1 at its brightest), always (his call). */
+static float ParchCandle(float x, float y, float W, float H)
+{
+    float dx = (x - 0.42f * W) / (0.62f * W), dy = (y - 0.55f * H) / (0.70f * H), r2 = dx * dx + dy * dy;
+    return FireClamp(1.08f - 0.62f * r2 * (1.12f - 0.12f * r2), 0.34f, 1);   /* (about 1.08 - 0.62 r^1.8, as the mocks) */
+}
+/* This frame's paper: dark until the painting is up, then the painting, the view easing in toward the arrival as the
+ * bar fills, by candlelight; a mesh so the light falls on its corners. */
+static void ParchDraw(float W, float H, float shown, DWORD now)
+{
+    int up = g_parchZone >= 0 && g_viewTex[VT_PARCH] && g_destMap == g_parchForMap && g_destWX == g_parchForX && g_destWY == g_parchForY;
+    float mw = (float)(PARCH_MAP_W * g_parchK), mh = (float)(PARCH_MAP_H * g_parchK), tw = (float)g_parchTW;
+    float bw = mw, bh = mw * H / W;                                /* the whole zone across the window, */
+    if (bh > mh) { bh = mh; bw = mh * W / H; }                    /* (or down it, in a window narrower than the map) */
+    float e = FireClamp(shown, 0, 1), z;
+    e = e * e * (3 - 2 * e);
+    z = 1 + (PARCH_ZOOM - 1) * e;
+    float ww = bw / z, wh = bh / z;
+    float cx = mw / 2 + (g_parchU * mw - mw / 2) * e, cy = g_parchV * mh;
+    cx = FireClamp(cx, ww / 2, mw - ww / 2); cy = FireClamp(cy, wh / 2, mh - wh / 2);
+    float a = up ? FireClamp((float)(LONG)(now - g_parchAt) / PARCH_FADE_MS, 0, 1) : 0;
+    for (int pass = 0; pass < 2; pass++) {                        /* the dark paper (while it is made, and under its fade), then it */
+        if (pass && !up) break;
+        for (int j = 0; j < PARCH_NY; j++)
+            for (int i = 0; i < PARCH_NX; i++) {
+                ViewVert *q = ViewQuadMode(pass ? VT_PARCH : -1, 0);
+                if (!q) return;
+                static const int ci[4] = { 0, 1, 1, 0 }, cj[4] = { 0, 0, 1, 1 };
+                for (int k = 0; k < 4; k++) {
+                    float fx = (float)(i + ci[k]) / PARCH_NX, fy = (float)(j + cj[k]) / PARCH_NY, sx = fx * W, sy = fy * H;
+                    float L = ParchCandle(sx, sy, W, H);
+                    float rgb[3] = { L, L * 0.84f, L * 0.62f };
+                    if (!pass) for (int c = 0; c < 3; c++) rgb[c] *= c ? (c == 1 ? 0.13f : 0.08f) : 0.18f;   /* (the paper unlit) */
+                    float u = (cx - ww / 2 + ww * fx) / (tw > 0 ? tw : 1), v = (cy - wh / 2 + wh * fy) / (tw > 0 ? tw : 1);
+                    ViewVertSet(q + k, sx, sy, u, v, SaberArgb(VBarRgb(rgb), pass ? a : 1));
+                }
+            }
+    }
+}
+/* The parchment asked for (Data\\CinderLoad\\parchment.txt): the client's world map tables read (read only), logged. */
+static void ParchRead(void)
+{
+    char flag[MAX_PATH], m[300];
+    g_parchAsked = Join(flag, g_dir, "Data\\CinderLoad\\parchment.txt") && Exists(flag);
+    if (!g_parchAsked) return;
+    unsigned char *wma = NULL, *wmo = NULL;
+    unsigned wn = 0, on = 0;
+    const char *f1, *f2;
+    int ok1 = ClientPicture("DBFilesClient\\WorldMapArea.dbc", "dbc.MPQ", &wma, &wn, &f1);
+    int ok2 = ClientPicture("DBFilesClient\\WorldMapOverlay.dbc", "dbc.MPQ", &wmo, &on, &f2);
+    ParchTables(ok1 ? wma : NULL, wn, ok2 ? wmo : NULL, on);
+    if (wma) HeapFree(GetProcessHeap(), 0, wma);
+    if (wmo) HeapFree(GetProcessHeap(), 0, wmo);
+    wsprintfA(m, "  the parchment: %d zones (WorldMapArea.dbc %s %s) and %d overlay pieces (WorldMapOverlay.dbc %s %s)", g_pzN,
+              ok1 ? "from" : "not read:", f1, g_ppN, ok2 ? "from" : "not read:", f2);
+    Log(m);
+}
 /* W x H pixels at the view's clock now: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its
  * top left, [2], [3] its bottom right), the overlay over it, and the blade, its tip the bar as shown. */
 static void ViewBuild(float W, float H, float shown, DWORD now)
 {
     ViewListStart();
+    if (g_parchOn) {                                            /* the parchment: the zone's painting by candlelight, vanilla's bar */
+        ParchDraw(W, H, shown, now);
+        if (g_barVanilla) VBarBuild(W, H, shown, now);
+        else SaberBuild(W, H, shown, now);
+        return;
+    }
     TodSet();                                                   /* the hour's light (the time of day) */
     ViewRect(VT_MAP, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
     ViewOverlayBuild(W, H, now);
@@ -7882,6 +8157,63 @@ static int ViewSparkUp(void)
     return g_viewTex[VT_SPARK] != 0;
 }
 
+static DWORD ViewNow(void);
+/* The painting made (g_parchPx) given to OpenGL as VT_PARCH (its name made once, its picture replaced each zone), no
+ * smaller copies (it is only ever drawn larger than it is): 1 when it took it. g_parchPx goes either way. */
+static int ParchUp(void)
+{
+    int ok = 0;
+    if (g_parchPx && g_parchTW > 0 && g_parchTW <= g_view.maxTex) {
+        while (gl.GetError()) {}
+        if (!g_viewTex[VT_PARCH]) gl.GenTextures(1, &g_viewTex[VT_PARCH]);
+        gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_PARCH]);
+        gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+        gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA8_, g_parchTW, g_parchTW, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, g_parchPx);
+        gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, 0);
+        gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_);
+        gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
+        gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
+        gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+        ok = !gl.GetError();
+    }
+    if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
+    return ok;
+}
+/* The view's thread, each frame of a screen, outside the step lock: once this screen's arrival is known, its zone's
+ * painting made and given to OpenGL (when it is another zone's than the one up), and put up for it, fading in. */
+static void ParchWork(DWORD now)
+{
+    if (!g_parchOn) return;
+    int held = StepLock(), map = g_destMap;
+    float x = g_destWX, y = g_destWY;
+    StepUnlock(held);
+    if (map < 0 || (map == g_parchForMap && x == g_parchForX && y == g_parchForY)) return;
+    static int triedMap = -2;
+    static float triedX, triedY;
+    if (map == triedMap && x == triedX && y == triedY) return;     /* (this arrival tried already, and it failed) */
+    triedMap = map; triedX = x; triedY = y;
+    char m[300];
+    int z = ParchFind(map, x, y);
+    if (z < 0) { wsprintfA(m, "  the parchment: no zone or continent painting for map %d; the paper stays dark", map); Log(m); return; }
+    const ParchZone *Z = &g_pz[z];
+    if (z != g_parchZone) {
+        DWORD t0 = ViewNow();
+        const char *why = "";
+        if (!ParchMake(z, &why)) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the paper stays dark", Z->name, why); Log(m); return; }
+        DWORD t1 = ViewNow();
+        int pieces = g_parchPieces, k = g_parchK;
+        if (!ParchUp()) { g_parchZone = -1; Log("  the parchment: OpenGL would not take the painting; the paper stays dark"); return; }
+        g_parchZone = z;
+        wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d overlay pieces) in %lu ms, given to "
+                  "OpenGL in %lu ms", Z->name, 256 * k, pieces, (unsigned long)(t1 - t0), (unsigned long)(ViewNow() - t1));
+        Log(m);
+    }
+    g_parchU = FireClamp((Z->l - y) / (Z->l - Z->r), 0, 1);
+    g_parchV = FireClamp((Z->t - x) / (Z->t - Z->b), 0, 1);
+    g_parchForMap = map; g_parchForX = x; g_parchForY = y;
+    g_parchAt = now;                                            /* (each screen: up from the dark paper) */
+}
+
 /* The sky's picture (VT_SKY), made here and given anew as each is finished (CloudUpload): CLOUD_TEX_W x CLOUD_TEX_H,
  * premultiplied, smooth between its texels. 0 when OpenGL would not take it (the view then has no weather). */
 static int ViewSkyUp(void)
@@ -8010,6 +8342,12 @@ static int ViewOpen(const char **why)
         Log(m);
         Log(ViewSparkUp() ? "  the view's blade: one bar for every class, in its colour; its spark given to OpenGL"
                           : "  the view's blade: its spark was not given to OpenGL; the blade has no tip, sparks or light on the logo");
+        g_parchOn = g_parchAsked && g_pzN > 0;
+        if (g_parchAsked)
+            Log(g_parchOn ? "  the view: the parchment in place of the living map (Data\\CinderLoad\\parchment.txt): each screen, the zone "
+                            "you arrive in as the client's own map paints it, by candlelight"
+                          : "  the view: Data\\CinderLoad\\parchment.txt asks for the parchment, but the client's WorldMapArea.dbc gave "
+                            "no zones; the living map instead");
         if (g_vbarAsked) {
             g_barVanilla = g_viewTex[VT_VBORDER] && g_viewTex[VT_VGLASS];
             Log(g_barVanilla ? "  the view's bar: vanilla's own in place of the blade (Data\\CinderLoad\\bar-vanilla.txt): its frame and glass "
@@ -8144,6 +8482,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
     if (g_todStyle & TOD_DISC)                          /* the client's own sun and moon, from its minimap (read only) */
         mpq_read(&kIo, "interface.MPQ", TOD_PATH, &g_view.blp[VT_TIME], &g_view.len[VT_TIME]);
     VBarRead(g_view.blp, g_view.len);                   /* vanilla's own bar, when bar-vanilla.txt asks for it (read only) */
+    ParchRead();                                        /* the parchment's tables, when parchment.txt asks for it (read only) */
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
     LONG seen = g_gameSeq, worldSeen = 0;
     DWORD fadeAt = 0, waitAt = 0;
@@ -8208,6 +8547,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             if (ViewStepLocked(p, ViewClock(t2), (float)g_view.w, (float)g_view.h)) built = 1;
             StepUnlock(held);
             CloudWork(!g_cloudShownOk);                      /* the sky's next picture, a share a frame (in "step") */
+            ParchWork(g_vclk.at);                            /* the parchment's painting, once the arrival is known (the step's clock) */
             DWORD t3 = ViewNow(), t4 = t3, t5 = t3, gameAt = g_gameAt;
             LONG quiet = (LONG)(t0 - gameAt);                /* the game's last loading frame, before this one began */
             if (!built) { Sleep(1); continue; }              /* (this screen's first quads not made yet) */

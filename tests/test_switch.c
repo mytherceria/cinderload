@@ -5429,6 +5429,163 @@ static void TestVanillaBar(void)
     Check(ok, "vanilla's bar read: only when Data/CinderLoad/bar-vanilla.txt is there; the client's newest copy of each picture (patch-5 over the base), ours and a zero-length stub passed over; none of the client's: not read, and the log says so");
 }
 
+/* The parchment (his "fix it", 10 Oct 2026: he had seen only the living map under the new bar): the client's world map
+ * tables read, the arrival's zone found (the smallest box holding it; else the continent), its painting made from its
+ * twelve tiles with the seams blended and every overlay piece laid on, then drawn by candlelight, easing in toward the
+ * arrival, fading up once it is made, with vanilla's bar; no living map under it. */
+static unsigned char g_tb[1 << 18];
+static unsigned TestWdbc(unsigned char *out, int rows, int fields, const unsigned *vals, const char *strs, unsigned sl)
+{
+    unsigned head[5] = { 0x43424457u, (unsigned)rows, (unsigned)fields, 4u * (unsigned)fields, sl };   /* "WDBC" */
+    memcpy(out, head, 20);
+    memcpy(out + 20, vals, 4u * (unsigned)(rows * fields));
+    memcpy(out + 20 + 4 * rows * fields, strs, sl);
+    return 20 + 4u * (unsigned)(rows * fields) + sl;
+}
+static unsigned TestF(float f) { unsigned u; memcpy(&u, &f, 4); return u; }
+static unsigned char *TestPalBlp(unsigned w, unsigned h, unsigned rgb, int alphaBits, unsigned *len)
+{
+    unsigned n = 1172 + w * h + (w * h * (unsigned)alphaBits + 7) / 8;
+    unsigned char *d = calloc(1, n);
+    memcpy(d, "BLP2", 4); d[4] = 1; d[8] = 1; d[9] = (unsigned char)alphaBits; d[10] = 8; d[11] = 0;
+    unsigned v[2] = { w, h }, off = 1172, l = w * h + (w * h * (unsigned)alphaBits + 7) / 8;
+    memcpy(d + 12, v, 8); memcpy(d + 20, &off, 4); memcpy(d + 84, &l, 4);
+    d[148] = (unsigned char)(rgb & 255); d[149] = (unsigned char)(rgb >> 8 & 255); d[150] = (unsigned char)(rgb >> 16 & 255);
+    if (alphaBits) memset(d + 1172 + w * h, 0xFF, (w * h * (unsigned)alphaBits + 7) / 8);   /* (index 0 everywhere, opaque) */
+    *len = n;
+    return d;
+}
+static const unsigned char *TestPx(int x, int y) { return g_parchPx + 4 * ((unsigned)y * (unsigned)g_parchTW + (unsigned)x); }
+static void TestParchment(void)
+{
+    /* the tables: a continent, a zone, a smaller zone inside it, a zone on the other continent, and a bad box; pieces */
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Inner\0Durotar\0Bad\0";
+    unsigned wv[5 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+                           30, 0, 12, 9, TestF(1535), TestF(-1935), TestF(-7939), TestF(-10254),
+                           99, 0, 77, 16, TestF(200), TestF(-200), TestF(-9000), TestF(-9400),
+                           4, 1, 14, 22, TestF(-1962), TestF(-7250), TestF(1808), TestF(-1716),
+                           5, 0, 15, 30, TestF(-5), TestF(5), TestF(10), TestF(20) };
+    static unsigned char wma[512], wmo[512];
+    unsigned wn = TestWdbc(wma, 5, 8, wv, wstr, sizeof wstr);
+    static const char ostr[] = "\0PIECE\0OTHER\0NONE\0";
+    unsigned ov[3 * 17] = { 0 };
+    unsigned o0[13] = { 1, 30, 0, 0, 0, 0, 0, 0, 1, 300, 200, 100, 50 }, o1[13] = { 2, 4, 0, 0, 0, 0, 0, 0, 7, 256, 256, 0, 0 },
+             o2[13] = { 3, 30, 0, 0, 0, 0, 0, 0, 13, 0, 128, 0, 0 };
+    memcpy(ov, o0, sizeof o0); memcpy(ov + 17, o1, sizeof o1); memcpy(ov + 34, o2, sizeof o2);
+    unsigned on = TestWdbc(wmo, 3, 17, ov, ostr, sizeof ostr);
+    ParchTables(wma, wn, wmo, on);
+    int ok = g_pzN == 4 && g_ppN == 2 && !strcmp(g_pz[1].name, "Elwynn") && g_pz[1].id == 30 && Near(g_pz[1].l, 1535, 1e-3) &&
+             !strcmp(g_pp[0].tex, "PIECE") && g_pp[0].zone == 30 && g_pp[0].w == 300 && g_pp[0].ox == 100 && g_pp[0].oy == 50;
+    ParchTables(NULL, 0, wmo, 7);
+    ok &= g_pzN == 0 && g_ppN == 0;                                   /* (no tables: nothing; a short one: nothing) */
+    ParchTables(wma, wn, wmo, on);
+    int elw = ParchFind(0, -9464, 62), inner = ParchFind(0, -9200, 0), cont = ParchFind(0, -500, 500), none = ParchFind(5, 0, 0);
+    ok &= elw == 1 && inner == 2 && cont == 0 && none == -1 && ParchFind(1, 0, -3000) == 3;
+    Check(ok, "the parchment's tables: the client's WorldMapArea (zones' boxes, a bad one left out) and WorldMapOverlay (pieces, an empty one left out); the arrival's zone the smallest box holding it, else its continent, else none");
+
+    /* its painting: the twelve tiles (each its own colour), the seams blended, the zone's piece laid on (two tiles wide,
+     * cut at its 300 texels) from a newer archive; another zone's piece and a missing tile */
+    Fresh("parchment");
+    GameDir();
+    static const char *tnames[12];
+    static char tbuf[12][64];
+    const char *tdata[12];
+    unsigned tlen[12];
+    for (int i = 0; i < 12; i++) {
+        snprintf(tbuf[i], sizeof tbuf[i], "Interface\\WorldMap\\Elwynn\\Elwynn%d.blp", i + 1);
+        tnames[i] = tbuf[i];
+        tdata[i] = (const char *)TestPalBlp(256, 256, (unsigned)(40 + 15 * i) << 16 | 0x4020, 0, &tlen[i]);
+    }
+    MakeMpq("Data/interface.MPQ", 12, tnames, tdata, tlen);
+    static const char *pnames[2] = { "Interface\\WorldMap\\Elwynn\\PIECE1.blp", "Interface\\WorldMap\\Elwynn\\PIECE2.blp" };
+    const char *pdata[2];
+    unsigned plen[2];
+    for (int i = 0; i < 2; i++) pdata[i] = (const char *)TestPalBlp(256, 256, 0xFFFFFF, 1, &plen[i]);
+    MakeMpq("Data/patch-5.MPQ", 2, pnames, pdata, plen);
+    const char *why = "";
+    ok = ParchMake(1, &why) && g_parchK == 1 && g_parchTW == 1024 && g_parchPieces == 1 && g_parchMade == 1;
+    const unsigned char *c1 = TestPx(40, 40), *c6 = TestPx(256 + 128, 256 + 128);   /* (clear of the piece and the seams) */
+    ok &= c1[2] == 0x20 && c1[1] == 0x40 && c1[0] == 40 && c6[0] == 40 + 15 * 5 && c6[3] == 255;   /* (RGBA; well away from the seams) */
+    const unsigned char *in1 = TestPx(110, 60), *in2 = TestPx(390, 60), *out1 = TestPx(406, 60), *below = TestPx(110, 260);
+    ok &= in1[0] == 255 && in1[1] == 255 && in2[0] == 255 && out1[1] != 255 && below[1] != 255;
+    int step = abs((int)TestPx(255, 400)[0] - (int)TestPx(256, 400)[0]), far = TestPx(256 + 40, 400)[0] == 40 + 15 * 5;
+    ok &= step <= 3 && far;
+    Check(ok, "the parchment's painting: the zone's twelve tiles in their places, the tiles' seams blended (the step across one gone, its colour unchanged further off), its overlay piece laid on from the newest archive, two tiles wide and cut at its own width, no other zone's");
+    MakeMpq("Data/interface.MPQ", 11, tnames, tdata, tlen);           /* (its twelfth tile gone) */
+    ok = !ParchMake(1, &why) && strstr(why, "twelve") && g_parchMade == -1;
+    ParchMake(1, &why);
+    MakeMpq("Data/interface.MPQ", 12, tnames, tdata, tlen);
+    ok &= ParchMake(1, &why);
+    Check(ok, "the parchment's painting: a tile missing, none made, and why");
+    for (int i = 0; i < 12; i++) free((void *)tdata[i]);
+    for (int i = 0; i < 2; i++) free((void *)pdata[i]);
+
+    /* drawn: the dark paper, then the painting by candlelight over it (fading up once it is made), easing in toward the
+     * arrival as the bar fills, then vanilla's bar; no living map */
+    static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
+    memcpy(g_bgUV, uv, sizeof uv);
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    g_ovOn = 0; g_class = 11;
+    g_parchOn = 1; g_parchZone = 1; g_viewTex[VT_PARCH] = 1;
+    g_barVanilla = 1; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1; g_vbFullAt = 0;
+    g_destMap = 0; g_destWX = -9464; g_destWY = 62;
+    g_parchForMap = 0; g_parchForX = -9464; g_parchForY = 62;
+    g_parchU = (1535.0f - 62) / (1535.0f + 1935); g_parchV = (-7939.0f + 9464) / (-7939.0f + 10254);
+    g_parchAt = 1000;
+    ViewBuild(1920, 1080, 0.0f, 1000);
+    int Q = PARCH_NX * PARCH_NY;
+    const ViewVert *pd = g_vv + g_vb[0].first, *pp = g_vv + g_vb[1].first;
+    ok = g_vb[0].tex == -1 && g_vb[0].count == 4 * Q && g_vb[1].tex == VT_PARCH && g_vb[1].count == 4 * Q && !g_vb[1].add &&
+         g_vb[2].tex == -1 && g_vb[3].tex == VT_VGLASS && g_vb[4].tex == VT_VBORDER;
+    for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_MAP && g_vb[b].tex != VT_SPARK && g_vb[b].tex != VT_FRAME;
+    ok &= pp[0].c[3] == 0;                                             /* (made this moment: not up yet) */
+    float mw = 1002, mh = 668, bh = mw * 1080 / 1920;                  /* the whole zone across the window, */
+    float vy = FireClamp(g_parchV * mh, bh / 2, mh - bh / 2);          /* (down it at the arrival, kept on the map) */
+    const ViewVert *last = pp + 4 * (Q - 1) + 2;                        /* (the bottom right corner) */
+    ok &= Near(pp[0].u, 0, 1e-5) && Near(last->u, mw / 1024, 1e-5) && Near(pp[0].v, (vy - bh / 2) / 1024, 1e-4) &&
+          Near(last->v, (vy + bh / 2) / 1024, 1e-4) && Near(last->x, 1920, 1e-3) && Near(last->y, 1080, 1e-3);
+    int lit = 0, dimmest = 255;
+    for (int i = 0; i < 4 * Q; i++) { if (pp[i].c[0] > lit) lit = pp[i].c[0]; if (pp[i].c[0] < dimmest) dimmest = pp[i].c[0]; }
+    ok &= lit >= 250 && dimmest >= 85 && dimmest < 120 && pd[0].c[0] < 60;      /* the candle: bright to dim; the paper dark */
+    Check(ok, "the parchment drawn: the dark paper, then the zone's painting over it as a mesh lit by the candle (bright near it, dim at the edges), the whole zone across the window and down it at the arrival, then vanilla's bar; no living map, no blade");
+    ViewBuild(1920, 1080, 0.0f, 1000 + PARCH_FADE_MS / 2);
+    int half = g_vv[g_vb[1].first].c[3];
+    ViewBuild(1920, 1080, 1.0f, 1000 + PARCH_FADE_MS + 9000);
+    pp = g_vv + g_vb[1].first; last = pp + 4 * (Q - 1) + 2;
+    float ww = mw / PARCH_ZOOM, cx = FireClamp(g_parchU * mw, ww / 2, mw - ww / 2);
+    ok = half > 100 && half < 155 && pp[0].c[3] == 255 && Near(last->u - pp[0].u, ww / 1024, 1e-4) && Near((last->u + pp[0].u) / 2, cx / 1024, 1e-4);
+    Check(ok, "the parchment drawn: it fades up once made, and eases in as the bar fills, to its full zoom centred on the arrival (kept on the map)");
+    g_destWX = -9300;                                                  /* (another arrival, its painting not up for it yet) */
+    ViewBuild(1920, 1080, 0.5f, 20000);
+    ok = g_vb[0].tex == -1 && g_vb[0].count >= 4 * Q;                  /* (the bar's channel joins the paper's batch) */
+    for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_PARCH;
+    g_parchZone = -1; g_destWX = -9464;
+    ViewBuild(1920, 1080, 0.5f, 20000);
+    for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_PARCH;
+    Check(ok, "the parchment drawn: until its painting is up for this screen's arrival (or with none), the dark paper alone");
+    g_parchOn = 0; g_parchZone = -1; g_barVanilla = 0; g_class = 0; g_destMap = -1; g_parchForMap = -2;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
+
+    /* asked for: only by parchment.txt, which brings vanilla's bar too; the tables from the client's dbc archive */
+    Fresh("parchment-asked");
+    GameDir();
+    ParchRead();
+    ok = !g_parchAsked;
+    Put("Data/CinderLoad/parchment.txt", "");
+    static const char *dn[2] = { "DBFilesClient\\WorldMapArea.dbc", "DBFilesClient\\WorldMapOverlay.dbc" };
+    const char *dd[2] = { (const char *)wma, (const char *)wmo };
+    unsigned dl[2] = { wn, on };
+    MakeMpq("Data/dbc.MPQ", 2, dn, dd, dl);
+    ParchRead();
+    unsigned char *vb[VT_COUNT] = { 0 };
+    unsigned vl[VT_COUNT] = { 0 };
+    VBarRead(vb, vl);
+    ok &= g_parchAsked && g_pzN == 4 && g_ppN == 2 && LogSays("the parchment: 4 zones (WorldMapArea.dbc from dbc.MPQ)") && g_vbarAsked;
+    g_parchAsked = 0; g_vbarAsked = 0;
+    Check(ok, "the parchment asked for: only by Data/CinderLoad/parchment.txt (vanilla's bar with it); the client's world map tables read and logged");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -5612,6 +5769,7 @@ int main(int argc, char **argv)
     TestTimeOfDay();
     TestViewDefault();
     TestVanillaBar();
+    TestParchment();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
