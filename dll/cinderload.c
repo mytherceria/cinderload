@@ -7616,7 +7616,7 @@ static void VBarRead(unsigned char **blp, unsigned *len)
 #define PARCH_MAP_W     1002          /* the world map's own picture, of its 1024 x 768 (times the same) */
 #define PARCH_MAP_H     668
 typedef struct { int id, map, area; char name[40]; float l, r, t, b; } ParchZone;
-typedef struct { int zone, w, h, ox, oy; char tex[40]; } ParchPiece;
+typedef struct { int zone, w, h, ox, oy, area[4]; char tex[40]; } ParchPiece;   /* (area: AreaTable ids, 0 for none) */
 static ParchZone g_pz[PARCH_ZONES];
 static ParchPiece g_pp[PARCH_PIECES];
 static int g_pzN, g_ppN, g_parchAsked, g_parchOn;
@@ -7672,6 +7672,7 @@ static void ParchTables(const unsigned char *wma, unsigned wn, const unsigned ch
             const unsigned char *r = rec + i * size;
             ParchPiece *p = &g_pp[g_ppN];
             p->zone = (int)Rd32(r + 4);
+            for (int a = 0; a < 4; a++) p->area[a] = (int)Rd32(r + 8 + 4 * a);
             DbcString(str, sl, Rd32(r + 32), p->tex, sizeof p->tex);
             p->w = (int)Rd32(r + 36); p->h = (int)Rd32(r + 40); p->ox = (int)Rd32(r + 44); p->oy = (int)Rd32(r + 48);
             if (p->tex[0] && p->w > 0 && p->h > 0 && p->w <= 1024 && p->h <= 768 && p->ox >= 0 && p->oy >= 0) g_ppN++;
@@ -7905,6 +7906,188 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
     ParchMesh(VT_PARCH, W, H, -zx / cw * W, -zy / ch * H, (1 - zx) / cw * W, (1 - zy) / ch * H, 0, 0, zw, zh, (float)g_zoneTW,
               a * kz, cont && kz < 1 ? PARCH_FEATHER : 0);
 }
+/* ---- the explored areas (the parchment's vanilla-true discovery, its proof; his "word, start on the explored-areas
+ * read", 10 Oct 2026) ----
+ * The client keeps which areas this character has found as 2048 bits in the player's own fields (PLAYER_EXPLORED_ZONES_1,
+ * field 0x457, 64 words: the servers' UpdateFields for 1.12.1), and its world map shows a zone's overlay piece when one of
+ * the piece's four areas is found (that area's AreaTable.dbc bit, field 3, set), when an area's bit lies past the 2048, or
+ * when its field 10 is below 0 (WoW.exe's own loop at 0x4A6B40). They are read the way its code reads them (0x4A9A40):
+ * the active player's GUID from the object manager (0x468550: s_curMgr at 0xB41414, the GUID at +0xC0), its object found
+ * in the manager's list (each object's link at the offset kept at +0xA4, the first at +0xAC, the last's next odd), its
+ * fields at +0x08 (its GUID first), its pointer to its player fields at +0xE68, the bits at +0xE6C there. On the game's
+ * own thread just before a world frame is shown (never a loading one, when the list is being built), at most every
+ * EXPLORE_MS, every pointer checked readable first; kept per character, whenever they change, in
+ * Data\CinderLoad\explored-<guid>.bin, and in explored-<guid>.txt zone by zone, which of its pieces are found and which
+ * not (to be checked against the game's own map). Read only; only with the parchment asked for. */
+#define OBJ_MGR_VA      0xB41414    /* s_curMgr */
+#define OBJ_MGR_LINK    0xA4        /* the offset of each object's link in the list (its next at +4) */
+#define OBJ_MGR_FIRST   0xAC        /* the list's first object */
+#define OBJ_MGR_GUID    0xC0        /* the active player's GUID, low word then high */
+#define OBJ_FIELDS      0x08        /* an object's pointer to its fields (OBJECT_FIELD_GUID first) */
+#define PLAYER_FIELDS   0xE68       /* a player object's pointer to its player fields */
+#define EXPLORED_OFF    0xE6C       /* the explored bits there (0x39B words past UNIT_END) */
+#define EXPLORED_BYTES  256
+#define EXPLORE_MS      3000
+#define EXPLORE_OBJECTS 30000       /* the most of the list walked */
+#define AREA_ROWS       16384
+static int g_atN, g_atSorted;
+static int g_atId[AREA_ROWS], g_atBit[AREA_ROWS], g_atLvl[AREA_ROWS];   /* AreaTable: id, its bit, its field 10 */
+static volatile LONG g_parchTablesOk;        /* the tables read (the view's thread, at start); the game's thread may use them */
+
+/* AreaTable.dbc's ids, bits and field 10, from the file's bytes. */
+static void ParchAreas(const unsigned char *d, unsigned n)
+{
+    unsigned rows, fields, size, sl;
+    const unsigned char *rec;
+    const char *str;
+    g_atN = 0; g_atSorted = 1;
+    if (!DbcTable(d, n, &rows, &fields, &size, &rec, &str, &sl) || fields < 11) return;
+    for (unsigned i = 0; i < rows && g_atN < AREA_ROWS; i++) {
+        const unsigned char *r = rec + i * size;
+        g_atId[g_atN] = (int)Rd32(r); g_atBit[g_atN] = (int)Rd32(r + 12); g_atLvl[g_atN] = (int)Rd32(r + 40);
+        if (g_atN && g_atId[g_atN] <= g_atId[g_atN - 1]) g_atSorted = 0;
+        g_atN++;
+    }
+}
+/* Area id's row in g_at*, or -1. */
+static int AreaRow(int id)
+{
+    if (g_atSorted) {
+        int lo = 0, hi = g_atN - 1;
+        while (lo <= hi) { int mid = (lo + hi) / 2; if (g_atId[mid] == id) return mid; if (g_atId[mid] < id) lo = mid + 1; else hi = mid - 1; }
+        return -1;
+    }
+    for (int i = 0; i < g_atN; i++) if (g_atId[i] == id) return i;
+    return -1;
+}
+/* Overlay piece p found, by bits (the client's own rule, above). */
+static int PieceFound(const ParchPiece *p, const unsigned char *bits)
+{
+    for (int k = 0; k < 4; k++) {
+        int a = p->area[k], r = a > 0 ? AreaRow(a) : -1;
+        if (r < 0) continue;
+        int b = g_atBit[r];
+        if (g_atLvl[r] < 0 || b < 0 || b >= 8 * EXPLORED_BYTES) return 1;
+        if (bits[b >> 3] & (1 << (b & 7))) return 1;
+    }
+    return 0;
+}
+/* The active player's explored bits into bits and its GUID: 1 when read, 0 when it cannot be (no player, a pointer that
+ * does not read, the list too long). */
+static int ExploreRead(unsigned char *bits, unsigned *lo, unsigned *hi)
+{
+    unsigned mgr;
+    if (!ClientWord(OBJ_MGR_VA, &mgr) || !mgr) return 0;
+    const unsigned char *m = (const unsigned char *)(ULONG_PTR)mgr;
+    if (!Readable(m + OBJ_MGR_LINK, OBJ_MGR_GUID + 8 - OBJ_MGR_LINK)) return 0;
+    *lo = Rd32(m + OBJ_MGR_GUID); *hi = Rd32(m + OBJ_MGR_GUID + 4);
+    unsigned link = Rd32(m + OBJ_MGR_LINK), o = Rd32(m + OBJ_MGR_FIRST);
+    if ((!*lo && !*hi) || link > 0x4000) return 0;
+    for (int n = 0; o && !(o & 1) && n < EXPLORE_OBJECTS; n++) {
+        const unsigned char *ob = (const unsigned char *)(ULONG_PTR)o;
+        if (!Readable(ob, (int)link + 8)) return 0;
+        unsigned f = Rd32(ob + OBJ_FIELDS);
+        const unsigned char *fp = (const unsigned char *)(ULONG_PTR)f;
+        if (f && Readable(fp, 8) && Rd32(fp) == *lo && Rd32(fp + 4) == *hi) {
+            if (!Readable(ob + PLAYER_FIELDS, 4)) return 0;
+            unsigned pf = Rd32(ob + PLAYER_FIELDS);
+            const unsigned char *pp = (const unsigned char *)(ULONG_PTR)pf;
+            if (!pf || !Readable(pp + EXPLORED_OFF, EXPLORED_BYTES)) return 0;
+            for (int i = 0; i < EXPLORED_BYTES; i++) bits[i] = pp[EXPLORED_OFF + i];
+            return 1;
+        }
+        o = Rd32(ob + link + 4);
+    }
+    return 0;
+}
+/* A file of the game's folder (rel under it) written whole: 1 when it was. */
+static int FilePut(const char *rel, const void *d, unsigned n)
+{
+    char path[MAX_PATH];
+    if (!Join(path, g_dir, rel)) return 0;
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    DWORD put = 0;
+    BOOL ok = WriteFile(h, d, n, &put, NULL);
+    CloseHandle(h);
+    return ok && put == n;
+}
+static void TextCat(char *out, unsigned cap, unsigned *at, const char *s)
+{
+    while (*s && *at + 1 < cap) out[(*at)++] = *s++;
+    out[*at] = 0;
+}
+/* Zone by zone, which of its overlay pieces bits has found (and which not), as lines into out: the pieces found in
+ * all (*found of *pieces). */
+static unsigned ExploreText(const unsigned char *bits, char *out, unsigned cap, int *found, int *pieces)
+{
+    unsigned at = 0;
+    *found = *pieces = 0;
+    out[0] = 0;
+    for (int z = 0; z < g_pzN; z++) {
+        const ParchZone *Z = &g_pz[z];
+        if (!Z->area) continue;
+        int n = 0, f = 0;
+        for (int p = 0; p < g_ppN; p++) if (g_pp[p].zone == Z->id) { n++; f += PieceFound(&g_pp[p], bits); }
+        if (!n) continue;
+        char line[96];
+        wsprintfA(line, "%s (%s): %d of %d found", Z->name, Z->map == 0 ? "Eastern Kingdoms" : Z->map == 1 ? "Kalimdor" : "other", f, n);
+        TextCat(out, cap, &at, line);
+        for (int pass = 1; pass >= 0; pass--) {
+            int first = 1;
+            for (int p = 0; p < g_ppN; p++) {
+                if (g_pp[p].zone != Z->id || PieceFound(&g_pp[p], bits) != pass) continue;
+                TextCat(out, cap, &at, first ? (pass ? ": " : "; not yet: ") : ", ");
+                TextCat(out, cap, &at, g_pp[p].tex);
+                first = 0;
+            }
+        }
+        TextCat(out, cap, &at, "\r\n");
+        *found += f; *pieces += n;
+    }
+    return at;
+}
+static unsigned char g_exBits[EXPLORED_BYTES];
+static unsigned g_exGuid[2];
+static DWORD g_exAt;
+static int g_exFailed;
+/* The game's thread, just before a world frame is shown: every EXPLORE_MS, the player's explored areas read, and
+ * kept when they have changed (or are another character's). */
+static void ExploreKeep(DWORD now)
+{
+    if (!g_parchAsked || !g_parchTablesOk) return;
+    if (g_exAt && (LONG)(now - g_exAt) < EXPLORE_MS) return;
+    g_exAt = now ? now : 1;
+    unsigned char bits[EXPLORED_BYTES];
+    unsigned lo = 0, hi = 0;
+    if (!ExploreRead(bits, &lo, &hi)) {
+        if (!g_exFailed++) Log("explored: the player's explored areas could not be read (no player yet, or the client is laid out "
+                               "otherwise); the parchment paints whole zones");
+        return;
+    }
+    if (lo == g_exGuid[0] && hi == g_exGuid[1] && Same(bits, g_exBits, EXPLORED_BYTES)) return;
+    for (int i = 0; i < EXPLORED_BYTES; i++) g_exBits[i] = bits[i];
+    g_exGuid[0] = lo; g_exGuid[1] = hi;
+    int set = 0;
+    for (int i = 0; i < EXPLORED_BYTES; i++) for (int b = 0; b < 8; b++) set += bits[i] >> b & 1;
+    char rel[96], m[300];
+    wsprintfA(rel, "Data\\CinderLoad\\explored-%08X%08X.bin", hi, lo);
+    int okBin = FilePut(rel, bits, EXPLORED_BYTES);
+    unsigned cap = 96 * 1024, n;
+    char *text = (char *)HeapAlloc(GetProcessHeap(), 0, cap);
+    int found = 0, pieces = 0, okTxt = 0;
+    if (text) {
+        n = ExploreText(bits, text, cap, &found, &pieces);
+        rel[lstrlenA(rel) - 3] = 0;
+        lstrcatA(rel, "txt");
+        okTxt = FilePut(rel, text, n);
+        HeapFree(GetProcessHeap(), 0, text);
+    }
+    wsprintfA(m, "explored: character %08X%08X has found %d of 2048 areas, %d of the world map's %d pieces; "
+              "Data\\CinderLoad\\explored-%08X%08X.bin %s, .txt %s", hi, lo, set, found, pieces, hi, lo,
+              okBin ? "written" : "NOT written", okTxt ? "written" : "NOT written");
+    Log(m);
+}
 /* A screen's first frame, made at once as the view opens (before its first step can be: his note, 10 Oct, "for a split
  * second ... you get the previous screen"): the dark paper and vanilla's bar empty, for the parchment; for the living map,
  * nothing (black). Never the last screen's frame. */
@@ -7929,8 +8112,16 @@ static void ParchRead(void)
     ParchTables(ok1 ? wma : NULL, wn, ok2 ? wmo : NULL, on);
     if (wma) HeapFree(GetProcessHeap(), 0, wma);
     if (wmo) HeapFree(GetProcessHeap(), 0, wmo);
-    wsprintfA(m, "  the parchment: %d zones (WorldMapArea.dbc %s %s) and %d overlay pieces (WorldMapOverlay.dbc %s %s)", g_pzN,
-              ok1 ? "from" : "not read:", f1, g_ppN, ok2 ? "from" : "not read:", f2);
+    unsigned char *at = NULL;
+    unsigned an = 0;
+    const char *f3;
+    int ok3 = ClientPicture("DBFilesClient\\AreaTable.dbc", "dbc.MPQ", &at, &an, &f3);
+    ParchAreas(ok3 ? at : NULL, an);
+    if (at) HeapFree(GetProcessHeap(), 0, at);
+    InterlockedExchange(&g_parchTablesOk, g_pzN > 0 && g_atN > 0);
+    wsprintfA(m, "  the parchment: %d zones (WorldMapArea.dbc %s %s), %d overlay pieces (WorldMapOverlay.dbc %s %s) and %d areas "
+              "(AreaTable.dbc %s %s)", g_pzN, ok1 ? "from" : "not read:", f1, g_ppN, ok2 ? "from" : "not read:", f2, g_atN,
+              ok3 ? "from" : "not read:", f3);
     Log(m);
 }
 /* W x H pixels at the view's clock now: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its
@@ -8876,6 +9067,7 @@ void WINAPI PrePresent(unsigned char *gx)
     int loading = g_loadFrame;
     g_loadFrame = 0;
     if (!loading) InterlockedExchange(&g_worldFrames, g_worldFrames + 1);   /* (the view waits for one to fade) */
+    if (!loading) ExploreKeep(GetTickCount());                  /* the player's explored areas, now and then (the parchment's) */
     if (!g_blurOn || g_blurDead || !gx) return;
     float amount = 0;
     int mode = BlurStep(loading, GetTickCount(), &amount);

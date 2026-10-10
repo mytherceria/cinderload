@@ -1,3 +1,4 @@
+#define _GNU_SOURCE                                     /* (MAP_32BIT: the explored test's low memory) */
 /* Runs CinderLoad.dll's own code (dll/cinderload.c) against fake game folders, on POSIX through tests/shim:
  *   gcc -std=c99 -Wall -Wno-unused-function -Itests/shim -Ishared -o /tmp/test_switch tests/test_switch.c \
  *       shared/mpq.c shared/inflate.c -lm && /tmp/test_switch <scratch dir> [<client folder>]
@@ -5675,6 +5676,118 @@ static void TestModeTurn(void)
           "no1600x1200's hooks: a call through the door reaches the hook with the lock held (one caller at a time), its answer back, the lock let go");
 }
 
+/* The explored areas (the parchment's discovery, its proof; his "word, start on the explored-areas read", 10 Oct 2026):
+ * the client's own rule for a piece found, the active player found in the object manager's list as the client lays it
+ * out (built here in low memory, where its 32-bit pointers fit), its bits read, kept per character with a zone-by-zone
+ * account */
+#include <sys/mman.h>
+static unsigned TestLow(void *p) { return (unsigned)(ULONG_PTR)p; }
+static void TestPut32(unsigned char *at, unsigned v) { memcpy(at, &v, 4); }
+static void TestExplore(void)
+{
+    /* AreaTable: id, bit (field 3), field 10; three areas, one always shown, one past the 2048 */
+    static unsigned av[4 * 25];
+    memset(av, 0, sizeof av);
+    unsigned ids[4] = { 9, 87, 120, 4000 }, bitv[4] = { 125, 548, 2050, 7 }, lvl[4] = { 1, 1, 1, 0xFFFFFFFFu };
+    for (int i = 0; i < 4; i++) { av[i * 25] = ids[i]; av[i * 25 + 3] = bitv[i]; av[i * 25 + 10] = lvl[i]; }
+    static unsigned char atb[1024];
+    unsigned an = TestWdbc(atb, 4, 25, av, "\0", 1);
+    ParchAreas(atb, an);
+    int ok = g_atN == 4 && g_atSorted && AreaRow(87) == 1 && AreaRow(5) == -1 && g_atBit[0] == 125 && g_atLvl[3] < 0;
+    unsigned char bits[EXPLORED_BYTES];
+    memset(bits, 0, sizeof bits);
+    bits[125 >> 3] |= 1 << (125 & 7);                                     /* Northshire found, Goldshire not */
+    ParchPiece pn = { 30, 1, 1, 0, 0, { 9, 0, 0, 0 }, "NORTHSHIREVALLEY" }, pg = { 30, 1, 1, 0, 0, { 87, 0, 0, 0 }, "GOLDSHIRE" };
+    ParchPiece pw = { 30, 1, 1, 0, 0, { 87, 120, 0, 0 }, "FORESTSEDGE" }, pa = { 30, 1, 1, 0, 0, { 4000, 0, 0, 0 }, "ALWAYS" };
+    ParchPiece pz = { 30, 1, 1, 0, 0, { 0, 0, 0, 0 }, "NONE" }, pu = { 30, 1, 1, 0, 0, { 77, 0, 0, 0 }, "UNKNOWN" };
+    ok &= PieceFound(&pn, bits) && !PieceFound(&pg, bits) && PieceFound(&pw, bits) && PieceFound(&pa, bits) && !PieceFound(&pz, bits) && !PieceFound(&pu, bits);
+    bits[548 >> 3] |= 1 << (548 & 7);
+    ok &= PieceFound(&pg, bits);
+    av[25] = 3;                                                          /* (out of order: still found, by a search through all) */
+    an = TestWdbc(atb, 4, 25, av, "\0", 1);
+    ParchAreas(atb, an);
+    ok &= !g_atSorted && AreaRow(3) == 1 && AreaRow(87) == -1;
+    Check(ok, "explored: the client's own rule for a piece found: any of its areas' bits set, or an area past the 2048 bits, or one whose field 10 is below 0; an area with no row, none; AreaTable read sorted or not");
+    av[25] = 87;                                                         /* (the table as it was, for what follows) */
+    an = TestWdbc(atb, 4, 25, av, "\0", 1);
+    ParchAreas(atb, an);
+
+    /* the object manager as the client lays it out: the active player's GUID at +0xC0, the list's link offset at +0xA4 and
+     * its first object at +0xAC; each object's next at link + 4 (odd at the end), its fields at +8 (its GUID first), a
+     * player's pointer to its player fields at +0xE68, the explored bits at +0xE6C there */
+    unsigned char *low = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    if (low == MAP_FAILED) { Check(0, "explored: low memory for the test's object manager"); return; }
+    memset(low, 0, 1 << 16);
+    unsigned char *mgr = low, *o1 = low + 0x400, *o2 = low + 0x2000, *f1 = low + 0x8000, *f2 = low + 0x8100, *pf = low + 0x9000;
+    TestPut32(mgr + OBJ_MGR_LINK, 0x38); TestPut32(mgr + OBJ_MGR_FIRST, TestLow(o1));
+    TestPut32(mgr + OBJ_MGR_GUID, 0x1234); TestPut32(mgr + OBJ_MGR_GUID + 4, 0x50000);
+    TestPut32(o1 + OBJ_FIELDS, TestLow(f1)); TestPut32(o1 + 0x38 + 4, TestLow(o2));
+    TestPut32(f1, 0x1234); TestPut32(f1 + 4, 0x60000);                   /* (another object: its low word the player's) */
+    TestPut32(o1 + PLAYER_FIELDS, TestLow(low + 0xC000));                /* (and other bits, should it be taken for it) */
+    memset(low + 0xC000 + EXPLORED_OFF, 0xFF, EXPLORED_BYTES);
+    TestPut32(o2 + OBJ_FIELDS, TestLow(f2)); TestPut32(o2 + 0x38 + 4, TestLow(mgr + OBJ_MGR_FIRST - 4) | 1);   /* (the last) */
+    TestPut32(f2, 0x1234); TestPut32(f2 + 4, 0x50000);
+    TestPut32(o2 + PLAYER_FIELDS, TestLow(pf));
+    memcpy(pf + EXPLORED_OFF, bits, EXPLORED_BYTES);
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));
+    unsigned char got[EXPLORED_BYTES];
+    unsigned lo = 0, hi = 0;
+    ok = ExploreRead(got, &lo, &hi) && lo == 0x1234 && hi == 0x50000 && !memcmp(got, bits, EXPLORED_BYTES);
+    TestPut32(mgr + OBJ_MGR_GUID, 0x9999);                               /* no object is the player */
+    ok &= !ExploreRead(got, &lo, &hi);
+    TestPut32(mgr + OBJ_MGR_GUID, 0); TestPut32(mgr + OBJ_MGR_GUID + 4, 0);   /* no player yet */
+    ok &= !ExploreRead(got, &lo, &hi);
+    TestPut32(mgr + OBJ_MGR_GUID, 0x1234); TestPut32(mgr + OBJ_MGR_GUID + 4, 0x50000);
+    TestPut32(o2 + PLAYER_FIELDS, 0);                                    /* its player fields not there */
+    ok &= !ExploreRead(got, &lo, &hi);
+    TestPut32(o2 + PLAYER_FIELDS, TestLow(pf));
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), 0);                 /* no object manager */
+    ok &= !ExploreRead(got, &lo, &hi);
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));
+    Check(ok, "explored: the active player found in the object manager's list as the client lays it out, its explored bits read; none with no manager, no player yet, no object of its GUID or no player fields");
+
+    /* kept per character, with its zone-by-zone account, when they change; only with the parchment asked for */
+    Fresh("explored");
+    GameDir();
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));     /* (Fresh clears the client's image) */
+    static const char wstr[] = "\0Elwynn\0";
+    unsigned wv[8] = { 30, 0, 12, 1, TestF(1535), TestF(-1935), TestF(-7939), TestF(-10254) };
+    static unsigned char wma[256], wmo[512];
+    unsigned wn = TestWdbc(wma, 1, 8, wv, wstr, sizeof wstr);
+    static const char ostr[] = "\0NORTHSHIREVALLEY\0GOLDSHIRE\0FORESTSEDGE\0";
+    unsigned ov[3 * 17] = { 0 };
+    unsigned r0[13] = { 1, 30, 9, 0, 0, 0, 0, 0, 1, 256, 256, 0, 0 }, r1[13] = { 2, 30, 87, 0, 0, 0, 0, 0, 18, 256, 256, 0, 0 },
+             r2[13] = { 3, 30, 120, 0, 0, 0, 0, 0, 28, 256, 256, 0, 0 };   /* (an area past the 2048: always found) */
+    memcpy(ov, r0, sizeof r0); memcpy(ov + 17, r1, sizeof r1); memcpy(ov + 34, r2, sizeof r2);
+    unsigned on = TestWdbc(wmo, 3, 17, ov, ostr, sizeof ostr);
+    ParchTables(wma, wn, wmo, on);
+    bits[548 >> 3] &= (unsigned char)~(1 << (548 & 7));                 /* (Goldshire not found again) */
+    memcpy(pf + EXPLORED_OFF, bits, EXPLORED_BYTES);
+    g_exAt = 0; g_exGuid[0] = g_exGuid[1] = 0; g_exFailed = 0;
+    g_parchAsked = 0; g_parchTablesOk = 1;
+    ExploreKeep(1000);
+    ok = !Get("Data/CinderLoad/explored-0005000000001234.bin");          /* not asked for: nothing */
+    g_parchAsked = 1;
+    ExploreKeep(1000);
+    ok &= Get("Data/CinderLoad/explored-0005000000001234.bin") != NULL;   /* (Get's one buffer: the .bin first) */
+    const char *t = Get("Data/CinderLoad/explored-0005000000001234.txt");
+    ok &= t && strstr(t, "Elwynn (Eastern Kingdoms): 2 of 3 found: NORTHSHIREVALLEY, FORESTSEDGE; not yet: GOLDSHIRE") &&
+          LogSays("explored: character 0005000000001234 has found 1 of 2048 areas, 2 of the world map's 3 pieces");
+    Put("Data/CinderLoad/explored-0005000000001234.txt", "x");
+    pf[EXPLORED_OFF + (548 >> 3)] |= 1 << (548 & 7);                    /* Goldshire found, */
+    ExploreKeep(1000 + EXPLORE_MS - 1);                                  /* (not yet time to look) */
+    ok &= !strcmp(Get("Data/CinderLoad/explored-0005000000001234.txt"), "x");
+    ExploreKeep(1000 + EXPLORE_MS + 1);                                  /* (time: seen) */
+    t = Get("Data/CinderLoad/explored-0005000000001234.txt");
+    ok &= t && strstr(t, "Elwynn (Eastern Kingdoms): 3 of 3 found: NORTHSHIREVALLEY, GOLDSHIRE, FORESTSEDGE\r\n") && !strstr(t, "not yet");
+    Put("Data/CinderLoad/explored-0005000000001234.txt", "y");
+    ExploreKeep(1000 + 2 * EXPLORE_MS + 2);                              /* (time, but nothing has changed) */
+    ok &= !strcmp(Get("Data/CinderLoad/explored-0005000000001234.txt"), "y");
+    Check(ok, "explored: kept per character in Data/CinderLoad/explored-<guid>.bin with a zone-by-zone account (found, not yet), written again when they change and not otherwise, at most every EXPLORE_MS; nothing without the parchment");
+    g_parchAsked = 0; g_parchTablesOk = 0;
+    munmap(low, 1 << 16);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -5860,6 +5973,7 @@ int main(int argc, char **argv)
     TestVanillaBar();
     TestParchment();
     TestModeTurn();
+    TestExplore();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
