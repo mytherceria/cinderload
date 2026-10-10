@@ -2421,6 +2421,7 @@ static DWORD StepNow(DWORD now)
     return now;
 }
 
+static void ExploreAtLoad(void);                               /* (the parchment's, below) */
 /* The game's thread, each loading frame it draws: a new screen's start, and what only its own frames can tell (how many,
  * the pauses between them and where, the time to a full bar, the freeze at its end). */
 static void GameFacts(float p, DWORD now)
@@ -2451,6 +2452,7 @@ static void GameFacts(float p, DWORD now)
         if (g_blurUsed) { g_blurUsed = 0; g_dissolveAt = 0; BlurRelease(); }
         InterlockedExchange(&g_holdLast, 0);
         MusicFade();                                                  /* the character list's music out, snappily */
+        ExploreAtLoad();                                              /* its character's explored areas, once (the parchment's) */
         LONG full = g_lnN[g_screenKind] > 0 ? g_lnMs[g_screenKind] : (g_screenKind ? 0 : FIRST_GUESS_MS);
         LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS, floor = g_holdMs - fz;
         LONG plan = full > floor ? full : floor;
@@ -7695,217 +7697,6 @@ static int ParchFind(int map, float x, float y)
     return best >= 0 ? best : cont;
 }
 
-/* Map's continent (its row with area 0), or -1. */
-static int ParchContinent(int map)
-{
-    for (int i = 0; i < g_pzN; i++) if (g_pz[i].map == map && !g_pz[i].area) return i;
-    return -1;
-}
-/* ln x for x > 0 (no C runtime): x brought into [0.5, 1] by twos, then the series for 2 atanh((x - 1) / (x + 1)). */
-static float ParchLn(float x)
-{
-    if (!(x > 0)) return -30;
-    int k = 0;
-    while (x > 1) { x *= 0.5f; k++; }
-    while (x < 0.5f) { x *= 2; k--; }
-    float y = (x - 1) / (x + 1), y2 = y * y, t = y, sum = 0;
-    for (int i = 1; i < 24; i += 2) { sum += t / (float)i; t *= y2; }
-    return 2 * sum + (float)k * 0.69314718f;
-}
-
-/* One of the zone's pictures, read and decoded (its first level) into a w x h RGBA buffer of its own: NULL when it
- * cannot be had (a missing piece is left out). */
-static unsigned char *ParchTile(const char *folder, const char *name, int n, unsigned *w, unsigned *h)
-{
-    char path[160];
-    unsigned char *d = NULL, *out = NULL;
-    unsigned len = 0;
-    const char *from;
-    BlpInfo b;
-    wsprintfA(path, "Interface\\WorldMap\\%s\\%s%d.blp", folder, name, n);
-    if (!ClientPicture(path, "interface.MPQ", &d, &len, &from)) return NULL;
-    if (BlpParse(d, len, &b) && b.w <= 1024 && b.h <= 1024 &&
-        (out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)b.w * b.h * 4)) != NULL) {
-        if (b.dxt) DxtDecode(d + b.off[0], b.w, b.h, b.dxt, out);
-        else BlpPalDecode(d, &b, 0, b.w, b.h, out);
-        *w = b.w; *h = b.h;
-    }
-    HeapFree(GetProcessHeap(), 0, d);
-    return out;
-}
-/* src (sw x sh RGBA) over the painting at x, y, as far as cw x ch of it, blended by its alpha (opaque when solid). */
-static void ParchPut(const unsigned char *src, unsigned sw, unsigned sh, int x, int y, int cw, int ch, int solid)
-{
-    for (int j = 0; j < ch && j < (int)sh; j++) {
-        int py = y + j;
-        if (py < 0 || py >= g_parchTW) continue;
-        for (int i = 0; i < cw && i < (int)sw; i++) {
-            int px = x + i;
-            if (px < 0 || px >= g_parchTW) continue;
-            const unsigned char *s = src + 4 * ((unsigned)j * sw + (unsigned)i);
-            unsigned char *o = g_parchPx + 4 * ((unsigned)py * (unsigned)g_parchTW + (unsigned)px);
-            unsigned a = solid ? 255u : s[3];
-            for (int c = 0; c < 3; c++) o[c] = (unsigned char)((s[c] * a + o[c] * (255u - a) + 127u) / 255u);
-            o[3] = 255;
-        }
-    }
-}
-/* The tiles' seams blended (the HD patch's zone tiles jump in brightness at their edges): each seam's colour step,
- * smoothed along it, spread over PARCH_SEAM texels either side, half each way; the columns' seams, then the rows'. */
-static float g_seamD[2048], g_seamS[2048];
-static void ParchSeams(int T, int vw, int vh)
-{
-    int R = PARCH_SEAM * g_parchK, rad = 6 * g_parchK, W = g_parchTW;
-    for (int dir = 0; dir < 2; dir++)                              /* 0: columns' seams (x = T, 2T, ...), 1: rows' */
-        for (int at = T; at < (dir ? vh : vw) - 1; at += T)
-            for (int c = 0; c < 3; c++) {
-                int n = dir ? vw : vh;
-                for (int k = 0; k < n; k++) {
-                    const unsigned char *a = g_parchPx + 4 * (dir ? (unsigned)(at * W + k) : (unsigned)(k * W + at));
-                    const unsigned char *b = g_parchPx + 4 * (dir ? (unsigned)((at - 1) * W + k) : (unsigned)(k * W + at - 1));
-                    g_seamD[k] = (float)a[c] - (float)b[c];
-                }
-                for (int pass = 0; pass < 3; pass++) {             /* smoothed along the seam (three box passes) */
-                    float sum = 0;
-                    int cnt = 0;
-                    for (int k = -rad; k < n + rad; k++) {
-                        int in = k + rad, out = k - rad - 1;
-                        if (in >= 0 && in < n) { sum += g_seamD[in]; cnt++; }
-                        if (out >= 0 && out < n) { sum -= g_seamD[out]; cnt--; }
-                        if (k >= 0 && k < n) g_seamS[k] = cnt ? sum / (float)cnt : 0;
-                    }
-                    for (int k = 0; k < n; k++) g_seamD[k] = g_seamS[k];
-                }
-                for (int k = 0; k < n; k++)
-                    for (int i = 0; i < R; i++) {
-                        float d = g_seamD[k] * 0.5f * (1 - (float)i / (float)R);
-                        int p1 = at + i, p0 = at - 1 - i;
-                        if (p0 < 0 || p1 >= (dir ? vh : vw)) continue;
-                        unsigned char *q1 = g_parchPx + 4 * (dir ? (unsigned)(p1 * W + k) : (unsigned)(k * W + p1)) + c;
-                        unsigned char *q0 = g_parchPx + 4 * (dir ? (unsigned)(p0 * W + k) : (unsigned)(k * W + p0)) + c;
-                        *q1 = (unsigned char)(int)FireClamp((float)*q1 - d, 0, 255);
-                        *q0 = (unsigned char)(int)FireClamp((float)*q0 + d, 0, 255);
-                    }
-            }
-}
-/* Zone z's painting into g_parchPx (its base's twelve tiles, the seams blended, every overlay piece laid on): 1 when
- * made, 0 and why not. */
-static int ParchMake(int z, const char **why)
-{
-    const ParchZone *Z = &g_pz[z];
-    if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
-    g_parchMade = -1; g_parchPieces = 0;
-    int T = 0, have = 0;
-    for (int i = 1; i <= 12; i++) {
-        unsigned w = 0, h = 0;
-        unsigned char *t = ParchTile(Z->name, Z->name, i, &w, &h);
-        if (!t) continue;
-        if (!T) {                                                  /* the first tile sets the size: 256, or 512 in HD */
-            if (w != h || (w != 256 && w != 512)) { HeapFree(GetProcessHeap(), 0, t); *why = "its tiles are not 256 or 512 square"; return 0; }
-            T = (int)w; g_parchK = T / 256; g_parchTW = 4 * T;
-            g_parchPx = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)g_parchTW * (SIZE_T)g_parchTW * 4);
-            if (!g_parchPx) { HeapFree(GetProcessHeap(), 0, t); *why = "no memory for it"; return 0; }
-        }
-        if ((int)w == T && (int)h == T) { ParchPut(t, w, h, ((i - 1) % 4) * T, ((i - 1) / 4) * T, T, T, 1); have++; }
-        HeapFree(GetProcessHeap(), 0, t);
-    }
-    if (have < 12) { *why = "its twelve tiles are not all in the client's archives"; return 0; }
-    ParchSeams(T, PARCH_MAP_W * g_parchK, PARCH_MAP_H * g_parchK);
-    for (int p = 0; p < g_ppN; p++) {                             /* the overlay pieces, as the world map lays them */
-        const ParchPiece *P = &g_pp[p];
-        if (P->zone != Z->id) continue;
-        int pw = P->w * g_parchK, ph = P->h * g_parchK, nw = (P->w + 255) / 256, nh = (P->h + 255) / 256;
-        for (int j = 0; j < nh; j++)
-            for (int q = 0; q < nw; q++) {
-                unsigned w = 0, h = 0;
-                unsigned char *t = ParchTile(Z->name, P->tex, j * nw + q + 1, &w, &h);
-                if (!t) continue;
-                int cw = pw - q * T < T ? pw - q * T : T, chh = ph - j * T < T ? ph - j * T : T;
-                ParchPut(t, w, h, P->ox * g_parchK + q * T, P->oy * g_parchK + j * T, cw, chh, 0);
-                HeapFree(GetProcessHeap(), 0, t);
-            }
-        g_parchPieces++;
-    }
-    g_parchMade = z;
-    return 1;
-}
-/* The candle's light at x, y in a W x H window (0.34 at the darkest, 1 at its brightest), always (his call). */
-static float ParchCandle(float x, float y, float W, float H)
-{
-    float dx = (x - 0.42f * W) / (0.62f * W), dy = (y - 0.55f * H) / (0.70f * H), r2 = dx * dx + dy * dy;
-    return FireClamp(1.08f - 0.62f * r2 * (1.12f - 0.12f * r2), 0.34f, 1);   /* (about 1.08 - 0.62 r^1.8, as the mocks) */
-}
-/* A mesh of PARCH_NX x PARCH_NY quads over x0..x1, y0..y1 on screen, its picture's texels u0..u1, v0..v1 of a tw-wide
- * texture (tex -1: no picture, the paper itself, unlit), lit by the candle at each corner, alpha a, and, with feather,
- * soft within that much of the mesh's edges. */
-static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
-                      float tw, float a, float feather)
-{
-    static const int ci[4] = { 0, 1, 1, 0 }, cj[4] = { 0, 0, 1, 1 };
-    for (int j = 0; j < PARCH_NY; j++)
-        for (int i = 0; i < PARCH_NX; i++) {
-            ViewVert *q = ViewQuadMode(tex, 0);
-            if (!q) return;
-            for (int k = 0; k < 4; k++) {
-                float fx = (float)(i + ci[k]) / PARCH_NX, fy = (float)(j + cj[k]) / PARCH_NY;
-                float sx = x0 + (x1 - x0) * fx, sy = y0 + (y1 - y0) * fy;
-                float L = ParchCandle(FireClamp(sx, 0, W), FireClamp(sy, 0, H), W, H);
-                float rgb[3] = { L, L * 0.84f, L * 0.62f }, al = a;
-                if (tex < 0) { rgb[0] *= 0.18f; rgb[1] *= 0.13f; rgb[2] *= 0.08f; }   /* (the paper unlit) */
-                if (feather > 0) {
-                    float ex = fx < 1 - fx ? fx : 1 - fx, ey = fy < 1 - fy ? fy : 1 - fy;
-                    al *= FireClamp(ex / feather, 0, 1) * FireClamp(ey / feather, 0, 1);
-                }
-                ViewVertSet(q + k, sx, sy, (u0 + (u1 - u0) * fx) / tw, (v0 + (v1 - v0) * fy) / tw, SaberArgb(VBarRgb(rgb), al));
-            }
-        }
-}
-/* This frame's paper: dark until the painting is up, then (his wishes, 10 Oct) its whole continent's painting across the
- * window, held until the bar is PARCH_IN0 along, closing in evenly by ratio until the zone fills the window at PARCH_IN1
- * (the zone's own painting coming up over its continent's as it does), then on in to PARCH_ZOOM from the zone's middle
- * toward the arrival (kept on the continent's painting before, on the zone's after); all by candlelight. No continent's
- * painting: the zone alone, the whole of it across the window until PARCH_IN1. */
-static void ParchDraw(float W, float H, float shown, DWORD now)
-{
-    int up = g_parchZone >= 0 && g_viewTex[VT_PARCH] && g_destMap == g_parchForMap && g_destWX == g_parchForX && g_destWY == g_parchForY;
-    int cont = up && g_parchCont >= 0 && g_parchCont != g_parchZone && g_viewTex[VT_PARCH2] && g_pz[g_parchCont].map == g_pz[g_parchZone].map;
-    ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);         /* the dark paper (while it is made, and under its fade) */
-    if (!up) return;
-    float A = W / H, bw = A >= 1.5f ? 1 : A / 1.5f;               /* the zone across the window (or down it, when narrower) */
-    float s0 = FireClamp(shown, 0, 1), p1 = FireClamp((s0 - PARCH_IN0) / (PARCH_IN1 - PARCH_IN0), 0, 1), p2 = FireClamp((s0 - PARCH_IN1) / (1 - PARCH_IN1), 0, 1);
-    p1 = p1 * p1 * (3 - 2 * p1); p2 = p2 * p2 * (3 - 2 * p2);
-    float cw = bw;                                                  /* (the window's width in the zone's widths, its height in its heights) */
-    if (cont) {                                                     /* the whole continent, closing in evenly by ratio to the zone */
-        const ParchZone *Z = &g_pz[g_parchZone], *C = &g_pz[g_parchCont];
-        float whole = bw * (C->l - C->r) / (Z->l - Z->r);
-        cw = whole * (float)FireExp((double)(p1 * ParchLn(bw / whole)));
-    }
-    cw *= (float)FireExp((double)(p2 * ParchLn(1 / PARCH_ZOOM)));   /* then on in toward the arrival */
-    float ch = cw * 1.5f / A;
-    float lo, hi, cu = 0.5f + (g_parchU - 0.5f) * p2, cv = 0.5f + (g_parchV - 0.5f) * p2;
-    lo = cw / 2 < 0.5f ? cw / 2 : 0.5f; hi = 1 - cw / 2 > 0.5f ? 1 - cw / 2 : 0.5f; cu = FireClamp(cu, lo, hi);
-    lo = ch / 2 < 0.5f ? ch / 2 : 0.5f; hi = 1 - ch / 2 > 0.5f ? 1 - ch / 2 : 0.5f; cv = FireClamp(cv, lo, hi);
-    float zx = cu - cw / 2, zy = cv - ch / 2;                       /* the window's top left, in the zone's own 0..1 */
-    float a = FireClamp((float)(LONG)(now - g_parchAt) / PARCH_FADE_MS, 0, 1);
-    if (cont) {                                                      /* the continent's painting under it, the window on it */
-        const ParchZone *Z = &g_pz[g_parchZone], *C = &g_pz[g_parchCont];
-        float su = (Z->l - Z->r) / (C->l - C->r), ou = (C->l - Z->l) / (C->l - C->r);   /* the zone's 0..1 on the continent's */
-        float sv = (Z->t - Z->b) / (C->t - C->b), ov = (C->t - Z->t) / (C->t - C->b);
-        float c0u = ou + su * zx, c1u = c0u + su * cw, c0v = ov + sv * zy, c1v = c0v + sv * ch;
-        /* kept on it: inside it while it is narrower than it, centred on it once as wide (the whole continent, to begin with) */
-        float d = c1u - c0u >= 1 ? 0.5f - (c0u + c1u) / 2 : c0u < 0 ? -c0u : c1u > 1 ? 1 - c1u : 0;
-        c0u += d; c1u += d; zx += d / su;
-        d = c1v - c0v >= 1 ? 0.5f - (c0v + c1v) / 2 : c0v < 0 ? -c0v : c1v > 1 ? 1 - c1v : 0;
-        c0v += d; c1v += d; zy += d / sv;
-        float mw = (float)(PARCH_MAP_W * g_contK), mh = (float)(PARCH_MAP_H * g_contK);
-        ParchMesh(VT_PARCH2, W, H, 0, 0, W, H, c0u * mw, c0v * mh, c1u * mw, c1v * mh, (float)g_contTW, a, 0);
-    }
-    float kz = cont ? FireClamp((PARCH_XF * bw - cw) / ((PARCH_XF - 1) * bw), 0, 1) : 1;
-    if (kz <= 0) return;
-    float zw = (float)(PARCH_MAP_W * g_zoneK), zh = (float)(PARCH_MAP_H * g_zoneK);   /* the zone's painting over its own box */
-    ParchMesh(VT_PARCH, W, H, -zx / cw * W, -zy / ch * H, (1 - zx) / cw * W, (1 - zy) / ch * H, 0, 0, zw, zh, (float)g_zoneTW,
-              a * kz, cont && kz < 1 ? PARCH_FEATHER : 0);
-}
 /* ---- the explored areas (the parchment's vanilla-true discovery, its proof; his "word, start on the explored-areas
  * read", 10 Oct 2026) ----
  * The client keeps which areas this character has found as 2048 bits in the player's own fields (PLAYER_EXPLORED_ZONES_1,
@@ -7914,11 +7705,13 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
  * when its field 10 is below 0 (WoW.exe's own loop at 0x4A6B40). They are read the way its code reads them (0x4A9A40):
  * the active player's GUID from the object manager (0x468550: s_curMgr at 0xB41414, the GUID at +0xC0), its object found
  * in the manager's list (each object's link at the offset kept at +0xA4, the first at +0xAC, the last's next odd), its
- * fields at +0x08 (its GUID first), its pointer to its player fields at +0xE68, the bits at +0xE6C there. On the game's
- * own thread just before a world frame is shown (never a loading one, when the list is being built), at most every
- * EXPLORE_MS, every pointer checked readable first; kept per character, whenever they change, in
- * Data\CinderLoad\explored-<guid>.bin, and in explored-<guid>.txt zone by zone, which of its pieces are found and which
- * not (to be checked against the game's own map). Read only; only with the parchment asked for. */
+ * fields at +0x08 (its GUID first), its pointer to its player fields at +0xE68, the bits at +0xE6C there; every pointer
+ * checked readable first. Once a screen, as it begins, on the game's own thread (his rule, 10 Oct: "just match what it
+ * has when you first start a game load on a given character ... no need to keep rescanning"): read live when the player
+ * is there (a teleport, a hearth), and kept per character in Data\CinderLoad\explored-<guid>.bin when it has changed,
+ * with explored-<guid>.txt beside it, zone by zone, which of its pieces are found and which not; at a login, before the
+ * player is there, from the picked character's file instead; neither, none, and the whole zone is painted. The parchment
+ * then leaves out every piece this character has not found. Read only; only with the parchment asked for. */
 #define OBJ_MGR_VA      0xB41414    /* s_curMgr */
 #define OBJ_MGR_LINK    0xA4        /* the offset of each object's link in the list (its next at +4) */
 #define OBJ_MGR_FIRST   0xAC        /* the list's first object */
@@ -7927,7 +7720,6 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
 #define PLAYER_FIELDS   0xE68       /* a player object's pointer to its player fields */
 #define EXPLORED_OFF    0xE6C       /* the explored bits there (0x39B words past UNIT_END) */
 #define EXPLORED_BYTES  256
-#define EXPLORE_MS      3000
 #define EXPLORE_OBJECTS 30000       /* the most of the list walked */
 #define AREA_ROWS       16384
 static int g_atN, g_atSorted;
@@ -8047,24 +7839,15 @@ static unsigned ExploreText(const unsigned char *bits, char *out, unsigned cap, 
     }
     return at;
 }
-static unsigned char g_exBits[EXPLORED_BYTES];
+static unsigned char g_exBits[EXPLORED_BYTES];   /* the last kept (its file written this session) */
 static unsigned g_exGuid[2];
-static DWORD g_exAt;
-static int g_exFailed;
-/* The game's thread, just before a world frame is shown: every EXPLORE_MS, the player's explored areas read, and
- * kept when they have changed (or are another character's). */
-static void ExploreKeep(DWORD now)
+static unsigned char g_scrBits[EXPLORED_BYTES];  /* this screen's character's, as it began */
+static volatile LONG g_scrKnown, g_scrSeq;       /* 1 read live, 2 from its file, 0 none; counted each screen */
+static unsigned g_scrGuid[2];
+/* A character's explored bits kept: its file, and the zone-by-zone account beside it (when they differ from the last
+ * kept). Logged. */
+static void ExploreSave(const unsigned char *bits, unsigned lo, unsigned hi)
 {
-    if (!g_parchAsked || !g_parchTablesOk) return;
-    if (g_exAt && (LONG)(now - g_exAt) < EXPLORE_MS) return;
-    g_exAt = now ? now : 1;
-    unsigned char bits[EXPLORED_BYTES];
-    unsigned lo = 0, hi = 0;
-    if (!ExploreRead(bits, &lo, &hi)) {
-        if (!g_exFailed++) Log("explored: the player's explored areas could not be read (no player yet, or the client is laid out "
-                               "otherwise); the parchment paints whole zones");
-        return;
-    }
     if (lo == g_exGuid[0] && hi == g_exGuid[1] && Same(bits, g_exBits, EXPLORED_BYTES)) return;
     for (int i = 0; i < EXPLORED_BYTES; i++) g_exBits[i] = bits[i];
     g_exGuid[0] = lo; g_exGuid[1] = hi;
@@ -8087,6 +7870,267 @@ static void ExploreKeep(DWORD now)
               "Data\\CinderLoad\\explored-%08X%08X.bin %s, .txt %s", hi, lo, set, found, pieces, hi, lo,
               okBin ? "written" : "NOT written", okTxt ? "written" : "NOT written");
     Log(m);
+}
+/* The picked character's GUID from the character list (its entry's first eight bytes): 1 when there is one. */
+static int ExploreGuidPicked(unsigned *lo, unsigned *hi)
+{
+    unsigned e = CharEntry();
+    const unsigned char *p = e ? ClientAt(e) : 0;
+    if (!p || !Readable(p, 8)) return 0;
+    *lo = Rd32(p); *hi = Rd32(p + 4);
+    return *lo || *hi;
+}
+/* Its file's bits: 1 when read whole. */
+static int ExploreLoad(unsigned lo, unsigned hi, unsigned char *bits)
+{
+    char rel[96], path[MAX_PATH];
+    wsprintfA(rel, "Data\\CinderLoad\\explored-%08X%08X.bin", hi, lo);
+    if (!Join(path, g_dir, rel)) return 0;
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    DWORD got = 0;
+    BOOL ok = ReadFile(f, bits, EXPLORED_BYTES, &got, NULL);
+    CloseHandle(f);
+    return ok && got == EXPLORED_BYTES;
+}
+/* The game's thread, as a screen begins: this screen's character's explored areas, once (above), for the parchment. */
+static void ExploreAtLoad(void)
+{
+    if (!g_parchAsked || !g_parchTablesOk) return;
+    unsigned char bits[EXPLORED_BYTES];
+    unsigned lo = 0, hi = 0;
+    int known = 0;
+    if (ExploreRead(bits, &lo, &hi)) { known = 1; ExploreSave(bits, lo, hi); }
+    else if (ExploreGuidPicked(&lo, &hi) && ExploreLoad(lo, hi, bits)) known = 2;
+    for (int i = 0; i < EXPLORED_BYTES; i++) g_scrBits[i] = known ? bits[i] : 0;
+    g_scrGuid[0] = lo; g_scrGuid[1] = hi;
+    InterlockedExchange(&g_scrKnown, known);
+    InterlockedIncrement(&g_scrSeq);
+    static LONG lastKnown = -1;
+    if (known != lastKnown || known == 0) {
+        char m[200];
+        wsprintfA(m, "explored: this screen's character %08X%08X: %s", hi, lo,
+                  known == 1 ? "read now (the player is here), the pieces it has not found left blank"
+                  : known == 2 ? "from its file (a login: the player is not here yet), the pieces it had not found left blank"
+                  : "not known yet (no player, no file), the whole zone painted");
+        Log(m);
+        lastKnown = known;
+    }
+}
+/* Map's continent (its row with area 0), or -1. */
+static int ParchContinent(int map)
+{
+    for (int i = 0; i < g_pzN; i++) if (g_pz[i].map == map && !g_pz[i].area) return i;
+    return -1;
+}
+/* ln x for x > 0 (no C runtime): x brought into [0.5, 1] by twos, then the series for 2 atanh((x - 1) / (x + 1)). */
+static float ParchLn(float x)
+{
+    if (!(x > 0)) return -30;
+    int k = 0;
+    while (x > 1) { x *= 0.5f; k++; }
+    while (x < 0.5f) { x *= 2; k--; }
+    float y = (x - 1) / (x + 1), y2 = y * y, t = y, sum = 0;
+    for (int i = 1; i < 24; i += 2) { sum += t / (float)i; t *= y2; }
+    return 2 * sum + (float)k * 0.69314718f;
+}
+
+/* One of the zone's pictures, read and decoded (its first level) into a w x h RGBA buffer of its own: NULL when it
+ * cannot be had (a missing piece is left out). */
+static unsigned char *ParchTile(const char *folder, const char *name, int n, unsigned *w, unsigned *h)
+{
+    char path[160];
+    unsigned char *d = NULL, *out = NULL;
+    unsigned len = 0;
+    const char *from;
+    BlpInfo b;
+    wsprintfA(path, "Interface\\WorldMap\\%s\\%s%d.blp", folder, name, n);
+    if (!ClientPicture(path, "interface.MPQ", &d, &len, &from)) return NULL;
+    if (BlpParse(d, len, &b) && b.w <= 1024 && b.h <= 1024 &&
+        (out = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)b.w * b.h * 4)) != NULL) {
+        if (b.dxt) DxtDecode(d + b.off[0], b.w, b.h, b.dxt, out);
+        else BlpPalDecode(d, &b, 0, b.w, b.h, out);
+        *w = b.w; *h = b.h;
+    }
+    HeapFree(GetProcessHeap(), 0, d);
+    return out;
+}
+/* src (sw x sh RGBA) over the painting at x, y, as far as cw x ch of it, blended by its alpha (opaque when solid). */
+static void ParchPut(const unsigned char *src, unsigned sw, unsigned sh, int x, int y, int cw, int ch, int solid)
+{
+    for (int j = 0; j < ch && j < (int)sh; j++) {
+        int py = y + j;
+        if (py < 0 || py >= g_parchTW) continue;
+        for (int i = 0; i < cw && i < (int)sw; i++) {
+            int px = x + i;
+            if (px < 0 || px >= g_parchTW) continue;
+            const unsigned char *s = src + 4 * ((unsigned)j * sw + (unsigned)i);
+            unsigned char *o = g_parchPx + 4 * ((unsigned)py * (unsigned)g_parchTW + (unsigned)px);
+            unsigned a = solid ? 255u : s[3];
+            for (int c = 0; c < 3; c++) o[c] = (unsigned char)((s[c] * a + o[c] * (255u - a) + 127u) / 255u);
+            o[3] = 255;
+        }
+    }
+}
+/* The tiles' seams blended (the HD patch's zone tiles jump in brightness at their edges): each seam's colour step,
+ * smoothed along it, spread over PARCH_SEAM texels either side, half each way; the columns' seams, then the rows'. */
+static float g_seamD[2048], g_seamS[2048];
+static void ParchSeams(int T, int vw, int vh)
+{
+    int R = PARCH_SEAM * g_parchK, rad = 6 * g_parchK, W = g_parchTW;
+    for (int dir = 0; dir < 2; dir++)                              /* 0: columns' seams (x = T, 2T, ...), 1: rows' */
+        for (int at = T; at < (dir ? vh : vw) - 1; at += T)
+            for (int c = 0; c < 3; c++) {
+                int n = dir ? vw : vh;
+                for (int k = 0; k < n; k++) {
+                    const unsigned char *a = g_parchPx + 4 * (dir ? (unsigned)(at * W + k) : (unsigned)(k * W + at));
+                    const unsigned char *b = g_parchPx + 4 * (dir ? (unsigned)((at - 1) * W + k) : (unsigned)(k * W + at - 1));
+                    g_seamD[k] = (float)a[c] - (float)b[c];
+                }
+                for (int pass = 0; pass < 3; pass++) {             /* smoothed along the seam (three box passes) */
+                    float sum = 0;
+                    int cnt = 0;
+                    for (int k = -rad; k < n + rad; k++) {
+                        int in = k + rad, out = k - rad - 1;
+                        if (in >= 0 && in < n) { sum += g_seamD[in]; cnt++; }
+                        if (out >= 0 && out < n) { sum -= g_seamD[out]; cnt--; }
+                        if (k >= 0 && k < n) g_seamS[k] = cnt ? sum / (float)cnt : 0;
+                    }
+                    for (int k = 0; k < n; k++) g_seamD[k] = g_seamS[k];
+                }
+                for (int k = 0; k < n; k++)
+                    for (int i = 0; i < R; i++) {
+                        float d = g_seamD[k] * 0.5f * (1 - (float)i / (float)R);
+                        int p1 = at + i, p0 = at - 1 - i;
+                        if (p0 < 0 || p1 >= (dir ? vh : vw)) continue;
+                        unsigned char *q1 = g_parchPx + 4 * (dir ? (unsigned)(p1 * W + k) : (unsigned)(k * W + p1)) + c;
+                        unsigned char *q0 = g_parchPx + 4 * (dir ? (unsigned)(p0 * W + k) : (unsigned)(k * W + p0)) + c;
+                        *q1 = (unsigned char)(int)FireClamp((float)*q1 - d, 0, 255);
+                        *q0 = (unsigned char)(int)FireClamp((float)*q0 + d, 0, 255);
+                    }
+            }
+}
+/* Zone z's painting into g_parchPx (its base's twelve tiles, the seams blended, every overlay piece laid on): 1 when
+ * made, 0 and why not. */
+static const unsigned char *g_makeBits;     /* the explored bits ParchMake paints by (NULL: every piece) */
+static int g_parchAll;                       /* the zone's pieces in all, as ParchMake last counted them */
+static int ParchMake(int z, const char **why)
+{
+    const ParchZone *Z = &g_pz[z];
+    if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
+    g_parchMade = -1; g_parchPieces = 0; g_parchAll = 0;
+    int T = 0, have = 0;
+    for (int i = 1; i <= 12; i++) {
+        unsigned w = 0, h = 0;
+        unsigned char *t = ParchTile(Z->name, Z->name, i, &w, &h);
+        if (!t) continue;
+        if (!T) {                                                  /* the first tile sets the size: 256, or 512 in HD */
+            if (w != h || (w != 256 && w != 512)) { HeapFree(GetProcessHeap(), 0, t); *why = "its tiles are not 256 or 512 square"; return 0; }
+            T = (int)w; g_parchK = T / 256; g_parchTW = 4 * T;
+            g_parchPx = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)g_parchTW * (SIZE_T)g_parchTW * 4);
+            if (!g_parchPx) { HeapFree(GetProcessHeap(), 0, t); *why = "no memory for it"; return 0; }
+        }
+        if ((int)w == T && (int)h == T) { ParchPut(t, w, h, ((i - 1) % 4) * T, ((i - 1) / 4) * T, T, T, 1); have++; }
+        HeapFree(GetProcessHeap(), 0, t);
+    }
+    if (have < 12) { *why = "its twelve tiles are not all in the client's archives"; return 0; }
+    ParchSeams(T, PARCH_MAP_W * g_parchK, PARCH_MAP_H * g_parchK);
+    for (int p = 0; p < g_ppN; p++) {                             /* the overlay pieces, as the world map lays them */
+        const ParchPiece *P = &g_pp[p];
+        if (P->zone != Z->id) continue;
+        g_parchAll++;
+        if (g_makeBits && !PieceFound(P, g_makeBits)) continue;      /* (not found by this character: left blank) */
+        int pw = P->w * g_parchK, ph = P->h * g_parchK, nw = (P->w + 255) / 256, nh = (P->h + 255) / 256;
+        for (int j = 0; j < nh; j++)
+            for (int q = 0; q < nw; q++) {
+                unsigned w = 0, h = 0;
+                unsigned char *t = ParchTile(Z->name, P->tex, j * nw + q + 1, &w, &h);
+                if (!t) continue;
+                int cw = pw - q * T < T ? pw - q * T : T, chh = ph - j * T < T ? ph - j * T : T;
+                ParchPut(t, w, h, P->ox * g_parchK + q * T, P->oy * g_parchK + j * T, cw, chh, 0);
+                HeapFree(GetProcessHeap(), 0, t);
+            }
+        g_parchPieces++;
+    }
+    g_parchMade = z;
+    return 1;
+}
+/* The candle's light at x, y in a W x H window (0.34 at the darkest, 1 at its brightest), always (his call). */
+static float ParchCandle(float x, float y, float W, float H)
+{
+    float dx = (x - 0.42f * W) / (0.62f * W), dy = (y - 0.55f * H) / (0.70f * H), r2 = dx * dx + dy * dy;
+    return FireClamp(1.08f - 0.62f * r2 * (1.12f - 0.12f * r2), 0.34f, 1);   /* (about 1.08 - 0.62 r^1.8, as the mocks) */
+}
+/* A mesh of PARCH_NX x PARCH_NY quads over x0..x1, y0..y1 on screen, its picture's texels u0..u1, v0..v1 of a tw-wide
+ * texture (tex -1: no picture, the paper itself, unlit), lit by the candle at each corner, alpha a, and, with feather,
+ * soft within that much of the mesh's edges. */
+static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
+                      float tw, float a, float feather)
+{
+    static const int ci[4] = { 0, 1, 1, 0 }, cj[4] = { 0, 0, 1, 1 };
+    for (int j = 0; j < PARCH_NY; j++)
+        for (int i = 0; i < PARCH_NX; i++) {
+            ViewVert *q = ViewQuadMode(tex, 0);
+            if (!q) return;
+            for (int k = 0; k < 4; k++) {
+                float fx = (float)(i + ci[k]) / PARCH_NX, fy = (float)(j + cj[k]) / PARCH_NY;
+                float sx = x0 + (x1 - x0) * fx, sy = y0 + (y1 - y0) * fy;
+                float L = ParchCandle(FireClamp(sx, 0, W), FireClamp(sy, 0, H), W, H);
+                float rgb[3] = { L, L * 0.84f, L * 0.62f }, al = a;
+                if (tex < 0) { rgb[0] *= 0.18f; rgb[1] *= 0.13f; rgb[2] *= 0.08f; }   /* (the paper unlit) */
+                if (feather > 0) {
+                    float ex = fx < 1 - fx ? fx : 1 - fx, ey = fy < 1 - fy ? fy : 1 - fy;
+                    al *= FireClamp(ex / feather, 0, 1) * FireClamp(ey / feather, 0, 1);
+                }
+                ViewVertSet(q + k, sx, sy, (u0 + (u1 - u0) * fx) / tw, (v0 + (v1 - v0) * fy) / tw, SaberArgb(VBarRgb(rgb), al));
+            }
+        }
+}
+/* This frame's paper: dark until the painting is up, then (his wishes, 10 Oct) its whole continent's painting across the
+ * window, held until the bar is PARCH_IN0 along, closing in evenly by ratio until the zone fills the window at PARCH_IN1
+ * (the zone's own painting coming up over its continent's as it does), then on in to PARCH_ZOOM from the zone's middle
+ * toward the arrival (kept on the continent's painting before, on the zone's after); all by candlelight. No continent's
+ * painting: the zone alone, the whole of it across the window until PARCH_IN1. */
+static void ParchDraw(float W, float H, float shown, DWORD now)
+{
+    int up = g_parchZone >= 0 && g_viewTex[VT_PARCH] && g_destMap == g_parchForMap && g_destWX == g_parchForX && g_destWY == g_parchForY;
+    int cont = up && g_parchCont >= 0 && g_parchCont != g_parchZone && g_viewTex[VT_PARCH2] && g_pz[g_parchCont].map == g_pz[g_parchZone].map;
+    ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);         /* the dark paper (while it is made, and under its fade) */
+    if (!up) return;
+    float A = W / H, bw = A >= 1.5f ? 1 : A / 1.5f;               /* the zone across the window (or down it, when narrower) */
+    float s0 = FireClamp(shown, 0, 1), p1 = FireClamp((s0 - PARCH_IN0) / (PARCH_IN1 - PARCH_IN0), 0, 1), p2 = FireClamp((s0 - PARCH_IN1) / (1 - PARCH_IN1), 0, 1);
+    p1 = p1 * p1 * (3 - 2 * p1); p2 = p2 * p2 * (3 - 2 * p2);
+    float cw = bw;                                                  /* (the window's width in the zone's widths, its height in its heights) */
+    if (cont) {                                                     /* the whole continent, closing in evenly by ratio to the zone */
+        const ParchZone *Z = &g_pz[g_parchZone], *C = &g_pz[g_parchCont];
+        float whole = bw * (C->l - C->r) / (Z->l - Z->r);
+        cw = whole * (float)FireExp((double)(p1 * ParchLn(bw / whole)));
+    }
+    cw *= (float)FireExp((double)(p2 * ParchLn(1 / PARCH_ZOOM)));   /* then on in toward the arrival */
+    float ch = cw * 1.5f / A;
+    float lo, hi, cu = 0.5f + (g_parchU - 0.5f) * p2, cv = 0.5f + (g_parchV - 0.5f) * p2;
+    lo = cw / 2 < 0.5f ? cw / 2 : 0.5f; hi = 1 - cw / 2 > 0.5f ? 1 - cw / 2 : 0.5f; cu = FireClamp(cu, lo, hi);
+    lo = ch / 2 < 0.5f ? ch / 2 : 0.5f; hi = 1 - ch / 2 > 0.5f ? 1 - ch / 2 : 0.5f; cv = FireClamp(cv, lo, hi);
+    float zx = cu - cw / 2, zy = cv - ch / 2;                       /* the window's top left, in the zone's own 0..1 */
+    float a = FireClamp((float)(LONG)(now - g_parchAt) / PARCH_FADE_MS, 0, 1);
+    if (cont) {                                                      /* the continent's painting under it, the window on it */
+        const ParchZone *Z = &g_pz[g_parchZone], *C = &g_pz[g_parchCont];
+        float su = (Z->l - Z->r) / (C->l - C->r), ou = (C->l - Z->l) / (C->l - C->r);   /* the zone's 0..1 on the continent's */
+        float sv = (Z->t - Z->b) / (C->t - C->b), ov = (C->t - Z->t) / (C->t - C->b);
+        float c0u = ou + su * zx, c1u = c0u + su * cw, c0v = ov + sv * zy, c1v = c0v + sv * ch;
+        /* kept on it: inside it while it is narrower than it, centred on it once as wide (the whole continent, to begin with) */
+        float d = c1u - c0u >= 1 ? 0.5f - (c0u + c1u) / 2 : c0u < 0 ? -c0u : c1u > 1 ? 1 - c1u : 0;
+        c0u += d; c1u += d; zx += d / su;
+        d = c1v - c0v >= 1 ? 0.5f - (c0v + c1v) / 2 : c0v < 0 ? -c0v : c1v > 1 ? 1 - c1v : 0;
+        c0v += d; c1v += d; zy += d / sv;
+        float mw = (float)(PARCH_MAP_W * g_contK), mh = (float)(PARCH_MAP_H * g_contK);
+        ParchMesh(VT_PARCH2, W, H, 0, 0, W, H, c0u * mw, c0v * mh, c1u * mw, c1v * mh, (float)g_contTW, a, 0);
+    }
+    float kz = cont ? FireClamp((PARCH_XF * bw - cw) / ((PARCH_XF - 1) * bw), 0, 1) : 1;
+    if (kz <= 0) return;
+    float zw = (float)(PARCH_MAP_W * g_zoneK), zh = (float)(PARCH_MAP_H * g_zoneK);   /* the zone's painting over its own box */
+    ParchMesh(VT_PARCH, W, H, -zx / cw * W, -zy / ch * H, (1 - zx) / cw * W, (1 - zy) / ch * H, 0, 0, zw, zh, (float)g_zoneTW,
+              a * kz, cont && kz < 1 ? PARCH_FEATHER : 0);
 }
 /* A screen's first frame, made at once as the view opens (before its first step can be: his note, 10 Oct, "for a split
  * second ... you get the previous screen"): the dark paper and vanilla's bar empty, for the parchment; for the living map,
@@ -8470,29 +8514,40 @@ static int ParchUp(int slot)
 static void ParchWork(DWORD now)
 {
     if (!g_parchOn) return;
+    static unsigned char bits[EXPLORED_BYTES], madeBits[EXPLORED_BYTES];
+    static LONG doneSeq = -1, triedSeq = -1, madeKnown = -1;
     int held = StepLock(), map = g_destMap;
     float x = g_destWX, y = g_destWY;
+    LONG seq = g_scrSeq, known = g_scrKnown;                    /* (this screen's character's explored areas, as it began) */
+    if (seq != doneSeq && seq != triedSeq) for (int i = 0; i < EXPLORED_BYTES; i++) bits[i] = g_scrBits[i];
     StepUnlock(held);
-    if (map < 0 || (map == g_parchForMap && x == g_parchForX && y == g_parchForY)) return;
+    if (map < 0 || (seq == doneSeq && map == g_parchForMap && x == g_parchForX && y == g_parchForY)) return;
     static int triedMap = -2;
     static float triedX, triedY;
-    if (map == triedMap && x == triedX && y == triedY) return;     /* (this arrival tried already, and it failed) */
-    triedMap = map; triedX = x; triedY = y;
+    if (seq == triedSeq && map == triedMap && x == triedX && y == triedY) return;   /* (this arrival tried already, and it failed) */
+    triedMap = map; triedX = x; triedY = y; triedSeq = seq;
     char m[300];
     int z = ParchFind(map, x, y);
     if (z < 0) { wsprintfA(m, "  the parchment: no zone or continent painting for map %d; the paper stays dark", map); Log(m); return; }
     const ParchZone *Z = &g_pz[z];
-    if (z != g_parchZone) {
+    if (z != g_parchZone || known != madeKnown || (known && !Same(bits, madeBits, EXPLORED_BYTES))) {   /* (another zone, or other areas found) */
         DWORD t0 = ViewNow();
         const char *why = "";
-        if (!ParchMake(z, &why)) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the paper stays dark", Z->name, why); Log(m); return; }
+        g_makeBits = known ? bits : NULL;                           /* the pieces this character has not found left blank */
+        int made = ParchMake(z, &why);
+        g_makeBits = NULL;
+        if (!made) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the paper stays dark", Z->name, why); Log(m); return; }
         DWORD t1 = ViewNow();
-        int pieces = g_parchPieces, k = g_parchK;
+        int pieces = g_parchPieces, all = g_parchAll, k = g_parchK;
         g_zoneTW = g_parchTW; g_zoneK = g_parchK;
         if (!ParchUp(VT_PARCH)) { g_parchZone = -1; Log("  the parchment: OpenGL would not take the painting; the paper stays dark"); return; }
         g_parchZone = z;
-        wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d overlay pieces) in %lu ms, given to "
-                  "OpenGL in %lu ms", Z->name, 256 * k, pieces, (unsigned long)(t1 - t0), (unsigned long)(ViewNow() - t1));
+        madeKnown = known;
+        for (int i = 0; i < EXPLORED_BYTES; i++) madeBits[i] = bits[i];
+        wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d of its %d overlay pieces%s) in %lu ms, "
+                  "given to OpenGL in %lu ms", Z->name, 256 * k, pieces, all,
+                  known ? ", the rest not found by this character" : ", its explored areas not known", (unsigned long)(t1 - t0),
+                  (unsigned long)(ViewNow() - t1));
         Log(m);
     }
     int c = ParchContinent(map);                                /* its continent, for the opening */
@@ -8514,6 +8569,7 @@ static void ParchWork(DWORD now)
     g_parchU = FireClamp((Z->l - y) / (Z->l - Z->r), 0, 1);
     g_parchV = FireClamp((Z->t - x) / (Z->t - Z->b), 0, 1);
     g_parchForMap = map; g_parchForX = x; g_parchForY = y;
+    doneSeq = seq;
     g_parchAt = now;                                            /* (each screen: up from the dark paper) */
 }
 
@@ -9067,7 +9123,6 @@ void WINAPI PrePresent(unsigned char *gx)
     int loading = g_loadFrame;
     g_loadFrame = 0;
     if (!loading) InterlockedExchange(&g_worldFrames, g_worldFrames + 1);   /* (the view waits for one to fade) */
-    if (!loading) ExploreKeep(GetTickCount());                  /* the player's explored areas, now and then (the parchment's) */
     if (!g_blurOn || g_blurDead || !gx) return;
     float amount = 0;
     int mode = BlurStep(loading, GetTickCount(), &amount);

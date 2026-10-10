@@ -5518,6 +5518,12 @@ static void TestParchment(void)
     MakeMpq("Data/interface.MPQ", 12, tnames, tdata, tlen);
     ok &= ParchMake(1, &why);
     Check(ok, "the parchment's painting: a tile missing, none made, and why");
+    static unsigned char foundNone[EXPLORED_BYTES];                      /* this character has found nothing: its piece left blank */
+    g_makeBits = foundNone;
+    ok = ParchMake(1, &why) && g_parchPieces == 0 && g_parchAll == 1 && TestPx(110, 60)[1] != 255;
+    g_makeBits = NULL;
+    ok &= ParchMake(1, &why) && g_parchPieces == 1 && g_parchAll == 1 && TestPx(110, 60)[1] == 255;
+    Check(ok, "the parchment's painting: the pieces this screen's character has not found left blank, every piece when its explored areas are not known");
     for (int i = 0; i < 12; i++) free((void *)tdata[i]);
     for (int i = 0; i < 2; i++) free((void *)pdata[i]);
 
@@ -5763,27 +5769,45 @@ static void TestExplore(void)
     ParchTables(wma, wn, wmo, on);
     bits[548 >> 3] &= (unsigned char)~(1 << (548 & 7));                 /* (Goldshire not found again) */
     memcpy(pf + EXPLORED_OFF, bits, EXPLORED_BYTES);
-    g_exAt = 0; g_exGuid[0] = g_exGuid[1] = 0; g_exFailed = 0;
+    g_exGuid[0] = g_exGuid[1] = 0;
+    /* once a screen, as it begins (his rule, 10 Oct: no rescanning): not asked for, nothing */
     g_parchAsked = 0; g_parchTablesOk = 1;
-    ExploreKeep(1000);
-    ok = !Get("Data/CinderLoad/explored-0005000000001234.bin");          /* not asked for: nothing */
+    LONG seq0 = g_scrSeq;
+    ExploreAtLoad();
+    ok = g_scrSeq == seq0 && !Get("Data/CinderLoad/explored-0005000000001234.bin");
+    /* a teleport or a hearth: the player is there, read now and kept */
     g_parchAsked = 1;
-    ExploreKeep(1000);
+    ExploreAtLoad();
+    ok &= g_scrSeq == seq0 + 1 && g_scrKnown == 1 && !memcmp(g_scrBits, bits, EXPLORED_BYTES) && g_scrGuid[0] == 0x1234 && g_scrGuid[1] == 0x50000;
     ok &= Get("Data/CinderLoad/explored-0005000000001234.bin") != NULL;   /* (Get's one buffer: the .bin first) */
     const char *t = Get("Data/CinderLoad/explored-0005000000001234.txt");
     ok &= t && strstr(t, "Elwynn (Eastern Kingdoms): 2 of 3 found: NORTHSHIREVALLEY, FORESTSEDGE; not yet: GOLDSHIRE") &&
-          LogSays("explored: character 0005000000001234 has found 1 of 2048 areas, 2 of the world map's 3 pieces");
-    Put("Data/CinderLoad/explored-0005000000001234.txt", "x");
-    pf[EXPLORED_OFF + (548 >> 3)] |= 1 << (548 & 7);                    /* Goldshire found, */
-    ExploreKeep(1000 + EXPLORE_MS - 1);                                  /* (not yet time to look) */
-    ok &= !strcmp(Get("Data/CinderLoad/explored-0005000000001234.txt"), "x");
-    ExploreKeep(1000 + EXPLORE_MS + 1);                                  /* (time: seen) */
+          LogSays("explored: character 0005000000001234 has found 1 of 2048 areas, 2 of the world map's 3 pieces") &&
+          LogSays("read now (the player is here)");
+    Put("Data/CinderLoad/explored-0005000000001234.txt", "y");
+    ExploreAtLoad();                                                     /* (the next screen, nothing found since: not written again) */
+    ok &= g_scrSeq == seq0 + 2 && !strcmp(Get("Data/CinderLoad/explored-0005000000001234.txt"), "y");
+    pf[EXPLORED_OFF + (548 >> 3)] |= 1 << (548 & 7);                    /* Goldshire found, then a hearth */
+    ExploreAtLoad();
     t = Get("Data/CinderLoad/explored-0005000000001234.txt");
     ok &= t && strstr(t, "Elwynn (Eastern Kingdoms): 3 of 3 found: NORTHSHIREVALLEY, GOLDSHIRE, FORESTSEDGE\r\n") && !strstr(t, "not yet");
-    Put("Data/CinderLoad/explored-0005000000001234.txt", "y");
-    ExploreKeep(1000 + 2 * EXPLORE_MS + 2);                              /* (time, but nothing has changed) */
-    ok &= !strcmp(Get("Data/CinderLoad/explored-0005000000001234.txt"), "y");
-    Check(ok, "explored: kept per character in Data/CinderLoad/explored-<guid>.bin with a zone-by-zone account (found, not yet), written again when they change and not otherwise, at most every EXPLORE_MS; nothing without the parchment");
+    Check(ok, "explored: once a screen, as it begins (no rescanning: his rule): read now when the player is there, kept per character in Data/CinderLoad/explored-<guid>.bin with a zone-by-zone account when it has changed; nothing without the parchment");
+    /* a login: no player yet, the picked character's file instead (its GUID the first eight bytes of its list entry);
+     * no file, not known (the whole zone painted) */
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), 0);
+    unsigned entry = 0xB50000;                                           /* (a list of one, in the client's image) */
+    TestPut32(shim_module + (CHAR_COUNT_VA - 0x400000), 1); TestPut32(shim_module + (CHAR_LIST_VA - 0x400000), entry);
+    TestPut32(shim_module + (CHAR_PICKED_VA - 0x400000), 0);
+    TestPut32(shim_module + (entry - 0x400000), 0x1234); TestPut32(shim_module + (entry - 0x400000) + 4, 0x50000);
+    int sure = g_classSure;
+    g_classSure = 1;
+    ExploreAtLoad();
+    ok = g_scrKnown == 2 && g_scrBits[548 >> 3] & (1 << (548 & 7)) && LogSays("from its file (a login");
+    TestPut32(shim_module + (entry - 0x400000), 0x4321);                 /* (a character with no file yet) */
+    ExploreAtLoad();
+    ok &= g_scrKnown == 0 && g_scrBits[125 >> 3] == 0 && LogSays("not known yet (no player, no file), the whole zone painted");
+    g_classSure = sure;
+    Check(ok, "explored: at a login, before the player is there, the picked character's file (its GUID from the character list); no file, not known, and the whole zone is painted");
     g_parchAsked = 0; g_parchTablesOk = 0;
     munmap(low, 1 << 16);
 }
