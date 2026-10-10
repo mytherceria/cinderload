@@ -5557,17 +5557,20 @@ static void TestParchment(void)
          Near(last->x, (1 - (cu1 - cw1 / 2)) / cw1 * 1920, 0.05) && Near(pp[0].y, -(cv1 - ch1 / 2) / ch1 * 1080, 0.05);
     Check(ok, "the parchment drawn: it fades up once made, and eases in as the bar fills, to its full zoom centred on the arrival (kept on the map)");
 
-    /* with its continent's painting: the opening (his wish, 10 Oct: "started further zoomed out"), PARCH_OPEN of the
-     * zone's widths of the continent with the zone in the middle, closing in, the zone's own painting coming up over it */
+    /* with its continent's painting: the opening (his wishes, 10 Oct: "started further zoomed out", then "way too zoomed
+     * in at start"), the whole continent across the window, held, closing in, the zone's own painting coming up over it */
     g_parchCont = 0; g_viewTex[VT_PARCH2] = 1; g_contTW = 1024; g_contK = 1;
     ViewBuild(1920, 1080, 0.0f, 30000);
     const ViewVert *pc = g_vv + g_vb[1].first;
-    float su = 3470.0f / 35200, ou = 14465.0f / 35200, c0u = ou + su * (0.5f - PARCH_OPEN / 2), c1u = c0u + su * PARCH_OPEN;
+    float su = 3470.0f / 35200, ou = 14465.0f / 35200, c0u = 0, c1u = 1;   /* (the whole continent across) */
     const ViewVert *mid = pc + 4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2);   /* (the screen's middle: a corner there) */
     ok = g_vb[1].tex == VT_PARCH2 && g_vb[1].count == 4 * Q && g_vb[2].tex == -1 && Near(pc[0].x, 0, 1e-3) && Near(pc[0].u, c0u * 1002 / 1024, 1e-4) &&
-         Near((pc + 4 * (PARCH_NX - 1) + 1)->u, c1u * 1002 / 1024, 1e-4) && Near(mid->u, (ou + su * 0.5f) * 1002 / 1024, 1e-4) && mid->c[3] == 255;
+         Near((pc + 4 * (PARCH_NX - 1) + 1)->u, c1u * 1002 / 1024, 1e-4) && Near(mid->u, 0.5 * 1002 / 1024, 1e-4) && mid->c[3] == 255;   /* (kept on the continent: its middle) */
+    (void)ou;
     for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_PARCH;      /* (the zone's own not come up yet) */
-    Check(ok, "the parchment's opening: its continent's painting across the window with the zone in its middle, three of the zone's widths across, the zone's own painting not up yet");
+    ViewBuild(1920, 1080, PARCH_IN0, 30000);                           /* (held so until the bar is PARCH_IN0 along) */
+    ok &= Near(g_vv[g_vb[1].first].u, 0, 1e-4) && Near((g_vv + g_vb[1].first + 4 * (PARCH_NX - 1) + 1)->u, 1002.0 / 1024, 1e-4);
+    Check(ok, "the parchment's opening (his notes: further out, then 'you can't tell exactly what zone it even is'): its whole continent's painting across the window, held a while, the zone's own painting not up yet");
     ViewBuild(1920, 1080, 0.55f, 30000);
     int coming = g_vb[1].tex == VT_PARCH2 && g_vb[2].tex == VT_PARCH;
     int edge = coming ? g_vv[g_vb[2].first].c[3] : 255, inside = coming ? g_vv[g_vb[2].first + 4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2)].c[3] : 0;

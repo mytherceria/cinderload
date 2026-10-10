@@ -7606,9 +7606,11 @@ static void VBarRead(unsigned char **blp, unsigned *len)
 #define PARCH_FADE_MS   400           /* the painting comes up over this once it is made */
 #define PARCH_ZOOM      1.30f         /* how far in the view eases over the load (1: the zone across the window) */
 #define PARCH_SEAM      12            /* a tile seam's colour step spread this far either side (texels, times the tiles' size over 256) */
-#define PARCH_OPEN      3.0f          /* the opening (his wish, 10 Oct: "started further zoomed out"): this many of the zone's
-                                       * widths across the window, on its continent's painting */
-#define PARCH_XF        1.8f          /* the zone's painting comes up over its continent's from this many of its widths across,
+#define PARCH_IN0       0.12f         /* the opening (his wishes, 10 Oct: "started further zoomed out", then "way too zoomed in at
+                                       * start. you can't tell exactly what zone it even is"): the whole continent's painting
+                                       * across the window until the bar is this far, */
+#define PARCH_IN1       0.62f         /* closing in until the zone fills the window by here, then on in toward the arrival */
+#define PARCH_XF        2.6f          /* the zone's painting comes up over its continent's from this many of its widths across,
                                        * whole at one */
 #define PARCH_FEATHER   0.06f         /* while it comes up, its edges soft over this much of it */
 #define PARCH_MAP_W     1002          /* the world map's own picture, of its 1024 x 768 (times the same) */
@@ -7857,11 +7859,11 @@ static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, f
             }
         }
 }
-/* This frame's paper: dark until the painting is up, then (his wish, 10 Oct: "started further zoomed out") its continent's
- * painting with the zone in the middle, PARCH_OPEN of the zone's widths across, closing in as the bar fills (evenly, by
- * ratio), the zone's own painting coming up over it as it fills the window, on in to PARCH_ZOOM, from the zone's middle
- * toward the arrival (kept on the zone once inside it, on the continent before); all by candlelight. No continent's
- * painting: the zone alone, the whole of it across the window to begin with. */
+/* This frame's paper: dark until the painting is up, then (his wishes, 10 Oct) its whole continent's painting across the
+ * window, held until the bar is PARCH_IN0 along, closing in evenly by ratio until the zone fills the window at PARCH_IN1
+ * (the zone's own painting coming up over its continent's as it does), then on in to PARCH_ZOOM from the zone's middle
+ * toward the arrival (kept on the continent's painting before, on the zone's after); all by candlelight. No continent's
+ * painting: the zone alone, the whole of it across the window until PARCH_IN1. */
 static void ParchDraw(float W, float H, float shown, DWORD now)
 {
     int up = g_parchZone >= 0 && g_viewTex[VT_PARCH] && g_destMap == g_parchForMap && g_destWX == g_parchForX && g_destWY == g_parchForY;
@@ -7869,11 +7871,17 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
     ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);         /* the dark paper (while it is made, and under its fade) */
     if (!up) return;
     float A = W / H, bw = A >= 1.5f ? 1 : A / 1.5f;               /* the zone across the window (or down it, when narrower) */
-    float e = FireClamp(shown, 0, 1);
-    e = e * e * (3 - 2 * e);
-    float cwEnd = bw / PARCH_ZOOM, cwStart = cont ? bw * PARCH_OPEN : bw;
-    float cw = cwStart * (float)FireExp((double)(e * ParchLn(cwEnd / cwStart))), ch = cw * 1.5f / A;   /* (zone widths, heights) */
-    float lo, hi, cu = 0.5f + (g_parchU - 0.5f) * e, cv = 0.5f + (g_parchV - 0.5f) * e;
+    float s0 = FireClamp(shown, 0, 1), p1 = FireClamp((s0 - PARCH_IN0) / (PARCH_IN1 - PARCH_IN0), 0, 1), p2 = FireClamp((s0 - PARCH_IN1) / (1 - PARCH_IN1), 0, 1);
+    p1 = p1 * p1 * (3 - 2 * p1); p2 = p2 * p2 * (3 - 2 * p2);
+    float cw = bw;                                                  /* (the window's width in the zone's widths, its height in its heights) */
+    if (cont) {                                                     /* the whole continent, closing in evenly by ratio to the zone */
+        const ParchZone *Z = &g_pz[g_parchZone], *C = &g_pz[g_parchCont];
+        float whole = bw * (C->l - C->r) / (Z->l - Z->r);
+        cw = whole * (float)FireExp((double)(p1 * ParchLn(bw / whole)));
+    }
+    cw *= (float)FireExp((double)(p2 * ParchLn(1 / PARCH_ZOOM)));   /* then on in toward the arrival */
+    float ch = cw * 1.5f / A;
+    float lo, hi, cu = 0.5f + (g_parchU - 0.5f) * p2, cv = 0.5f + (g_parchV - 0.5f) * p2;
     lo = cw / 2 < 0.5f ? cw / 2 : 0.5f; hi = 1 - cw / 2 > 0.5f ? 1 - cw / 2 : 0.5f; cu = FireClamp(cu, lo, hi);
     lo = ch / 2 < 0.5f ? ch / 2 : 0.5f; hi = 1 - ch / 2 > 0.5f ? 1 - ch / 2 : 0.5f; cv = FireClamp(cv, lo, hi);
     float zx = cu - cw / 2, zy = cv - ch / 2;                       /* the window's top left, in the zone's own 0..1 */
@@ -7883,8 +7891,11 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         float su = (Z->l - Z->r) / (C->l - C->r), ou = (C->l - Z->l) / (C->l - C->r);   /* the zone's 0..1 on the continent's */
         float sv = (Z->t - Z->b) / (C->t - C->b), ov = (C->t - Z->t) / (C->t - C->b);
         float c0u = ou + su * zx, c1u = c0u + su * cw, c0v = ov + sv * zy, c1v = c0v + sv * ch;
-        if (c1u - c0u <= 1) { float d = c0u < 0 ? -c0u : c1u > 1 ? 1 - c1u : 0; c0u += d; c1u += d; zx += d / su; }   /* (kept on it) */
-        if (c1v - c0v <= 1) { float d = c0v < 0 ? -c0v : c1v > 1 ? 1 - c1v : 0; c0v += d; c1v += d; zy += d / sv; }
+        /* kept on it: inside it while it is narrower than it, centred on it once as wide (the whole continent, to begin with) */
+        float d = c1u - c0u >= 1 ? 0.5f - (c0u + c1u) / 2 : c0u < 0 ? -c0u : c1u > 1 ? 1 - c1u : 0;
+        c0u += d; c1u += d; zx += d / su;
+        d = c1v - c0v >= 1 ? 0.5f - (c0v + c1v) / 2 : c0v < 0 ? -c0v : c1v > 1 ? 1 - c1v : 0;
+        c0v += d; c1v += d; zy += d / sv;
         float mw = (float)(PARCH_MAP_W * g_contK), mh = (float)(PARCH_MAP_H * g_contK);
         ParchMesh(VT_PARCH2, W, H, 0, 0, W, H, c0u * mw, c0v * mh, c1u * mw, c1v * mh, (float)g_contTW, a, 0);
     }
