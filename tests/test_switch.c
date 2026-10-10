@@ -5521,12 +5521,13 @@ static void TestParchment(void)
     for (int i = 0; i < 2; i++) free((void *)pdata[i]);
 
     /* drawn: the dark paper, then the painting by candlelight over it (fading up once it is made), easing in toward the
-     * arrival as the bar fills, then vanilla's bar; no living map */
+     * arrival as the bar fills, then vanilla's bar; no living map. First without its continent: the zone alone, the whole
+     * of it across the window to begin with */
     static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
     memcpy(g_bgUV, uv, sizeof uv);
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
     g_ovOn = 0; g_class = 11;
-    g_parchOn = 1; g_parchZone = 1; g_viewTex[VT_PARCH] = 1;
+    g_parchOn = 1; g_parchZone = 1; g_viewTex[VT_PARCH] = 1; g_zoneTW = 1024; g_zoneK = 1; g_parchCont = -1;
     g_barVanilla = 1; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1; g_vbFullAt = 0;
     g_destMap = 0; g_destWX = -9464; g_destWY = 62;
     g_parchForMap = 0; g_parchForX = -9464; g_parchForY = 62;
@@ -5537,24 +5538,57 @@ static void TestParchment(void)
     const ViewVert *pd = g_vv + g_vb[0].first, *pp = g_vv + g_vb[1].first;
     ok = g_vb[0].tex == -1 && g_vb[0].count == 4 * Q && g_vb[1].tex == VT_PARCH && g_vb[1].count == 4 * Q && !g_vb[1].add &&
          g_vb[2].tex == -1 && g_vb[3].tex == VT_VGLASS && g_vb[4].tex == VT_VBORDER;
-    for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_MAP && g_vb[b].tex != VT_SPARK && g_vb[b].tex != VT_FRAME;
+    for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_MAP && g_vb[b].tex != VT_SPARK && g_vb[b].tex != VT_FRAME && g_vb[b].tex != VT_PARCH2;
     ok &= pp[0].c[3] == 0;                                             /* (made this moment: not up yet) */
-    float mw = 1002, mh = 668, bh = mw * 1080 / 1920;                  /* the whole zone across the window, */
-    float vy = FireClamp(g_parchV * mh, bh / 2, mh - bh / 2);          /* (down it at the arrival, kept on the map) */
+    float A = 1920.0f / 1080, ch0 = 1.5f / A, zy0 = 0.5f - ch0 / 2;    /* the whole zone across, its middle in the middle */
     const ViewVert *last = pp + 4 * (Q - 1) + 2;                        /* (the bottom right corner) */
-    ok &= Near(pp[0].u, 0, 1e-5) && Near(last->u, mw / 1024, 1e-5) && Near(pp[0].v, (vy - bh / 2) / 1024, 1e-4) &&
-          Near(last->v, (vy + bh / 2) / 1024, 1e-4) && Near(last->x, 1920, 1e-3) && Near(last->y, 1080, 1e-3);
+    ok &= Near(pp[0].u, 0, 1e-6) && Near(pp[0].v, 0, 1e-6) && Near(last->u, 1002.0 / 1024, 1e-5) && Near(last->v, 668.0 / 1024, 1e-5) &&
+          Near(pp[0].x, 0, 1e-2) && Near(last->x, 1920, 1e-2) && Near(pp[0].y, -zy0 / ch0 * 1080, 1e-2) && Near(last->y, (1 - zy0) / ch0 * 1080, 1e-2);
     int lit = 0, dimmest = 255;
     for (int i = 0; i < 4 * Q; i++) { if (pp[i].c[0] > lit) lit = pp[i].c[0]; if (pp[i].c[0] < dimmest) dimmest = pp[i].c[0]; }
     ok &= lit >= 250 && dimmest >= 85 && dimmest < 120 && pd[0].c[0] < 60;      /* the candle: bright to dim; the paper dark */
-    Check(ok, "the parchment drawn: the dark paper, then the zone's painting over it as a mesh lit by the candle (bright near it, dim at the edges), the whole zone across the window and down it at the arrival, then vanilla's bar; no living map, no blade");
+    Check(ok, "the parchment drawn: the dark paper, then the zone's painting over it as a mesh lit by the candle (bright near it, dim at the edges), with no continent's the whole zone across the window, then vanilla's bar; no living map, no blade");
     ViewBuild(1920, 1080, 0.0f, 1000 + PARCH_FADE_MS / 2);
     int half = g_vv[g_vb[1].first].c[3];
     ViewBuild(1920, 1080, 1.0f, 1000 + PARCH_FADE_MS + 9000);
     pp = g_vv + g_vb[1].first; last = pp + 4 * (Q - 1) + 2;
-    float ww = mw / PARCH_ZOOM, cx = FireClamp(g_parchU * mw, ww / 2, mw - ww / 2);
-    ok = half > 100 && half < 155 && pp[0].c[3] == 255 && Near(last->u - pp[0].u, ww / 1024, 1e-4) && Near((last->u + pp[0].u) / 2, cx / 1024, 1e-4);
+    float cw1 = 1 / PARCH_ZOOM, ch1 = cw1 * 1.5f / A, cu1 = FireClamp(g_parchU, cw1 / 2, 1 - cw1 / 2), cv1 = FireClamp(g_parchV, ch1 / 2, 1 - ch1 / 2);
+    ok = half > 100 && half < 155 && pp[5 * 4 * PARCH_NX / 2 + 8].c[3] == 255 && Near(pp[0].x, -(cu1 - cw1 / 2) / cw1 * 1920, 0.05) &&
+         Near(last->x, (1 - (cu1 - cw1 / 2)) / cw1 * 1920, 0.05) && Near(pp[0].y, -(cv1 - ch1 / 2) / ch1 * 1080, 0.05);
     Check(ok, "the parchment drawn: it fades up once made, and eases in as the bar fills, to its full zoom centred on the arrival (kept on the map)");
+
+    /* with its continent's painting: the opening (his wish, 10 Oct: "started further zoomed out"), PARCH_OPEN of the
+     * zone's widths of the continent with the zone in the middle, closing in, the zone's own painting coming up over it */
+    g_parchCont = 0; g_viewTex[VT_PARCH2] = 1; g_contTW = 1024; g_contK = 1;
+    ViewBuild(1920, 1080, 0.0f, 30000);
+    const ViewVert *pc = g_vv + g_vb[1].first;
+    float su = 3470.0f / 35200, ou = 14465.0f / 35200, c0u = ou + su * (0.5f - PARCH_OPEN / 2), c1u = c0u + su * PARCH_OPEN;
+    const ViewVert *mid = pc + 4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2);   /* (the screen's middle: a corner there) */
+    ok = g_vb[1].tex == VT_PARCH2 && g_vb[1].count == 4 * Q && g_vb[2].tex == -1 && Near(pc[0].x, 0, 1e-3) && Near(pc[0].u, c0u * 1002 / 1024, 1e-4) &&
+         Near((pc + 4 * (PARCH_NX - 1) + 1)->u, c1u * 1002 / 1024, 1e-4) && Near(mid->u, (ou + su * 0.5f) * 1002 / 1024, 1e-4) && mid->c[3] == 255;
+    for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_PARCH;      /* (the zone's own not come up yet) */
+    Check(ok, "the parchment's opening: its continent's painting across the window with the zone in its middle, three of the zone's widths across, the zone's own painting not up yet");
+    ViewBuild(1920, 1080, 0.55f, 30000);
+    int coming = g_vb[1].tex == VT_PARCH2 && g_vb[2].tex == VT_PARCH;
+    int edge = coming ? g_vv[g_vb[2].first].c[3] : 255, inside = coming ? g_vv[g_vb[2].first + 4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2)].c[3] : 0;
+    ViewBuild(1920, 1080, 1.0f, 30000);
+    pp = g_vv + g_vb[2].first; last = pp + 4 * (Q - 1) + 2;
+    ok = coming && edge == 0 && inside > 0 && inside < 255 && g_vb[1].tex == VT_PARCH2 && g_vb[2].tex == VT_PARCH &&
+         pp[4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2)].c[3] == 255 && Near(pp[0].x, -(cu1 - cw1 / 2) / cw1 * 1920, 0.05) &&
+         Near(last->x, (1 - (cu1 - cw1 / 2)) / cw1 * 1920, 0.05);
+    Check(ok, "the parchment's opening: closing in, the zone's own painting comes up over its continent's, soft at its edges, and ends whole at its full zoom on the arrival");
+    g_parchCont = -1; g_viewTex[VT_PARCH2] = 0;
+
+    /* a screen's first frame, made as the view opens: the dark paper and the empty bar (the parchment), nothing (the
+     * living map); never the last screen's */
+    ViewFirstList(1920, 1080, 40000);
+    ok = g_vbN == 3 && g_vb[0].tex == -1 && g_vb[0].count >= 4 * Q && g_vb[1].tex == VT_VGLASS && g_vb[2].tex == VT_VBORDER;   /* (the bar's channel joins the paper's batch) */
+    for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_PARCH && g_vb[b].tex != VT_MAP;
+    g_parchOn = 0;
+    ViewFirstList(1920, 1080, 40000);
+    ok &= g_vbN == 0;
+    g_parchOn = 1;
+    Check(ok, "a screen's first frame, made at once as the view opens: the dark paper and the empty bar for the parchment, nothing for the living map; never the last screen's frame");
     g_destWX = -9300;                                                  /* (another arrival, its painting not up for it yet) */
     ViewBuild(1920, 1080, 0.5f, 20000);
     ok = g_vb[0].tex == -1 && g_vb[0].count >= 4 * Q;                  /* (the bar's channel joins the paper's batch) */
@@ -5584,6 +5618,54 @@ static void TestParchment(void)
     ok &= g_parchAsked && g_pzN == 4 && g_ppN == 2 && LogSays("the parchment: 4 zones (WorldMapArea.dbc from dbc.MPQ)") && g_vbarAsked;
     g_parchAsked = 0; g_vbarAsked = 0;
     Check(ok, "the parchment asked for: only by Data/CinderLoad/parchment.txt (vanilla's bar with it); the client's world map tables read and logged");
+}
+
+/* no1600x1200's two display hooks made to take turns (his "fix the no1600x1200 crash", 10 Oct 2026): each hook's jump
+ * pointed at CinderLoad's door, which lets one caller through at a time and goes on to the hook; only a jump out of the
+ * function's own module (or MinHook's hot-patch form) is taken for a hook */
+static unsigned char g_fakeFn[64], g_fakeHook[16];
+static int g_hookCalls, g_hookHeld;
+static BOOL WINAPI TestHookSettings(const char *dev, DWORD mode, void *dm)
+{
+    (void)dev; (void)dm;
+    g_hookCalls++; g_hookHeld = g_modeLock.held;
+    return mode == 7;
+}
+static void TestFakeJump(unsigned char *at, const unsigned char *to)
+{
+    at[0] = 0xE9;
+    unsigned rel = (unsigned)(to - (at + 5));
+    memcpy(at + 1, &rel, 4);
+}
+static void TestModeTurn(void)
+{
+    void *next = NULL;
+    memset(g_fakeFn, 0xCC, sizeof g_fakeFn);
+    TestFakeJump(g_fakeFn + 16, g_fakeHook);                          /* a hook: a jump at its first byte, out of its module */
+    int r = ModeTurnPatch(g_fakeFn + 16, g_fakeFn, g_fakeFn + sizeof g_fakeFn, (void *)ModeSettingsTurn, &next);
+    unsigned char *now = g_fakeFn + 16 + 5 + (int)Rd32(g_fakeFn + 17);
+    int ok = r == 1 && next == (void *)g_fakeHook && now == (unsigned char *)(void *)ModeSettingsTurn && g_fakeFn[16] == 0xE9;
+    memset(g_fakeFn, 0xCC, sizeof g_fakeFn);                          /* MinHook's hot-patch form: EB F9, the jump before it */
+    TestFakeJump(g_fakeFn + 11, g_fakeHook);
+    g_fakeFn[16] = 0xEB; g_fakeFn[17] = 0xF9;
+    next = NULL;
+    r = ModeTurnPatch(g_fakeFn + 16, g_fakeFn, g_fakeFn + sizeof g_fakeFn, (void *)ModeSettingsTurn, &next);
+    now = g_fakeFn + 11 + 5 + (int)Rd32(g_fakeFn + 12);
+    ok &= r == 2 && next == (void *)g_fakeHook && now == (unsigned char *)(void *)ModeSettingsTurn && g_fakeFn[16] == 0xEB;
+    memset(g_fakeFn, 0xCC, sizeof g_fakeFn);                          /* not hooked: its own first instruction */
+    g_fakeFn[16] = 0x8B; g_fakeFn[17] = 0xFF;
+    next = NULL;
+    ok &= ModeTurnPatch(g_fakeFn + 16, g_fakeFn, g_fakeFn + sizeof g_fakeFn, (void *)ModeSettingsTurn, &next) == 0 && !next && g_fakeFn[16] == 0x8B;
+    TestFakeJump(g_fakeFn + 16, g_fakeFn + 40);                       /* a jump within its own module: not a hook */
+    ok &= ModeTurnPatch(g_fakeFn + 16, g_fakeFn, g_fakeFn + sizeof g_fakeFn, (void *)ModeSettingsTurn, &next) == 0 && !next &&
+          g_fakeFn + 16 + 5 + (int)Rd32(g_fakeFn + 17) == g_fakeFn + 40;
+    ok &= ModeTurnPatch(NULL, g_fakeFn, g_fakeFn + sizeof g_fakeFn, (void *)ModeSettingsTurn, &next) == 0;
+    Check(ok, "no1600x1200's hooks: a hook's jump (or MinHook's hot-patch form) sent to CinderLoad's door, the door going on to the hook; a function not hooked, or a jump within its own module, left alone");
+    InitializeCriticalSection(&g_modeLock);
+    g_edsNext = TestHookSettings; g_hookCalls = 0; g_hookHeld = 0;
+    BOOL got = ModeSettingsTurn("\\\\.\\DISPLAY1", 7, NULL);
+    Check(got && g_hookCalls == 1 && g_hookHeld && !g_modeLock.held && g_modeTurns >= 1,
+          "no1600x1200's hooks: a call through the door reaches the hook with the lock held (one caller at a time), its answer back, the lock let go");
 }
 
 int main(int argc, char **argv)
@@ -5770,6 +5852,7 @@ int main(int argc, char **argv)
     TestViewDefault();
     TestVanillaBar();
     TestParchment();
+    TestModeTurn();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }

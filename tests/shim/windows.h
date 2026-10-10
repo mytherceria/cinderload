@@ -129,6 +129,7 @@ static HANDLE CreateThread(void *sa, size_t st, LPTHREAD_START_ROUTINE f, LPVOID
 static void Sleep(DWORD ms) { (void)ms; }
 static DWORD GetTickCount(void) { return shim_ticks; }
 static LONG InterlockedExchange(volatile LONG *at, LONG v) { LONG old = *at; *at = v; return old; }
+static LONG InterlockedIncrement(volatile LONG *p) { return ++*p; }
 typedef struct { int held; } CRITICAL_SECTION;       /* one thread here: counts, so a test can see it is let go */
 static void InitializeCriticalSection(CRITICAL_SECTION *c) { c->held = 0; }
 static void EnterCriticalSection(CRITICAL_SECTION *c) { c->held++; }

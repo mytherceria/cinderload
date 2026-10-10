@@ -5591,8 +5591,9 @@ static int TextHas(const char *list, const char *name)
  * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
-       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_COUNT };   /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client;
-                                                                 * VT_PARCH: the parchment, painted here from the client's map) */
+       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_COUNT };   /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client;
+                                                                 * VT_PARCH, VT_PARCH2: the parchment's zone and its continent,
+                                                                 * painted here from the client's map) */
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -7586,6 +7587,11 @@ static void VBarRead(unsigned char **blp, unsigned *len)
 #define PARCH_FADE_MS   400           /* the painting comes up over this once it is made */
 #define PARCH_ZOOM      1.30f         /* how far in the view eases over the load (1: the zone across the window) */
 #define PARCH_SEAM      12            /* a tile seam's colour step spread this far either side (texels, times the tiles' size over 256) */
+#define PARCH_OPEN      3.0f          /* the opening (his wish, 10 Oct: "started further zoomed out"): this many of the zone's
+                                       * widths across the window, on its continent's painting */
+#define PARCH_XF        1.8f          /* the zone's painting comes up over its continent's from this many of its widths across,
+                                       * whole at one */
+#define PARCH_FEATHER   0.06f         /* while it comes up, its edges soft over this much of it */
 #define PARCH_MAP_W     1002          /* the world map's own picture, of its 1024 x 768 (times the same) */
 #define PARCH_MAP_H     668
 typedef struct { int id, map, area; char name[40]; float l, r, t, b; } ParchZone;
@@ -7596,6 +7602,8 @@ static int g_pzN, g_ppN, g_parchAsked, g_parchOn;
 static unsigned char *g_parchPx;             /* the painting being made (RGBA, g_parchTW square), until given to OpenGL */
 static int g_parchTW, g_parchK, g_parchPieces;   /* its texture's size, its tiles' size over 256 (1, or 2 in HD), its pieces */
 static int g_parchZone = -1, g_parchMade = -1;   /* the zone on OpenGL (-1 none), and the one in g_parchPx */
+static int g_parchCont = -1;                 /* its continent on OpenGL (VT_PARCH2), for the opening (-1 none) */
+static int g_zoneTW, g_zoneK = 1, g_contTW, g_contK = 1;   /* each one's texture size and tiles' size over 256 */
 static DWORD g_parchAt;                      /* the view's clock as it came up (each screen, once its arrival is known) */
 static int g_parchForMap = -2;               /* the arrival it was put up for (map, world x, y) */
 static float g_parchForX, g_parchForY;
@@ -7663,6 +7671,24 @@ static int ParchFind(int map, float x, float y)
         if (best < 0 || a < ba) { best = i; ba = a; }
     }
     return best >= 0 ? best : cont;
+}
+
+/* Map's continent (its row with area 0), or -1. */
+static int ParchContinent(int map)
+{
+    for (int i = 0; i < g_pzN; i++) if (g_pz[i].map == map && !g_pz[i].area) return i;
+    return -1;
+}
+/* ln x for x > 0 (no C runtime): x brought into [0.5, 1] by twos, then the series for 2 atanh((x - 1) / (x + 1)). */
+static float ParchLn(float x)
+{
+    if (!(x > 0)) return -30;
+    int k = 0;
+    while (x > 1) { x *= 0.5f; k++; }
+    while (x < 0.5f) { x *= 2; k--; }
+    float y = (x - 1) / (x + 1), y2 = y * y, t = y, sum = 0;
+    for (int i = 1; i < 24; i += 2) { sum += t / (float)i; t *= y2; }
+    return 2 * sum + (float)k * 0.69314718f;
 }
 
 /* One of the zone's pictures, read and decoded (its first level) into a w x h RGBA buffer of its own: NULL when it
@@ -7787,38 +7813,77 @@ static float ParchCandle(float x, float y, float W, float H)
     float dx = (x - 0.42f * W) / (0.62f * W), dy = (y - 0.55f * H) / (0.70f * H), r2 = dx * dx + dy * dy;
     return FireClamp(1.08f - 0.62f * r2 * (1.12f - 0.12f * r2), 0.34f, 1);   /* (about 1.08 - 0.62 r^1.8, as the mocks) */
 }
-/* This frame's paper: dark until the painting is up, then the painting, the view easing in toward the arrival as the
- * bar fills, by candlelight; a mesh so the light falls on its corners. */
+/* A mesh of PARCH_NX x PARCH_NY quads over x0..x1, y0..y1 on screen, its picture's texels u0..u1, v0..v1 of a tw-wide
+ * texture (tex -1: no picture, the paper itself, unlit), lit by the candle at each corner, alpha a, and, with feather,
+ * soft within that much of the mesh's edges. */
+static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
+                      float tw, float a, float feather)
+{
+    static const int ci[4] = { 0, 1, 1, 0 }, cj[4] = { 0, 0, 1, 1 };
+    for (int j = 0; j < PARCH_NY; j++)
+        for (int i = 0; i < PARCH_NX; i++) {
+            ViewVert *q = ViewQuadMode(tex, 0);
+            if (!q) return;
+            for (int k = 0; k < 4; k++) {
+                float fx = (float)(i + ci[k]) / PARCH_NX, fy = (float)(j + cj[k]) / PARCH_NY;
+                float sx = x0 + (x1 - x0) * fx, sy = y0 + (y1 - y0) * fy;
+                float L = ParchCandle(FireClamp(sx, 0, W), FireClamp(sy, 0, H), W, H);
+                float rgb[3] = { L, L * 0.84f, L * 0.62f }, al = a;
+                if (tex < 0) { rgb[0] *= 0.18f; rgb[1] *= 0.13f; rgb[2] *= 0.08f; }   /* (the paper unlit) */
+                if (feather > 0) {
+                    float ex = fx < 1 - fx ? fx : 1 - fx, ey = fy < 1 - fy ? fy : 1 - fy;
+                    al *= FireClamp(ex / feather, 0, 1) * FireClamp(ey / feather, 0, 1);
+                }
+                ViewVertSet(q + k, sx, sy, (u0 + (u1 - u0) * fx) / tw, (v0 + (v1 - v0) * fy) / tw, SaberArgb(VBarRgb(rgb), al));
+            }
+        }
+}
+/* This frame's paper: dark until the painting is up, then (his wish, 10 Oct: "started further zoomed out") its continent's
+ * painting with the zone in the middle, PARCH_OPEN of the zone's widths across, closing in as the bar fills (evenly, by
+ * ratio), the zone's own painting coming up over it as it fills the window, on in to PARCH_ZOOM, from the zone's middle
+ * toward the arrival (kept on the zone once inside it, on the continent before); all by candlelight. No continent's
+ * painting: the zone alone, the whole of it across the window to begin with. */
 static void ParchDraw(float W, float H, float shown, DWORD now)
 {
     int up = g_parchZone >= 0 && g_viewTex[VT_PARCH] && g_destMap == g_parchForMap && g_destWX == g_parchForX && g_destWY == g_parchForY;
-    float mw = (float)(PARCH_MAP_W * g_parchK), mh = (float)(PARCH_MAP_H * g_parchK), tw = (float)g_parchTW;
-    float bw = mw, bh = mw * H / W;                                /* the whole zone across the window, */
-    if (bh > mh) { bh = mh; bw = mh * W / H; }                    /* (or down it, in a window narrower than the map) */
-    float e = FireClamp(shown, 0, 1), z;
+    int cont = up && g_parchCont >= 0 && g_parchCont != g_parchZone && g_viewTex[VT_PARCH2] && g_pz[g_parchCont].map == g_pz[g_parchZone].map;
+    ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);         /* the dark paper (while it is made, and under its fade) */
+    if (!up) return;
+    float A = W / H, bw = A >= 1.5f ? 1 : A / 1.5f;               /* the zone across the window (or down it, when narrower) */
+    float e = FireClamp(shown, 0, 1);
     e = e * e * (3 - 2 * e);
-    z = 1 + (PARCH_ZOOM - 1) * e;
-    float ww = bw / z, wh = bh / z;
-    float cx = mw / 2 + (g_parchU * mw - mw / 2) * e, cy = g_parchV * mh;
-    cx = FireClamp(cx, ww / 2, mw - ww / 2); cy = FireClamp(cy, wh / 2, mh - wh / 2);
-    float a = up ? FireClamp((float)(LONG)(now - g_parchAt) / PARCH_FADE_MS, 0, 1) : 0;
-    for (int pass = 0; pass < 2; pass++) {                        /* the dark paper (while it is made, and under its fade), then it */
-        if (pass && !up) break;
-        for (int j = 0; j < PARCH_NY; j++)
-            for (int i = 0; i < PARCH_NX; i++) {
-                ViewVert *q = ViewQuadMode(pass ? VT_PARCH : -1, 0);
-                if (!q) return;
-                static const int ci[4] = { 0, 1, 1, 0 }, cj[4] = { 0, 0, 1, 1 };
-                for (int k = 0; k < 4; k++) {
-                    float fx = (float)(i + ci[k]) / PARCH_NX, fy = (float)(j + cj[k]) / PARCH_NY, sx = fx * W, sy = fy * H;
-                    float L = ParchCandle(sx, sy, W, H);
-                    float rgb[3] = { L, L * 0.84f, L * 0.62f };
-                    if (!pass) for (int c = 0; c < 3; c++) rgb[c] *= c ? (c == 1 ? 0.13f : 0.08f) : 0.18f;   /* (the paper unlit) */
-                    float u = (cx - ww / 2 + ww * fx) / (tw > 0 ? tw : 1), v = (cy - wh / 2 + wh * fy) / (tw > 0 ? tw : 1);
-                    ViewVertSet(q + k, sx, sy, u, v, SaberArgb(VBarRgb(rgb), pass ? a : 1));
-                }
-            }
+    float cwEnd = bw / PARCH_ZOOM, cwStart = cont ? bw * PARCH_OPEN : bw;
+    float cw = cwStart * (float)FireExp((double)(e * ParchLn(cwEnd / cwStart))), ch = cw * 1.5f / A;   /* (zone widths, heights) */
+    float lo, hi, cu = 0.5f + (g_parchU - 0.5f) * e, cv = 0.5f + (g_parchV - 0.5f) * e;
+    lo = cw / 2 < 0.5f ? cw / 2 : 0.5f; hi = 1 - cw / 2 > 0.5f ? 1 - cw / 2 : 0.5f; cu = FireClamp(cu, lo, hi);
+    lo = ch / 2 < 0.5f ? ch / 2 : 0.5f; hi = 1 - ch / 2 > 0.5f ? 1 - ch / 2 : 0.5f; cv = FireClamp(cv, lo, hi);
+    float zx = cu - cw / 2, zy = cv - ch / 2;                       /* the window's top left, in the zone's own 0..1 */
+    float a = FireClamp((float)(LONG)(now - g_parchAt) / PARCH_FADE_MS, 0, 1);
+    if (cont) {                                                      /* the continent's painting under it, the window on it */
+        const ParchZone *Z = &g_pz[g_parchZone], *C = &g_pz[g_parchCont];
+        float su = (Z->l - Z->r) / (C->l - C->r), ou = (C->l - Z->l) / (C->l - C->r);   /* the zone's 0..1 on the continent's */
+        float sv = (Z->t - Z->b) / (C->t - C->b), ov = (C->t - Z->t) / (C->t - C->b);
+        float c0u = ou + su * zx, c1u = c0u + su * cw, c0v = ov + sv * zy, c1v = c0v + sv * ch;
+        if (c1u - c0u <= 1) { float d = c0u < 0 ? -c0u : c1u > 1 ? 1 - c1u : 0; c0u += d; c1u += d; zx += d / su; }   /* (kept on it) */
+        if (c1v - c0v <= 1) { float d = c0v < 0 ? -c0v : c1v > 1 ? 1 - c1v : 0; c0v += d; c1v += d; zy += d / sv; }
+        float mw = (float)(PARCH_MAP_W * g_contK), mh = (float)(PARCH_MAP_H * g_contK);
+        ParchMesh(VT_PARCH2, W, H, 0, 0, W, H, c0u * mw, c0v * mh, c1u * mw, c1v * mh, (float)g_contTW, a, 0);
     }
+    float kz = cont ? FireClamp((PARCH_XF * bw - cw) / ((PARCH_XF - 1) * bw), 0, 1) : 1;
+    if (kz <= 0) return;
+    float zw = (float)(PARCH_MAP_W * g_zoneK), zh = (float)(PARCH_MAP_H * g_zoneK);   /* the zone's painting over its own box */
+    ParchMesh(VT_PARCH, W, H, -zx / cw * W, -zy / ch * H, (1 - zx) / cw * W, (1 - zy) / ch * H, 0, 0, zw, zh, (float)g_zoneTW,
+              a * kz, cont && kz < 1 ? PARCH_FEATHER : 0);
+}
+/* A screen's first frame, made at once as the view opens (before its first step can be: his note, 10 Oct, "for a split
+ * second ... you get the previous screen"): the dark paper and vanilla's bar empty, for the parchment; for the living map,
+ * nothing (black). Never the last screen's frame. */
+static void ViewFirstList(float W, float H, DWORD now)
+{
+    ViewListStart();
+    if (!g_parchOn) return;
+    ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);
+    if (g_barVanilla) VBarBuild(W, H, 0, now);
 }
 /* The parchment asked for (Data\\CinderLoad\\parchment.txt): the client's world map tables read (read only), logged. */
 static void ParchRead(void)
@@ -8158,15 +8223,15 @@ static int ViewSparkUp(void)
 }
 
 static DWORD ViewNow(void);
-/* The painting made (g_parchPx) given to OpenGL as VT_PARCH (its name made once, its picture replaced each zone), no
+/* The painting made (g_parchPx) given to OpenGL in slot (its name made once, its picture replaced each time), no
  * smaller copies (it is only ever drawn larger than it is): 1 when it took it. g_parchPx goes either way. */
-static int ParchUp(void)
+static int ParchUp(int slot)
 {
     int ok = 0;
     if (g_parchPx && g_parchTW > 0 && g_parchTW <= g_view.maxTex) {
         while (gl.GetError()) {}
-        if (!g_viewTex[VT_PARCH]) gl.GenTextures(1, &g_viewTex[VT_PARCH]);
-        gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_PARCH]);
+        if (!g_viewTex[slot]) gl.GenTextures(1, &g_viewTex[slot]);
+        gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
         gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
         gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA8_, g_parchTW, g_parchTW, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, g_parchPx);
         gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, 0);
@@ -8202,11 +8267,28 @@ static void ParchWork(DWORD now)
         if (!ParchMake(z, &why)) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the paper stays dark", Z->name, why); Log(m); return; }
         DWORD t1 = ViewNow();
         int pieces = g_parchPieces, k = g_parchK;
-        if (!ParchUp()) { g_parchZone = -1; Log("  the parchment: OpenGL would not take the painting; the paper stays dark"); return; }
+        g_zoneTW = g_parchTW; g_zoneK = g_parchK;
+        if (!ParchUp(VT_PARCH)) { g_parchZone = -1; Log("  the parchment: OpenGL would not take the painting; the paper stays dark"); return; }
         g_parchZone = z;
         wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d overlay pieces) in %lu ms, given to "
                   "OpenGL in %lu ms", Z->name, 256 * k, pieces, (unsigned long)(t1 - t0), (unsigned long)(ViewNow() - t1));
         Log(m);
+    }
+    int c = ParchContinent(map);                                /* its continent, for the opening */
+    if (c >= 0 && c != z && c != g_parchCont) {
+        DWORD t0 = ViewNow();
+        const char *why = "";
+        g_parchCont = -1;
+        if (!ParchMake(c, &why)) { wsprintfA(m, "  the parchment: %s could not be painted (%s); no opening on it", g_pz[c].name, why); Log(m); }
+        else {
+            g_contTW = g_parchTW; g_contK = g_parchK;
+            if (ParchUp(VT_PARCH2)) {
+                g_parchCont = c;
+                wsprintfA(m, "  the parchment: %s painted for the opening (%d-px tiles) in %lu ms", g_pz[c].name, 256 * g_parchK,
+                          (unsigned long)(ViewNow() - t0));
+                Log(m);
+            } else Log("  the parchment: OpenGL would not take the continent's painting; no opening on it");
+        }
     }
     g_parchU = FireClamp((Z->l - y) / (Z->l - Z->r), 0, 1);
     g_parchV = FireClamp((Z->t - x) / (Z->t - Z->b), 0, 1);
@@ -8284,6 +8366,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM w, LPARAM l)
 /* Our window over the game window's whole client area, its OpenGL context and the world map's picture: 1 when all are
  * there and the window shows; -1 not for this screen (the game's window minimised, say); 0 not at all. why: what
  * failed, for the log. */
+static int ViewFrame(DWORD *drawn, DWORD *gpu);
 static int ViewOpen(const char **why)
 {
     HWND game = NULL;
@@ -8365,11 +8448,19 @@ static int ViewOpen(const char **why)
     }
     g_view.w = w; g_view.h = h;
     static int clickLogged;                              /* whole again after the last screen's fade, and the mouse through */
-    if (!ViewClickThrough() && !clickLogged) {
+    int layered = ViewClickThrough();
+    if (!layered && !clickLogged) {
         clickLogged = 1;
         Log("  the view: the system would not make its window layered, so the mouse stops at it while it shows");
     }
+    /* shown see-through, its first frame drawn, then whole: the window still holds the last screen's last frame until a
+     * new one is drawn into it, and the game's first frames of a screen come a moment before the view's can (his note,
+     * 10 Oct: "for a split second ... you get the previous screen") */
+    if (layered) ViewAlpha(0);
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
+    ViewFirstList((float)w, (float)h, ViewNow());
+    ViewFrame(NULL, NULL);
+    if (layered) ViewAlpha(255);
     return 1;
 }
 static DWORD ViewNow(void);
@@ -8828,6 +8919,72 @@ static void PresentSetup(void)
     Log(m);
 }
 
+/* ---- no1600x1200's display hooks, made to take turns (his "fix the no1600x1200 crash", 10 Oct 2026) ----
+ * no1600x1200.dll (it lifts the game's 1600 x 1200 cap) hooks USER32's EnumDisplaySettingsA and EnumDisplayDevicesA with
+ * MinHook, and its EnumDisplaySettingsA hook keeps a copy of every mode it is handed in one list of its own, with no
+ * lock. At start the game lists the screen's modes on its thread while another mod's thread (comfytime's, through d3d9)
+ * lists them on its: when the list grows under one while the other copies it, the copy runs off the old one's end and
+ * the game dies (ERROR #132 in no1600x1200.dll at its offset 0x5E9E, the same place every time: ten times on his test
+ * copy from 26 Sep to 10 Oct). Its hooks are jumps at the two functions' first bytes, put there before CinderLoad loads
+ * (it comes earlier in dlls.txt): each jump is pointed at a door of CinderLoad's own that lets one caller through at a
+ * time, on to the hook as before. Only when no1600x1200.dll is loaded and the function starts with such a jump out of
+ * USER32 (or MinHook's hot-patch form: a short jump back to one); in memory only. */
+static CRITICAL_SECTION g_modeLock;
+static BOOL (WINAPI *g_edsNext)(const char *, DWORD, void *);
+static BOOL (WINAPI *g_eddNext)(const char *, DWORD, void *, DWORD);
+static volatile LONG g_modeTurns;                    /* calls through the doors (the log's count) */
+static BOOL WINAPI ModeSettingsTurn(const char *dev, DWORD mode, void *dm)
+{
+    EnterCriticalSection(&g_modeLock);
+    InterlockedIncrement(&g_modeTurns);
+    BOOL r = g_edsNext(dev, mode, dm);
+    LeaveCriticalSection(&g_modeLock);
+    return r;
+}
+static BOOL WINAPI ModeDevicesTurn(const char *dev, DWORD i, void *dd, DWORD flags)
+{
+    EnterCriticalSection(&g_modeLock);
+    InterlockedIncrement(&g_modeTurns);
+    BOOL r = g_eddNext(dev, i, dd, flags);
+    LeaveCriticalSection(&g_modeLock);
+    return r;
+}
+/* fn's hook (a jump, E9, at its first byte; or MinHook's hot-patch form, EB F9 there and the jump five bytes before it)
+ * going somewhere outside lo..hi (the module fn is in): *next that place, and the jump sent to door instead. 1 when done,
+ * 2 when done in the hot-patch form, 0 when fn is not hooked so (left alone). */
+static int ModeTurnPatch(unsigned char *fn, const unsigned char *lo, const unsigned char *hi, void *door, void **next)
+{
+    if (!fn) return 0;
+    unsigned char *jmp = fn[0] == 0xE9 ? fn : fn[0] == 0xEB && fn[1] == 0xF9 && fn[-5] == 0xE9 ? fn - 5 : NULL;
+    if (!jmp) return 0;
+    unsigned char *to = jmp + 5 + (int)Rd32(jmp + 1);
+    if (to >= lo && to < hi) return 0;                             /* (a jump within the module: not a hook) */
+    DWORD old;
+    if (!VirtualProtect(jmp, 5, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    *next = to;                                                    /* (before the jump moves: the door goes on to it) */
+    unsigned rel = (unsigned)((unsigned char *)door - (jmp + 5));
+    *(volatile unsigned *)(void *)(jmp + 1) = rel;                 /* one store (the four bytes share a cache line) */
+    VirtualProtect(jmp, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), jmp, 5);
+    return jmp == fn ? 1 : 2;
+}
+#ifdef __i386__
+static void ModeTurnStart(void)
+{
+    HMODULE u = GetModuleHandleA("user32.dll");
+    if (!GetModuleHandleA("no1600x1200.dll") || !u) return;
+    const unsigned char *lo = (const unsigned char *)u, *hi = lo + Rd32(lo + Rd32(lo + 0x3C) + 24 + 56);   /* (SizeOfImage) */
+    InitializeCriticalSection(&g_modeLock);
+    int a = ModeTurnPatch((unsigned char *)GetProcAddress(u, "EnumDisplaySettingsA"), lo, hi, (void *)ModeSettingsTurn, (void **)&g_edsNext);
+    int b = ModeTurnPatch((unsigned char *)GetProcAddress(u, "EnumDisplayDevicesA"), lo, hi, (void *)ModeDevicesTurn, (void **)&g_eddNext);
+    char m[300];
+    wsprintfA(m, "no1600x1200: its display hooks take turns now (EnumDisplaySettingsA %s, EnumDisplayDevicesA %s): two threads listing "
+              "the screen's modes at once crashed the game at its start (in memory only)",
+              a == 1 ? "its jump" : a == 2 ? "its hot-patch jump" : "not hooked, left alone", b == 1 ? "its jump" : b == 2 ? "its hot-patch jump" : "not hooked, left alone");
+    Log(m);
+}
+#endif
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
     (void)reserved;
@@ -8847,6 +9004,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
                 TakeOutAfterAll();
             }
         }
+#ifdef __i386__
+        if (g_dir[0]) ModeTurnStart();                  /* (before another mod's thread can list the screen's modes) */
+#endif
         if (g_dir[0]) FireStart();
         if (g_dir[0]) ViewStart();
     }
