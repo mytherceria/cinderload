@@ -7608,10 +7608,11 @@ static void VBarRead(unsigned char **blp, unsigned *len)
 #define PARCH_FADE_MS   400           /* the painting comes up over this once it is made */
 #define PARCH_ZOOM      1.30f         /* how far in the view eases over the load (1: the zone across the window) */
 #define PARCH_SEAM      12            /* a tile seam's colour step spread this far either side (texels, times the tiles' size over 256) */
-#define PARCH_IN0       0.12f         /* the opening (his wishes, 10 Oct: "started further zoomed out", then "way too zoomed in at
-                                       * start. you can't tell exactly what zone it even is"): the whole continent's painting
-                                       * across the window until the bar is this far, */
-#define PARCH_IN1       0.62f         /* closing in until the zone fills the window by here, then on in toward the arrival */
+#define PARCH_FOLLOW_S  0.25f         /* the camera's middle follows where it should be over about this long, */
+#define PARCH_SPRING    6.0f          /* its zoom on a critically damped spring this stiff (a second: no jolt when it starts or
+                                       * stops: "it should glide smoothly"), */
+#define PARCH_RATE      1.2f          /* closing in no quicker than this (its width's log, a second: a sudden end still glides) */
+#define PARCH_FRONT     2.2f          /* how much of the way in comes early (his loads stall about halfway: the zone is up by then) */
 #define PARCH_XF        2.6f          /* the zone's painting comes up over its continent's from this many of its widths across,
                                        * whole at one */
 #define PARCH_FEATHER   0.06f         /* while it comes up, its edges soft over this much of it */
@@ -7893,6 +7894,17 @@ static int ExploreLoad(unsigned lo, unsigned hi, unsigned char *bits)
     CloseHandle(f);
     return ok && got == EXPLORED_BYTES;
 }
+static volatile LONG g_exPending;                /* this screen's were not read live: read once as the world shows */
+/* The game's thread, as the world shows after a screen whose start had no player to read (a login): read once, and kept
+ * for the next login (his note, 10 Oct: the zones all still showed; a character that only ever logged in would never
+ * have been read). */
+static void ExploreAfterLoad(void)
+{
+    if (!g_parchAsked || !g_parchTablesOk) return;
+    unsigned char bits[EXPLORED_BYTES];
+    unsigned lo = 0, hi = 0;
+    if (ExploreRead(bits, &lo, &hi)) ExploreSave(bits, lo, hi);
+}
 /* The game's thread, as a screen begins: this screen's character's explored areas, once (above), for the parchment. */
 static void ExploreAtLoad(void)
 {
@@ -7906,6 +7918,7 @@ static void ExploreAtLoad(void)
     g_scrGuid[0] = lo; g_scrGuid[1] = hi;
     InterlockedExchange(&g_scrKnown, known);
     InterlockedIncrement(&g_scrSeq);
+    InterlockedExchange(&g_exPending, known != 1);
     static LONG lastKnown = -1;
     if (known != lastKnown || known == 0) {
         char m[200];
@@ -8086,29 +8099,55 @@ static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, f
             }
         }
 }
-/* This frame's paper: dark until the painting is up, then (his wishes, 10 Oct) its whole continent's painting across the
- * window, held until the bar is PARCH_IN0 along, closing in evenly by ratio until the zone fills the window at PARCH_IN1
- * (the zone's own painting coming up over its continent's as it does), then on in to PARCH_ZOOM from the zone's middle
- * toward the arrival (kept on the continent's painting before, on the zone's after); all by candlelight. No continent's
- * painting: the zone alone, the whole of it across the window until PARCH_IN1. */
+/* Where the camera should be at q, the zoom's own progress (g_drift: the bar smoothed, never back, as the living map's
+ * zoom): its width (as a log, in the zone's widths) and its middle (in the zone's own 0..1, before it is kept on the
+ * continent), from the whole continent (or, with no continent's painting, the whole zone) to PARCH_ZOOM on the
+ * arrival, in one glide eased at both ends (his notes, 10 Oct: "further zoomed out", "you can't tell exactly what zone it
+ * even is", then "the camera is kind of jerky ... it should glide smoothly"), the middle turning toward the arrival
+ * over its second part. */
+static void ParchCamera(float q, float bw, float whole, float *lw, float *cu, float *cv)
+{
+    float E = FireClamp(q, 0, 1);
+    E = E < 1 ? 1 - (float)FireExp(PARCH_FRONT * (double)ParchLn(1 - E)) : 1;   /* (most of the way early: the zone is up by */
+    E = E * E * E * (E * (E * 6 - 15) + 10);                         /* halfway, where loads stall; smootherstep: no kink) */
+    float l0 = ParchLn(whole), l1 = ParchLn(bw / PARCH_ZOOM);
+    *lw = l0 + (l1 - l0) * E;
+    float c = FireClamp((E - 0.35f) / 0.65f, 0, 1);
+    c = c * c * (3 - 2 * c);
+    *cu = 0.5f + (g_parchU - 0.5f) * c; *cv = 0.5f + (g_parchV - 0.5f) * c;
+}
+static struct { float lw, vl, cu, cv; DWORD at, screen; int on; } g_cam;   /* the camera as drawn (followed, not jumped) */
+/* This frame's paper: dark until the painting is up, then its whole continent's painting, closing in on the zone, its
+ * own painting coming up over its continent's as it fills the window, on in toward the arrival (ParchCamera), the camera
+ * following where it should be over PARCH_FOLLOW_S, so a sudden step of the load still glides; kept on the continent's
+ * painting before, on the zone's after; all by candlelight. */
 static void ParchDraw(float W, float H, float shown, DWORD now)
 {
+    (void)shown;
     int up = g_parchZone >= 0 && g_viewTex[VT_PARCH] && g_destMap == g_parchForMap && g_destWX == g_parchForX && g_destWY == g_parchForY;
     int cont = up && g_parchCont >= 0 && g_parchCont != g_parchZone && g_viewTex[VT_PARCH2] && g_pz[g_parchCont].map == g_pz[g_parchZone].map;
     ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);         /* the dark paper (while it is made, and under its fade) */
-    if (!up) return;
+    if (!up) { g_cam.on = 0; return; }
     float A = W / H, bw = A >= 1.5f ? 1 : A / 1.5f;               /* the zone across the window (or down it, when narrower) */
-    float s0 = FireClamp(shown, 0, 1), p1 = FireClamp((s0 - PARCH_IN0) / (PARCH_IN1 - PARCH_IN0), 0, 1), p2 = FireClamp((s0 - PARCH_IN1) / (1 - PARCH_IN1), 0, 1);
-    p1 = p1 * p1 * (3 - 2 * p1); p2 = p2 * p2 * (3 - 2 * p2);
-    float cw = bw;                                                  /* (the window's width in the zone's widths, its height in its heights) */
-    if (cont) {                                                     /* the whole continent, closing in evenly by ratio to the zone */
-        const ParchZone *Z = &g_pz[g_parchZone], *C = &g_pz[g_parchCont];
-        float whole = bw * (C->l - C->r) / (Z->l - Z->r);
-        cw = whole * (float)FireExp((double)(p1 * ParchLn(bw / whole)));
+    float whole = bw;
+    if (cont) whole = bw * (g_pz[g_parchCont].l - g_pz[g_parchCont].r) / (g_pz[g_parchZone].l - g_pz[g_parchZone].r);
+    float lw, tu, tv;
+    ParchCamera(g_drift, bw, whole, &lw, &tu, &tv);
+    if (!g_cam.on || g_cam.screen != g_parchAt || (LONG)(now - g_cam.at) > 500 || (LONG)(now - g_cam.at) < 0) {
+        g_cam.lw = lw; g_cam.vl = 0; g_cam.cu = tu; g_cam.cv = tv;   /* (a new screen, or a long pause: where it should be) */
+    } else {
+        float dt = (float)(now - g_cam.at) / 1000.0f, k = 1 - (float)FireExp(-(double)dt / PARCH_FOLLOW_S);
+        int n = (int)(dt * 240) + 1;                                /* (the spring in steps of at most 1/240 s) */
+        float hstep = dt / (float)n;
+        for (int i = 0; i < n; i++) {
+            float acc = PARCH_SPRING * PARCH_SPRING * (lw - g_cam.lw) - 2 * PARCH_SPRING * g_cam.vl;
+            g_cam.vl = FireClamp(g_cam.vl + acc * hstep, -PARCH_RATE, PARCH_RATE);
+            g_cam.lw += g_cam.vl * hstep;
+        }
+        g_cam.cu += (tu - g_cam.cu) * k; g_cam.cv += (tv - g_cam.cv) * k;
     }
-    cw *= (float)FireExp((double)(p2 * ParchLn(1 / PARCH_ZOOM)));   /* then on in toward the arrival */
-    float ch = cw * 1.5f / A;
-    float lo, hi, cu = 0.5f + (g_parchU - 0.5f) * p2, cv = 0.5f + (g_parchV - 0.5f) * p2;
+    g_cam.on = 1; g_cam.at = now; g_cam.screen = g_parchAt;
+    float cw = (float)FireExp((double)g_cam.lw), ch = cw * 1.5f / A, lo, hi, cu = g_cam.cu, cv = g_cam.cv;
     lo = cw / 2 < 0.5f ? cw / 2 : 0.5f; hi = 1 - cw / 2 > 0.5f ? 1 - cw / 2 : 0.5f; cu = FireClamp(cu, lo, hi);
     lo = ch / 2 < 0.5f ? ch / 2 : 0.5f; hi = 1 - ch / 2 > 0.5f ? 1 - ch / 2 : 0.5f; cv = FireClamp(cv, lo, hi);
     float zx = cu - cw / 2, zy = cv - ch / 2;                       /* the window's top left, in the zone's own 0..1 */
@@ -9123,6 +9162,7 @@ void WINAPI PrePresent(unsigned char *gx)
     int loading = g_loadFrame;
     g_loadFrame = 0;
     if (!loading) InterlockedExchange(&g_worldFrames, g_worldFrames + 1);   /* (the view waits for one to fade) */
+    if (!loading && g_exPending && InterlockedExchange(&g_exPending, 0)) ExploreAfterLoad();   /* (once, as the world shows) */
     if (!g_blurOn || g_blurDead || !gx) return;
     float amount = 0;
     int mode = BlurStep(loading, GetTickCount(), &amount);

@@ -5540,6 +5540,7 @@ static void TestParchment(void)
     g_parchForMap = 0; g_parchForX = -9464; g_parchForY = 62;
     g_parchU = (1535.0f - 62) / (1535.0f + 1935); g_parchV = (-7939.0f + 9464) / (-7939.0f + 10254);
     g_parchAt = 1000;
+    g_drift = 0; g_cam.on = 0;                                          /* (the zoom's own progress, which the camera follows) */
     ViewBuild(1920, 1080, 0.0f, 1000);
     int Q = PARCH_NX * PARCH_NY;
     const ViewVert *pd = g_vv + g_vb[0].first, *pp = g_vv + g_vb[1].first;
@@ -5557,6 +5558,7 @@ static void TestParchment(void)
     Check(ok, "the parchment drawn: the dark paper, then the zone's painting over it as a mesh lit by the candle (bright near it, dim at the edges), with no continent's the whole zone across the window, then vanilla's bar; no living map, no blade");
     ViewBuild(1920, 1080, 0.0f, 1000 + PARCH_FADE_MS / 2);
     int half = g_vv[g_vb[1].first].c[3];
+    g_drift = 1;
     ViewBuild(1920, 1080, 1.0f, 1000 + PARCH_FADE_MS + 9000);
     pp = g_vv + g_vb[1].first; last = pp + 4 * (Q - 1) + 2;
     float cw1 = 1 / PARCH_ZOOM, ch1 = cw1 * 1.5f / A, cu1 = FireClamp(g_parchU, cw1 / 2, 1 - cw1 / 2), cv1 = FireClamp(g_parchV, ch1 / 2, 1 - ch1 / 2);
@@ -5567,26 +5569,54 @@ static void TestParchment(void)
     /* with its continent's painting: the opening (his wishes, 10 Oct: "started further zoomed out", then "way too zoomed
      * in at start"), the whole continent across the window, held, closing in, the zone's own painting coming up over it */
     g_parchCont = 0; g_viewTex[VT_PARCH2] = 1; g_contTW = 1024; g_contK = 1;
+    g_drift = 0; g_cam.on = 0;
     ViewBuild(1920, 1080, 0.0f, 30000);
     const ViewVert *pc = g_vv + g_vb[1].first;
     float su = 3470.0f / 35200, ou = 14465.0f / 35200, c0u = 0, c1u = 1;   /* (the whole continent across) */
+    (void)su;
     const ViewVert *mid = pc + 4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2);   /* (the screen's middle: a corner there) */
     ok = g_vb[1].tex == VT_PARCH2 && g_vb[1].count == 4 * Q && g_vb[2].tex == -1 && Near(pc[0].x, 0, 1e-3) && Near(pc[0].u, c0u * 1002 / 1024, 1e-4) &&
          Near((pc + 4 * (PARCH_NX - 1) + 1)->u, c1u * 1002 / 1024, 1e-4) && Near(mid->u, 0.5 * 1002 / 1024, 1e-4) && mid->c[3] == 255;   /* (kept on the continent: its middle) */
     (void)ou;
     for (int b = 0; b < g_vbN; b++) ok &= g_vb[b].tex != VT_PARCH;      /* (the zone's own not come up yet) */
-    ViewBuild(1920, 1080, PARCH_IN0, 30000);                           /* (held so until the bar is PARCH_IN0 along) */
-    ok &= Near(g_vv[g_vb[1].first].u, 0, 1e-4) && Near((g_vv + g_vb[1].first + 4 * (PARCH_NX - 1) + 1)->u, 1002.0 / 1024, 1e-4);
+    g_drift = 0.02f; g_cam.on = 0;                                       /* (eased: near the start it has hardly moved) */
+    ViewBuild(1920, 1080, 0.0f, 31000);
+    ok &= g_vv[g_vb[1].first].u < 0.01f && (g_vv + g_vb[1].first + 4 * (PARCH_NX - 1) + 1)->u > 0.97f * 1002 / 1024;
     Check(ok, "the parchment's opening (his notes: further out, then 'you can't tell exactly what zone it even is'): its whole continent's painting across the window, held a while, the zone's own painting not up yet");
-    ViewBuild(1920, 1080, 0.55f, 30000);
+    g_drift = 0.3f; g_cam.on = 0;
+    ViewBuild(1920, 1080, 0.3f, 32000);
     int coming = g_vb[1].tex == VT_PARCH2 && g_vb[2].tex == VT_PARCH;
     int edge = coming ? g_vv[g_vb[2].first].c[3] : 255, inside = coming ? g_vv[g_vb[2].first + 4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2)].c[3] : 0;
-    ViewBuild(1920, 1080, 1.0f, 30000);
+    g_drift = 1; g_cam.on = 0;
+    ViewBuild(1920, 1080, 1.0f, 33000);
     pp = g_vv + g_vb[2].first; last = pp + 4 * (Q - 1) + 2;
     ok = coming && edge == 0 && inside > 0 && inside < 255 && g_vb[1].tex == VT_PARCH2 && g_vb[2].tex == VT_PARCH &&
          pp[4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2)].c[3] == 255 && Near(pp[0].x, -(cu1 - cw1 / 2) / cw1 * 1920, 0.05) &&
          Near(last->x, (1 - (cu1 - cw1 / 2)) / cw1 * 1920, 0.05);
-    Check(ok, "the parchment's opening: closing in, the zone's own painting comes up over its continent's, soft at its edges, and ends whole at its full zoom on the arrival");
+    g_drift = 0.54f; g_cam.on = 0;                                       /* (his loads stall about halfway: the zone is up by then) */
+    ViewBuild(1920, 1080, 0.54f, 34000);
+    ok &= g_vb[2].tex == VT_PARCH && g_vv[g_vb[2].first + 4 * (PARCH_NY / 2 * PARCH_NX + PARCH_NX / 2)].c[3] == 255;
+    Check(ok, "the parchment's opening: closing in, the zone's own painting comes up over its continent's, soft at its edges, whole by halfway (where loads stall), and ends at its full zoom on the arrival");
+    /* it glides (his note, 10 Oct: "the camera is kind of jerky ... it should glide smoothly"): driven by the zoom's own
+     * smoothed progress, and following it over PARCH_FOLLOW_S, so a sudden step goes part of the way a frame */
+    g_drift = 0.3f; g_cam.on = 0;
+    ViewBuild(1920, 1080, 0.3f, 40000);
+    float lw0 = g_cam.lw;
+    g_drift = 0.6f;                                                      /* (a sudden step) */
+    ViewBuild(1920, 1080, 0.6f, 40016);
+    float lw1 = g_cam.lw, lwT, tu0, tv0;
+    ParchCamera(0.6f, 1, 3470.0f / 3470 * 35200 / 3470, &lwT, &tu0, &tv0);
+    ok = lw1 < lw0 && lw1 > lwT && (lw0 - lw1) < 0.02f * (lw0 - lwT);   /* (a sixteenth of a second: barely begun, no jolt) */
+    for (int f = 1; f <= 190; f++) ViewBuild(1920, 1080, 0.6f, 40016 + 16 * (DWORD)f);
+    ok &= Near(g_cam.lw, lwT, 0.01) && fabsf(g_cam.vl) < 0.05f;           /* (three seconds on: there, and still) */
+    float prev = 0;                                                      /* the camera's path only ever closes in */
+    for (int f = 0; f <= 100; f++) {
+        float lwa, ua, va;
+        ParchCamera(0.01f * f, 1, 35200.0f / 3470, &lwa, &ua, &va);
+        if (f && lwa > prev + 1e-5f) ok = 0;                          /* (float rounding where it is flat) */
+        prev = lwa;
+    }
+    Check(ok, "the parchment glides: driven by the zoom's own smoothed progress, eased at both ends, only ever closing in, the camera's zoom on a critically damped spring with a top speed, so a sudden step starts gently, glides and settles instead of jumping");
     g_parchCont = -1; g_viewTex[VT_PARCH2] = 0;
 
     /* a screen's first frame, made as the view opens: the dark paper and the empty bar (the parchment), nothing (the
@@ -5806,8 +5836,14 @@ static void TestExplore(void)
     TestPut32(shim_module + (entry - 0x400000), 0x4321);                 /* (a character with no file yet) */
     ExploreAtLoad();
     ok &= g_scrKnown == 0 && g_scrBits[125 >> 3] == 0 && LogSays("not known yet (no player, no file), the whole zone painted");
+    ok &= g_exPending == 1;                                              /* (not read live: once more as the world shows) */
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));     /* the world shows: the player is there */
+    TestPut32(mgr + OBJ_MGR_GUID, 0x4321); TestPut32(f2, 0x4321);
+    ExploreAfterLoad();
+    ok &= Get("Data/CinderLoad/explored-0005000000004321.bin") != NULL;
+    TestPut32(mgr + OBJ_MGR_GUID, 0x1234); TestPut32(f2, 0x1234);
     g_classSure = sure;
-    Check(ok, "explored: at a login, before the player is there, the picked character's file (its GUID from the character list); no file, not known, and the whole zone is painted");
+    Check(ok, "explored: at a login, before the player is there, the picked character's file (its GUID from the character list); no file, not known, the whole zone painted, and read once as the world shows, so the next login has it");
     g_parchAsked = 0; g_parchTablesOk = 0;
     munmap(low, 1 << 16);
 }
