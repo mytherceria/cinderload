@@ -5743,6 +5743,13 @@ static void TestParchment(void)
         g_parchFullOn = 0; g_viewScreen = 43;                           /* (back to what was discovered) */
         ParchWork(4000);
         ok &= g_upN == 3 && g_parchZone == 1;
+        memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[3] = 0x24; g_scrSeq++; g_viewScreen = 44;   /* (more found: painted again) */
+        g_zoneTW = g_zoneK = 0;
+        ParchWork(5000);
+        ok &= g_upN == 4 && g_parchZone == 1 && Same(g_pmadeBits, g_scrBits, EXPLORED_BYTES) && g_zoneTW == 1024 && g_zoneK == 1;
+        g_viewScreen = 45;                                               /* (the same found: not painted again) */
+        ParchWork(6000);
+        ok &= g_upN == 4;
         g_scrKnown = 0; g_scrSeq++; g_mapDirN = dirs; g_parchOn = 0; g_destMap = -1; g_parchCont = -1; g_parchZone = -1;
         Check(ok, "the map's areas (his switch): discovered, the zone painted with only the pieces this character has found; the full map, every piece as though found; the zone painted again when the choice changes, not when it stays");
     }
@@ -7587,6 +7594,42 @@ static void TestGlide(void)
         TestGl(0);
         g_pjWorker = 0; g_pj.state = 0; g_parchCont = g_parchZone = -1;
         Check(before && during && done && going && next && off && copy, "a screen ended with its job still the worker's (before it ran, or as it ran), done, or going up: its painting freed and never given to OpenGL, nothing posted over it meanwhile, the world's made again on the next screen and a copy's painting with it; the view off the same, and the worker's loop then ends by itself");
+    }
+    /* the zone's job with the worker: its explored areas as they were as it was posted (copied into it), painted by them
+     * and kept as what it was made for, not as they are when it is up; its painting's size and its post's time its own; the
+     * explored areas it was painted by not left for the next painting (the skeptic's surviving mutants on 61c66db) */
+    {
+        TestGlideState();
+        g_parchTablesOk = 1; g_pjWorker = 0;
+        ParchWorkerStart();
+        g_testWorker = shim_thread_fn; g_testWorkerArg = shim_thread_arg;
+        memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[3] = 0x24; g_scrKnown = 1; g_scrSeq++;
+        g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 80;
+        g_zoneTW = 0; g_zoneK = 0;
+        DWORD t = 4000, postedAt = 0;
+        for (int k = 0; k < 40 && !(g_pj.state == 1 && g_pj.kind == PJ_ZONE); k++) {
+            t += 16; ParchWork(t);
+            if (g_pj.state == 1 && g_pj.kind == PJ_ZONE) postedAt = t;
+            else if (g_pj.state == 1) TestWorker();
+        }
+        int zj = g_pj.state == 1 && g_pj.kind == PJ_ZONE && g_pj.known == 1 && !g_pj.full && Same(g_pj.bits, g_scrBits, EXPLORED_BYTES) &&
+                 g_pj.posted == postedAt && postedAt > 4016;
+        g_scrBits[3] = 0x2C; g_scrSeq++;                                   /* (more found while it was being painted) */
+        TestWorker();
+        zj &= g_makeBits == NULL && g_pj.state == 2;
+        int tw = g_parchTW, k2 = g_parchK;
+        for (int k = 0; k < 10 && (g_parchZone != 1 || g_pj.state || g_pjUp >= 0); k++) { t += 16; ParchWork(t); if (g_pj.state == 1) TestWorker(); }
+        zj &= g_parchZone == 1 && g_pmadeKnown == 1 && g_pmadeBits[3] == 0x24 && g_zoneTW == tw && g_zoneK == k2 && tw > 0;
+        int again = 0;                                                  /* (the next screen: painted again by what is found now) */
+        g_viewScreen = 81;
+        for (int k = 0; k < 10 && !again; k++) {
+            t += 16; ParchWork(t);
+            if (g_pj.state == 1 && g_pj.kind == PJ_ZONE) again = g_pj.bits[3] == 0x2C;
+            if (g_pj.state == 1) TestWorker();
+        }
+        zj &= again;
+        g_pjWorker = 0; g_pj.state = 0; g_scrKnown = 0; g_scrSeq++;
+        Check(zj, "the zone's job with the worker: the explored areas as they stood at its post copied into it and painted by (not left for the next painting), kept as what its painting was made for when it is up though more were found meanwhile, so the next screen paints it again; its painting's size and its post's time its own");
     }
     for (int i = 0; i < 36; i++) free((void *)tdata[i]);
     TestGlideState();
