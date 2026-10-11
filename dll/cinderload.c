@@ -5704,7 +5704,7 @@ static int TextHas(const char *list, const char *name)
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
        VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_PWORLD, VT_PCONTM, VT_PZONEM, VT_PWORD0, VT_PWORD1, VT_PMARK,
-       VT_PGLOW, VT_COUNT };
+       VT_PGLOW, VT_PNOUT0, VT_PNOUT1, VT_COUNT };
                                                                 /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client;
                                                                  * VT_PARCH, VT_PARCH2, VT_PWORLD: the parchment's zone, its
                                                                  * continent and the world, painted here from the client's map;
@@ -5712,7 +5712,9 @@ enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO,
                                                                  * zone's copies in the colours under them; VT_PWORD0, 1:
                                                                  * the world's names of the two continents, cut out of it;
                                                                  * VT_PMARK, VT_PGLOW: the player's marker, the world map's
-                                                                 * own arrow and the candle's glow, read from the client) */
+                                                                 * own arrow and the candle's glow, read from the client;
+                                                                 * VT_PNOUT0, 1: the world's names painted out, laid over it
+                                                                 * as each fades) */
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -8740,9 +8742,10 @@ static void ParchLayerT(int slot, float tw, float th, float pw, float ph, ParchR
 /* the world's names (a picture each: its box on the world's picture, its texels with the letters' alpha) and the world's
  * painting around each continent's own name (its box on the world's picture, RGBA): see ParchWorldWords */
 typedef struct { int ok, w, h, x0, y0; unsigned char *px; } ParchPic;
-static ParchPic g_wordPic[2], g_wordUnder[2];
+static ParchPic g_wordPic[2], g_wordUnder[2], g_wordOut[2];   /* (g_wordOut: each name painted out, laid over the world's as it fades) */
 static int g_wordUp[2];                       /* each name's picture on OpenGL (VT_PWORD0, VT_PWORD1), */
 static int g_wordTW[2], g_wordTH[2];          /* its texture's size */
+static int g_wordOutUp[2], g_wordOutTW[2], g_wordOutTH[2];   /* (and its painted-out picture's: VT_PNOUT0, VT_PNOUT1) */
 static int g_contWords = -1;                  /* the continent (row) whose own name was painted out as it was made */
 static int g_contCut, g_zoneCut;              /* the continent's and the zone's paintings as up: cut to their own areas */
 static float g_contShare, g_zoneShare;        /* (their own areas' share of their pictures) */
@@ -8919,8 +8922,29 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
     float mk = blend ? g_glide.mk0 + (1 - g_glide.mk0) * ParchMix(e, cs0, cs1) : 1;
     g_pcam.mk = mk; g_pcam.mc = g_pcam.mz = 0;
     float reach = ParchSqrt(W * W + H * H);
+    /* the continent's name, the world's (its continent's own painted out of its painting), fading out once it is wider
+     * than the window (his answer, 11 Oct: "yes the continent name should fade out"): whole up to as wide as the window, as
+     * the opening shows it, gone at PARCH_NAME_FADE times that, and by the landing at the latest (the fade then over the
+     * glide's last PARCH_NAME_FADE of zoom); as it fades, the world's painting under it has it painted out (VT_PNOUT) */
+    int wc = arrive && map >= 0 && map <= 1 ? map : -1;
+    float named = 0, wup = ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt);
+    ParchRect nr = { 0, 0, 0, 0 };
+    float sxW = PARCH_WORLD_FW / (float)(PARCH_MAP_W * g_worldK), syW = PARCH_WORLD_FH / (float)(PARCH_MAP_H * g_worldK);
+    if (world && wc >= 0 && g_wordUp[wc] && g_viewTex[VT_PWORD0 + wc] && g_wordPic[wc].ok && (!contUp || g_contWords == c)) {
+        const ParchPic *P = &g_wordPic[wc];
+        nr.x0 = (float)P->x0 * sxW; nr.y0 = (float)P->y0 * syW; nr.x1 = (float)(P->x0 + P->w) * sxW; nr.y1 = (float)(P->y0 + P->h) * syW;
+        double full = W / ((double)P->w * sxW), s1 = full * PARCH_NAME_FADE < b.s ? full * PARCH_NAME_FADE : b.s;   /* (its zoom as wide as
+                                                                     * the window; gone: then twice that, or the landing's) */
+        float gone = (float)((ParchLn(v.s) - ParchLn(s1)) / ParchLn(PARCH_NAME_FADE)) + 1;
+        named = 1 - ParchSmooth(gone);
+    }
     if (world) ParchLayer(VT_PWORLD, (float)g_worldTW, (float)(PARCH_MAP_W * g_worldK), (float)(PARCH_MAP_H * g_worldK), wr, v, W, H,
-                          ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt), 0, NULL, NULL);
+                          wup, 0, NULL, NULL);
+    if (world && wc >= 0 && named < 1 && g_wordOutUp[wc] && g_viewTex[VT_PNOUT0 + wc] && g_wordOut[wc].ok && (!contUp || g_contWords == c)) {
+        const ParchPic *Q = &g_wordOut[wc];
+        ParchRect qr = { (float)Q->x0 * sxW, (float)Q->y0 * syW, (float)(Q->x0 + Q->w) * sxW, (float)(Q->y0 + Q->h) * syW };
+        ParchLayerT(VT_PNOUT0 + wc, (float)g_wordOutTW[wc], (float)g_wordOutTH[wc], (float)Q->w, (float)Q->h, qr, v, W, H, wup * (1 - named), 0, NULL, NULL);
+    }
     for (int layer = 0; layer < 2; layer++) {                      /* its continent's, then its zone's */
         int up = layer ? zoneUp : contUp, slot = layer ? VT_PARCH : VT_PARCH2, mslot = layer ? VT_PZONEM : VT_PCONTM;
         if (!up) continue;
@@ -8947,20 +8971,10 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         } else
             ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m, !base, clip, &bl);
     }
-    /* the continent's name, the world's, over them all at its own place (its continent's own painted out of its painting),
-     * fading out once it is wider than the window (his answer, 11 Oct: "yes the continent name should fade out"): whole
-     * up to as wide as the window, as the opening shows it, gone at PARCH_NAME_FADE times that, and by the landing at the
-     * latest (the fade then over the glide's last PARCH_NAME_FADE of zoom) */
-    int wc = arrive && map >= 0 && map <= 1 ? map : -1;
-    if (world && wc >= 0 && g_wordUp[wc] && g_viewTex[VT_PWORD0 + wc] && g_wordPic[wc].ok && (!contUp || g_contWords == c)) {
+    /* the continent's name, the world's, over them all at its own place, as it fades (above) */
+    if (named > 0) {
         const ParchPic *P = &g_wordPic[wc];
-        float sx = PARCH_WORLD_FW / (float)(PARCH_MAP_W * g_worldK), sy = PARCH_WORLD_FH / (float)(PARCH_MAP_H * g_worldK);
-        ParchRect nr = { (float)P->x0 * sx, (float)P->y0 * sy, (float)(P->x0 + P->w) * sx, (float)(P->y0 + P->h) * sy };
-        double full = W / ((double)P->w * sx), s1 = full * PARCH_NAME_FADE < b.s ? full * PARCH_NAME_FADE : b.s;   /* (its zoom as wide as
-                                                                     * the window; gone: then twice that, or the landing's) */
-        float gone = (float)((ParchLn(v.s) - ParchLn(s1)) / ParchLn(PARCH_NAME_FADE)) + 1;
-        ParchLayerT(VT_PWORD0 + wc, (float)g_wordTW[wc], (float)g_wordTH[wc], (float)P->w, (float)P->h, nr, v, W, H,
-                    ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt) * (1 - ParchSmooth(gone)), 0, NULL, NULL);
+        ParchLayerT(VT_PWORD0 + wc, (float)g_wordTW[wc], (float)g_wordTH[wc], (float)P->w, (float)P->h, nr, v, W, H, wup * named, 0, NULL, NULL);
     }
     /* the player's marker over them all, coming up with the finest painting under it */
     if (arrive) ParchMarkDraw(g_pcam.px, g_pcam.py, W, H, now, zoneUp ? g_pcam.mz : contUp && z < 0 ? g_pcam.mc : 0);
@@ -9935,12 +9949,15 @@ static int ParchLandCut(const ParchLines *P, int map, ParchRect rf, const ParchL
  * little elsewhere, on the continent's own (Azeroth, Kalimdor). Kept: the world's, where the opening shows it. As the
  * world's painting is made (once a session), its two names are cut out of it as pictures of their own (the painting's
  * own texels, their alpha the letters: what stands out from the painting's local mean by PARCH_WORD_EDGE either way, its
- * gaps closed, grown a little and softened), and the painting around each continent's own name kept a while. As a
+ * gaps closed, grown a little and softened), each painted out on a picture of its own as well (ParchPaintOut: the paper
+ * round them, its grain mirrored on through them; laid over the world's painting as the name fades), and the painting
+ * around each continent's own name kept a while, its name painted out. As a
  * continent's painting is made, its own name is painted out of it from the client's files: inside its letters (found
- * the same way) and the world's name's place on it, the world's painting there, laid on by the two places on the frame
- * and given this painting's own colours (its local mean outside the letters), so the only name in it is the world's, in
- * the world's place. The world's name is then drawn over every painting, the zones' too, at its place on the frame: one
- * name, never moved, never doubled, scaling with the zoom. Where the names are on each painting: kWords (measured on the
+ * the same way), the world's painting there (its name painted out of it too), laid on by the two places on the frame
+ * and given this painting's own colours (its local mean outside the letters), so no name is left in any painting. The
+ * world's name is then drawn over every painting, the zones' too, at its place on the frame, fading out once it is wider
+ * than the window (his answer, 11 Oct: "yes the continent name should fade out"): one name, never moved, never doubled,
+ * scaling with the zoom, and none once it has faded. Where the names are on each painting: kWords (measured on the
  * client's paintings, the same in its 256-px and HD tiles: texels of its 1002 x 668 picture), each checked as made (its
  * letters must be there: a share of its box between PARCH_WORD_FEW and PARCH_WORD_MANY); not found as measured, that
  * continent's two names are left as the client paints them, and the log says so. Without the world's painting (the
@@ -10084,6 +10101,158 @@ static int WordBox(int i, int K, int pw, int ph, int *x0, int *y0, int *x1, int 
     return *x0 >= 0 && *y0 >= 0 && *x1 <= pw && *y1 <= ph && *x1 > *x0 + 4 && *y1 > *y0 + 4;
 }
 static void ParchPicFree(ParchPic *P) { if (P->px) HeapFree(GetProcessHeap(), 0, P->px); P->px = NULL; P->ok = 0; }
+/* A mask (w x h, 0..255) grown by r texels (each its largest within r across, then down); softened at its edges (a
+ * three-wide box along its rows, then its columns, passes times). */
+#define PARCH_OUT_GROW  2             /* the name's letters painted out this far past their rims (HD texels) */
+static void ParchMaskGrow(unsigned char *M, int w, int h, int r)
+{
+    unsigned char *row = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(w > h ? w : h));
+    if (!row) return;
+    for (int dir = 0; dir < 2; dir++) {
+        int n = dir ? h : w, lines = dir ? w : h;
+        for (int l = 0; l < lines; l++) {
+            for (int i = 0; i < n; i++) row[i] = M[dir ? i * w + l : l * w + i];
+            for (int i = 0; i < n; i++) {
+                unsigned char v = 0;
+                for (int j = i - r; j <= i + r; j++) if (j >= 0 && j < n && row[j] > v) v = row[j];
+                M[dir ? i * w + l : l * w + i] = v;
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, row);
+}
+static void ParchMaskSoft(unsigned char *M, int w, int h, int passes)
+{
+    unsigned char *row = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(w > h ? w : h));
+    if (!row) return;
+    for (int p = 0; p < passes; p++)
+        for (int dir = 0; dir < 2; dir++) {
+            int n = dir ? h : w, lines = dir ? w : h;
+            for (int l = 0; l < lines; l++) {
+                for (int i = 0; i < n; i++) row[i] = M[dir ? i * w + l : l * w + i];
+                for (int i = 0; i < n; i++)
+                    M[dir ? i * w + l : l * w + i] = (unsigned char)((row[i > 0 ? i - 1 : 0] + row[i] + row[i < n - 1 ? i + 1 : n - 1] + 1) / 3);
+            }
+        }
+    HeapFree(GetProcessHeap(), 0, row);
+}
+/* A mask's holes filled (w x h: what its marks at half or more close round, out of reach of its edge, marked whole). */
+static void ParchMaskHoles(unsigned char *M, int w, int h)
+{
+    int n = w * h, *q = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n * sizeof(int)), head = 0, tail = 0;
+    unsigned char *out = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)n);
+    if (q && out) {
+        for (int i = 0; i < n; i++) {
+            int x = i % w, y = i / w;
+            if ((x == 0 || y == 0 || x == w - 1 || y == h - 1) && M[i] < 128) { out[i] = 1; q[tail++] = i; }
+        }
+        while (head < tail) {
+            int i = q[head++], x = i % w, y = i / w;
+            int nb[4] = { x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1 };
+            for (int k = 0; k < 4; k++)
+                if (nb[k] >= 0 && !out[nb[k]] && M[nb[k]] < 128) { out[nb[k]] = 1; q[tail++] = nb[k]; }
+        }
+        for (int i = 0; i < n; i++) if (!out[i]) M[i] = 255;
+    }
+    if (q) HeapFree(GetProcessHeap(), 0, q);
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+}
+/* A name painted out of a painting (px, stride T, its picture pw x ph; the box x0, y0, w x h on it, M its mask there,
+ * 0..255: how much of each texel goes): each texel of it becomes the paper round it, its colour the local one (the mean
+ * outside the letters in cells of PARCH_OUT_CELL HD texels, softened, a cell with none its neighbours'), its grain the
+ * nearest paper's past the letters, mirrored across their edge (so the paper's grain and the sea's hatching run on
+ * through it), laid over the texel by its mask. */
+#define PARCH_OUT_CELL  8
+#define PARCH_OUT_DOWN  4.0f          /* the paper's grain taken across rather than down unless down is this much nearer */
+#define PARCH_OUT_GRAIN 0.35f         /* its grain this strong (the mirrored copy's lines softened) */
+static void ParchPaintOut(unsigned char *px, int T, int pw, int ph, int x0, int y0, int w, int h, const unsigned char *M, int K)
+{
+    int cs = PARCH_OUT_CELL * K, nw = (w + cs - 1) / cs, nh = (h + cs - 1) / cs, reach = 2 * PARCH_WORD_MEAN * K;
+    if (w <= 0 || h <= 0) return;
+    float *g = (float *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)nw * (SIZE_T)nh * 4 + (SIZE_T)(nw > nh ? nw : nh)) * sizeof(float));
+    if (!g) return;
+    float *cnt = g + 3 * nw * nh;
+    for (int j = 0; j < nh; j++)                                     /* each cell's paper: its mean outside the letters */
+        for (int i = 0; i < nw; i++) {
+            float sum[3] = { 0, 0, 0 };
+            int n = 0;
+            for (int y = j * cs; y < (j + 1) * cs && y < h; y++)
+                for (int x = i * cs; x < (i + 1) * cs && x < w; x++) {
+                    if (M[y * w + x] > 24) continue;
+                    const unsigned char *q = px + 4 * ((unsigned)(y0 + y) * (unsigned)T + (unsigned)(x0 + x));
+                    for (int ch = 0; ch < 3; ch++) sum[ch] += q[ch];
+                    n++;
+                }
+            for (int ch = 0; ch < 3; ch++) g[3 * (j * nw + i) + ch] = n ? sum[ch] / (float)n : 0;
+            cnt[j * nw + i] = (float)n;
+        }
+    for (int pass = 0; pass < nw + nh; pass++) {                      /* cells with none: their neighbours' */
+        int empty = 0;
+        for (int j = 0; j < nh; j++)
+            for (int i = 0; i < nw; i++) {
+                if (cnt[j * nw + i] > 0) continue;
+                static const int di[4] = { -1, 1, 0, 0 }, dj[4] = { 0, 0, -1, 1 };
+                float d[3] = { 0, 0, 0 };
+                int n = 0;
+                for (int k = 0; k < 4; k++) {
+                    int I = i + di[k], J = j + dj[k];
+                    if (I < 0 || J < 0 || I >= nw || J >= nh || !(cnt[J * nw + I] > 0)) continue;
+                    for (int ch = 0; ch < 3; ch++) d[ch] += g[3 * (J * nw + I) + ch];
+                    n++;
+                }
+                if (!n) { empty++; continue; }
+                for (int ch = 0; ch < 3; ch++) g[3 * (j * nw + i) + ch] = d[ch] / (float)n;
+                cnt[j * nw + i] = 0.5f;
+            }
+        if (!empty) break;
+    }
+    ParchBlur(g, nw, nh, 2, cnt);
+    static const int dx8[8] = { 1, -1, 0, 0, 1, 1, -1, -1 }, dy8[8] = { 0, 0, 1, -1, 1, -1, 1, -1 };
+    static const float kWay8[8] = { 1, 1, PARCH_OUT_DOWN, PARCH_OUT_DOWN, 1.414f * PARCH_OUT_DOWN, 1.414f * PARCH_OUT_DOWN,
+                                    1.414f * PARCH_OUT_DOWN, 1.414f * PARCH_OUT_DOWN };
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int a = M[y * w + x];
+            if (!a) continue;
+            int best = -1, bd = 0;                                    /* the nearest paper past the letters, 8 ways */
+            float bdist = 1e30f;
+            for (int k = 0; k < 8; k++)                               /* (across first: the sea's hatching runs across) */
+                for (int d = 1; d <= reach && (float)d * kWay8[k] < bdist; d++) {
+                    int X = x + dx8[k] * d, Y = y + dy8[k] * d;
+                    if (x0 + X < 0 || y0 + Y < 0 || x0 + X >= pw || y0 + Y >= ph) break;
+                    if (X < 0 || Y < 0 || X >= w || Y >= h || !M[Y * w + X]) { best = k; bd = d; bdist = (float)d * kWay8[k]; break; }
+                }
+            float c[2][3];                                            /* the paper's colour here, and at its grain's source */
+            int sx = x, sy = y;
+            if (best >= 0) {
+                for (int s2 = 2 * bd; s2 >= bd; s2--) {               /* (mirrored across the edge, as far as the paper goes) */
+                    int X = x + dx8[best] * s2, Y = y + dy8[best] * s2;
+                    if (x0 + X < 0 || y0 + Y < 0 || x0 + X >= pw || y0 + Y >= ph) continue;
+                    if (X < 0 || Y < 0 || X >= w || Y >= h || !M[Y * w + X]) { sx = X; sy = Y; break; }
+                }
+            }
+            for (int t = 0; t < 2; t++) {
+                float u = ((float)(t ? sx : x) + 0.5f) / (float)cs - 0.5f, v = ((float)(t ? sy : y) + 0.5f) / (float)cs - 0.5f;
+                if (u < 0) u = 0;
+                if (v < 0) v = 0;
+                if (u > (float)(nw - 1)) u = (float)(nw - 1);
+                if (v > (float)(nh - 1)) v = (float)(nh - 1);
+                int i0 = (int)u, j0 = (int)v, i1 = i0 + 1 < nw ? i0 + 1 : i0, j1 = j0 + 1 < nh ? j0 + 1 : j0;
+                float fx = u - (float)i0, fy = v - (float)j0;
+                for (int ch = 0; ch < 3; ch++)
+                    c[t][ch] = (g[3 * (j0 * nw + i0) + ch] * (1 - fx) + g[3 * (j0 * nw + i1) + ch] * fx) * (1 - fy) +
+                               (g[3 * (j1 * nw + i0) + ch] * (1 - fx) + g[3 * (j1 * nw + i1) + ch] * fx) * fy;
+            }
+            unsigned char *o = px + 4 * ((unsigned)(y0 + y) * (unsigned)T + (unsigned)(x0 + x));
+            const unsigned char *q = px + 4 * ((unsigned)(y0 + sy) * (unsigned)T + (unsigned)(x0 + sx));
+            float k = (float)a / 255;
+            for (int ch = 0; ch < 3; ch++) {
+                float grain = sx == x && sy == y ? 0 : PARCH_OUT_GRAIN * ((float)q[ch] - c[1][ch]);
+                o[ch] = (unsigned char)(int)FireClamp((float)o[ch] * (1 - k) + (c[0][ch] + grain) * k + 0.5f, 0, 255);
+            }
+        }
+    HeapFree(GetProcessHeap(), 0, g);
+}
 /* The world's painting just made (g_parchPx): each continent's name cut out as a picture of its own, and the painting
  * around each continent's own name (on the world's picture, by the continent's box on the frame) kept. The continents'
  * boxes: their WorldMapArea rows (cont[0], cont[1]; -1 none). */
@@ -10092,7 +10261,7 @@ static void ParchWorldWords(const int *cont)
     int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, T = g_parchTW;
     char m[200];
     for (int c = 0; c < 2; c++) {
-        ParchPicFree(&g_wordPic[c]); ParchPicFree(&g_wordUnder[c]);
+        ParchPicFree(&g_wordPic[c]); ParchPicFree(&g_wordUnder[c]); ParchPicFree(&g_wordOut[c]);
         int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1, good = 1, words = 0;
         for (int i = 0; i < PARCH_WORDS; i++) {                       /* the name's lines, each checked */
             int x0, y0, x1, y1;
@@ -10137,56 +10306,96 @@ static void ParchWorldWords(const int *cont)
             HeapFree(GetProcessHeap(), 0, mm);
         }
         P->ok = 1;
-        if (cont[c] < 0) continue;                                    /* the painting around the continent's own name */
-        ParchRect rc = ParchBox(cont[c]);
-        int ux0 = 1 << 30, uy0 = 1 << 30, ux1 = -1, uy1 = -1;
-        for (int i = 0; i < PARCH_WORDS; i++) {
-            if (kWords[i].cont != c || !lstrcmpiA(kWords[i].folder, "World")) continue;
-            float fx0 = rc.x0 + kWords[i].x0 / PARCH_MAP_W * (rc.x1 - rc.x0), fx1 = rc.x0 + kWords[i].x1 / PARCH_MAP_W * (rc.x1 - rc.x0);
-            float fy0 = rc.y0 + kWords[i].y0 / PARCH_MAP_H * (rc.y1 - rc.y0), fy1 = rc.y0 + kWords[i].y1 / PARCH_MAP_H * (rc.y1 - rc.y0);
-            int wx0 = (int)(fx0 / PARCH_WORLD_FW * (float)pw), wx1 = (int)(fx1 / PARCH_WORLD_FW * (float)pw) + 1;
-            int wy0 = (int)(fy0 / PARCH_WORLD_FH * (float)ph), wy1 = (int)(fy1 / PARCH_WORLD_FH * (float)ph) + 1;
-            if (wx0 < ux0) ux0 = wx0;
-            if (wy0 < uy0) uy0 = wy0;
-            if (wx1 > ux1) ux1 = wx1;
-            if (wy1 > uy1) uy1 = wy1;
-        }
-        if (bx0 < ux0) ux0 = bx0;                                     /* (and the world's own name's place) */
-        if (by0 < uy0) uy0 = by0;
-        if (bx1 > ux1) ux1 = bx1;
-        if (by1 > uy1) uy1 = by1;
-        int e = PARCH_WORD_WORLD * K / 2 + 2;
-        ux0 -= e; uy0 -= e; ux1 += e; uy1 += e;
-        if (ux0 < 0) ux0 = 0;
-        if (uy0 < 0) uy0 = 0;
-        if (ux1 > pw) ux1 = pw;
-        if (uy1 > ph) uy1 = ph;
-        ParchPic *U = &g_wordUnder[c];
-        if (ux1 <= ux0 || uy1 <= uy0) continue;
-        U->x0 = ux0; U->y0 = uy0; U->w = ux1 - ux0; U->h = uy1 - uy0;
-        U->px = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)U->w * (SIZE_T)U->h * 4);
-        if (!U->px) continue;
-        for (int y = 0; y < U->h; y++)
-            for (int x = 0; x < U->w; x++) {
-                *(unsigned *)(void *)(U->px + 4 * ((unsigned)y * (unsigned)U->w + (unsigned)x)) =
-                    *(const unsigned *)(const void *)(g_parchPx + 4 * ((unsigned)(uy0 + y) * (unsigned)T + (unsigned)(ux0 + x)));
-                U->px[4 * ((unsigned)y * (unsigned)U->w + (unsigned)x) + 3] = 0;
+        /* the name painted out (his answer, 11 Oct: "yes the continent name should fade out"): its letters, their rims and
+         * round them (grown PARCH_OUT_GROW, an O's middle too, softened), the paper round them with its grain run on through
+         * them (ParchPaintOut), as a picture of its own (g_wordOut) laid over the world's painting as the name fades, and
+         * in the painting kept round the continent's own name (U), so none of it is laid on a continent's painting. The
+         * world's painting itself keeps both names: the opening shows them. */
+        int E = (PARCH_OUT_GROW + 2) * K;                             /* (room round the boxes for their rims' last light) */
+        int ox0 = bx0 > E ? bx0 - E : 0, oy0 = by0 > E ? by0 - E : 0, ox1 = bx1 + E < pw ? bx1 + E : pw, oy1 = by1 + E < ph ? by1 + E : ph;
+        int ow = ox1 - ox0, oh = oy1 - oy0;
+        unsigned char *M = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)ow * (SIZE_T)oh);
+        unsigned char *keep = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)ow * (SIZE_T)oh * 4);
+        ParchPic *Q = &g_wordOut[c];
+        if (M && keep) {
+            for (int i = 0; i < PARCH_WORDS; i++) {
+                int x0, y0, x1, y1;
+                if (kWords[i].cont != c || lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) continue;
+                unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+                if (!mm) continue;
+                ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 0, mm);
+                for (int y = y0; y < y1; y++)
+                    for (int x = x0; x < x1; x++) {
+                        unsigned char *o = M + (y - oy0) * ow + (x - ox0);
+                        if (mm[(y - y0) * (x1 - x0) + (x - x0)] > *o) *o = mm[(y - y0) * (x1 - x0) + (x - x0)];
+                    }
+                HeapFree(GetProcessHeap(), 0, mm);
             }
-        for (int i = 0; i < PARCH_WORDS; i++) {                       /* (its alpha: the world's name's letters and all round them) */
-            int x0, y0, x1, y1;
-            if (kWords[i].cont != c || lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) continue;
-            unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
-            if (!mm) continue;
-            ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 0, mm);
-            for (int y = y0; y < y1; y++)
-                for (int x = x0; x < x1; x++) {
-                    if (x < ux0 || y < uy0 || x >= ux1 || y >= uy1) continue;
-                    unsigned char *o = U->px + 4 * ((unsigned)(y - uy0) * (unsigned)U->w + (unsigned)(x - ux0)) + 3;
-                    if (mm[(y - y0) * (x1 - x0) + (x - x0)] > *o) *o = mm[(y - y0) * (x1 - x0) + (x - x0)];
-                }
-            HeapFree(GetProcessHeap(), 0, mm);
+            ParchMaskGrow(M, ow, oh, PARCH_OUT_GROW * K);
+            ParchMaskHoles(M, ow, oh);
+            ParchMaskSoft(M, ow, oh, K);
+            for (int y = 0; y < oh; y++)                              /* (painted out here a while, then put back) */
+                for (int x = 0; x < ow; x++)
+                    ((unsigned *)(void *)keep)[y * ow + x] = ((const unsigned *)(const void *)g_parchPx)[(unsigned)(oy0 + y) * (unsigned)T + (unsigned)(ox0 + x)];
+            ParchPaintOut(g_parchPx, T, pw, ph, ox0, oy0, ow, oh, M, K);
+            Q->x0 = ox0; Q->y0 = oy0; Q->w = ow; Q->h = oh;
+            Q->px = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)ow * (SIZE_T)oh * 4);
+            if (Q->px) {
+                for (int y = 0; y < oh; y++)
+                    for (int x = 0; x < ow; x++) {
+                        const unsigned char *s = g_parchPx + 4 * ((unsigned)(oy0 + y) * (unsigned)T + (unsigned)(ox0 + x));
+                        unsigned char *o = Q->px + 4 * ((unsigned)y * (unsigned)ow + (unsigned)x);
+                        o[0] = s[0]; o[1] = s[1]; o[2] = s[2]; o[3] = M[y * ow + x];
+                    }
+                Q->ok = 1;
+            }
         }
-        U->ok = 1;
+        if (cont[c] >= 0) {                                           /* the painting around the continent's own name */
+            ParchRect rc = ParchBox(cont[c]);
+            int ux0 = 1 << 30, uy0 = 1 << 30, ux1 = -1, uy1 = -1;
+            for (int i = 0; i < PARCH_WORDS; i++) {
+                if (kWords[i].cont != c || !lstrcmpiA(kWords[i].folder, "World")) continue;
+                float fx0 = rc.x0 + kWords[i].x0 / PARCH_MAP_W * (rc.x1 - rc.x0), fx1 = rc.x0 + kWords[i].x1 / PARCH_MAP_W * (rc.x1 - rc.x0);
+                float fy0 = rc.y0 + kWords[i].y0 / PARCH_MAP_H * (rc.y1 - rc.y0), fy1 = rc.y0 + kWords[i].y1 / PARCH_MAP_H * (rc.y1 - rc.y0);
+                int wx0 = (int)(fx0 / PARCH_WORLD_FW * (float)pw), wx1 = (int)(fx1 / PARCH_WORLD_FW * (float)pw) + 1;
+                int wy0 = (int)(fy0 / PARCH_WORLD_FH * (float)ph), wy1 = (int)(fy1 / PARCH_WORLD_FH * (float)ph) + 1;
+                if (wx0 < ux0) ux0 = wx0;
+                if (wy0 < uy0) uy0 = wy0;
+                if (wx1 > ux1) ux1 = wx1;
+                if (wy1 > uy1) uy1 = wy1;
+            }
+            if (bx0 < ux0) ux0 = bx0;                                 /* (and the world's own name's place) */
+            if (by0 < uy0) uy0 = by0;
+            if (bx1 > ux1) ux1 = bx1;
+            if (by1 > uy1) uy1 = by1;
+            int e = PARCH_WORD_WORLD * K / 2 + 2;
+            ux0 -= e; uy0 -= e; ux1 += e; uy1 += e;
+            if (ux0 < 0) ux0 = 0;
+            if (uy0 < 0) uy0 = 0;
+            if (ux1 > pw) ux1 = pw;
+            if (uy1 > ph) uy1 = ph;
+            ParchPic *U = &g_wordUnder[c];
+            if (ux1 > ux0 && uy1 > uy0) {
+                U->x0 = ux0; U->y0 = uy0; U->w = ux1 - ux0; U->h = uy1 - uy0;
+                U->px = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)U->w * (SIZE_T)U->h * 4);
+                if (U->px) {
+                    for (int y = 0; y < U->h; y++)                    /* (its name painted out; its alpha where it was) */
+                        for (int x = 0; x < U->w; x++) {
+                            *(unsigned *)(void *)(U->px + 4 * ((unsigned)y * (unsigned)U->w + (unsigned)x)) =
+                                *(const unsigned *)(const void *)(g_parchPx + 4 * ((unsigned)(uy0 + y) * (unsigned)T + (unsigned)(ux0 + x)));
+                            int X = ux0 + x - ox0, Y = uy0 + y - oy0;
+                            U->px[4 * ((unsigned)y * (unsigned)U->w + (unsigned)x) + 3] = M && keep && X >= 0 && Y >= 0 && X < ow && Y < oh ? M[Y * ow + X] : 0;
+                        }
+                    U->ok = 1;
+                }
+            }
+        }
+        if (M && keep)                                                /* (the world's painting as it was) */
+            for (int y = 0; y < oh; y++)
+                for (int x = 0; x < ow; x++)
+                    ((unsigned *)(void *)g_parchPx)[(unsigned)(oy0 + y) * (unsigned)T + (unsigned)(ox0 + x)] = ((const unsigned *)(const void *)keep)[y * ow + x];
+        if (M) HeapFree(GetProcessHeap(), 0, M);
+        if (keep) HeapFree(GetProcessHeap(), 0, keep);
     }
 }
 
@@ -10254,7 +10463,10 @@ static int ParchContWords(int c, ParchLines *Lc)
         HeapFree(GetProcessHeap(), 0, A); HeapFree(GetProcessHeap(), 0, F);
         return 0;
     }
-    for (int y = 0; y < rh; y++)                                      /* the world's painting laid on, and its name's letters too */
+    ParchMaskGrow(A, rw, rh, PARCH_OUT_GROW * K);                    /* (its rims' last light too, an O's middle; softened) */
+    ParchMaskHoles(A, rw, rh);
+    ParchMaskSoft(A, rw, rh, K);
+    for (int y = 0; y < rh; y++)                                      /* the world's painting there (its own name painted out of it) */
         for (int x = 0; x < rw; x++) {
             float wx = ax + bx * (float)(rx0 + x), wy = ay + by * (float)(ry0 + y), s[4] = { 0, 0, 0, 0 };
             int ix = wx < 0 ? -1 : (int)wx, iy = wy < 0 ? -1 : (int)wy;
@@ -10265,11 +10477,9 @@ static int ParchContWords(int c, ParchLines *Lc)
                     X = X < 0 ? 0 : X >= U->w ? U->w - 1 : X; Y = Y < 0 ? 0 : Y >= U->h ? U->h - 1 : Y;
                     const unsigned char *q = U->px + 4 * ((unsigned)Y * (unsigned)U->w + (unsigned)X);
                     float k = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy);
-                    for (int ch = 0; ch < 4; ch++) s[ch] += k * q[ch];   /* (its alpha: the world's name's letters there) */
+                    for (int ch = 0; ch < 4; ch++) s[ch] += k * q[ch];
                 }
             for (int ch = 0; ch < 3; ch++) F[3 * (y * rw + x) + ch] = s[ch];
-            unsigned char *o = A + y * rw + x;
-            if (s[3] > (float)*o) *o = (unsigned char)(int)(s[3] + 0.5f);
         }
     /* its own colours: each cell's mean of this painting and of the world's, where there are no letters, the difference
      * softened between the cells and added to the world's */
@@ -10562,8 +10772,10 @@ static int ParchUpDone(DWORD now, int slot, int up)
     if (slot == VT_PWORLD) {
         if (!up) { Log("  the parchment: OpenGL would not take the world's painting; each glide opens on its continent's painting"); return 0; }
         g_worldUp = 1; g_worldAt = now;
-        for (int k = 0; k < 2; k++)
+        for (int k = 0; k < 2; k++) {
             g_wordUp[k] = g_wordPic[k].ok && PARCH_UPPIC(VT_PWORD0 + k, &g_wordPic[k], &g_wordTW[k], &g_wordTH[k]);
+            g_wordOutUp[k] = g_wordOut[k].ok && PARCH_UPPIC(VT_PNOUT0 + k, &g_wordOut[k], &g_wordOutTW[k], &g_wordOutTH[k]);
+        }
         g_markUp = g_pj.words && PARCH_UPPIC(VT_PMARK, &g_markPic[0], &g_markTW[0], &g_markTH[0]) &&
                    PARCH_UPPIC(VT_PGLOW, &g_markPic[1], &g_markTW[1], &g_markTH[1]);
         Log(g_markUp ? "  the parchment: the player's marker, the world map's own arrow (MinimapArrow.blp) and the candle's glow (GenericGlow2_32.blp), read from the client"

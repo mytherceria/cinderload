@@ -6642,6 +6642,18 @@ static void TestWordLetters(int x0, int y0, int x1, int y1, int K)
         TestPaintFill(x, y0 + 5 * K, x + 3 * K, y1 - 5 * K, 0x302010);           /* (its stroke) */
     }
 }
+/* an O as the client paints its names' (a dark ring between light rims, its middle a lighter paper), over the last
+ * letters of a word's box (x1, y0..y1) on paper */
+static void TestWordO(int x1, int y0, int y1, unsigned paper, unsigned mid)
+{
+    float cx = (float)x1 - 18, cy = (float)(y0 + y1) / 2;
+    TestPaintFill(x1 - 54, y0, x1, y1, paper);
+    for (int y = y0; y < y1; y++)
+        for (int x = x1 - 54; x < x1; x++) {
+            float d = sqrtf((x - cx) * (x - cx) + (y - cy) * (y - cy));
+            if (d <= 12.5f) TestPaintFill(x, y, x + 1, y + 1, d > 10 || (d > 5 && d <= 7) ? 0xF0E0C0 : d > 7 ? 0x302010 : mid);
+        }
+}
 static void TestWords(void)
 {
     /* the letters: strokes between rims found; the sea's hatching (dark lines, no rims) not */
@@ -6672,6 +6684,7 @@ static void TestWords(void)
         int a0, b0, a1, b1;
         if (lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, 1, 1002, 668, &a0, &b0, &a1, &b1)) continue;
         TestWordLetters(a0, b0, a1, b1, 1);
+        if (i == 2) TestWordO(a1, b0, b1, 0x908060, 0xA89070);        /* (KALIMDOR's O) */
     }
     static unsigned char world[1002 * 668 * 4];
     for (int y = 0; y < 668; y++) memcpy(world + 4 * (size_t)y * 1002, g_parchPx + 4 * (size_t)y * g_parchTW, 1002 * 4);
@@ -6682,24 +6695,127 @@ static void TestWords(void)
     int sx = 658 + 6 + 1 - g_wordPic[0].x0, sy = 375 - g_wordPic[0].y0;   /* (a stroke of EASTERN) */
     ok &= g_wordPic[0].px[4 * (sy * g_wordPic[0].w + sx) + 3] > 200 && g_wordPic[0].px[4 * (sy * g_wordPic[0].w + sx)] == 0x30;
     Check(ok, "the world's names, cut out of its painting: each a picture of the painting's own texels, its alpha the letters");
+    /* and painted out (his answer, 11 Oct: "yes the continent name should fade out"): each a picture of its own, the
+     * letters, their rims and round them gone, laid over the world's painting as the name fades (so no name is left once
+     * it has), and in the painting kept round the continent's own name; the world's painting itself as it was (the
+     * opening shows both names) */
+    {
+        int kept = 1, gone = 1, covers = 1, under = 1;
+        for (int y = 0; y < 668; y++) if (memcmp(g_parchPx + 4 * (size_t)y * g_parchTW, world + 4 * (size_t)y * 1002, 1002 * 4)) kept = 0;
+        for (int i = 0; i < PARCH_WORDS; i++) {
+            int a0, b0, a1, b1;
+            if (lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, 1, 1002, 668, &a0, &b0, &a1, &b1)) continue;
+            const ParchPic *Q = &g_wordOut[kWords[i].cont], *U = &g_wordUnder[kWords[i].cont];
+            if (!Q->ok || Q->x0 > a0 - PARCH_OUT_GROW || Q->y0 > b0 - PARCH_OUT_GROW || Q->x0 + Q->w < a1 + PARCH_OUT_GROW || Q->y0 + Q->h < b1 + PARCH_OUT_GROW) { covers = 0; continue; }
+            for (int y = b0; y < b1; y++)
+                for (int x = a0; x < a1; x++) {
+                    const unsigned char *q = Q->px + 4 * ((y - Q->y0) * Q->w + (x - Q->x0)), *was = world + 4 * ((size_t)y * 1002 + x);
+                    int over[3];
+                    for (int ch = 0; ch < 3; ch++) over[ch] = (q[ch] * q[3] + was[ch] * (255 - q[3]) + 127) / 255;
+                    if (abs(over[0] - 0x90) > 4 || abs(over[1] - 0x80) > 4 || abs(over[2] - 0x60) > 4) gone = 0;
+                    if (U->ok && x >= U->x0 && y >= U->y0 && x < U->x0 + U->w && y < U->y0 + U->h) {
+                        const unsigned char *u = U->px + 4 * ((y - U->y0) * U->w + (x - U->x0));
+                        if (abs(u[0] - 0x90) > 4) under = 0;
+                    }
+                }
+            int rx = a0 + 6 - 2, ry = (b0 + b1) / 2;                  /* (a rim of its first letter, and just past it) */
+            int ramp = 0;                                             /* (its edge softened: a ramp of a few texels) */
+            for (int x = rx - 10; x < rx + 3; x++) { int a = Q->px[4 * ((ry - Q->y0) * Q->w + (x - Q->x0)) + 3]; if (a > 0 && a < 255) ramp++; }
+            if (ramp < 3) covers = 0;
+            if (!(Q->px[4 * ((ry - Q->y0) * Q->w + (rx - Q->x0)) + 3] == 255 && Q->px[4 * ((ry - Q->y0) * Q->w + (rx - 1 - Q->x0)) + 3] > 128)) covers = 0;
+        }
+        printf("  the world's names painted out: the world's painting kept %d, gone under their pictures %d, the rims and round them %d, in the painting kept round the continent's own %d\n", kept, gone, covers, under);
+        Check(kept && gone && covers && under, "the world's names painted out, each a picture of its own (the letters, their rims and round them: the paper round them in their place), laid over the world's painting as the name fades, and in the painting kept round a continent's own name; the world's painting itself as it was, both names (the opening)");
+    }
+    /* the paint-out itself: the paper round it with its grain carried on (the sea's hatching across); nothing else changed;
+     * a mask grown, its holes filled (an O's middle, not a C's), softened at its edges */
+    {
+        TestPaintNew(1);
+        for (int y = 0; y < 200; y++) TestPaintFill(0, y, 300, y + 1, (y / 2) % 2 ? 0x706048 : 0x908060);   /* (hatching, two rows each) */
+        static unsigned char keep[300 * 200 * 4];
+        for (int y = 0; y < 200; y++) memcpy(keep + 4 * (size_t)y * 300, g_parchPx + 4 * (size_t)y * g_parchTW, 300 * 4);
+        static unsigned char M[60 * 40];
+        memset(M, 0, sizeof M);
+        for (int y = 10; y < 30; y++) for (int x = 20; x < 40; x++) M[y * 60 + x] = 255;      /* (a square on the box 100, 80) */
+        ParchPaintOut(g_parchPx, g_parchTW, 1002, 668, 100, 80, 60, 40, M, 1);
+        int grain = 1, still = 1;
+        for (int y = 92; y < 104; y++) {                                   /* inside: its rows still dark and light as round it */
+            int here = TestPaintAt(130, y)[0], next = TestPaintAt(130, y + 2)[0];
+            int want = (y / 2) % 2 ? -1 : 1;                                /* (light rows 0x90, dark 0x70) */
+            if ((here - next) * want < 0.25f * 0x20) grain = 0;
+        }
+        for (int y = 0; y < 200; y++) for (int x = 0; x < 300; x++) {
+            int in = x >= 120 && x < 140 && y >= 90 && y < 110;
+            if (!in && memcmp(TestPaintAt(x, y), keep + 4 * ((size_t)y * 300 + x), 4)) still = 0;
+        }
+        TestPaintNew(1);                                                   /* (and stripes down: the grain mirrored, not one texel's) */
+        for (int x = 0; x < 300; x++) TestPaintFill(x, 0, x + 1, 200, (x / 2) % 2 ? 0x706048 : 0x908060);
+        ParchPaintOut(g_parchPx, g_parchTW, 1002, 668, 100, 80, 60, 40, M, 1);
+        int lo = 255, hi = 0;
+        for (int x = 121; x < 129; x++) { int v = TestPaintAt(x, 100)[0]; if (v < lo) lo = v; if (v > hi) hi = v; }   /* (all from its left edge) */
+        if (hi - lo < 0.25f * 0x20) grain = 0;
+        static unsigned char G[21 * 21], O[30 * 30], C[30 * 30], S[20 * 20];
+        memset(G, 0, sizeof G); G[10 * 21 + 10] = 200;
+        ParchMaskGrow(G, 21, 21, 3);
+        int grown = G[7 * 21 + 7] == 200 && G[13 * 21 + 13] == 200 && G[6 * 21 + 10] == 0 && G[10 * 21 + 14] == 0;
+        memset(O, 0, sizeof O); memset(C, 0, sizeof C);
+        for (int y = 5; y < 25; y++) for (int x = 5; x < 25; x++) {
+            int ring = x < 8 || x >= 22 || y < 8 || y >= 22;
+            O[y * 30 + x] = ring ? 255 : 0;
+            C[y * 30 + x] = ring && !(x >= 22 && y >= 12 && y < 18) ? 255 : 0;           /* (a C: open on its right) */
+        }
+        O[15 * 30 + 15] = 60;                                               /* (a faint mark in the O's middle) */
+        ParchMaskHoles(O, 30, 30); ParchMaskHoles(C, 30, 30);
+        int holes = O[15 * 30 + 15] == 255 && O[10 * 30 + 12] == 255 && O[2 * 30 + 2] == 0 && C[15 * 30 + 15] == 0;
+        memset(S, 0, sizeof S);
+        for (int y = 5; y < 15; y++) for (int x = 5; x < 15; x++) S[y * 20 + x] = 255;
+        ParchMaskSoft(S, 20, 20, 1);
+        int soft = S[10 * 20 + 10] == 255 && S[10 * 20 + 5] > 100 && S[10 * 20 + 5] < 255 && S[10 * 20 + 4] > 0 && S[10 * 20 + 4] < 128 && S[10 * 20 + 2] == 0;
+        printf("  the paint-out: the grain carried on %d, nothing else changed %d; a mask grown %d, its holes %d, softened %d\n", grain, still, grown, holes, soft);
+        Check(grain && still && grown && holes && soft,
+              "a name painted out: the paper round it with its grain carried on through it (the hatching's rows dark and light as round it), nothing else changed; its mask grown, its holes filled (an O's middle, never a C's), softened at its edges");
+    }
     TestPaintNew(1);                                                  /* Azeroth's painting: its own name, larger and elsewhere */
     TestPaintFill(0, 0, 1002, 668, 0xB09050);
+    for (int y = 0; y < 668; y++) for (int x = 0; x < 1002; x++) g_parchPx[4 * ((size_t)y * g_parchTW + x)] += (x + y) % 2 ? 8 : 0;   /* (its grain) */
     for (int i = 0; i < PARCH_WORDS; i++) {
         int a0, b0, a1, b1;
         if (lstrcmpiA(kWords[i].folder, "Azeroth") || !WordBox(i, 1, 1002, 668, &a0, &b0, &a1, &b1)) continue;
         TestWordLetters(a0, b0, a1, b1, 1);
+        if (i == 3) TestWordO(a1, b0, b1, 0xB49050, 0xF0D0A0);        /* (an O in its own EASTERN, its middle lit) */
     }
     ParchLinesKeep(&g_linesCont, ParchBox(0), 0, 1);
     int a0, b0, a1, b1;
     WordBox(3, 1, 1002, 668, &a0, &b0, &a1, &b1);                     /* (Azeroth's EASTERN) */
     int lx = a0 + 6 + 1, ly = (b0 + b1) / 2;
     int was = TestPaintAt(lx, ly)[0];
-    ok = ParchContWords(0, &g_linesCont) && was == 0x30 && TestPaintAt(lx, ly)[0] > 0x60 && (g_linesCont.m[ly * 1002 + lx] & CUT_WORD) &&
-         TestPaintAt(20, 20)[0] == 0xB0;
-    Check(ok, "a continent's own name painted out of its painting, with the world's painting there in its own colours; its letters marked so a zone's outline may take them back; the rest of it untouched");
+    static unsigned char cont[1002 * 668 * 4];
+    for (int y = 0; y < 668; y++) memcpy(cont + 4 * (size_t)y * 1002, g_parchPx + 4 * (size_t)y * g_parchTW, 1002 * 4);
+    ok = ParchContWords(0, &g_linesCont) && was == 0x30 && TestPaintAt(lx, ly)[0] > 0x60 && (g_linesCont.m[ly * 1002 + lx] & CUT_WORD);
+    int untouched = 1;                                                /* (outside its own name: the world's name's place too) */
+    for (int y = 0; y < 668; y++)
+        for (int x = 0; x < 1002; x++) {
+            int own = 0;
+            for (int i = 0; i < PARCH_WORDS; i++) {
+                int c0, d0, c1, d1;
+                int g = PARCH_OUT_GROW + 2;                           /* (its letters' mask grown and softened past them) */
+                if (!lstrcmpiA(kWords[i].folder, "Azeroth") && WordBox(i, 1, 1002, 668, &c0, &d0, &c1, &d1) && x >= c0 - g && x < c1 + g && y >= d0 - g && y < d1 + g) own = 1;
+            }
+            if (!own && memcmp(TestPaintAt(x, y), cont + 4 * ((size_t)y * 1002 + x), 4)) untouched = 0;
+        }
+    int noneLeft = 1;                                                 /* (its own name: nothing of it left, an O's middle neither) */
+    for (int i = 0; i < PARCH_WORDS; i++) {
+        int c0, d0, c1, d1;
+        if (lstrcmpiA(kWords[i].folder, "Azeroth") || !WordBox(i, 1, 1002, 668, &c0, &d0, &c1, &d1)) continue;
+        for (int y = d0; y < d1; y++) for (int x = c0; x < c1; x++) if (abs(TestPaintAt(x, y)[0] - 0xB4) > 8) noneLeft = 0;
+    }
+    printf("  the continent's own name painted out: untouched round it %d, nothing of it left %d\n", untouched, noneLeft);
+    ok &= untouched && noneLeft;
+    Check(ok, "a continent's own name painted out of its painting, with the world's painting there (its name painted out too) in its own colours; its letters marked so a zone's outline may take them back; the rest of it untouched, the world's name's place too (no name of the world's laid on it: it fades)");
     /* the name drawn: over the zone's painting, at the world's place on the frame, the same place every frame */
     g_viewScreen = 30; g_worldUp = 1; g_viewTex[VT_PWORLD] = 1; g_worldTW = 1024; g_worldK = 1; g_worldAt = 0;
     g_wordUp[0] = 1; g_viewTex[VT_PWORD0] = 1; g_wordTW[0] = 256; g_wordTH[0] = 64; g_contWords = 0;
+    g_wordOutUp[0] = 1; g_viewTex[VT_PNOUT0] = 1; g_wordOutTW[0] = 256; g_wordOutTH[0] = 128;
     TestGlideArrive(0, 1, 0, -9464, 62, 2000);
     ViewBuild(1920, 1080, 0.0f, 2000);
     float px0[3];
@@ -6725,14 +6841,14 @@ static void TestWords(void)
     TestGlideArrive(0, 1, 0, -9464, 62, 2000);
     ViewBuild(1920, 1080, 0.0f, 2000);
     ViewBuild(1920, 1080, 0.02f, 2600);
-    ok &= TestBatch(VT_PWORD0) < 0;
+    ok &= TestBatch(VT_PWORD0) < 0 && TestBatch(VT_PNOUT0) < 0;    /* (nor the world's painted out under it) */
     Check(ok, "the continent's name, the world's, drawn over every painting (the zone's too) at its own place on the frame, the same place every frame of the glide; none drawn over a continent whose own name was not painted out");
     /* it fades out once wider than the window (his answer, 11 Oct: "yes the continent name should fade out"): whole up to
      * as wide as the window, half at 1.41 times, gone at twice that and by the landing at the latest */
     g_contWords = 0;
     {
         float nw = g_wordPic[0].w * PARCH_WORLD_FW / 1002.0f;          /* (its width on the frame, map tiles) */
-        int whole = 1, gone = 1, half = 0, seen = 0, fades[2] = { 0, 0 };
+        int whole = 1, gone = 1, half = 0, seen = 0, fades[2] = { 0, 0 }, out = 1, outSeen = 0;
         for (int run = 0; run < 2; run++) {                            /* Elwynn; then at sea on the name itself (a landing zoom
                                                                         * under twice its own: gone by the landing all the same) */
             if (run) TestGlideArrive(0, 0, 0, -7200, 577, 2000); else TestGlideArrive(0, 1, 0, -9464, 62, 2000);
@@ -6751,11 +6867,18 @@ static void TestWords(void)
                     if (fabsf((float)a - want) > 6) whole = 0;
                 }
                 if (b >= 0 && a > 0 && a < 255) fades[run]++;
+                /* the name painted out under it, over the world's painting: as much as the name has faded */
+                int qb = TestBatch(VT_PNOUT0), qa = 0, wb = TestBatch(VT_PWORLD), cb = TestBatch(VT_PARCH2);
+                for (int i = qb >= 0 ? g_vb[qb].first : 0; qb >= 0 && i < g_vb[qb].first + g_vb[qb].count; i++) if (g_vv[i].c[3] > qa) qa = g_vv[i].c[3];
+                if (qb >= 0) outSeen++;
+                if (qb >= 0 && (qb < wb || (cb >= 0 && qb > cb))) out = 0;
+                if (b >= 0 && (a + (qb >= 0 ? qa : 0) < 253 || a + (qb >= 0 ? qa : 0) > 257)) out = 0;   /* (while it is on the window) */
             }
         }
-        ok = whole && gone && half && seen > 20 && fades[0] > 2 && fades[1] > 2;
+        printf("  the name's fade: its painted-out picture under it as it fades %d (%d frames)\n", out, outSeen);
+        ok = whole && gone && half && seen > 20 && fades[0] > 2 && fades[1] > 2 && out && outSeen > 50;
     }
-    Check(ok, "the continent's name fades out once it is wider than the window (his answer: \"yes the continent name should fade out\"): whole up to as wide as the window, as the opening shows it, half at 1.41 times, gone at twice (eased on the zoom's log) and by the landing at the latest, never always drawn");
+    Check(ok, "the continent's name fades out once it is wider than the window (his answer: \"yes the continent name should fade out\"): whole up to as wide as the window, as the opening shows it, half at 1.41 times, gone at twice (eased on the zoom's log) and by the landing at the latest, never always drawn; the world's painting under it has it painted out as much as it has faded, under the continent's and the zone's paintings");
     /* the work's steps as each painting is made: the continent's lines kept, its own name painted out, it cut to its land
      * (the world's painting under it); the zone cut to its own area */
     TestPaintNew(1);                                                  /* the world's lines: Azeroth's land a block of it */
@@ -6786,7 +6909,7 @@ static void TestWords(void)
     words = ParchContMade(0, &why);
     ok &= !words && g_contWords == -1 && !g_contCut;
     Check(ok, "as each painting is made: the continent's own lines kept, its own name painted out and it cut to its land as the world's painting draws it (none of it without the world's); the zone cut to its own area (not without its continent's lines)");
-    for (int c = 0; c < 2; c++) { ParchPicFree(&g_wordPic[c]); ParchPicFree(&g_wordUnder[c]); g_wordUp[c] = 0; }
+    for (int c = 0; c < 2; c++) { ParchPicFree(&g_wordPic[c]); ParchPicFree(&g_wordUnder[c]); ParchPicFree(&g_wordOut[c]); g_wordUp[c] = g_wordOutUp[c] = 0; }
     if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
     if (g_linesWorld.m) HeapFree(GetProcessHeap(), 0, g_linesWorld.m);
     g_linesCont.m = g_linesWorld.m = NULL;
