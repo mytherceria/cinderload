@@ -26,6 +26,13 @@ int shim_vq;
 int shim_screen_w = 3440, shim_screen_h = 1440;
 char shim_cmdline[512] = "\"C:\\Games\\WoW\\WoW.exe\"";
 int shim_wine;
+HWND shim_game;
+int shim_game_alive;
+DWORD shim_game_tid = 77;
+HOOKPROC shim_hook;
+DWORD shim_hook_tid;
+int shim_hooks, shim_unhooks, shim_hook_fail, shim_posted, shim_post_fail;
+UINT shim_posted_msg;
 
 static int fails, checks;
 static void Check(int cond, const char *what) { checks++; if (!cond) { printf("FAIL: %s\n", what); fails++; } }
@@ -6035,6 +6042,9 @@ static void LuaPlant(void)
 {
     for (int i = 0; i < LUA_CODE_COUNT; i++) memcpy(shim_module + (kLuaCode[i].va - 0x400000u), kLuaCode[i].bytes, (size_t)kLuaCode[i].n);
 }
+static void SwitchesQuiet(void);
+static DWORD g_tk = 5000;                                /* the switches' clock in these tests */
+static void Tick(void) { g_tk += LUA_TICK_MS; LuaTick(g_tk); } /* a tick a probe may come on */
 static void TestSwitches(void)
 {
     int ok;
@@ -6106,27 +6116,27 @@ static void TestSwitches(void)
     g_luaExec = FakeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
     g_luaOn = 1; g_luaBroken = 0; g_luaBusy = 0; g_luaFails = 0; g_luaSetups = 0; g_luaSynced = 0;
     g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = 0;
-    LuaTick();
+    Tick();
     ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
           !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
           !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"parchment\", \"retro\"\n-- CinderLoad", 57) && !strcmp(g_fkVal, "parchment retro") &&
           g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro");
     Check(ok, "a login: the CVar made as RegisterCVar makes one (no help, no flags, the choice its default, no callback, category 9, registered), the probe finds no switches, they are made from the choice held (the setup's mark there while it runs, gone after)");
-    LuaTick();
+    Tick();
     ok = g_fkProbes == 2 && g_fkSetups == 1 && g_fkRegisters == 1;
     FkSet("satellite neo");                                           /* the player's clicks */
-    LuaTick();
+    Tick();
     ok &= g_parchAsked == 0 && g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo") &&
           LogSays("style: the map satellite, the bar neo (chosen on the world map or with /cinderload)") && g_fkSetups == 1;
     g_fkUp = 0;                                                        /* a /reload */
-    LuaTick();
+    Tick();
     ok &= g_fkSetups == 2 && !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"satellite\", \"neo\"\n", 42) && !strcmp(g_fkVal, "satellite neo") &&
           LogSays("made (again: at a login or a /reload), set to satellite neo");
     FkSet("parchment neo");                                           /* a click, then at once a teleport */
     StyleAtLoad();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0 && LogSays("(chosen just before this loading screen)");
     FkSet("satellite");                                               /* (one word: not the switches' own value) */
-    LuaTick();
+    Tick();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0;
     FkSet("satellite retro");                                         /* a click, then a teleport: the game's first frame of it */
     g_dispNew = 1;
@@ -6140,14 +6150,14 @@ static void TestSwitches(void)
 
     int runs = g_fkRuns;
     TestPut32(shim_module + FIRE_LAYER_RVA, 3);
-    LuaTick();
+    Tick();
     ok = g_fkRuns == runs;
     TestPut32(shim_module + FIRE_LAYER_RVA, 0);
-    g_luaBusy = 1; LuaTick(); g_luaBusy = 0;
+    g_luaBusy = 1; Tick(); g_luaBusy = 0;
     ok &= g_fkRuns == runs;
-    L[LUA_L_NCCALLS] = 2; LuaTick(); L[LUA_L_NCCALLS] = 0;
+    L[LUA_L_NCCALLS] = 2; Tick(); L[LUA_L_NCCALLS] = 0;
     ok &= g_fkRuns == runs;
-    g_luaOn = 0; LuaTick(); g_luaOn = 1;
+    g_luaOn = 0; Tick(); g_luaOn = 1;
     ok &= g_fkRuns == runs;
     Check(ok, "no tick in a loading screen, inside another tick, with the UI's Lua running, or with the switches off");
 
@@ -6156,46 +6166,45 @@ static void TestSwitches(void)
     FkSet("satellite retro");
     StyleAtLoad();
     ok = g_parchAsked == 1 && g_vbarAsked == 0;
-    LuaTick();
+    Tick();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0 && !strcmp(g_fkVal, "parchment neo") && g_luaSynced;
     Check(ok, "a CVar there before the switches set it (Config.wtf's) never counts: style.txt's choice stands, and the switches set the CVar to it");
 
     /* their fault, a chunk that does not run, a CVar the client will not make: off for the session */
     FkSet("parchment neo fault");
-    LuaTick();
+    Tick();
     runs = g_fkRuns;
     g_fkUp = 0;
-    LuaTick();
+    Tick();
     ok = g_luaBroken && g_fkRuns == runs && LogSays("off for this session, as they met a Lua error");
     g_luaBroken = 0; g_fkUp = 0; g_fkIgnore = 1;
     FkSet("parchment neo");
-    LuaTick();
+    Tick();
     ok &= !g_luaBroken && g_luaFails == 1 && LogSays("made, but no word back from them (1 time)");
-    LuaTick();
+    Tick();
     ok &= g_luaBroken && LogSays("as they did not run (twice made, no word back)");
     FkSet("satellite neo");                                           /* off: not even a screen's start asks the client */
     StyleAtLoad();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0;
     g_luaBroken = 0; g_luaFails = 0; g_fkUp = 0;                       /* once with no word back, then a good one: counted again */
-    LuaTick();
+    Tick();
     g_fkIgnore = 0; g_fkUp = 0;
-    LuaTick();
+    Tick();
     g_fkIgnore = 1; g_fkUp = 0;
-    LuaTick();
+    Tick();
     ok &= !g_luaBroken && g_luaFails == 1;
     g_luaBroken = 0; g_luaFails = 0; g_fkIgnore = 0; g_fkCv = NULL; g_fkRegFail = 1;
-    LuaTick();
+    Tick();
     ok &= g_luaBroken && LogSays("the client would not make its CVar");
     g_luaBroken = 0; g_fkCv = NULL; g_fkRegFail = 0; g_fkHide = 1;      /* made, but the client's lookup does not find it */
-    LuaTick();
+    Tick();
     ok &= g_luaBroken;
     g_fkHide = 0;
     Check(ok, "off for the session (logged; the world map and style.txt as ever): when the switches report a Lua error, when they are made twice and never run, when the client will not make their CVar");
 
     char small[64];
     Check(LuaChunk(small, sizeof small, 1, 1) == 0, "the switches' chunk: never written past its buffer");
-    g_luaOn = 0; g_luaBroken = 0; g_luaFails = 0; g_luaSynced = 0; g_luaExec = NULL; g_cvLookup = NULL; g_cvRegister = NULL;
-    g_parchAsked = 0; g_vbarAsked = 0;
+    SwitchesQuiet();
     munmap(low, 1 << 16);
 }
 
@@ -6207,6 +6216,35 @@ static void PutN(const char *rel, const void *data, size_t n)
     FILE *f = fopen(p, "wb");
     if (f) { fwrite(data, 1, n, f); fclose(f); }
 }
+/* The game in the world at a safe moment for the switches (a player, no loading screen, the UI's Lua idle), over low
+ * memory: low + 0x1000 the object manager, + 0x2000 the lua_State, + 0x3000 the fake CVar, + 0x4000 its value. */
+static void SwitchesWorld(unsigned char *low)
+{
+    memset(low, 0, 1 << 16);
+    unsigned char *mgr = low + 0x1000, *L = low + 0x2000;
+    g_fkLow = low + 0x3000; g_fkVal = (char *)(low + 0x4000);
+    LuaPlant();
+    TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));
+    TestPut32(mgr + OBJ_MGR_GUID, 0x1234);
+    TestPut32(shim_module + (LUA_STATE_VA - 0x400000), TestLow(L));
+    TestPut32(L + LUA_L_CI, 0x5000); TestPut32(L + LUA_L_BASE_CI, 0x5000);
+    g_luaExec = FakeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+    g_luaOn = 1; g_luaBroken = 0; g_luaBusy = 0; g_luaFails = 0; g_luaSetups = 0; g_luaSynced = 0; g_luaProbeAt = 0; g_luaCv = NULL;
+    g_luaPosted = 0; g_luaPostedAt = 0; g_luaMsg = 0;
+    g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = g_fkHide = 0;
+    shim_game = (HWND)(long)0x1234; shim_game_alive = 1; shim_game_tid = 77; shim_hook = NULL;
+    shim_hooks = shim_unhooks = shim_hook_fail = shim_posted = shim_post_fail = 0; shim_posted_msg = 0;
+}
+static void SwitchesQuiet(void)
+{
+    g_luaOn = 0; g_luaBroken = 0; g_luaFails = 0; g_luaSynced = 0; g_luaProbeAt = 0; g_luaCv = NULL; g_luaPosted = 0; g_luaMsg = 0;
+    g_luaExec = NULL; g_cvLookup = NULL; g_cvRegister = NULL;
+    shim_game = NULL; shim_game_alive = 0; shim_hook = NULL;
+    g_parchAsked = 0; g_vbarAsked = 0;
+}
+static int g_vsStarts, g_vsFail;
+static int FakeViewThreadStart(const unsigned char *base) { (void)base; g_vsStarts++; return !g_vsFail; }
 /* The style's file as Notepad and others save it; the CVar's value only as the switches write it; the black first frames
  * only for a parchment that will be drawn. */
 static void TestStyleFiles(void)
@@ -6281,6 +6319,151 @@ static void TestStyleFiles(void)
     }
 
 }
+/* The view's start and each screen's opening (outside the 32-bit part now, so these reach them); the switches' message
+ * pump, hook and exit. */
+static void TestSwitchesPump(void)
+{
+    int ok;
+    /* the view's start: the gate, then the style from style.txt, the view's thread, then the switches */
+    Fresh("view-start"); GameDir();
+    LuaPlant();
+    int wine = shim_wine, threads = shim_threads;
+    shim_wine = 1;                                                       /* (the gate: on under Wine with no files) */
+    g_map.ok = 1; g_driftOn = 1;
+    Put(STYLE_REL, "map satellite\r\nbar neo\r\n");
+    g_parchAsked = g_vbarAsked = 1; g_luaOn = 0; g_vsStarts = 0; g_vsFail = 0; shim_threads = 0;
+    ok = ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 1 && g_parchAsked == 0 && g_vbarAsked == 0 && g_viewOn &&
+         g_viewLive && g_luaOn && shim_threads == 1 && LogSays("style: the map satellite, the bar neo, from Data\\CinderLoad\\style.txt") &&
+         LogSays("view on:");
+    g_viewOn = 0; g_viewLive = 0; g_luaOn = 0;
+    Fresh("view-start-no-thread"); GameDir();
+    LuaPlant();
+    g_map.ok = 1; g_driftOn = 1;                                         /* (Fresh takes them away) */
+    g_vsFail = 1; shim_threads = 0;
+    ok &= !ViewStartFrom(shim_module, FakeViewThreadStart) && !g_viewOn && !g_viewLive && !g_luaOn && shim_threads == 0 &&
+          LogSays("view off: its thread could not be started");
+    g_vsFail = 0;
+    Fresh("view-start-off"); GameDir();
+    LuaPlant();
+    g_map.ok = 1; g_driftOn = 1;
+    Put("Data/CinderLoad/view-off.txt", "");
+    Put(STYLE_REL, "map satellite\r\n");
+    g_parchAsked = 1; g_vsStarts = 0;
+    ok &= !ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 0 && g_parchAsked == 1 && !g_luaOn && LogSays("view off:");
+    Fresh("view-start-no-map"); GameDir();
+    LuaPlant();
+    g_map.ok = 0; g_driftOn = 1;
+    ok &= !ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 0 && !g_luaOn;
+    g_map.ok = 0; g_driftOn = 0; shim_wine = wine; shim_threads = threads;
+    Check(ok, "the view's start: past its gate, the style from style.txt, the view's thread, then the world map's switches (their thread); no thread for the view, no switches; the view off, neither");
+
+    /* each screen as the view opens it: the choice of this moment, and the first frame's list for it */
+    {
+        int pzN = g_pzN;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+        g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
+        g_pzN = 4; g_parchZone = -1; g_parchCont = -1; g_class = 4; g_vbFullAt = 0;
+        g_parchAsked = 1; g_vbarAsked = 1;
+        ViewOpenFirst(1920, 1080, 5000);
+        ok = g_parchOn && g_barVanilla && g_vbN > 0;
+        g_parchAsked = 0;
+        ViewOpenFirst(1920, 1080, 5000);
+        ok &= !g_parchOn && g_vbN == 0;
+        g_parchAsked = 1; g_vbarAsked = 0;
+        ViewOpenFirst(1920, 1080, 5000);
+        ok &= g_parchOn && !g_barVanilla;
+        g_parchOn = 0; g_barVanilla = 0; g_class = 0; g_parchAsked = 0; g_vbarAsked = 0; g_pzN = pzN;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+        Check(ok, "each screen as the view opens it: the choice of that moment (a parchment screen's first frame its dark paper and bar, the living map's none of its own), changed from one screen to the next");
+    }
+
+    /* the pump: our thread's message, the game's thread's hook */
+    unsigned char *low = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    if (low == MAP_FAILED) { Check(0, "low memory for the switches' pump"); return; }
+    Fresh("switches-pump"); GameDir();
+    SwitchesWorld(low);
+    StyleLoad();
+    LuaPump pump = { NULL, NULL, 0, 0 };
+    ok = LuaPumpStep(&pump, 10000) && g_luaMsg == 0xC0DE && shim_hooks == 1 && shim_hook == LuaHook && shim_hook_tid == 77 &&
+         shim_posted == 1 && shim_posted_msg == g_luaMsg && g_luaPosted;
+    ok &= LuaPumpStep(&pump, 10250) && shim_posted == 1;                 /* (on its way: not sent again) */
+    MSG msg = { shim_game, g_luaMsg, 0, 0, 0, { 0, 0 } };
+    shim_ticks = 10300;
+    shim_hook(HC_ACTION, PM_NOREMOVE, (LPARAM)&msg);                     /* the game looks at its queue: no tick */
+    ok &= g_fkRuns == 0 && g_luaPosted && msg.message == g_luaMsg;
+    shim_hook(1, PM_REMOVE, (LPARAM)&msg);                               /* (not HC_ACTION: never) */
+    ok &= g_fkRuns == 0 && g_luaPosted;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);                       /* taken: the tick, made WM_NULL for the game's window */
+    ok &= g_fkSetups == 1 && g_luaSynced && msg.message == WM_NULL && !g_luaPosted;
+    ok &= LuaPumpStep(&pump, 10500) && shim_posted == 2;
+    Check(ok, "the switches' pump: our thread registers its message, hooks the game's own thread and sends it one message at a time; the game's thread ticks only on taking it off its queue (not on a look, not on another hook code), and never shows it to the game's window; then the next is sent");
+
+    /* a choice made in game kept within a poll (no probe needed), the probe still once a second */
+    FkSet("satellite neo");
+    int probes = g_fkProbes;
+    msg.message = g_luaMsg; shim_ticks = 10550;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);
+    const char *t = Get(STYLE_REL);
+    ok = g_fkProbes == probes && t && strstr(t, "map satellite\r\nbar neo") && g_parchAsked == 0 && g_vbarAsked == 0;
+    msg.message = g_luaMsg; shim_ticks = 10300 + LUA_TICK_MS;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);
+    ok &= g_fkProbes == probes + 1;
+    Check(ok, "a choice made on the world map kept in style.txt on the next message, a quarter of a second at most, not the next probe's second");
+
+    /* in a loading screen nothing is sent; a message never taken is sent again after 5 s; a window gone is found again */
+    TestPut32(shim_module + FIRE_LAYER_RVA, 3);
+    int posted = shim_posted;
+    ok = LuaPumpStep(&pump, 11000) && shim_posted == posted;
+    TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    ok &= LuaPumpStep(&pump, 11250) && shim_posted == posted + 1;
+    ok &= LuaPumpStep(&pump, 11250 + LUA_POST_STALE_MS - 1) && shim_posted == posted + 1;
+    ok &= LuaPumpStep(&pump, 11250 + LUA_POST_STALE_MS) && shim_posted == posted + 2 && LogSays("our message was not taken in 5 s");
+    shim_game_alive = 0;                                                 /* the window gone with ours queued */
+    ok &= LuaPumpStep(&pump, 17000) && !g_luaPosted;
+    shim_game = (HWND)(long)0x5678; shim_game_alive = 1; shim_game_tid = 78;   /* a new one, on another thread */
+    ok &= LuaPumpStep(&pump, 17250) && shim_unhooks == 1 && shim_hooks == 2 && shim_hook_tid == 78 && g_luaPosted &&
+          shim_posted == posted + 3;
+    Check(ok, "no message during a loading screen; one not taken in 5 s (a long freeze, its window gone) sent again, never stuck; a new game window found and its thread hooked");
+
+    /* the game quitting: its WM_QUIT taken, a choice made since the last message kept */
+    FkSet("parchment retro");
+    MSG quit = { shim_game, WM_QUIT, 0, 0, 0, { 0, 0 } };
+    shim_hook(HC_ACTION, PM_NOREMOVE, (LPARAM)&quit);
+    ok = g_parchAsked == 0;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
+    t = Get(STYLE_REL);
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && t && strstr(t, "map parchment\r\nbar retro") && LogSays("(chosen just before the game closed)");
+    g_luaBroken = 1;                                                     /* (off for the session: not even as it quits) */
+    FkSet("satellite neo");
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
+    ok &= g_parchAsked == 1 && (t = Get(STYLE_REL)) && strstr(t, "map parchment\r\nbar retro");
+    g_luaBroken = 0;
+    FkSet("parchment retro");
+    Check(ok, "the game quitting (its WM_QUIT off the queue): a choice made in its last moments kept in style.txt; with the switches off for the session, nothing taken");
+
+    /* a choice made just before a loading screen is the style of that screen, its explored areas read for it */
+    g_parchAsked = 0; g_parchTablesOk = 1;
+    StyleSet(0, 1, "a test");
+    FkSet("parchment retro");
+    LONG seq = g_scrSeq;
+    g_dispNew = 1;
+    GameStep(0.0f, 900000);
+    ok = g_parchAsked == 1 && g_scrSeq == seq + 1;
+    g_parchTablesOk = 0;
+    Check(ok, "the parchment chosen a moment before a loading screen: taken as it begins, before its explored areas are read, so they are read for that very screen");
+
+    /* off for good: the hook out, the thread ends; a thread that will not take a hook: off */
+    g_luaBroken = 1;
+    ok = !LuaPumpStep(&pump, 18000) && shim_unhooks == 2 && shim_hook == NULL;
+    g_luaBroken = 0; shim_hook_fail = 1;
+    LuaPump pump2 = { NULL, NULL, 0, 0 };
+    ok &= !LuaPumpStep(&pump2, 18250) && g_luaBroken && LogSays("the game's thread would not take a message hook");
+    shim_hook_fail = 0;
+    Check(ok, "the switches off for good: the hook taken out and their thread ended; a game thread that will not take the hook: off, logged");
+    SwitchesQuiet();
+    munmap(low, 1 << 16);
+}
+
 /* The switches' Lua (dll/switches.lua) as the DLL sends it, run by Lua 5.1 against a stubbed 1.12 UI with 5.0's limits
  * (tests/test_lua.lua); and switches_lua.h the same text as switches.lua. */
 static void TestSwitchesLua(void)
@@ -6534,6 +6717,7 @@ int main(int argc, char **argv)
     TestStyle();
     TestStyleFiles();
     TestSwitches();
+    TestSwitchesPump();
     TestSwitchesLua();
     if (argc > 2) {
         FireBarRealClient(argv[2]);

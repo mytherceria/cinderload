@@ -8356,6 +8356,40 @@ static int ViewWorldBlind(LONG seen)
     return 1;
 }
 
+/* At start (ViewStart; here so the tests reach it): the view, as ViewWanted says (on by default since slice 5), while the
+ * pack's world map zoom is on; then the style chosen (style.txt) and the world map's switches for it. start: the view's
+ * thread started, 1 when it was. 1 when the view is on. */
+static int ViewStartFrom(const unsigned char *base, int (*start)(const unsigned char *base))
+{
+    char m[400];
+    const char *why = "";
+    if (!ViewGate(&why)) { wsprintfA(m, "view off: %s", why); Log(m); return 0; }
+    int wine = RunsUnderWine();
+    if (!Readable(base + FIRE_LAYER_RVA, 8)) { Log("view off: the loading screen's numbers could not be read"); return 0; }
+    if (!g_map.ok || !g_driftOn) { Log("view off: it draws the world map's zoom, and that is not on"); return 0; }
+    StyleLoad();                                           /* the map and the bar chosen (style.txt) */
+    InitializeCriticalSection(&g_stepLock);
+    InterlockedExchange(&g_viewOn, 1);                     /* before any loading frame: the game's thread locks from now */
+    InterlockedExchange(&g_viewLive, 1);
+    if (!start(base)) { InterlockedExchange(&g_viewOn, 0); InterlockedExchange(&g_viewLive, 0); Log("view off: its thread could not be started"); return 0; }
+    LuaStart();                                            /* the world map's switches for them */
+    if (!wine && !g_gameWindowed)
+        Log("view on although the game holds the whole screen (Data\\CinderLoad\\view.txt asks for it): on world map "
+            "screens, its own window over the game; if a loading screen shows without its fire, labels and sea, delete "
+            "view.txt");
+    else
+        Log("view on: on world map screens, its own window over the game, drawn with OpenGL on its own thread, which "
+            "moves the bar and the zoom while it shows (Data\\CinderLoad\\view-off.txt turns it off)");
+    return 1;
+}
+/* The view's thread, as a screen opens (ViewOpen, its window up): what this screen draws, the player's choice as far as it
+ * can be (StylePick), and its first frame's list. */
+static void ViewOpenFirst(float w, float h, DWORD now)
+{
+    StylePick();
+    ViewFirstList(w, h, now);
+}
+
 #ifdef __i386__
 #include <d3d9.h>
 /* ITS DRAWING IS OPENGL, NOT DIRECT3D (4 Oct 2026, 22:23, his first launch of the proof: a critical error). Mods such as
@@ -8807,8 +8841,7 @@ static int ViewOpen(const char **why)
      * 10 Oct: "for a split second ... you get the previous screen") */
     if (layered) ViewAlpha(0);
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
-    StylePick();                                         /* (the map and the bar this screen: the player's choice) */
-    ViewFirstList((float)w, (float)h, ViewNow());
+    ViewOpenFirst((float)w, (float)h, ViewNow());       /* (the map and the bar this screen: the player's choice) */
     ViewFrame(NULL, NULL);
     if (layered) ViewAlpha(255);
     return 1;
@@ -9036,30 +9069,15 @@ static DWORD WINAPI ViewThread(LPVOID arg)
     }
 }
 /* At start: the view's thread, as ViewWanted says (on by default since slice 5), while the pack's world map zoom is on. */
+static int ViewThreadStart(const unsigned char *base)
+{
+    HANDLE t = CreateThread(NULL, 0, ViewThread, (LPVOID)base, 0, NULL);
+    if (t) CloseHandle(t);
+    return t != NULL;
+}
 static void ViewStart(void)
 {
-    char m[400];
-    const char *why = "";
-    const unsigned char *base = (const unsigned char *)GetModuleHandleA(NULL);
-    if (!ViewGate(&why)) { wsprintfA(m, "view off: %s", why); Log(m); return; }
-    int wine = RunsUnderWine();
-    if (!Readable(base + FIRE_LAYER_RVA, 8)) { Log("view off: the loading screen's numbers could not be read"); return; }
-    if (!g_map.ok || !g_driftOn) { Log("view off: it draws the world map's zoom, and that is not on"); return; }
-    StyleLoad();                                           /* the map and the bar chosen (style.txt) */
-    InitializeCriticalSection(&g_stepLock);
-    InterlockedExchange(&g_viewOn, 1);                     /* before any loading frame: the game's thread locks from now */
-    InterlockedExchange(&g_viewLive, 1);
-    HANDLE t = CreateThread(NULL, 0, ViewThread, (LPVOID)base, 0, NULL);
-    if (!t) { InterlockedExchange(&g_viewOn, 0); InterlockedExchange(&g_viewLive, 0); Log("view off: its thread could not be started"); return; }
-    CloseHandle(t);
-    LuaStart();                                            /* the world map's switches for them */
-    if (!wine && !g_gameWindowed)
-        Log("view on although the game holds the whole screen (Data\\CinderLoad\\view.txt asks for it): on world map "
-            "screens, its own window over the game; if a loading screen shows without its fire, labels and sea, delete "
-            "view.txt");
-    else
-        Log("view on: on world map screens, its own window over the game, drawn with OpenGL on its own thread, which "
-            "moves the bar and the zoom while it shows (Data\\CinderLoad\\view-off.txt turns it off)");
+    ViewStartFrom((const unsigned char *)GetModuleHandleA(NULL), ViewThreadStart);
 }
 #else
 static void ViewStart(void) {}
@@ -9515,7 +9533,9 @@ static void StylePick(void)
 #define CV_VALUE        0x20        /* a CVar's value (a char *) */
 #define CV_NAME         "CinderLoadStyle"
 #define CV_CATEGORY     9           /* (as RegisterCVar gives) */
-#define LUA_TICK_MS     1000
+#define LUA_POLL_MS     250         /* our message to the game's thread this often: a choice made in game kept within it */
+#define LUA_TICK_MS     1000        /* the probe (the switches made when not there) at most this often */
+#define LUA_POST_STALE_MS 5000      /* our message not taken in this long: sent again */
 #define LUA_FAILS_MAX   2
 #define LUA_SETUP_MARK  "Data\\CinderLoad\\ui-setup.tmp"
 #define LUA_OFF_PATH    "Data\\CinderLoad\\ui-off.txt"
@@ -9562,7 +9582,11 @@ static CvRegisterFn g_cvRegister;
 static int g_luaOn;                            /* the switches run this session (places as read, the view on) */
 static volatile LONG g_luaBroken;              /* off for the rest of the session (logged) */
 static int g_luaBusy, g_luaFails, g_luaSetups, g_luaSynced;   /* (synced: made once this session; the CVar holds the choice) */
-static volatile LONG g_luaPosted;              /* our message is on its way to the game's thread */
+static DWORD g_luaProbeAt;                     /* the last probe (0: none yet) */
+static void *g_luaCv;                          /* our CVar, once made (the game's thread) */
+static volatile LONG g_luaPosted;              /* our message is on its way to the game's thread, */
+static volatile LONG g_luaPostedAt;            /* sent then */
+static UINT g_luaMsg;                          /* (RegisterWindowMessageA's, on our thread before the hook is in) */
 #include "switches_lua.h"                      /* kSwitchesLua: dll/switches.lua, as a C string (tools/lua_to_c.py) */
 static const char kLuaProbe[] =                /* the switches not there (a login, a /reload): the CVar marked */
     "if not (type(CinderLoad) == \"table\" and CinderLoad.up) and WorldMapFrame then pcall(SetCVar, \"" CV_NAME "\", \"?\") end";
@@ -9656,8 +9680,9 @@ static int LuaChunk(char *out, int size, int map, int bar)
     lstrcatA(out, kSwitchesLua);
     return lstrlenA(out);
 }
-/* The game's thread, in its message pump (our message): the switches' tick (see above). */
-static void LuaTick(void)
+/* The game's thread, in its message pump (our message, every LUA_POLL_MS): the switches' tick (see above). A choice made in
+ * game is kept at once; the probe, and the switches made, at most every LUA_TICK_MS. */
+static void LuaTick(DWORD now)
 {
     if (!g_luaOn || g_luaBroken || g_luaBusy || !LuaSafeNow()) return;
     g_luaBusy = 1;
@@ -9670,11 +9695,14 @@ static void LuaTick(void)
         if (!cv || g_cvLookup(CV_NAME) != cv) { LuaBreak("the client would not make its CVar (" CV_NAME ")"); g_luaBusy = 0; return; }
         Log("the world map's switches: their CVar " CV_NAME " made, as the client's own RegisterCVar makes one");
     }
+    g_luaCv = cv;
     if (StyleFromCvar(cv, "chosen on the world map or with /cinderload") < 0) {
         LuaBreak("they met a Lua error and turned themselves off (the chat said where)");
         g_luaBusy = 0;
         return;
     }
+    if (g_luaProbeAt && now - g_luaProbeAt < LUA_TICK_MS) { g_luaBusy = 0; return; }
+    g_luaProbeAt = now ? now : 1;
     g_luaExec(kLuaProbe, "CinderLoad");
     if (CvText(cv, v, (int)sizeof v) && v[0] == '?' && !v[1]) {    /* not there: made, from the choice held */
         static char chunk[sizeof kSwitchesLua + 128];
@@ -9708,6 +9736,14 @@ static void StyleAtLoad(void)
     if (cv && StyleFromCvar(cv, "chosen just before this loading screen") < 0)
         LuaBreak("they met a Lua error and turned themselves off (the chat said where)");
 }
+/* The game's thread, as it quits (its WM_QUIT taken from its queue, the game still whole): a choice made since the last
+ * poll kept. Only the CVar's memory is read (no Lua, no call into the client). */
+static void LuaQuit(void)
+{
+    if (!g_luaOn || g_luaBroken || !g_luaCv) return;
+    if (StyleFromCvar(g_luaCv, "chosen just before the game closed") < 0)
+        LuaBreak("they met a Lua error and turned themselves off (the chat said where)");
+}
 /* At start, with the view on: whether the switches may run, from WoW.exe's bytes and the files. 1 when they may. */
 static int LuaWanted(void)
 {
@@ -9738,48 +9774,73 @@ static int LuaWanted(void)
     g_cvRegister = (CvRegisterFn)(void *)ClientAt(CV_REGISTER_VA);
     return 1;
 }
-#ifdef __i386__
-static UINT g_luaMsg;
+/* The game's thread, each message it takes from its queue (a WH_GETMESSAGE hook of that thread): ours (never seen by the
+ * game's window) is the tick; its WM_QUIT, the last chance to keep a choice. Only messages taken off the queue count, not
+ * ones the game merely looks at (PM_NOREMOVE). */
 static LRESULT CALLBACK LuaHook(int code, WPARAM w, LPARAM l)
 {
     MSG *msg = (MSG *)l;
-    if (code == HC_ACTION && w == PM_REMOVE && msg && g_luaMsg && msg->message == g_luaMsg) {
-        msg->message = WM_NULL;                                    /* (the game's window never sees it) */
-        InterlockedExchange(&g_luaPosted, 0);
-        LuaTick();
+    if (code == HC_ACTION && w == PM_REMOVE && msg) {
+        if (g_luaMsg && msg->message == g_luaMsg) {
+            msg->message = WM_NULL;                                /* (the game's window never sees it) */
+            InterlockedExchange(&g_luaPosted, 0);
+            LuaTick(GetTickCount());
+        } else if (msg->message == WM_QUIT) {
+            LuaQuit();
+        }
     }
     return CallNextHookEx(NULL, code, w, l);
 }
-/* Our thread: the game's window found, its thread's message hook in, and about once a second, when the game's thread may
- * be ready for a tick (no loading screen, a player there, its Lua there), our message to it. */
+#ifdef __i386__
+static HWND LuaGame(void) { HWND game = NULL; EnumWindows(ViewFind, (LPARAM)&game); return game; }
+#else
+static HWND LuaGame(void) { return shim_game; }                   /* (the tests' game window) */
+#endif
+/* Our thread, each LUA_POLL_MS (LuaThread): the game's window found, its thread's message hook in, and our message to it
+ * when it may be ready for a tick (no loading screen, a player there, its Lua there) and the last one was taken, or was
+ * not taken in LUA_POST_STALE_MS (a window that went with it queued, a long freeze: sent again, never stuck). 0 once the
+ * switches are off for good (the hook taken out). */
+typedef struct { HWND game; HHOOK hook; DWORD hooked; int stale; } LuaPump;
+static int LuaPumpStep(LuaPump *p, DWORD now)
+{
+    if (g_luaBroken) { if (p->hook) UnhookWindowsHookEx(p->hook); p->hook = NULL; return 0; }
+    if (!g_luaMsg && !(g_luaMsg = RegisterWindowMessageA("CinderLoad.Switches"))) {   /* (not in DllMain: no USER32 under the loader's lock) */
+        LuaBreak("no window message could be had for them");
+        return 0;
+    }
+    if (!p->game || !IsWindow(p->game)) {
+        p->game = LuaGame();
+        if (!p->game) return 1;
+        InterlockedExchange(&g_luaPosted, 0);                     /* (a message to a window gone never comes) */
+    }
+    DWORD tid = GetWindowThreadProcessId(p->game, NULL);
+    if (!p->hook || tid != p->hooked) {
+        if (p->hook) UnhookWindowsHookEx(p->hook);
+        p->hook = SetWindowsHookExA(WH_GETMESSAGE, LuaHook, NULL, tid);
+        p->hooked = p->hook ? tid : 0;
+        if (!p->hook) { LuaBreak("the game's thread would not take a message hook"); return 0; }
+        Log("the world map's switches: on the game's own thread, in its message pump, between its frames");
+    }
+    if (g_luaPosted && now - (DWORD)g_luaPostedAt >= LUA_POST_STALE_MS) {
+        InterlockedExchange(&g_luaPosted, 0);
+        if (p->stale++ < 4) Log("the world map's switches: our message was not taken in 5 s (a long freeze, or its window gone); sent again");
+    }
+    unsigned layer, mgr, L;
+    int ready = ClientWord(0x400000u + FIRE_LAYER_RVA, &layer) && !layer && ClientWord(OBJ_MGR_VA, &mgr) && mgr &&
+                ClientWord(LUA_STATE_VA, &L) && L;
+    if (ready && !g_luaPosted) {
+        InterlockedExchange(&g_luaPostedAt, (LONG)now);
+        InterlockedExchange(&g_luaPosted, 1);
+        if (!PostMessageA(p->game, g_luaMsg, 0, 0)) InterlockedExchange(&g_luaPosted, 0);
+    }
+    return 1;
+}
 static DWORD WINAPI LuaThread(LPVOID arg)
 {
     (void)arg;
-    HWND game = NULL;
-    HHOOK hook = NULL;
-    DWORD hooked = 0;
-    g_luaMsg = RegisterWindowMessageA("CinderLoad.Switches");      /* (here, not in DllMain: no USER32 under the loader's lock) */
-    if (!g_luaMsg) { LuaBreak("no window message could be had for them"); return 0; }
-    for (;;) {
-        Sleep(LUA_TICK_MS);
-        if (g_luaBroken) { if (hook) UnhookWindowsHookEx(hook); return 0; }
-        if (!game || !IsWindow(game)) { game = NULL; EnumWindows(ViewFind, (LPARAM)&game); if (!game) continue; }
-        DWORD tid = GetWindowThreadProcessId(game, NULL);
-        if (!hook || tid != hooked) {
-            if (hook) UnhookWindowsHookEx(hook);
-            hook = SetWindowsHookExA(WH_GETMESSAGE, LuaHook, NULL, tid);
-            hooked = hook ? tid : 0;
-            if (!hook) { LuaBreak("the game's thread would not take a message hook"); return 0; }
-            Log("the world map's switches: on the game's own thread, in its message pump, between its frames");
-        }
-        unsigned layer, mgr, L;
-        int ready = ClientWord(0x400000u + FIRE_LAYER_RVA, &layer) && !layer && ClientWord(OBJ_MGR_VA, &mgr) && mgr &&
-                    ClientWord(LUA_STATE_VA, &L) && L;
-        if (ready && !g_luaPosted) {
-            InterlockedExchange(&g_luaPosted, 1);
-            if (!PostMessageA(game, g_luaMsg, 0, 0)) InterlockedExchange(&g_luaPosted, 0);
-        }
-    }
+    LuaPump p = { NULL, NULL, 0, 0 };
+    do Sleep(LUA_POLL_MS); while (LuaPumpStep(&p, GetTickCount()));
+    return 0;
 }
 static void LuaStart(void)
 {
@@ -9789,9 +9850,6 @@ static void LuaStart(void)
     if (!t) { g_luaOn = 0; Log("the world map's switches: off, as their thread could not be started"); return; }
     CloseHandle(t);
 }
-#else
-static void LuaStart(void) {}
-#endif
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
