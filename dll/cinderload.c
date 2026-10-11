@@ -10772,8 +10772,10 @@ static int ParchNearPick(const float *yd, int n, float reach, int *pick, float *
     return got;
 }
 /* The painting in g_parchPx (its picture placed at r on the frame, its alpha its cut) laid into the sheet S (T texels a
- * side, placed at sr), sampled between its texels; where the sheet has another's already, the more opaque shows (each
- * colour weighted by its alpha to the fourth), the sheet's alpha the higher. The texels it reached. */
+ * side, placed at sr), sampled between its texels, its alpha soft within PARCH_FEATHER of its box's edges as the zone's
+ * own painting is drawn (so where its picture ends there is no straight seam, over the continent or over another
+ * neighbour); where the sheet has another's already, the more opaque shows (each colour weighted by its alpha to the
+ * fourth), the sheet's alpha the higher. The texels it reached. */
 static int ParchNearLay(unsigned char *S, int T, ParchRect sr, ParchRect r)
 {
     int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, P = g_parchTW, n = 0;
@@ -10790,8 +10792,9 @@ static int ParchNearLay(unsigned char *S, int T, ParchRect sr, ParchRect r)
         if (v < 0) v = 0;
         if (v > (float)(ph - 1)) v = (float)(ph - 1);
         int v0 = (int)v, v1 = v0 + 1 < ph ? v0 + 1 : v0;
-        float fv = v - (float)v0;
-        for (int x = x0; x <= x1; x++) {
+        float fv = v - (float)v0, pv = (sr.y0 + ((float)y + 0.5f) * sy - r.y0) / (r.y1 - r.y0), ey = pv < 1 - pv ? pv : 1 - pv;
+        float ky = ParchSmooth(ey / PARCH_FEATHER);                 /* (soft within PARCH_FEATHER of its box's edges, as the */
+        for (int x = x0; x <= x1; x++) {                            /* zone's own painting is drawn: no straight seam there) */
             float u = (sr.x0 + ((float)x + 0.5f) * sx - r.x0) / (r.x1 - r.x0) * (float)pw - 0.5f;
             if (u < -0.5f || u > (float)pw - 0.5f) continue;
             if (u < 0) u = 0;
@@ -10802,6 +10805,8 @@ static int ParchNearLay(unsigned char *S, int T, ParchRect sr, ParchRect r)
             const unsigned char *e = g_parchPx + 4 * ((SIZE_T)v1 * (SIZE_T)P + (SIZE_T)u0), *f = g_parchPx + 4 * ((SIZE_T)v1 * (SIZE_T)P + (SIZE_T)u1);
             for (int k = 0; k < 4; k++)
                 c[k] = ((float)a[k] * (1 - fu) + (float)b[k] * fu) * (1 - fv) + ((float)e[k] * (1 - fu) + (float)f[k] * fu) * fv;
+            float pu = (sr.x0 + ((float)x + 0.5f) * sx - r.x0) / (r.x1 - r.x0), ex = pu < 1 - pu ? pu : 1 - pu;
+            c[3] *= ky * ParchSmooth(ex / PARCH_FEATHER);
             float al = c[3] / 255;
             if (!(al > 0)) continue;
             unsigned char *d = S + 4 * ((SIZE_T)y * (SIZE_T)T + (SIZE_T)x);

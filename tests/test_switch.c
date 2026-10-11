@@ -8099,8 +8099,29 @@ static void TestNearby(void)
         memset(S, 0, sizeof S);
         ParchRect r3 = { 0, 0, 2, 2 };                                  /* (texel 0: 0.16 of the way from a black stripe to a red) */
         ParchNearLay(S, 32, r3, r3);
-        ok &= S[0] > 25 && S[0] < 55 && S[3] == 255;
+        ok &= S[0] > 25 && S[0] < 55 && S[3] < 20;                    /* (its corner texel: its colour, nearly clear) */
         Check(ok, "a neighbour laid into the sheet: its painting sampled between texels at its place, nothing past its box; where it is less opaque than what is there already, what is there shows (colours weighted by alpha to the fourth), the alpha the higher; alone, its own colour and alpha");
+        ParchFree();
+    }
+    /* no straight seam where a neighbour's picture ends: its alpha soft within PARCH_FEATHER of its box's edges (as the
+     * zone's own painting is drawn), over nothing and over another neighbour */
+    {
+        static unsigned char S[256 * 256 * 4];
+        memset(S, 0, sizeof S);
+        ParchRect sr = { 0, 0, 4, 4 }, ra = { 1, 1, 3, 3 }, rb = { 2, 1, 4, 3 };   /* (a: texels 64..191 each way; b: 128..255 across) */
+        TestPaintNew(1);
+        TestPaintFill(0, 0, 1002, 668, 0xC04020);
+        ParchNearLay(S, 256, sr, ra);
+        int most = 0, mostV = 0, at128 = S[4 * (128 * 256 + 128) + 3], edge = S[4 * (128 * 256 + 64) + 3];
+        for (int x = 40; x < 215; x++) { int st = abs(S[4 * (128 * 256 + x + 1) + 3] - S[4 * (128 * 256 + x) + 3]); if (st > most) most = st; }
+        for (int y = 40; y < 215; y++) { int st = abs(S[4 * ((y + 1) * 256 + 128) + 3] - S[4 * (y * 256 + 128) + 3]); if (st > mostV) mostV = st; }
+        ok = at128 == 255 && edge < 30 && most <= 60 && mostV <= 60 && S[4 * (128 * 256 + 63) + 3] == 0;
+        TestPaintFill(0, 0, 1002, 668, 0x2040C0);                       /* (b over a's right edge: a fades out into b) */
+        ParchNearLay(S, 256, sr, rb);
+        int mostR = 0;
+        for (int x = 150; x < 215; x++) { int st = abs(S[4 * (128 * 256 + x + 1)] - S[4 * (128 * 256 + x)]); if (st > mostR) mostR = st; }
+        ok &= mostR <= 48 && abs(S[4 * (128 * 256 + 200)] - 0x20) <= 2 && abs(S[4 * (128 * 256 + 160)] - 0x70) <= 2;
+        Check(ok, "a neighbour laid into the sheet: no straight seam where its picture ends, its alpha soft over the last six hundredths of its box (as the zone's own painting is drawn), no step of more than 60 of 255 a texel over nothing, and where it ends over another neighbour the colours blend across (no step of more than 48 a texel), the other alone past it");
         ParchFree();
     }
 
@@ -8193,9 +8214,9 @@ static void TestNearbyMake(void)
     int far = a[3];
     ok &= far > 20 && far < 45 && abs(a[2] - 0xC0) <= 1;
     ok &= TestSheetAt(0, x, y)[3] == 0;                                /* (the arrival's zone's own land: none of Westfall there) */
-    TestNearChunk(5, 15, &cx, &cy);                                    /* (Westfall's land south, 7 chunks: 233 yards) */
-    a = TestSheetAt(0, cx, cy);
-    ok &= a[3] > 70 && a[3] < 110 && a[2] > 0xB0;
+    TestNearChunk(5, 15, &cx, &cy);                                    /* (Westfall's land south, 7 chunks: 233 yards, and */
+    a = TestSheetAt(0, cx, cy);                                        /* 17 yards inside its box's edge: softer there too) */
+    ok &= a[3] > 40 && a[3] < 75 && a[2] > 0xB0;
     TestNearChunk(12, 10, &cx, &cy);                                   /* (its piece: every piece painted, no areas given) */
     a = TestSheetAt(0, cx, cy);
     ok &= a[0] > 0xC0 && a[2] < 0x40 && a[3] > 40;
