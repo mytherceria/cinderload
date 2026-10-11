@@ -5894,6 +5894,153 @@ static int TestGlideGood(float W, float H, float *dev, float *jump)
     *dev = worst; *jump = most > 0 ? change / most : 99;
     return ok && land >= 0 && land == fullAt;
 }
+/* The arrival's zone as the client finds it (the skeptic's find, 11 Oct 2026): its terrain chunk's area, walked up to
+ * its zone, that zone's page; a capital the terrain does not know by its building; the boxes only without a tile's file */
+static unsigned char g_adt[2][24 * 1024];
+static unsigned TestAdt(unsigned char *out, int cx, int cy, unsigned area, unsigned others, const unsigned char *modf, unsigned nModf,
+                        const char *wmoName)
+{
+    unsigned at = 0;
+    unsigned v[2] = { 0x4D564552u, 4 }, ver = 18;                    /* MVER */
+    memcpy(out, v, 8); memcpy(out + 8, &ver, 4); at = 12;
+    unsigned mcin = at + 8, hd[2] = { ADT_MCIN, 256 * 16 };
+    memcpy(out + at, hd, 8); at += 8 + 256 * 16;
+    if (wmoName) {                                                     /* MWMO, MWID, MODF */
+        unsigned nl = (unsigned)strlen(wmoName) + 1, h1[2] = { ADT_MWMO, nl }, h2[2] = { ADT_MWID, 4 }, zero = 0, h3[2] = { ADT_MODF, 64 * nModf };
+        memcpy(out + at, h1, 8); memcpy(out + at + 8, wmoName, nl); at += 8 + nl;
+        memcpy(out + at, h2, 8); memcpy(out + at + 8, &zero, 4); at += 12;
+        memcpy(out + at, h3, 8); memcpy(out + at + 8, modf, 64 * nModf); at += 8 + 64 * nModf;
+    }
+    for (int j = 0; j < 16; j++)
+        for (int i = 0; i < 16; i++) {                                 /* every chunk: its header, its place, its area */
+            unsigned h[2] = { ADT_MCNK, 0x38 + 8 }, head[16] = { 0 };
+            head[1] = (unsigned)i; head[2] = (unsigned)j; head[13] = i == cx && j == cy ? area : others;
+            unsigned ent[4] = { at, 8 + 0x38 + 8, 0, 0 };
+            memcpy(out + mcin + 16 * (j * 16 + i), ent, 16);
+            memcpy(out + at, h, 8); memcpy(out + at + 8, head, 0x38); memset(out + at + 8 + 0x38, 0, 8); at += 8 + 0x38 + 8;
+        }
+    return at;
+}
+static void TestModf(unsigned char *e, float x0, float y0, float x1, float y1, unsigned set)
+{
+    memset(e, 0, 64);
+    float lo[3] = { 17066.666f - y1, -500, 17066.666f - x1 }, hi[3] = { 17066.666f - y0, 500, 17066.666f - x0 };
+    memcpy(e + 32, lo, 12); memcpy(e + 44, hi, 12);
+    unsigned s = set;
+    memcpy(e + 60, &s, 4);
+}
+static void TestZoneRule(void)
+{
+    Fresh("zone-rule");
+    GameDir();
+    TestGlideState();
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Inner\0Westfall\0Ironforge\0DunMorogh\0";
+    unsigned wv[6 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+                           30, 0, 12, 9, TestF(1535), TestF(-1935), TestF(-7939), TestF(-10254),
+                           99, 0, 77, 16, TestF(200), TestF(-200), TestF(-9000), TestF(-9600),
+                           39, 0, 40, 22, TestF(3016), TestF(-483), TestF(-9400), TestF(-11733),
+                           341, 0, 1537, 31, TestF(-713), TestF(-1504), TestF(-4569), TestF(-5096),
+                           27, 0, 1, 41, TestF(1802), TestF(-3122), TestF(-3877), TestF(-7160) };
+    static unsigned char wma[512];
+    unsigned wn = TestWdbc(wma, 6, 8, wv, wstr, sizeof wstr);
+    ParchTables(wma, wn, NULL, 0);
+    unsigned av[9 * 11] = { 0 };                                       /* AreaTable: id, map, parent, bit, flags .. field 10 */
+    static const unsigned arow[9][5] = { { 1, 0, 0, 1, 0x40 }, { 12, 0, 0, 2, 0x40 }, { 40, 0, 0, 3, 0x40 }, { 77, 0, 0, 4, 0 },
+                                         { 87, 0, 12, 5, 0x40 }, { 131, 0, 1, 6, 0 }, { 600, 0, 0, 7, 0 }, { 1537, 0, 0, 8, 0x138 },
+                                         { 2101, 0, 77, 9, 0 } };
+    for (int i = 0; i < 9; i++) memcpy(av + 11 * i, arow[i], sizeof arow[i]);
+    static unsigned char atb[1024];
+    unsigned an = TestWdbc(atb, 9, 11, av, "\0", 1);
+    ParchAreas(atb, an);
+    static const char mstr[] = "\0Azeroth\0Kalimdor\0";
+    unsigned mv[2 * 3] = { 0, 1, 0, 1, 9, 0 };
+    static unsigned char mpd[128];
+    unsigned mn = TestWdbc(mpd, 2, 3, mv, mstr, sizeof mstr);
+    ParchMaps(mpd, mn);
+    unsigned wav[4 * 11] = { 0 };                                      /* WMOAreaTable: id, wmo, set, group .. area (field 10) */
+    static const unsigned warow[4][11] = { { 1, 208, 0, 0xFFFFFFFFu, 0, 0, 0, 0, 0, 0, 1537 }, { 2, 208, 0, 3, 0, 0, 0, 0, 0, 0, 77 },
+                                           { 3, 208, 1, 0xFFFFFFFFu, 0, 0, 0, 0, 0, 0, 2101 }, { 4, 500, 0, 0xFFFFFFFFu, 0, 0, 0, 0, 0, 0, 0 } };
+    for (int i = 0; i < 4; i++) memcpy(wav + 11 * i, warow[i], sizeof warow[i]);
+    static unsigned char wat[512];
+    unsigned wtn = TestWdbc(wat, 4, 11, wav, "\0", 1);
+    ParchWmoAreas(wat, wtn);
+    int ok = g_mapDirN == 2 && !strcmp(g_mapDir[1].dir, "Kalimdor") && g_waN == 2 && g_waArea[0] == 1537 && g_waSet[1] == 1 &&
+             g_atParent[AreaRow(87)] == 12 && g_atFlags[AreaRow(1537)] == 0x138 && AreaZone(87) == 12 && AreaZone(2101) == 77 && AreaZone(131) == 1 &&
+             AreaZone(12) == 12 && AreaZone(5555) == -1;
+    Check(ok, "the arrival's zone, its tables: Map.dbc's folders, WMOAreaTable.dbc's buildings' own areas (only their root rows), AreaTable's parents and flags; an area's zone its last parent");
+
+    /* Goldshire (-9464, 62): tile 31_49, chunk 14 across, 11 down; that chunk Goldshire's, the rest of the tile Westfall's;
+     * a smaller box (Inner) holds it too */
+    unsigned n0 = TestAdt(g_adt[0], 14, 11, 87, 40, NULL, 0, NULL);
+    static unsigned char modf[2][64];                                  /* Dun Morogh's tile: the capital's building over a place, an inn over another */
+    TestModf(modf[0], -5000, -1000, -4800, -800, 0);
+    TestModf(modf[1], -5250, -750, -5150, -650, 1);
+    unsigned n1;
+    {                                                                  /* (both placements: one file name, two sets) */
+        static unsigned char both[128];
+        memcpy(both, modf[0], 64); memcpy(both + 64, modf[1], 64);
+        n1 = TestAdt(g_adt[1], 0, 0, 1, 1, both, 2, "World\\wmo\\Test\\City.wmo");
+    }
+    static unsigned char wmo[96];
+    unsigned wh[2] = { 0x4D564552u, 4 }, wver = 17, mh[2] = { WMO_MOHD, 64 }, id = 208;
+    memcpy(wmo, wh, 8); memcpy(wmo + 8, &wver, 4); memcpy(wmo + 12, mh, 8); memset(wmo + 20, 0, 64); memcpy(wmo + 20 + 0x20, &id, 4);
+    static const char *tn[2] = { "World\\Maps\\Azeroth\\Azeroth_31_49.adt", "World\\Maps\\Azeroth\\Azeroth_33_41.adt" };
+    const char *td[2] = { (const char *)g_adt[0], (const char *)g_adt[1] };
+    unsigned tl[2] = { n0, n1 };
+    MakeMpq("Data/terrain.MPQ", 2, tn, td, tl);
+    static const char *wn2[1] = { "World\\wmo\\Test\\City.wmo" };
+    const char *wd[1] = { (const char *)wmo };
+    unsigned wl[1] = { 84 };
+    MakeMpq("Data/patch-3.MPQ", 1, wn2, wd, wl);
+    int way = -1;
+    int z = ParchZoneAt(0, -9464, 62, &way), old = ParchFind(0, -9464, 62);
+    ok = z == 1 && way == 1 && old == 2;
+    z = ParchZoneAt(0, -9464 - 34, 62, &way);                          /* (the next chunk down: the rest of the tile) */
+    ok &= z == 3 && way == 1;
+    unsigned char *tmpAdt = malloc(n0);                                /* (a list that points at another chunk: not believed) */
+    memcpy(tmpAdt, g_adt[0], n0);
+    memcpy(tmpAdt + 12 + 8 + 16 * (11 * 16 + 14), tmpAdt + 12 + 8, 4);
+    ok &= AdtArea(tmpAdt, n0, 14, 11) == -1 && AdtArea(g_adt[0], n0, 14, 11) == 87;
+    free(tmpAdt);
+    Check(ok, "the arrival's zone as the client finds it: its terrain chunk's area (Goldshire), walked up to its zone (Elwynn), that zone's page; not the smaller box that also holds it; the chunk beside it its own; a chunk list pointing at another chunk not believed");
+    g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0;                    /* the parchment's work takes the arrival so, and says how */
+    g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 21;
+    ParchWork(5000);
+    ok = g_parchWant == 1 && g_parchWantCont == 0 && LogSays("the arrival (map 0, -9464, 62) is in Elwynn, by its terrain's area, as the client");
+    Check(ok, "the parchment's work: the arrival's zone found as the client finds it, and logged");
+    TestGlideState();
+    z = ParchZoneAt(0, -4900, -900, &way);                             /* (the capital's building over the place) */
+    ok = z == 4 && way == 2;
+    z = ParchZoneAt(0, -5200, -700, &way);                             /* (an inn's building, its area another zone's with a page:
+                                                                        * not a capital, the terrain's zone) */
+    ok &= z == 5 && way == 1;
+    z = ParchZoneAt(0, -5100, -1000, &way);                            /* (no building over it: the terrain's) */
+    ok &= z == 5 && way == 1;
+    Check(ok, "the arrival's zone: inside a capital the terrain does not know (Ironforge, Undercity), the capital, by its building's placement holding the place and its root row in WMOAreaTable; another building's area (an inn's) leaves the terrain's zone");
+    TestModf(modf[0], -5000, -1000, -4800, -800, 3);                  /* (the placement's name set has no row: the terrain's) */
+    { static unsigned char both[128]; memcpy(both, modf[0], 64); memcpy(both + 64, modf[1], 64);
+      n1 = TestAdt(g_adt[1], 0, 0, 1, 1, both, 2, "World\\wmo\\Test\\City.wmo"); tl[1] = n1; MakeMpq("Data/terrain.MPQ", 2, tn, td, tl); }
+    z = ParchZoneAt(0, -4900, -900, &way);
+    ok = z == 5 && way == 1;
+    n0 = TestAdt(g_adt[0], 14, 11, 600, 600, NULL, 0, NULL);           /* (a zone with no page: its continent's) */
+    tl[0] = n0;
+    MakeMpq("Data/terrain.MPQ", 2, tn, td, tl);
+    z = ParchZoneAt(0, -9464, 62, &way);
+    ok &= z == 0 && way == 3;
+    MakeMpq("Data/terrain.MPQ", 1, tn + 1, td + 1, tl + 1);            /* (no tile's file: the boxes, as before) */
+    z = ParchZoneAt(0, -9464, 62, &way);
+    ok &= z == 2 && way == 0;
+    z = ParchZoneAt(1, -9464, 62, &way);                               /* (Kalimdor's: no such tile) */
+    ok &= z == -1 && way == 0;
+    g_mapDirN = 0;                                                     /* (no folder for the map: the boxes) */
+    ok &= ParchZoneAt(0, -9464, 62, &way) == 2 && way == 0;
+    g_mapDirN = 2;
+    unsigned char bad[64];                                             /* a tile's file that is not one: the boxes */
+    memset(bad, 0x41, sizeof bad);
+    ok &= AdtArea(bad, sizeof bad, 14, 11) == -1 && AdtArea(g_adt[1], n1, 16, 0) == -1;
+    Check(ok, "the arrival's zone: a building whose name set has no row leaves the terrain's; a zone with no page, its continent's (as the client's map shows); no tile's file, no folder for the map, or a file that is not one: the smallest box, as before");
+    g_mapDirN = 0; g_waN = 0;
+}
 static void TestGlide(void)
 {
     /* the path: one zoom about one fixed point; every point on a straight line on the screen, the zoom's log even in the
@@ -6548,6 +6695,7 @@ int main(int argc, char **argv)
     TestViewDefault();
     TestVanillaBar();
     TestParchment();
+    TestZoneRule();
     TestGlide();
     TestModeTurn();
     TestExplore();

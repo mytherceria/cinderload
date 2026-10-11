@@ -7717,7 +7717,7 @@ static void ParchTables(const unsigned char *wma, unsigned wn, const unsigned ch
         }
 }
 /* The zone (not a continent: area 0) on map whose box holds world x, y, the smallest where boxes overlap; else that map's
- * continent; -1 when neither. */
+ * continent; -1 when neither. Only where the client's own rule cannot be read (ParchZoneAt: no terrain file). */
 static int ParchFind(int map, float x, float y)
 {
     int best = -1, cont = -1;
@@ -7760,6 +7760,7 @@ static int ParchFind(int map, float x, float y)
 #define AREA_ROWS       16384
 static int g_atN, g_atSorted;
 static int g_atId[AREA_ROWS], g_atBit[AREA_ROWS], g_atLvl[AREA_ROWS];   /* AreaTable: id, its bit, its field 10 */
+static int g_atParent[AREA_ROWS], g_atFlags[AREA_ROWS];                   /* and its parent (field 2), its flags (field 4) */
 static volatile LONG g_parchTablesOk;        /* the tables read (the view's thread, at start); the game's thread may use them */
 
 /* AreaTable.dbc's ids, bits and field 10, from the file's bytes. */
@@ -7773,6 +7774,7 @@ static void ParchAreas(const unsigned char *d, unsigned n)
     for (unsigned i = 0; i < rows && g_atN < AREA_ROWS; i++) {
         const unsigned char *r = rec + i * size;
         g_atId[g_atN] = (int)Rd32(r); g_atBit[g_atN] = (int)Rd32(r + 12); g_atLvl[g_atN] = (int)Rd32(r + 40);
+        g_atParent[g_atN] = (int)Rd32(r + 8); g_atFlags[g_atN] = (int)Rd32(r + 16);
         if (g_atN && g_atId[g_atN] <= g_atId[g_atN - 1]) g_atSorted = 0;
         g_atN++;
     }
@@ -7799,6 +7801,163 @@ static int PieceFound(const ParchPiece *p, const unsigned char *bits)
         if (bits[b >> 3] & (1 << (b & 7))) return 1;
     }
     return 0;
+}
+/* ---- the arrival's zone, as the client finds it (the skeptic's find, 11 Oct 2026: the smallest WorldMapArea box
+ * holding the place was often the wrong zone: the Crossroads in Mulgore, Brill in the Western Plaguelands, Darkshire in
+ * Deadwind Pass, Auberdine in Felwood, Ratchet in Durotar, Tarren Mill in Alterac, Kargath in the Searing Gorge) ----
+ * The client knows which area a place is in from its terrain: each map tile's file (World\Maps\<map's folder>\<folder>_
+ * <x>_<y>.adt, x = 32 - y / 533 1/3, y = 32 - x / 533 1/3; the folder Map.dbc's field 1) holds 16 x 16 chunks (MCIN
+ * lists them, MCNK each), and each chunk's header says its area (AreaTable.dbc's id, at +0x34); inside a building the
+ * building's own (its WMO file's id, MOHD +0x20, and the name set its placement picks: its root row in WMOAreaTable.dbc,
+ * group -1, field 10). An area's zone is its last parent (AreaTable field 2), and the world map's page for it the
+ * WorldMapArea row with that zone (its field 2). Here: the terrain's chunk under the place; a capital the terrain does
+ * not know (Ironforge, Undercity: their streets are inside their buildings) by its building's placement holding the
+ * place (its bounds across, MODF +32: the arrival has no height, so only a capital's (AreaTable flag 0x100) is taken);
+ * a zone with no page, its continent's (as the client's map shows). Read from the client's own files (terrain.MPQ,
+ * wmo.MPQ and their patches, newest first; read only), once an arrival. Without the tile's file (a map with no folder,
+ * no terrain read): the smallest box, as before. */
+#define MAP_DIRS        256
+#define WMO_AREAS       8192
+#define AREA_CAPITAL    0x100         /* AreaTable flags: a main capital city */
+#define ADT_TILE_YD     533.333333    /* yards a map tile */
+static struct { int id; char dir[40]; } g_mapDir[MAP_DIRS];
+static int g_mapDirN;
+static int g_waN, g_waWmo[WMO_AREAS], g_waSet[WMO_AREAS], g_waArea[WMO_AREAS];   /* WMOAreaTable's root rows */
+/* Map.dbc's folders (id, field 1), from the file's bytes. */
+static void ParchMaps(const unsigned char *d, unsigned n)
+{
+    unsigned rows, fields, size, sl;
+    const unsigned char *rec;
+    const char *str;
+    g_mapDirN = 0;
+    if (!DbcTable(d, n, &rows, &fields, &size, &rec, &str, &sl) || fields < 2) return;
+    for (unsigned i = 0; i < rows && g_mapDirN < MAP_DIRS; i++) {
+        const unsigned char *r = rec + i * size;
+        g_mapDir[g_mapDirN].id = (int)Rd32(r);
+        DbcString(str, sl, Rd32(r + 4), g_mapDir[g_mapDirN].dir, sizeof g_mapDir[g_mapDirN].dir);
+        if (g_mapDir[g_mapDirN].dir[0]) g_mapDirN++;
+    }
+}
+/* WMOAreaTable.dbc's root rows (group -1): the building's id (field 1), its name set (2), its area (10). */
+static void ParchWmoAreas(const unsigned char *d, unsigned n)
+{
+    unsigned rows, fields, size, sl;
+    const unsigned char *rec;
+    const char *str;
+    g_waN = 0;
+    if (!DbcTable(d, n, &rows, &fields, &size, &rec, &str, &sl) || fields < 11) return;
+    for (unsigned i = 0; i < rows && g_waN < WMO_AREAS; i++) {
+        const unsigned char *r = rec + i * size;
+        if ((int)Rd32(r + 12) != -1 || !Rd32(r + 40)) continue;
+        g_waWmo[g_waN] = (int)Rd32(r + 4); g_waSet[g_waN] = (int)Rd32(r + 8); g_waArea[g_waN] = (int)Rd32(r + 40);
+        g_waN++;
+    }
+}
+/* Area id's zone (its last parent), or -1 when AreaTable has no such area. */
+static int AreaZone(int area)
+{
+    for (int depth = 0; depth < 8; depth++) {
+        int r = AreaRow(area);
+        if (r < 0) return depth ? area : -1;
+        if (g_atParent[r] <= 0 || g_atParent[r] == area) return area;
+        area = g_atParent[r];
+    }
+    return area;
+}
+static int ParchContinent(int map);
+/* Map's page for zone (its WorldMapArea row), or -1. */
+static int ParchPage(int map, int zone)
+{
+    for (int i = 0; i < g_pzN; i++) if (g_pz[i].map == map && g_pz[i].area && g_pz[i].area == zone) return i;
+    return -1;
+}
+/* A chunk of a terrain or building file (its four letters as the file stores them, reversed): its data's offset, and
+ * its size, or 0. */
+static unsigned AdtChunk(const unsigned char *d, unsigned n, unsigned id, unsigned *size)
+{
+    for (unsigned off = 0; off + 8 <= n; ) {
+        unsigned c = Rd32(d + off), s = Rd32(d + off + 4);
+        if (s > n - off - 8) return 0;
+        if (c == id) { *size = s; return off + 8; }
+        off += 8 + s;
+    }
+    return 0;
+}
+#define ADT_MCIN 0x4D43494Eu
+#define ADT_MCNK 0x4D434E4Bu
+#define ADT_MODF 0x4D4F4446u
+#define ADT_MWMO 0x4D574D4Fu
+#define ADT_MWID 0x4D574944u
+#define WMO_MOHD 0x4D4F4844u
+/* The area of the terrain's chunk (cx, cy: 0..15 across and down the tile) in a tile's file, or -1. */
+static int AdtArea(const unsigned char *d, unsigned n, int cx, int cy)
+{
+    unsigned sz = 0, in = AdtChunk(d, n, ADT_MCIN, &sz);
+    if (!in || sz < 256 * 16 || cx < 0 || cx > 15 || cy < 0 || cy > 15) return -1;
+    unsigned at = Rd32(d + in + 16 * (unsigned)(cy * 16 + cx));
+    if (at > n || n - at < 8 + 0x38 || Rd32(d + at) != ADT_MCNK) return -1;
+    const unsigned char *h = d + at + 8;
+    if (Rd32(h + 4) != (unsigned)cx || Rd32(h + 8) != (unsigned)cy) return -1;
+    return (int)Rd32(h + 0x34);
+}
+/* A capital's page for world x, y on map, by a building of the tile's file placed over it (see above), or -1. */
+static int AdtCapital(const unsigned char *d, unsigned n, int map, float x, float y)
+{
+    unsigned msz = 0, wsz = 0, isz = 0, mo = AdtChunk(d, n, ADT_MODF, &msz), mw = AdtChunk(d, n, ADT_MWMO, &wsz),
+             mi = AdtChunk(d, n, ADT_MWID, &isz);
+    if (!mo || !mw || !mi) return -1;
+    float px = 17066.666f - y, pz = 17066.666f - x;               /* (the placements' own axes) */
+    for (unsigned k = 0; k < msz / 64; k++) {
+        const unsigned char *e = d + mo + 64 * k;
+        if (!(px >= DbcFloat(e + 32) && px <= DbcFloat(e + 44) && pz >= DbcFloat(e + 40) && pz <= DbcFloat(e + 52))) continue;
+        unsigned name = Rd32(e), set = Rd32(e + 60) & 0xFFFFu;
+        if (name >= isz / 4 || Rd32(d + mi + 4 * name) >= wsz) continue;
+        char path[160];
+        unsigned at = Rd32(d + mi + 4 * name), i = 0;
+        while (at + i < wsz && d[mw + at + i] && i < sizeof path - 1) { path[i] = (char)d[mw + at + i]; i++; }
+        path[i] = 0;
+        unsigned char *w = NULL;
+        unsigned wl = 0, hs = 0;
+        const char *from;
+        if (!path[0] || !ClientPicture(path, "wmo.MPQ", &w, &wl, &from)) continue;
+        unsigned hd = AdtChunk(w, wl, WMO_MOHD, &hs);
+        int wmo = hd && hs >= 0x24 ? (int)Rd32(w + hd + 0x20) : -1;
+        HeapFree(GetProcessHeap(), 0, w);
+        for (int r = 0; wmo >= 0 && r < g_waN; r++) {
+            if (g_waWmo[r] != wmo || g_waSet[r] != (int)set) continue;
+            int zone = AreaZone(g_waArea[r]), zr = zone > 0 ? AreaRow(zone) : -1, page = zone > 0 ? ParchPage(map, zone) : -1;
+            if (zr >= 0 && (g_atFlags[zr] & AREA_CAPITAL) && page >= 0) return page;
+        }
+    }
+    return -1;
+}
+/* The arrival's page (a WorldMapArea row: its zone's, its continent's when its zone has none) for world x, y on map, as
+ * the client finds it (above), and how (*way: 1 its terrain, 2 a capital's building, 3 its zone has no page, 0 the
+ * boxes: no tile's file); -1 when neither. */
+static int ParchZoneAt(int map, float x, float y, int *way)
+{
+    *way = 0;
+    const char *dir = NULL;
+    for (int i = 0; i < g_mapDirN; i++) if (g_mapDir[i].id == map) dir = g_mapDir[i].dir;
+    if (!dir || !(x > -17066 && x < 17066 && y > -17066 && y < 17066)) return ParchFind(map, x, y);
+    double fx = 32 - (double)y / ADT_TILE_YD, fy = 32 - (double)x / ADT_TILE_YD;
+    int tx = (int)fx, ty = (int)fy;
+    char path[160];
+    wsprintfA(path, "World\\Maps\\%s\\%s_%d_%d.adt", dir, dir, tx, ty);
+    unsigned char *d = NULL;
+    unsigned n = 0;
+    const char *from;
+    if (!ClientPicture(path, "terrain.MPQ", &d, &n, &from)) return ParchFind(map, x, y);
+    int cx = (int)((fx - tx) * 16), cy = (int)((fy - ty) * 16);
+    int area = AdtArea(d, n, cx > 15 ? 15 : cx, cy > 15 ? 15 : cy), page = AdtCapital(d, n, map, x, y);
+    HeapFree(GetProcessHeap(), 0, d);
+    if (page >= 0) { *way = 2; return page; }
+    if (area < 0) return ParchFind(map, x, y);
+    int zone = AreaZone(area);
+    page = zone > 0 ? ParchPage(map, zone) : -1;
+    if (page >= 0) { *way = 1; return page; }
+    *way = 3;
+    return ParchContinent(map);
 }
 /* The active player's explored bits into bits and its GUID: 1 when read, 0 when it cannot be (no player, a pointer that
  * does not read, the list too long). */
@@ -8622,10 +8781,17 @@ static void ParchWork(DWORD now)
     }
     if (map < 0) return;
     if (screen != g_parchForScreen || map != g_parchForMap || x != g_parchForX || y != g_parchForY) {   /* the glide's end */
-        g_parchWant = ParchFind(map, x, y); g_parchWantCont = ParchContinent(map);
+        int way = 0;
+        g_parchWant = ParchZoneAt(map, x, y, &way); g_parchWantCont = ParchContinent(map);
         g_parchForMap = map; g_parchForX = x; g_parchForY = y; g_parchForScreen = screen; g_parchAt = now;
         g_ptry.cont = g_ptry.zone = 0;
         if (g_parchWant < 0) { wsprintfA(m, "  the parchment: no zone or continent painting for map %d; the opening stays", map); Log(m); }
+        else {
+            static const char *const kWay[4] = { "the smallest box holding it (no terrain file to read)", "its terrain's area, as the client",
+                                                 "the capital's building over it", "its terrain's zone has no page: its continent's" };
+            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d) is in %s, by %s", map, (int)x, (int)y, g_pz[g_parchWant].name, kWay[way]);
+            Log(m);
+        }
     }
     int z = g_parchWant, c = g_parchWantCont;
     if (z < 0) return;
@@ -8702,6 +8868,15 @@ static void ParchRead(void)
     int ok3 = ClientPicture("DBFilesClient\\AreaTable.dbc", "dbc.MPQ", &at, &an, &f3);
     ParchAreas(ok3 ? at : NULL, an);
     if (at) HeapFree(GetProcessHeap(), 0, at);
+    unsigned char *mp = NULL, *wa = NULL;                        /* the arrival's zone as the client finds it */
+    unsigned mn = 0, wan = 0;
+    const char *f5, *f6;
+    int ok5 = ClientPicture("DBFilesClient\\Map.dbc", "dbc.MPQ", &mp, &mn, &f5);
+    int ok6 = ClientPicture("DBFilesClient\\WMOAreaTable.dbc", "dbc.MPQ", &wa, &wan, &f6);
+    ParchMaps(ok5 ? mp : NULL, mn);
+    ParchWmoAreas(ok6 ? wa : NULL, wan);
+    if (mp) HeapFree(GetProcessHeap(), 0, mp);
+    if (wa) HeapFree(GetProcessHeap(), 0, wa);
     InterlockedExchange(&g_parchTablesOk, g_pzN > 0 && g_atN > 0);
     unsigned char *wmc = NULL;                                   /* the glide's frame: the continents on the world map */
     unsigned cn = 0;
@@ -8736,6 +8911,9 @@ static void ParchRead(void)
     wsprintfA(m, "  the parchment: %d zones (WorldMapArea.dbc %s %s), %d overlay pieces (WorldMapOverlay.dbc %s %s) and %d areas "
               "(AreaTable.dbc %s %s)", g_pzN, ok1 ? "from" : "not read:", f1, g_ppN, ok2 ? "from" : "not read:", f2, g_atN,
               ok3 ? "from" : "not read:", f3);
+    Log(m);
+    wsprintfA(m, "  the parchment: an arrival's zone by its terrain, as the client: %d maps' folders (Map.dbc %s %s), %d buildings' areas "
+              "(WMOAreaTable.dbc %s %s)", g_mapDirN, ok5 ? "from" : "not read:", f5, g_waN, ok6 ? "from" : "not read:", f6);
     Log(m);
 }
 /* W x H pixels at the view's clock now: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its
