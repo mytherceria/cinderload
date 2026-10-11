@@ -215,7 +215,10 @@ end
 CL.W, CL.H, CL.L, CL.R, CL.CW = 760, 608, 26, 394, 340
 CL.GOLD, CL.WHITE = { 1, 0.82, 0 }, { 1, 1, 1 }
 CL.FONT, CL.TITLEFONT = "Fonts\\FRIZQT__.TTF", "Fonts\\MORPHEUS.TTF"
-CL.TIP = { bgFile = "Interface\\Tooltips\\UI-Tooltip-Background", edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = 1,
+-- the backdrops' fill: the client's plain white (ChatFrameBackground, 248 grey and opaque in interface.MPQ), so a colour set
+-- on it is the colour drawn; the tooltip's own (UI-Tooltip-Background) is a 54% grey 73% opaque, which the colour multiplies
+CL.FILL = "Interface\\ChatFrame\\ChatFrameBackground"
+CL.TIP = { bgFile = CL.FILL, edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = 1,
            tileSize = 16, edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 } }
 CL.FRAME8 = { edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 8, tile = 1, tileSize = 8,
               insets = { left = 2, right = 2, top = 2, bottom = 2 } }
@@ -383,7 +386,7 @@ function CL.Build()
     p:EnableMouse(1)
     p:SetMovable(1)
     if p.SetClampedToScreen then p:SetClampedToScreen(1) end
-    p:SetBackdrop({ bgFile = "Interface\\Tooltips\\UI-Tooltip-Background", edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+    p:SetBackdrop({ bgFile = CL.FILL, edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
                     tile = 1, tileSize = 32, edgeSize = 32, insets = { left = 11, right = 12, top = 12, bottom = 11 } })
     p:SetBackdropColor(0, 0, 0, 0.88)            -- (the "plus": the dialog's black 88% opaque, not the art's 60%)
     p:SetScript("OnHide", CL.Safe("hide", function() PlaySound("igMainMenuClose") end))

@@ -9,7 +9,9 @@ Usage: STORMLIB=/path/to/libstorm.so python3 -I render_panel.py <tree tsv> <clie
        [--game <frame png> --at <x> <y>] [--scale 2] [--contrast <out tsv>]
    The window is drawn at his screen (5120 x 2160, UI scale as the tree has it); with --game, over that picture
    (stretched to 5120 x 2160) with its top left at x, y, then cut out with a margin as the mockup's close-up is.
-   --contrast: each word's contrast (WCAG) against the brightest pixel behind it, the window drawn without words.
+   --contrast: each word's contrast (WCAG) against the brightest pixel behind it, the window drawn without words over
+   the game's frame where it sits (with --game) and over plain white (the brightest any scene can be). Backdrops are
+   drawn as the client draws them: the backdrop's file times its colour.
 """
 import ctypes, io, os, sys
 import numpy as np
@@ -128,10 +130,8 @@ def main():
         if r['bg']:
             bg = arc.texture(r['bg'])
             c = r['bdColor']
-            if c:                                              # (a colour on the plain tooltip background: that colour)
-                fill = Image.new('RGBA', (max(1, int(x1 - x0 - ins[0] - ins[1])), max(1, int(y1 - y0 - ins[2] - ins[3]))),
-                                 tuple(int(255 * v) for v in c[:3]) + (int(255 * (c[3] if len(c) > 3 else 1)),))
-                canvas.alpha_composite(fill, (int(x0 + ins[0]), int(y0 + ins[2])))
+            if c and bg is not None:                           # (as the client draws it: the file times the colour)
+                put(bg, x0 + ins[0], y0 + ins[2], x1 - ins[1], y1 - ins[3], list(c[:3]) + [c[3] if len(c) > 3 else 1])
             elif bg is not None:
                 put(bg, x0 + ins[0], y0 + ins[2], x1 - ins[1], y1 - ins[3])
         if r['edge']:
@@ -229,17 +229,27 @@ def main():
             a = a / 255.0
             a = np.where(a <= 0.03928, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
             return 0.2126 * a[..., 0] + 0.7152 * a[..., 1] + 0.0722 * a[..., 2]
-        back = np.asarray(Image.alpha_composite(Image.new('RGBA', bare.size, (0, 0, 0, 255)), bare).convert('RGB')).astype(np.float64)
+        # behind the window: the game's frame where it sits (with --game), and plain white, the brightest any scene can be
+        behind = [('white', Image.new('RGBA', bare.size, (255, 255, 255, 255)))]
+        if '--game' in sys.argv:
+            g = Image.open(sys.argv[sys.argv.index('--game') + 1]).convert('RGB').resize((5120, 2160), Image.LANCZOS).convert('RGBA')
+            i = sys.argv.index('--at')
+            gx, gy = int(sys.argv[i + 1]) - 48, int(sys.argv[i + 2]) - 48
+            behind.insert(0, ('the game', g.crop((gx, gy, gx + int(round(bare.width / scale)), gy + int(round(bare.height / scale))))
+                              .resize(bare.size, Image.LANCZOS)))
+        backs = [np.asarray(Image.alpha_composite(b, bare).convert('RGB')).astype(np.float64) for _, b in behind]
         rows = []
         for r in words:
             x0, y0, x1, y1 = [int(v) for v in r['bbox']]
-            lb = float(lum(back[max(0, y0):y1, max(0, x0):x1]).max())
             lt = float(lum(np.array([v * 255 for v in (r['color'] or [1, 1, 1])[:3]])))
-            rows.append(((lt + 0.05) / (lb + 0.05), r['text']))
+            rows.append(tuple((lt + 0.05) / (float(lum(b[max(0, y0):y1, max(0, x0):x1]).max()) + 0.05) for b in backs) + (r['text'],))
         with open(CONTRAST, 'w') as f:
-            for ratio, t in sorted(rows):
-                f.write('%.1f\t%s\n' % (ratio, t))
-        print('contrast: lowest %.1f:1 (%s), %d words' % (min(rows)[0], min(rows)[1], len(rows)))
+            f.write('\t'.join('over %s' % n for n, _ in behind) + '\tthe words\n')
+            for row in sorted(rows):
+                f.write('\t'.join('%.1f' % v for v in row[:-1]) + '\t' + row[-1] + '\n')
+        for j, (n, _) in enumerate(behind):
+            low = min(rows, key=lambda row: row[j])
+            print('contrast over %s: lowest %.1f:1 (%s), %d words' % (n, low[j], low[-1], len(rows)))
     if '--game' in sys.argv:
         game = Image.open(sys.argv[sys.argv.index('--game') + 1]).convert('RGB').resize((5120, 2160), Image.LANCZOS).convert('RGBA')
         i = sys.argv.index('--at')

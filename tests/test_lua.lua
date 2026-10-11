@@ -199,6 +199,15 @@ Check(Near(cx, ux) and Near(cy, uy + 40), "it opens in the middle of the screen,
 local bd = p.backdrop
 Check(bd and bd.edgeFile == "Interface\\DialogFrame\\UI-DialogBox-Border" and bd.edgeSize == 32 and bd.insets.left == 11 and bd.insets.top == 12 and
       p.backdropColor[1] == 0 and Near(p.backdropColor[4], 0.88), "the client's dialog border (UI-DialogBox-Border, 32), its black 88% opaque (the plus)")
+local fills = { n = 0, other = "" }
+for _, f in ipairs(world.made) do
+    if not f.blizzard and f.backdrop and f.backdrop.bgFile and f.backdropColor then          -- (a colour set on a fill of ours)
+        fills.n = fills.n + 1
+        if f.backdrop.bgFile ~= "Interface\\ChatFrame\\ChatFrameBackground" then fills.other = fills.other .. " " .. f.backdrop.bgFile end
+    end
+end
+Check(bd.bgFile == "Interface\\ChatFrame\\ChatFrameBackground" and fills.n == 6 and fills.other == "",
+      "the window's and its five boxes' fill the client's plain opaque white (ChatFrameBackground), so 88% black and the boxes' grey are drawn as set, not multiplied by the tooltip's see-through grey:" .. fills.other)
 local head = P("Title")
 local htex = {}
 for _, k in ipairs(head.kids) do if k.kind == "Texture" and k.texture then table.insert(htex, k) end end
