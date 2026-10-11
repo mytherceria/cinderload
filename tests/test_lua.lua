@@ -412,4 +412,16 @@ Fresh({ cvar = "?" })
 Run(setupSN)
 Check(world.cvars.CinderLoadStyle == "satellite neo" and Checks(nil, 1, nil, 1), "made with satellite and neo held: those checked")
 
+-- for the mock sheet: what /cinderload says, then /cinderload map (a fresh session, the defaults)
+if layoutOut then
+    Fresh({ cvar = "?" })
+    Run(setupSrc)
+    local f = io.open(layoutOut, "a")
+    for _, m in ipairs({ "", "map" }) do
+        Slash(m)
+        for _, t in ipairs(world.chat) do f:write("chat /cinderload" .. (m ~= "" and " " .. m or "") .. "\t" .. t .. "\n") end
+    end
+    f:close()
+end
+
 print(string.format("done %d %d", checks, fails))
