@@ -6083,6 +6083,239 @@ static void TestZoneRule(void)
     Check(ok, "the arrival's zone: a building whose name set has no row leaves the terrain's; a zone with no page, its continent's (as the client's map shows); no tile's file, no folder for the map, or a file that is not one: the smallest box, as before");
     g_mapDirN = 0; g_waN = 0;
 }
+/* The cut (his pick, 11 Oct: "go with the COMBO", grown so "the blur doesn't take away anything from inside the zone"):
+ * a painting cut to its own area as the coarser one under it draws it, whole and sharp inside, fading and softening only
+ * in the grown margin past its border */
+static void TestPaintNew(int K)
+{
+    if (g_parchPx) HeapFree(GetProcessHeap(), 0, g_parchPx);
+    g_parchK = K; g_parchTW = 1024 * K;
+    g_parchPx = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)g_parchTW * g_parchTW * 4);
+}
+static void TestPaintFill(int x0, int y0, int x1, int y1, unsigned rgb)
+{
+    for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) {
+        unsigned char *p = g_parchPx + 4 * ((size_t)y * g_parchTW + x);
+        p[0] = (unsigned char)(rgb >> 16); p[1] = (unsigned char)(rgb >> 8); p[2] = (unsigned char)rgb; p[3] = 255;
+    }
+}
+static const unsigned char *TestPaintAt(int x, int y) { return g_parchPx + 4 * ((size_t)y * g_parchTW + x); }
+static void TestCut(void)
+{
+    /* the coarser painting (a continent's, 256-px tiles): parchment, a zone outlined in dark ink (a gap of one texel in its
+     * border, closed), a lake inside drawn in ink, a neighbour beside it */
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(300, 200, 600, 400, 0x302010);                     /* (the zone's border: a 4-texel line) */
+    TestPaintFill(304, 204, 596, 396, 0xC0A070);
+    TestPaintFill(450, 200, 451, 204, 0xC8A060);                      /* (a one-texel gap in it) */
+    TestPaintFill(400, 280, 440, 320, 0x302010);                      /* (a lake in ink: a hole) */
+    TestPaintFill(404, 284, 436, 316, 0x6080A0);
+    ParchRect rc = { 0, 0, 10.02f, 6.68f };                           /* (a texel a hundredth of a tile) */
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    int ok = g_linesCont.m && g_linesCont.w == 1002 && g_linesCont.h == 668 && g_linesCont.row == 0 &&
+             (g_linesCont.m[201 * 1002 + 350] & CUT_DARK) && !(g_linesCont.m[300 * 1002 + 350] & CUT_DARK) && (g_linesCont.m[300 * 1002 + 350] & CUT_INK) == 0;
+    TestPaintFill(700, 100, 900, 104, 0x908060);                      /* (a border drawn lighter, darker only than round it) */
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    ok &= (g_linesCont.m[102 * 1002 + 800] & CUT_DARK) && !(g_linesCont.m[120 * 1002 + 800] & CUT_DARK);
+    Check(ok, "the cut: the coarser painting kept as its lines (dark, or darker than round them by PARCH_CUT_REL; ink), a byte a texel");
+    TestPaintFill(700, 100, 900, 104, 0xC8A060);
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    /* the finer painting (the zone's, 256-px tiles): its box on the frame 2.5 .. 6.5 x 1.5 .. 4.5 tiles: the outline
+     * (3.0..6.0 x 2.0..4.0) maps to its texels 125..877 x 148..519 */
+    ParchRect rz = { 2.5f, 1.5f, 6.5f, 4.5f };
+    TestPaintNew(1);
+    for (int y = 0; y < 668; y++) for (int x = 0; x < 1002; x++) {   /* (a fine checker: its detail) */
+        unsigned char *p = g_parchPx + 4 * ((size_t)y * g_parchTW + x);
+        int v = ((x / 3 + y / 3) & 1) ? 200 : 60;
+        p[0] = (unsigned char)v; p[1] = (unsigned char)(255 - v); p[2] = 90; p[3] = 255;
+    }
+    static unsigned char before[1002 * 668 * 4];
+    for (int y = 0; y < 668; y++) memcpy(before + 4 * (size_t)y * 1002, g_parchPx + 4 * (size_t)y * g_parchTW, 1002 * 4);
+    float seeds[4] = { 420, 260, 330, 230 }, share = 0;               /* (the first in the lake: its hole filled anyway) */
+    const char *why = "";
+    ok = ParchCut(&g_linesCont, rz, seeds, 2, 0, &share, &why) && !g_cutBoxed;
+    int grow = PARCH_CUT_GROW / 2;                                    /* (a 256-px painting: half an HD one's) */
+    int sharpIn = 1, wholeIn = 1;
+    for (int y = 160; y < 505; y += 7) for (int x = 140; x < 862; x += 7) {   /* inside its border: whole, untouched */
+        const unsigned char *p = TestPaintAt(x, y), *b = before + 4 * ((size_t)y * 1002 + x);
+        if (p[3] != 255) wholeIn = 0;
+        if (p[0] != b[0] || p[1] != b[1]) sharpIn = 0;
+    }
+    int lake = TestPaintAt(426, 334)[3] == 255 && TestPaintAt(500, 333)[3] == 255;   /* (the lake's place inside) */
+    int xb = 135;                                                     /* (its border, inside the ink: 3.04 tiles, (3.04 - 2.5) / 4 of 1002) */
+    float aEdge = TestPaintAt(xb - 2, 300)[3] / 255.0f, aMid = TestPaintAt(xb - grow / 2, 300)[3] / 255.0f, aOut = TestPaintAt(xb - grow - 3, 300)[3] / 255.0f;
+    float bEdge = (float)abs((int)TestPaintAt(xb - 2, 300)[0] - (int)before[4 * (300 * 1002 + xb - 2)]);
+    float bOut = (float)abs((int)TestPaintAt(xb - grow + 4, 300)[0] - (int)before[4 * (300 * 1002 + xb - grow + 4)]);
+    ok &= sharpIn && wholeIn && lake && aEdge > 0.97f && aMid > 0.35f && aMid < 0.65f && aOut == 0 && bEdge < 20 && bOut > 30 &&
+          share > 0.3f && share < 0.5f;
+    printf("  the cut: alpha just past its border %.3f, halfway out %.3f, past the grown line %.3f; its colours softened by %.0f just past it, %.0f near the line\n",
+           aEdge, aMid, aOut, bEdge, bOut);
+    Check(ok, "the cut: inside the zone's own border (as its continent draws it, its lake's hole filled) the painting is whole and untouched; past it, it fades from whole at the border to nothing at the outline grown PARCH_CUT_GROW, its colours softened only out there, more toward the line");
+    /* a border the painting draws open: every fill leaks; kept to its own box */
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(300, 200, 600, 400, 0x302010);
+    TestPaintFill(304, 204, 596, 396, 0xC0A070);
+    TestPaintFill(440, 200, 470, 204, 0xC8A060);                      /* (a gap of thirty texels: open) */
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x80C040);
+    ok = ParchCut(&g_linesCont, rz, seeds + 2, 1, 0, &share, &why) && g_cutBoxed && strstr(why, "own box");
+    TestPaintNew(1);                                                  /* (no lines at all: nothing, and why) */
+    ParchLines none = { 0 };
+    ok &= !ParchCut(&none, rz, seeds, 2, 0, &share, &why) && strstr(why, "no lines");
+    Check(ok, "the cut: a zone whose border the painting under it draws open is kept to its own box (and the log says so); with no painting under it, none");
+    /* a continent over the world: every seed's piece of land that holds, together; a seed at sea leaks and is left out */
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x707060);                         /* (the sea) */
+    TestPaintFill(100, 100, 300, 300, 0x302010); TestPaintFill(105, 105, 295, 295, 0xC8A060);   /* (two islands, their coasts) */
+    TestPaintFill(400, 150, 600, 450, 0x302010); TestPaintFill(405, 155, 595, 445, 0xC8A060);
+    ParchRect rw = { 0, 0, 10.02f, 6.68f };
+    ParchLinesKeep(&g_linesWorld, rw, -2, 1);
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x40A040);
+    float cs[6] = { 200, 200, 500, 300, 800, 600 };
+    ok = ParchCut(&g_linesWorld, rw, cs, 3, 1, &share, &why) && TestPaintAt(200, 200)[3] == 255 && TestPaintAt(500, 300)[3] == 255 &&
+         TestPaintAt(800, 600)[3] == 0 && TestPaintAt(350, 200)[3] == 0 && share > 0.1f && share < 0.2f;
+    Check(ok, "the cut, a continent over the world: every piece of its land a seed finds (two islands here), the sea a seed leaks into left out");
+    if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
+    if (g_linesWorld.m) HeapFree(GetProcessHeap(), 0, g_linesWorld.m);
+    g_linesCont.m = g_linesWorld.m = NULL;
+    ParchFree();
+}
+/* The continent's name, one label in one place (his note, 11 Oct): the world's kept, cut out of its painting; the
+ * continent's own painted out of its painting with the world's painting there */
+static void TestWordLetters(int x0, int y0, int x1, int y1, int K)
+{
+    /* a word's letters as the client paints them: dark strokes, each between light rims; stems three of K wide */
+    for (int x = x0 + 6 * K; x + 8 * K < x1; x += 14 * K) {
+        TestPaintFill(x - 2 * K, y0 + 3 * K, x + 5 * K, y1 - 3 * K, 0xF0E0C0);   /* (its rim) */
+        TestPaintFill(x, y0 + 5 * K, x + 3 * K, y1 - 5 * K, 0x302010);           /* (its stroke) */
+    }
+}
+static void TestWords(void)
+{
+    /* the letters: strokes between rims found; the sea's hatching (dark lines, no rims) not */
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x908060);
+    int x0 = 650, y0 = 360, x1 = 820, y1 = 388;                       /* (a word's box) */
+    for (int y = y0 - 30; y < y1 + 30; y += 5) TestPaintFill(x0 - 60, y, x0 - 5, y + 2, 0x403020);   /* (hatching beside it) */
+    TestWordLetters(x0, y0, x1, y1, 1);
+    static unsigned char m[400 * 100];
+    float sh = ParchLetters(g_parchPx, g_parchTW, 1002, 668, x0, y0, x1, y1, 1, 1, m);
+    int bw = x1 - x0, onStroke = m[(14 - y0 + y0) * bw + 7] > 200, offStroke = m[(14) * bw + 13] < 60;
+    float hs = ParchLetters(g_parchPx, g_parchTW, 1002, 668, x0 - 60, y0, x0 - 5, y1, 1, 1, m);
+    int ok = sh > 0.12f && sh < 0.75f && onStroke && offStroke && hs == 0;
+    Check(ok, "the names' letters: each stroke dark between two light rims, as the client paints its names, found; the sea's hatching (dark, no rims) not");
+    /* the world's names cut out, the continent's own painted out with the world's painting there, and the name drawn over
+     * every painting at the world's place */
+    TestGlideState();
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Kalimdor\0";
+    unsigned wv[3 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+                           30, 0, 12, 9, TestF(1535), TestF(-1935), TestF(-7939), TestF(-10254),
+                           13, 1, 0, 23, TestF(17066), TestF(-19733), TestF(12799), TestF(-11733) };
+    static unsigned char wma[256];
+    unsigned wmn = TestWdbc(wma, 3, 8, wv, wstr, sizeof wstr);
+    ParchTables(wma, wmn, NULL, 0);
+    TestPaintNew(1);                                                  /* the world's painting: its two names */
+    TestPaintFill(0, 0, 1002, 668, 0x908060);
+    for (int i = 0; i < PARCH_WORDS; i++) {
+        int a0, b0, a1, b1;
+        if (lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, 1, 1002, 668, &a0, &b0, &a1, &b1)) continue;
+        TestWordLetters(a0, b0, a1, b1, 1);
+    }
+    static unsigned char world[1002 * 668 * 4];
+    for (int y = 0; y < 668; y++) memcpy(world + 4 * (size_t)y * 1002, g_parchPx + 4 * (size_t)y * g_parchTW, 1002 * 4);
+    int conts[2] = { 0, 2 };
+    g_worldK = 1;
+    ParchWorldWords(conts);
+    ok = g_wordPic[0].ok && g_wordPic[1].ok && g_wordUnder[0].ok && g_wordPic[0].x0 <= 658 && g_wordPic[0].x0 + g_wordPic[0].w >= 815;
+    int sx = 658 + 6 + 1 - g_wordPic[0].x0, sy = 375 - g_wordPic[0].y0;   /* (a stroke of EASTERN) */
+    ok &= g_wordPic[0].px[4 * (sy * g_wordPic[0].w + sx) + 3] > 200 && g_wordPic[0].px[4 * (sy * g_wordPic[0].w + sx)] == 0x30;
+    Check(ok, "the world's names, cut out of its painting: each a picture of the painting's own texels, its alpha the letters");
+    TestPaintNew(1);                                                  /* Azeroth's painting: its own name, larger and elsewhere */
+    TestPaintFill(0, 0, 1002, 668, 0xB09050);
+    for (int i = 0; i < PARCH_WORDS; i++) {
+        int a0, b0, a1, b1;
+        if (lstrcmpiA(kWords[i].folder, "Azeroth") || !WordBox(i, 1, 1002, 668, &a0, &b0, &a1, &b1)) continue;
+        TestWordLetters(a0, b0, a1, b1, 1);
+    }
+    ParchLinesKeep(&g_linesCont, ParchBox(0), 0, 1);
+    int a0, b0, a1, b1;
+    WordBox(3, 1, 1002, 668, &a0, &b0, &a1, &b1);                     /* (Azeroth's EASTERN) */
+    int lx = a0 + 6 + 1, ly = (b0 + b1) / 2;
+    int was = TestPaintAt(lx, ly)[0];
+    ok = ParchContWords(0, &g_linesCont) && was == 0x30 && TestPaintAt(lx, ly)[0] > 0x60 && (g_linesCont.m[ly * 1002 + lx] & CUT_WORD) &&
+         TestPaintAt(20, 20)[0] == 0xB0;
+    Check(ok, "a continent's own name painted out of its painting, with the world's painting there in its own colours; its letters marked so a zone's outline may take them back; the rest of it untouched");
+    /* the name drawn: over the zone's painting, at the world's place on the frame, the same place every frame */
+    g_viewScreen = 30; g_worldUp = 1; g_viewTex[VT_PWORLD] = 1; g_worldTW = 1024; g_worldK = 1; g_worldAt = 0;
+    g_wordUp[0] = 1; g_viewTex[VT_PWORD0] = 1; g_wordTW[0] = 256; g_wordTH[0] = 64; g_contWords = 0;
+    TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    float px0[3];
+    int order = 1, nb = -1;
+    for (int f = 0; f < 3; f++) {
+        ViewBuild(1920, 1080, 0.04f * (float)f + 0.02f, 2600 + 400 * f);   /* (while it is on the window) */
+        nb = TestBatch(VT_PWORD0);
+        int zb = TestBatch(VT_PARCH), cb = TestBatch(VT_PARCH2);
+        order &= nb >= 0 && nb > zb && nb > cb;
+        const ViewVert *v0 = nb >= 0 ? g_vv + g_vb[nb].first : NULL;
+        float fxw = v0 ? (float)(g_pcam.v.x + (v0->x - 960) / g_pcam.v.s) : -1;   /* (its first corner back on the frame) */
+        px0[f] = fxw;
+    }
+    ParchRect want = { g_wordPic[0].x0 * PARCH_WORLD_FW / 1002.0f, 0, 0, 0 };
+    ok = order && Near(px0[0], want.x0, 0.02) && Near(px0[1], px0[0], 0.02) && Near(px0[2], px0[0], 0.02);
+    nb = TestBatch(VT_PWORD0);
+    ViewBuild(1920, 1080, 0.02f, 2600);
+    nb = TestBatch(VT_PWORD0);
+    float vmax = 0;
+    for (int i = nb >= 0 ? g_vb[nb].first : 0; nb >= 0 && i < g_vb[nb].first + g_vb[nb].count; i++) if (g_vv[i].v > vmax) vmax = g_vv[i].v;
+    ok &= Near(vmax, (double)g_wordPic[0].h / 64, 1e-4);              /* (its texture's height its own) */
+    g_contWords = -1;                                                  /* (its own name not painted out: no second one drawn) */
+    TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, 0.02f, 2600);
+    ok &= TestBatch(VT_PWORD0) < 0;
+    Check(ok, "the continent's name, the world's, drawn over every painting (the zone's too) at its own place on the frame, the same place every frame of the glide; none drawn over a continent whose own name was not painted out");
+    /* the work's steps as each painting is made: the continent's lines kept, its own name painted out, it cut to its land
+     * (the world's painting under it); the zone cut to its own area */
+    TestPaintNew(1);                                                  /* the world's lines: Azeroth's land a block of it */
+    TestPaintFill(0, 0, 1002, 668, 0x707060);
+    TestPaintFill(380, 50, 900, 600, 0x302010); TestPaintFill(385, 55, 895, 595, 0xC8A060);
+    ParchLinesKeep(&g_linesWorld, ParchWorldRect(), -2, 1);
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0xB09050);
+    for (int i = 0; i < PARCH_WORDS; i++) {
+        int c0, d0, c1, d1;
+        if (lstrcmpiA(kWords[i].folder, "Azeroth") || !WordBox(i, 1, 1002, 668, &c0, &d0, &c1, &d1)) continue;
+        TestWordLetters(c0, d0, c1, d1, 1);
+    }
+    const char *why = "";
+    g_worldUp = 1;
+    int words = ParchContMade(0, &why);
+    ok = words && g_contWords == 0 && g_linesCont.row == 0 && g_contCut && g_contShare > 0.05f;
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x40A040);
+    float fx, fy;
+    ParchSpot(0, -9464, 62, &fx, &fy);
+    ParchZoneMade(1, 0, fx, fy, &why);
+    ok &= g_zoneCut;
+    g_linesCont.row = 5;                                               /* (another continent's lines: not under it) */
+    ParchZoneMade(1, 0, fx, fy, &why);
+    ok &= !g_zoneCut && strstr(why, "not under it");
+    g_worldUp = 0;
+    words = ParchContMade(0, &why);
+    ok &= !words && g_contWords == -1 && !g_contCut;
+    Check(ok, "as each painting is made: the continent's own lines kept, its own name painted out and it cut to its land as the world's painting draws it (none of it without the world's); the zone cut to its own area (not without its continent's lines)");
+    for (int c = 0; c < 2; c++) { ParchPicFree(&g_wordPic[c]); ParchPicFree(&g_wordUnder[c]); g_wordUp[c] = 0; }
+    if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
+    if (g_linesWorld.m) HeapFree(GetProcessHeap(), 0, g_linesWorld.m);
+    g_linesCont.m = g_linesWorld.m = NULL;
+    ParchFree();
+    TestGlideState();
+}
 static void TestGlide(void)
 {
     /* the path: one zoom about one fixed point; every point on a straight line on the screen, the zoom's log even in the
@@ -6295,8 +6528,10 @@ static void TestGlide(void)
     ParchWork(132);
     ok &= g_upN == 2 && g_upOrder[1] == VT_PARCH2 && g_parchForScreen == 3 && g_parchAt == 132 && g_parchWant == 1 && g_parchWantCont == 0 &&
           g_parchCont == 0 && g_contAt == 132;
+    ok &= g_linesCont.row == 0 && g_linesCont.m;                       /* (its lines kept, for its zone's outline) */
     ParchWork(148);
-    ok &= g_upN == 3 && g_upOrder[2] == VT_PARCH && g_parchZone == 1 && g_zoneAt == 148 && !g_parchPx;
+    ok &= g_upN == 3 && g_upOrder[2] == VT_PARCH && g_parchZone == 1 && g_zoneAt == 148 && !g_parchPx && g_zoneCut && g_cutBoxed &&
+          LogSays("Elwynn cut to its own area as Azeroth's painting draws it");   /* (flat paintings: its outline leaks, kept to its box) */
     ParchWork(164);                                                     /* (all up: nothing more) */
     ok &= g_upN == 3;
     g_viewScreen = 4;                                                   /* (the next screen, the same place: taken anew, nothing made) */
@@ -6844,6 +7079,8 @@ int main(int argc, char **argv)
     TestVanillaBar();
     TestParchment();
     TestZoneRule();
+    TestCut();
+    TestWords();
     TestGlide();
     TestModeTurn();
     TestExplore();

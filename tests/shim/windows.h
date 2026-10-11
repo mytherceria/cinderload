@@ -102,6 +102,15 @@ static void *HeapAlloc(HANDLE h, DWORD f, size_t n) { (void)h; return (f & HEAP_
 static BOOL HeapFree(HANDLE h, DWORD f, void *p) { (void)h; (void)f; free(p); return TRUE; }
 static int lstrlenA(const char *s) { return (int)strlen(s); }
 static char *lstrcpyA(char *d, const char *s) { return strcpy(d, s); }
+static int lstrcmpiA(const char *a, const char *b)
+{
+    for (;; a++, b++) {
+        int x = (unsigned char)*a, y = (unsigned char)*b;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y || !x) return x - y;
+    }
+}
 static char *lstrcatA(char *d, const char *s) { return strcat(d, s); }
 static int wsprintfA(char *out, const char *fmt, ...) { va_list a; va_start(a, fmt); int n = vsprintf(out, fmt, a); va_end(a); return n; }
 static int GetSystemMetrics(int i) { return i == SM_CXSCREEN ? shim_screen_w : shim_screen_h; }

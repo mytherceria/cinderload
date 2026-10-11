@@ -5661,12 +5661,13 @@ static int TextHas(const char *list, const char *name)
  * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
-       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_PWORLD, VT_PCONTM, VT_PZONEM, VT_COUNT };
+       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_PWORLD, VT_PCONTM, VT_PZONEM, VT_PWORD0, VT_PWORD1, VT_COUNT };
                                                                 /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client;
                                                                  * VT_PARCH, VT_PARCH2, VT_PWORLD: the parchment's zone, its
                                                                  * continent and the world, painted here from the client's map;
                                                                  * VT_PCONTM, VT_PZONEM: with the fade C, the continent's and the
-                                                                 * zone's copies in the colours under them) */
+                                                                 * zone's copies in the colours under them; VT_PWORD0, 1:
+                                                                 * the world's names of the two continents, cut out of it) */
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -8493,8 +8494,16 @@ typedef struct { int on; float x, y, r, edge; } ParchBloom;
  * the world map's frame) seen by camera v: a mesh over where it, the window, clip (when given: soft PARCH_CLIP_F inside its
  * edges) and the bloom's circle meet, lit by the candle at each corner, alpha a, soft within PARCH_FEATHER of its own
  * edges when feather, and inside the bloom (when on) whole within its radius less its edge, nothing past it. */
+static void ParchLayerT(int slot, float tw, float th, float pw, float ph, ParchRect r, ParchView v, float W, float H, float a,
+                        int feather, const ParchRect *clip, const ParchBloom *bl);
 static void ParchLayer(int slot, float tw, float pw, float ph, ParchRect r, ParchView v, float W, float H, float a, int feather,
                        const ParchRect *clip, const ParchBloom *bl)
+{
+    ParchLayerT(slot, tw, tw, pw, ph, r, v, W, H, a, feather, clip, bl);
+}
+/* (the same, its texture tw x th) */
+static void ParchLayerT(int slot, float tw, float th, float pw, float ph, ParchRect r, ParchView v, float W, float H, float a,
+                        int feather, const ParchRect *clip, const ParchBloom *bl)
 {
     if (!(a > 0)) return;
     float X0 = (float)((r.x0 - v.x) * v.s) + W / 2, X1 = (float)((r.x1 - v.x) * v.s) + W / 2;
@@ -8552,10 +8561,19 @@ static void ParchLayer(int slot, float tw, float pw, float ph, ParchRect r, Parc
                 float sx = x0 + (x1 - x0) * (float)(i + ci[k]) / PARCH_GX, sy = y0 + (y1 - y0) * (float)(j + cj[k]) / PARCH_GY;
                 float pu = (sx - X0) / (X1 - X0), pv = (sy - Y0) / (Y1 - Y0), L = ParchCandle(sx, sy, W, H);
                 float rgb[3] = { L, L * 0.84f, L * 0.62f };
-                ViewVertSet(q + k, sx, sy, pu * pw / tw, pv * ph / tw, SaberArgb(VBarRgb(rgb), al[(j + cj[k]) * (PARCH_GX + 1) + i + ci[k]]));
+                ViewVertSet(q + k, sx, sy, pu * pw / tw, pv * ph / th, SaberArgb(VBarRgb(rgb), al[(j + cj[k]) * (PARCH_GX + 1) + i + ci[k]]));
             }
         }
 }
+/* the world's names (a picture each: its box on the world's picture, its texels with the letters' alpha) and the world's
+ * painting around each continent's own name (its box on the world's picture, RGBA): see ParchWorldWords */
+typedef struct { int ok, w, h, x0, y0; unsigned char *px; } ParchPic;
+static ParchPic g_wordPic[2], g_wordUnder[2];
+static int g_wordUp[2];                       /* each name's picture on OpenGL (VT_PWORD0, VT_PWORD1), */
+static int g_wordTW[2], g_wordTH[2];          /* its texture's size */
+static int g_contWords = -1;                  /* the continent (row) whose own name was painted out as it was made */
+static int g_contCut, g_zoneCut;              /* the continent's and the zone's paintings as up: cut to their own areas */
+static float g_contShare, g_zoneShare;        /* (their own areas' share of their pictures) */
 static LONG g_parchScrSeen = -1;              /* the view's screen the paper last drew for, and when it began */
 static DWORD g_parchScrAt;
 /* This screen's glide (one segment of it): the arrival it is for (g_parchAt) on the view's screen, the view it starts
@@ -8686,6 +8704,15 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
             ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m * mk, 1, clip, NULL);
         } else
             ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m, !base, clip, &bl);
+    }
+    /* the continent's name, the world's, over them all at its own place (its continent's own painted out of its painting) */
+    int wc = arrive && map >= 0 && map <= 1 ? map : -1;
+    if (world && wc >= 0 && g_wordUp[wc] && g_viewTex[VT_PWORD0 + wc] && g_wordPic[wc].ok && (!contUp || g_contWords == c)) {
+        const ParchPic *P = &g_wordPic[wc];
+        float sx = PARCH_WORLD_FW / (float)(PARCH_MAP_W * g_worldK), sy = PARCH_WORLD_FH / (float)(PARCH_MAP_H * g_worldK);
+        ParchRect nr = { (float)P->x0 * sx, (float)P->y0 * sy, (float)(P->x0 + P->w) * sx, (float)(P->y0 + P->h) * sy };
+        ParchLayerT(VT_PWORD0 + wc, (float)g_wordTW[wc], (float)g_wordTH[wc], (float)P->w, (float)P->h, nr, v, W, H,
+                    ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt), 0, NULL, NULL);
     }
 }
 
@@ -8833,6 +8860,886 @@ static int ParchMatch(const ParchLow *L, ParchRect rf)
     HeapFree(GetProcessHeap(), 0, g);
     return 1;
 }
+/* ---- the cut (his pick, 11 Oct ~01:10, after GRADIENT, CUT and COMBO were mocked on Elwynn: "go with the COMBO"; and on
+ * seeing it: "the blur starts too early and the gradient to transparency starts too early and the cut should maybe go
+ * ... 50 to 100 pixels bigger in every direction around the cut so that the blur doesn't take away anything from inside
+ * the zone that it's supposed to show") ----
+ * Each finer painting is cut to its own area as the coarser one under it draws it (a zone as its continent's painting
+ * draws it: the region inside that painting's own border lines; a continent as the world's draws it: its land inside the
+ * world's coast), that outline grown PARCH_CUT_GROW outward, and all the softening in that outer margin: inside its own
+ * border the painting is whole and sharp; past it, it fades to nothing at the grown line (over the last PARCH_CUT_BAND of
+ * the margin: all of it, so the fade begins at the border itself) and its colours soften toward it (by about
+ * PARCH_CUT_BLUR at the line). So the neighbours' borders, the coast and their names come from the coarser painting
+ * under it: no doubled coast, no page rectangle, no torn page edge. The outline: filled from a seed inside (the
+ * arrival's spot, then the zone's overlay pieces, then its box's middle), bounded by the coarser painting's dark lines
+ * (darker than PARCH_CUT_DARK, its one-texel gaps closed), the holes in it (towns, lakes, mountains drawn in ink) filled,
+ * grown into its border line by up to PARCH_CUT_REACH but never into the line's ink, then laid on the finer painting by
+ * the two paintings' WorldMapArea boxes. A fill that leaks out of the box's neighbourhood, or finds too little, is tried
+ * from the next seed; none holding, the plain fade band at the painting's edges (PARCH_FEATHER) instead, logged. Made once
+ * a painting, into its own alpha (the texture it already has: no more texture memory), the coarser painting kept
+ * meanwhile as a byte a texel (its lines). All from the client's own paintings, at run time. Lengths are in texels of
+ * an HD (512-px tiles) painting, half as many on a 256-px one. */
+#ifndef PARCH_CUT_GROW
+#define PARCH_CUT_GROW   75           /* the outline grown outward this far (his "50 to 100"; check frames at 50, 75 and 100) */
+#endif
+#ifndef PARCH_CUT_BAND
+#define PARCH_CUT_BAND   PARCH_CUT_GROW   /* the fade to nothing over the last this much of the margin (all of it: from the border) */
+#endif
+#define PARCH_CUT_BLUR   6            /* the margin's colours softened by about this much at the grown line (a gaussian's sigma) */
+#define PARCH_CUT_DARK   90           /* the coarser painting's lines: darker than this (0.30 R + 0.59 G + 0.11 B) */
+#define PARCH_CUT_INK    80           /* its ink (softened over three texels): darker than this, or brown (green under 0.66 of red, */
+#define PARCH_CUT_BROWN  130          /* red under this) */
+#define PARCH_CUT_REL    15           /* a continent's lines: also those darker than the painting round them by this much, */
+#define PARCH_CUT_MEAN   15           /* that over this far either way (its borders are lighter in places than PARCH_CUT_DARK) */
+#define PARCH_CUT_REACH  6            /* the region grown into its border line by at most this much of the coarser painting */
+#ifndef PARCH_CUT_GAP
+#define PARCH_CUT_GAP    2            /* a continent's lines: gaps up to twice this closed (texels of an HD painting) */
+#endif
+#define PARCH_CUT_COAST  3            /* the world's coasts (kept at half its HD size): gaps up to twice this closed (Kalimdor's east
+                                       * coast is drawn thin, and a fill of its land leaked into the sea through one) */
+#define PARCH_CUT_JOIN   4            /* its pieces joined across a line this thick (texels of the coarser HD painting), */
+#define PARCH_CUT_SEEDS  12           /* seeds tried at most */
+#define PARCH_CUT_FEW    0.08f        /* a region under this much of its box is not the zone (a lake, a town drawn in ink) */
+#ifndef PARCH_CUT_ROOM
+#define PARCH_CUT_ROOM   0.5f         /* the fill looked for this much of the box's size past its edges (reaching that: a leak) */
+#endif
+#define PARCH_CUT_MOST   1.6f         /* a region over this much of its box's area is not the zone alone (it leaked) */
+typedef struct { unsigned char *m; int w, h, K, row, gap; ParchRect r; } ParchLines;   /* a painting's lines: bit 0 dark, bit 1 ink;
+                                                       * the gaps in them closed: up to twice this many cells */
+static ParchLines g_linesWorld, g_linesCont;
+static int g_cutBoxed;                        /* the last cut leaked and was kept to its box */
+#define CUT_DARK 1
+#define CUT_INK  2
+#define CUT_WORD 4                    /* (a continent's own name's letters, painted out: an outline may take them back) */
+/* One row of the lines' source (RGB, w wide) softened across (1 2 1): R, G and luminance, four times. */
+static void LinesRow(const unsigned char *rgb, int w, int y, unsigned *o)
+{
+    const unsigned char *s = rgb + 3 * (unsigned)y * (unsigned)w;
+    for (int x = 0; x < w; x++) {
+        int xa = x > 0 ? x - 1 : 0, xb = x < w - 1 ? x + 1 : w - 1;
+        for (int c = 0; c < 2; c++) o[3 * x + c] = s[3 * xa + c] + 2u * s[3 * x + c] + s[3 * xb + c];
+        unsigned la = (77u * s[3 * xa] + 151u * s[3 * xa + 1] + 28u * s[3 * xa + 2]) >> 8, lm = (77u * s[3 * x] + 151u * s[3 * x + 1] + 28u * s[3 * x + 2]) >> 8;
+        unsigned lb = (77u * s[3 * xb] + 151u * s[3 * xb + 1] + 28u * s[3 * xb + 2]) >> 8;
+        o[3 * x + 2] = la + 2u * lm + lb;
+    }
+}
+/* The painting in g_parchPx (placed at r, row its WorldMapArea row, -2 the world) kept as its lines, at its own size or,
+ * shrink 2 (its tiles HD), at half (the world's: its continents' outlines need no more). */
+static void ParchLinesKeep(ParchLines *P, ParchRect r, int row, int shrink)
+{
+    if (P->m) HeapFree(GetProcessHeap(), 0, P->m);
+    P->m = NULL; P->row = -3;
+    int K = g_parchK, fw = PARCH_MAP_W * K, fh = PARCH_MAP_H * K, T = g_parchTW, s = shrink == 2 && K == 2 ? 2 : 1;
+    int w = fw / s, h = fh / s;
+    if (!g_parchPx || fw > T || fh > T) return;
+    unsigned char *rgb = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * (SIZE_T)h * 3);
+    unsigned *rows = (unsigned *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * 9 * sizeof(unsigned));
+    P->m = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * (SIZE_T)h);
+    if (!P->m || !rows || !rgb) {
+        if (P->m) HeapFree(GetProcessHeap(), 0, P->m);
+        if (rows) HeapFree(GetProcessHeap(), 0, rows);
+        if (rgb) HeapFree(GetProcessHeap(), 0, rgb);
+        P->m = NULL;
+        return;
+    }
+    for (int y = 0; y < h; y++)                                       /* (its texels, or each two by two's mean) */
+        for (int x = 0; x < w; x++)
+            for (int c = 0; c < 3; c++) {
+                unsigned v = 0;
+                for (int j = 0; j < s; j++)
+                    for (int i = 0; i < s; i++) v += g_parchPx[4 * ((unsigned)(y * s + j) * (unsigned)T + (unsigned)(x * s + i)) + c];
+                rgb[3 * ((unsigned)y * (unsigned)w + (unsigned)x) + c] = (unsigned char)(v / (unsigned)(s * s));
+            }
+    /* a continent's lines are also those darker than the painting round them by PARCH_CUT_REL (Kalimdor's borders are drawn
+     * lighter than PARCH_CUT_DARK): its local mean over 2 PARCH_CUT_MEAN + 1 texels (an HD painting's) each way, from sums
+     * down each column kept as the rows go by */
+    int rel = row >= 0, mr = PARCH_CUT_MEAN * K / 2 / s;
+    unsigned *col = rel ? (unsigned *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)w * sizeof(unsigned)) : NULL;
+    if (rel && !col) rel = 0;
+    for (int y = 0; rel && y < mr && y < h; y++)
+        for (int x = 0; x < w; x++) { const unsigned char *q = rgb + 3 * ((unsigned)y * (unsigned)w + (unsigned)x); col[x] += (77u * q[0] + 151u * q[1] + 28u * q[2]) >> 8; }
+    unsigned *ra = rows, *rm = rows + 3 * w, *rb = rows + 6 * w;
+    LinesRow(rgb, w, 0, ra); LinesRow(rgb, w, 0, rm); LinesRow(rgb, w, h > 1 ? 1 : 0, rb);
+    for (int y = 0; y < h; y++) {
+        const unsigned char *src = rgb + 3 * (unsigned)y * (unsigned)w;
+        unsigned char *out = P->m + (unsigned)y * (unsigned)w;
+        int rows0 = 0;
+        if (rel) {                                                    /* (the column sums now over rows y - mr .. y + mr) */
+            int add = y + mr, sub = y - mr - 1;
+            for (int x = 0; add < h && x < w; x++) { const unsigned char *q = rgb + 3 * ((unsigned)add * (unsigned)w + (unsigned)x); col[x] += (77u * q[0] + 151u * q[1] + 28u * q[2]) >> 8; }
+            for (int x = 0; sub >= 0 && x < w; x++) { const unsigned char *q = rgb + 3 * ((unsigned)sub * (unsigned)w + (unsigned)x); col[x] -= (77u * q[0] + 151u * q[1] + 28u * q[2]) >> 8; }
+            rows0 = (add < h ? add : h - 1) - (sub >= 0 ? sub + 1 : 0) + 1;
+        }
+        unsigned win = 0;
+        int x0w = 0, x1w = -1;
+        for (int x = 0; x < w; x++) {
+            unsigned L = (77u * src[3 * x] + 151u * src[3 * x + 1] + 28u * src[3 * x + 2]) >> 8;
+            unsigned R = ra[3 * x] + 2u * rm[3 * x] + rb[3 * x], G = ra[3 * x + 1] + 2u * rm[3 * x + 1] + rb[3 * x + 1],
+                     Ls = ra[3 * x + 2] + 2u * rm[3 * x + 2] + rb[3 * x + 2];   /* (sixteen times) */
+            unsigned char b = L < PARCH_CUT_DARK ? CUT_DARK : 0;
+            if ((100u * G < 66u * R && R < 16u * PARCH_CUT_BROWN) || Ls < 16u * PARCH_CUT_INK) b |= CUT_INK;
+            if (rel) {
+                while (x1w < x + mr && x1w < w - 1) win += col[++x1w];
+                while (x0w < x - mr) win -= col[x0w++];
+                int mean = (int)(win / (unsigned)((x1w - x0w + 1) * rows0));
+                if ((int)L < mean - PARCH_CUT_REL) b |= CUT_DARK;
+                if ((int)L < mean - 2 * PARCH_CUT_REL) b |= CUT_INK;
+            }
+            out[x] = b;
+        }
+        unsigned *t = ra; ra = rm; rm = rb; rb = t;                   /* (on a row) */
+        LinesRow(rgb, w, y + 2 < h ? y + 2 : h - 1, rb);
+    }
+    if (col) HeapFree(GetProcessHeap(), 0, col);
+    HeapFree(GetProcessHeap(), 0, rows);
+    HeapFree(GetProcessHeap(), 0, rgb);
+    P->w = w; P->h = h; P->K = K / s; P->r = r; P->row = row; P->gap = row == -2 ? PARCH_CUT_COAST : (PARCH_CUT_GAP * K + 1) / 2;
+}
+/* A crop's fill from start over its open cells, marking mark (q: room for every cell): the cells marked. */
+static int CutFill(unsigned char *mark, const unsigned char *open, int cw, int ch, int start, int *q)
+{
+    if (start < 0 || start >= cw * ch || !open[start] || mark[start]) return 0;
+    int head = 0, tail = 0;
+    mark[start] = 1; q[tail++] = start;
+    while (head < tail) {
+        int i = q[head++], x = i % cw;
+        if (x > 0 && open[i - 1] && !mark[i - 1]) { mark[i - 1] = 1; q[tail++] = i - 1; }
+        if (x < cw - 1 && open[i + 1] && !mark[i + 1]) { mark[i + 1] = 1; q[tail++] = i + 1; }
+        if (i >= cw && open[i - cw] && !mark[i - cw]) { mark[i - cw] = 1; q[tail++] = i - cw; }
+        if (i + cw < cw * ch && open[i + cw] && !mark[i + cw]) { mark[i + cw] = 1; q[tail++] = i + cw; }
+    }
+    return tail;
+}
+/* dst: src grown by a cell across and down (grow), or shrunk so (a cell kept only with all four neighbours; the crop's
+ * edge counts as the cell itself) */
+static void CutMorph(unsigned char *dst, const unsigned char *src, int cw, int ch, int grow)
+{
+    for (int y = 0; y < ch; y++)
+        for (int x = 0; x < cw; x++) {
+            int i = y * cw + x, c = src[i] != 0;
+            int l = x > 0 ? src[i - 1] != 0 : c, r = x < cw - 1 ? src[i + 1] != 0 : c;
+            int u = y > 0 ? src[i - cw] != 0 : c, d = y < ch - 1 ? src[i + cw] != 0 : c;
+            dst[i] = (unsigned char)(grow ? (c | l | r | u | d) : (c & l & r & u & d));
+        }
+}
+/* reg's holes filled: every cell the crop's edge cannot reach outside it (out, q: room). */
+static void CutHoles(unsigned char *reg, unsigned char *out, unsigned char *notReg, int cw, int ch, int *q)
+{
+    for (int i = 0; i < cw * ch; i++) { out[i] = 0; notReg[i] = !reg[i]; }
+    for (int x = 0; x < cw; x++) { CutFill(out, notReg, cw, ch, x, q); CutFill(out, notReg, cw, ch, (ch - 1) * cw + x, q); }
+    for (int y = 0; y < ch; y++) { CutFill(out, notReg, cw, ch, y * cw, q); CutFill(out, notReg, cw, ch, y * cw + cw - 1, q); }
+    for (int i = 0; i < cw * ch; i++) reg[i] = !out[i];
+}
+/* The crop cx0, cy0, cw x ch of P's lines into line (its bits) and open (1 where a fill may go: not on a dark line, its
+ * one-cell gaps closed; tmp: a crop's room). */
+static void CutOpen(const ParchLines *P, int cx0, int cy0, int cw, int ch, unsigned char *line, unsigned char *open, unsigned char *tmp)
+{
+    int n = cw * ch;
+    for (int y = 0; y < ch; y++)
+        for (int x = 0; x < cw; x++) {
+            int X = cx0 + x, Y = cy0 + y;
+            line[y * cw + x] = X >= 0 && Y >= 0 && X < P->w && Y < P->h ? P->m[Y * P->w + X] : 0;
+        }
+    for (int i = 0; i < n; i++) open[i] = line[i] & CUT_DARK;         /* the lines, their gaps closed */
+    for (int g = 0; g < P->gap; g++) { CutMorph(tmp, open, cw, ch, 1); for (int i = 0; i < n; i++) open[i] = tmp[i]; }
+    for (int g = 0; g < P->gap; g++) { CutMorph(tmp, open, cw, ch, 0); for (int i = 0; i < n; i++) open[i] = tmp[i]; }
+    for (int i = 0; i < n; i++) open[i] = !open[i];
+}
+/* A fill from the open cell nearest seed (sx, sy: crop cells, within three of P's HD texels) into reg (cleared first):
+ * its cells, 0 when there is none near or (unless leaks) it reached the crop's edge (a leak). */
+static int CutSeed(const unsigned char *open, int cw, int ch, int k, float sx, float sy, int leaks, unsigned char *reg, int *q)
+{
+    int n = cw * ch, x0 = (int)sx, y0 = (int)sy, win = 3 * k, start = -1, best = 1 << 30;
+    for (int dy = -win; dy <= win; dy++)
+        for (int dx = -win; dx <= win; dx++) {
+            int x = x0 + dx, y = y0 + dy, d = dx * dx + dy * dy;
+            if (x >= 0 && y >= 0 && x < cw && y < ch && open[y * cw + x] && d < best) { best = d; start = y * cw + x; }
+        }
+    for (int i = 0; i < n; i++) reg[i] = 0;
+    if (start < 0) return 0;
+    int got = CutFill(reg, open, cw, ch, start, q);
+    if (leaks) return got;
+    for (int x = 0; x < cw; x++) if (reg[x] || reg[(ch - 1) * cw + x]) return 0;    /* (it leaked) */
+    for (int y = 0; y < ch; y++) if (reg[y * cw] || reg[y * cw + cw - 1]) return 0;
+    return got;
+}
+/* A region (reg) made whole: its holes (towns, lakes, mountains in ink) filled, grown into its border line by up to
+ * PARCH_CUT_REACH but never into the ink, and into its continent's own name's letters (painted out: they hid its line)
+ * as far as their strokes, its stray threads off (an opening), its pieces joined across lines up to PARCH_CUT_JOIN thick
+ * (a closing: a lake's shore in ink), its holes filled again (a, b: crop rooms). Its cells. */
+static int CutWhole(const unsigned char *line, int cw, int ch, int k, unsigned char *reg, unsigned char *a, unsigned char *b, int *q)
+{
+    int n = cw * ch, got = 0;
+    CutHoles(reg, a, b, cw, ch, q);
+    for (int it = 0; it < (PARCH_CUT_REACH * k + 1) / 2; it++) {
+        CutMorph(a, reg, cw, ch, 1);
+        for (int i = 0; i < n; i++) if (a[i] && !(line[i] & CUT_INK)) reg[i] = 1;
+    }
+    for (int it = 0; it < 3 * k; it++) {
+        CutMorph(a, reg, cw, ch, 1);
+        for (int i = 0; i < n; i++) if (a[i] && (line[i] & CUT_WORD)) reg[i] = 1;
+    }
+    CutMorph(a, reg, cw, ch, 0);
+    CutMorph(reg, a, cw, ch, 1);
+    for (int it = 0; it < PARCH_CUT_JOIN * k / 2; it++) { CutMorph(a, reg, cw, ch, 1); for (int i = 0; i < n; i++) reg[i] = a[i]; }
+    for (int it = 0; it < PARCH_CUT_JOIN * k / 2; it++) { CutMorph(a, reg, cw, ch, 0); for (int i = 0; i < n; i++) reg[i] = a[i]; }
+    CutHoles(reg, a, b, cw, ch, q);                                   /* (its pieces joined across a thin line: a closing) */
+    for (int i = 0; i < n; i++) got += reg[i];
+    return got;
+}
+/* The finer painting's own area (pw x ph at rf on the frame) from the coarser's region (reg: the crop cx0, cy0, cw x ch of
+ * P), softened a little and laid on by the two places on the frame: inside (1 in it). sm: room for the crop in floats. */
+static void CutLay(const ParchLines *P, const unsigned char *reg, int cx0, int cy0, int cw, int ch, ParchRect rf, int pw, int ph,
+                   unsigned char *inside, float *sm)
+{
+    for (int y = 0; y < ch; y++)                                      /* (1 2 1 across, then down) */
+        for (int x = 0; x < cw; x++) {
+            int i = y * cw + x;
+            sm[i] = (float)((x > 0 ? reg[i - 1] : 0) + 2 * reg[i] + (x < cw - 1 ? reg[i + 1] : 0));
+        }
+    for (int x = 0; x < cw; x++) {
+        float prev = 0;
+        for (int y = 0; y < ch; y++) {
+            int i = y * cw + x;
+            float c = sm[i], nx = y < ch - 1 ? sm[i + cw] : 0;
+            sm[i] = (prev + 2 * c + nx) / 16;
+            prev = c;
+        }
+    }
+    float ku = (rf.x1 - rf.x0) / (P->r.x1 - P->r.x0) * (float)P->w / (float)pw, kv = (rf.y1 - rf.y0) / (P->r.y1 - P->r.y0) * (float)P->h / (float)ph;
+    float u0 = (rf.x0 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w - (float)cx0, v0 = (rf.y0 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h - (float)cy0;
+    for (int y = 0; y < ph; y++) {
+        float v = v0 + ((float)y + 0.5f) * kv - 0.5f;
+        int j = v < 0 ? -1 : (int)v;
+        float fy = v - (float)j;
+        for (int x = 0; x < pw; x++) {
+            float u = u0 + ((float)x + 0.5f) * ku - 0.5f;
+            int i = u < 0 ? -1 : (int)u;
+            float fx = u - (float)i, s = 0;
+            for (int dy = 0; dy < 2; dy++)
+                for (int dx = 0; dx < 2; dx++) {
+                    int X = i + dx, Y = j + dy;
+                    if (X >= 0 && Y >= 0 && X < cw && Y < ch) s += sm[Y * cw + X] * (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy);
+                }
+            inside[y * pw + x] = s > 0.5f;
+        }
+    }
+}
+/* The painting in g_parchPx given its cut (inside: its own area, pw x ph): whole inside; outside, d texels from it, alpha 1
+ * to PARCH_CUT_GROW - PARCH_CUT_BAND and smoothly to nothing at PARCH_CUT_GROW (scaled by K / 2), its colours toward a
+ * softened copy by smooth(d / grow). 1 when done. */
+static int CutApply(const unsigned char *inside, int pw, int ph, int K)
+{
+    int T = g_parchTW, grow = PARCH_CUT_GROW * K / 2, band = PARCH_CUT_BAND * K / 2;
+    if (band > grow) band = grow;
+    if (band < 1) band = 1;
+    int c = (int)((float)(PARCH_CUT_BLUR * K) / 3.0f + 0.5f), nw, nh;    /* the softened copy: cells of c texels, softened thrice */
+    if (c < 1) c = 1;
+    nw = (pw + c - 1) / c; nh = (ph + c - 1) / c;
+    unsigned short *d = (unsigned short *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * sizeof(unsigned short));
+    float *g = (float *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)nw * (SIZE_T)nh * 3 + (SIZE_T)(nw > nh ? nw : nh)) * sizeof(float));
+    if (!d || !g || !g_parchPx) { if (d) HeapFree(GetProcessHeap(), 0, d); if (g) HeapFree(GetProcessHeap(), 0, g); return 0; }
+    unsigned short dmax = (unsigned short)(3 * (grow + 2));
+    for (int i = 0; i < pw * ph; i++) d[i] = inside[i] ? 0 : dmax;    /* the distance to it (3 a step across, 4 corner to corner) */
+    for (int y = 0; y < ph; y++)
+        for (int x = 0; x < pw; x++) {
+            int i = y * pw + x, v = d[i];
+            if (!v) continue;
+            if (x > 0 && d[i - 1] + 3 < v) v = d[i - 1] + 3;
+            if (y > 0) {
+                if (d[i - pw] + 3 < v) v = d[i - pw] + 3;
+                if (x > 0 && d[i - pw - 1] + 4 < v) v = d[i - pw - 1] + 4;
+                if (x < pw - 1 && d[i - pw + 1] + 4 < v) v = d[i - pw + 1] + 4;
+            }
+            d[i] = (unsigned short)v;
+        }
+    for (int y = ph - 1; y >= 0; y--)
+        for (int x = pw - 1; x >= 0; x--) {
+            int i = y * pw + x, v = d[i];
+            if (!v) continue;
+            if (x < pw - 1 && d[i + 1] + 3 < v) v = d[i + 1] + 3;
+            if (y < ph - 1) {
+                if (d[i + pw] + 3 < v) v = d[i + pw] + 3;
+                if (x < pw - 1 && d[i + pw + 1] + 4 < v) v = d[i + pw + 1] + 4;
+                if (x > 0 && d[i + pw - 1] + 4 < v) v = d[i + pw - 1] + 4;
+            }
+            d[i] = (unsigned short)v;
+        }
+    for (int j = 0; j < nh; j++)                                      /* the softened copy's cells */
+        for (int i = 0; i < nw; i++) {
+            float s[3] = { 0, 0, 0 };
+            int n = 0;
+            for (int y = j * c; y < (j + 1) * c && y < ph; y++)
+                for (int x = i * c; x < (i + 1) * c && x < pw; x++, n++)
+                    for (int k = 0; k < 3; k++) s[k] += g_parchPx[4 * ((unsigned)y * (unsigned)T + (unsigned)x) + k];
+            for (int k = 0; k < 3; k++) g[3 * (j * nw + i) + k] = n ? s[k] / (float)n : 0;
+        }
+    ParchBlur(g, nw, nh, 3, g + nw * nh * 3);
+    for (int y = 0; y < ph; y++) {
+        float v = ((float)y + 0.5f) / (float)c - 0.5f;
+        int j0 = v < 0 ? 0 : (int)v, j1 = j0 + 1 < nh ? j0 + 1 : j0;
+        float fy = v < 0 ? 0 : v - (float)j0;
+        for (int x = 0; x < pw; x++) {
+            int i = y * pw + x;
+            if (!d[i]) continue;
+            float dt = (float)d[i] / 3.0f, w = ParchSmooth(dt / (float)grow), al = 1 - ParchSmooth((dt - (float)(grow - band)) / (float)band);
+            float u = ((float)x + 0.5f) / (float)c - 0.5f;
+            int i0 = u < 0 ? 0 : (int)u, i1 = i0 + 1 < nw ? i0 + 1 : i0;
+            float fx = u < 0 ? 0 : u - (float)i0;
+            unsigned char *p = g_parchPx + 4 * ((unsigned)y * (unsigned)T + (unsigned)x);
+            for (int k = 0; k < 3; k++) {
+                float s = (g[3 * (j0 * nw + i0) + k] * (1 - fx) + g[3 * (j0 * nw + i1) + k] * fx) * (1 - fy) +
+                          (g[3 * (j1 * nw + i0) + k] * (1 - fx) + g[3 * (j1 * nw + i1) + k] * fx) * fy;
+                p[k] = (unsigned char)(int)FireClamp((float)p[k] * (1 - w) + s * w + 0.5f, 0, 255);
+            }
+            p[3] = (unsigned char)(int)(255 * FireClamp(al, 0, 1) + 0.5f);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, d);
+    HeapFree(GetProcessHeap(), 0, g);
+    return 1;
+}
+/* The painting in g_parchPx (placed at rf) cut to its own area as P (the coarser painting under it) draws it, from the
+ * first of seeds (n of them: P's texels) whose fill holds; with all (union), every seed's that holds. Its own share of its
+ * picture (inside) through *share; 0 and why when none holds (then it is left whole: the plain band at its edges). */
+static int ParchCut(const ParchLines *P, ParchRect rf, const float *seeds, int n, int all, float *share, const char **why)
+{
+    *why = "no lines of the painting under it";
+    if (!P->m || !g_parchPx || n < 1) return 0;
+    int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K;
+    float bx0 = (rf.x0 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w, bx1 = (rf.x1 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w;
+    float by0 = (rf.y0 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h, by1 = (rf.y1 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h;
+    float mx = PARCH_CUT_ROOM * (bx1 - bx0) + 4 * P->K, my = PARCH_CUT_ROOM * (by1 - by0) + 4 * P->K;
+    int cx0 = (int)(bx0 - mx), cy0 = (int)(by0 - my), cw = (int)(bx1 + mx) - cx0 + 1, ch = (int)(by1 + my) - cy0 + 1;
+    if (all) {                                                        /* (a continent: only its painting under it, no more) */
+        if (cx0 < 0) { cw += cx0; cx0 = 0; }
+        if (cy0 < 0) { ch += cy0; cy0 = 0; }
+        if (cx0 + cw > P->w) cw = P->w - cx0;
+        if (cy0 + ch > P->h) ch = P->h - cy0;
+    }
+    if (cw < 8 || ch < 8 || (double)cw * ch > 8e6) { *why = "its box on the painting under it is not usable"; return 0; }
+    SIZE_T cells = (SIZE_T)cw * (SIZE_T)ch;
+    unsigned char *reg = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, cells * 5);
+    int *q = (int *)HeapAlloc(GetProcessHeap(), 0, cells * sizeof(int));
+    unsigned char *inside = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph);
+    float *sm = (float *)HeapAlloc(GetProcessHeap(), 0, cells * sizeof(float));
+    int ok = 0;
+    *why = "no memory for it";
+    if (reg && q && inside && sm) {
+        unsigned char *line = reg + cells, *open = reg + 2 * cells, *a = reg + 3 * cells, *uni = reg + 4 * cells;
+        int few = (int)(PARCH_CUT_FEW * (bx1 - bx0) * (by1 - by0)), held = 0, k = P->K;
+        CutOpen(P, cx0, cy0, cw, ch, line, open, a);
+        for (SIZE_T i = 0; i < cells; i++) uni[i] = 0;
+        *why = "every fill leaked out of its box or found too little";
+        int total = 0;
+        for (int s = 0; s < n; s++) {                                 /* every seed's piece that holds (a zone's own lines, its
+                                                                       * rivers drawn in ink, may cut it in several) */
+            float sx = seeds[2 * s] - (float)cx0, sy = seeds[2 * s + 1] - (float)cy0;
+            int ix = (int)sx, iy = (int)sy;
+            if (ix >= 0 && iy >= 0 && ix < cw && iy < ch && uni[iy * cw + ix]) continue;   /* (in a piece already found) */
+            int got = CutSeed(open, cw, ch, k, sx, sy, 0, reg, q);
+            if (!got || (!all && (float)(total + got) > PARCH_CUT_MOST * (bx1 - bx0) * (by1 - by0))) continue;   /* (leaked: not this one) */
+            held++;
+            total += got;
+            for (SIZE_T i = 0; i < cells; i++) uni[i] |= reg[i];
+        }
+        if (held) {                                                   /* its pieces made whole together */
+            total = CutWhole(line, cw, ch, k, uni, a, reg, q);
+            int edge = 0;
+            for (int x = 0; x < cw; x++) edge |= uni[x] | uni[(ch - 1) * cw + x];
+            for (int y = 0; y < ch; y++) edge |= uni[y * cw] | uni[y * cw + cw - 1];
+            if (!all && (total < few || edge)) held = 0;
+        }
+        g_cutBoxed = 0;
+        if (!held && !all) {                                          /* every one leaked (a border the painting draws faint, a city
+                                                                       * inside its zone): its pieces kept to its own box */
+            CutOpen(P, cx0, cy0, cw, ch, line, open, a);
+            for (SIZE_T i = 0; i < cells; i++) uni[i] = 0;
+            int ix0 = (int)(bx0 - (float)cx0), iy0 = (int)(by0 - (float)cy0), ix1 = (int)(bx1 - (float)cx0) + 1, iy1 = (int)(by1 - (float)cy0) + 1;
+            for (int s = 0; s < n; s++) {
+                int ix = (int)(seeds[2 * s] - (float)cx0), iy = (int)(seeds[2 * s + 1] - (float)cy0);
+                if (ix >= 0 && iy >= 0 && ix < cw && iy < ch && uni[iy * cw + ix]) continue;
+                if (!CutSeed(open, cw, ch, k, seeds[2 * s] - (float)cx0, seeds[2 * s + 1] - (float)cy0, 1, reg, q)) continue;
+                for (int y = 0; y < ch; y++)
+                    for (int x = 0; x < cw; x++) if (reg[y * cw + x] && x >= ix0 && x < ix1 && y >= iy0 && y < iy1) uni[y * cw + x] = 1;
+            }
+            total = CutWhole(line, cw, ch, k, uni, a, reg, q);
+            for (int y = 0; y < ch; y++)
+                for (int x = 0; x < cw; x++) if (!(x >= ix0 && x < ix1 && y >= iy0 && y < iy1)) uni[y * cw + x] = 0;
+            if (total >= few) { held = 1; g_cutBoxed = 1; *why = "its outline leaked: kept to its own box"; }
+        }
+        if (held) {
+            CutLay(P, uni, cx0, cy0, cw, ch, rf, pw, ph, inside, sm);
+            int in = 0;
+            for (int i = 0; i < pw * ph; i++) in += inside[i];
+            *share = (float)in / (float)(pw * ph);
+            if (in && CutApply(inside, pw, ph, K)) ok = 1;
+            else *why = in ? "no memory for its margin" : "its area does not fall on its painting";
+        }
+    }
+    if (reg) HeapFree(GetProcessHeap(), 0, reg);
+    if (q) HeapFree(GetProcessHeap(), 0, q);
+    if (inside) HeapFree(GetProcessHeap(), 0, inside);
+    if (sm) HeapFree(GetProcessHeap(), 0, sm);
+    return ok;
+}
+/* A zone's seeds on P's texels: the arrival's spot (fx, fy on the frame, when its box holds it), the middles of its
+ * overlay pieces (id), its box's middle. Their count. */
+static int CutZoneSeeds(const ParchLines *P, ParchRect rz, int id, float fx, float fy, float *seeds)
+{
+    int n = 0;
+    float sx = (P->r.x1 - P->r.x0) / (float)P->w, sy = (P->r.y1 - P->r.y0) / (float)P->h;
+    if (fx >= rz.x0 && fx <= rz.x1 && fy >= rz.y0 && fy <= rz.y1) { seeds[0] = (fx - P->r.x0) / sx; seeds[1] = (fy - P->r.y0) / sy; n = 1; }
+    for (int p = 0; p < g_ppN && n < PARCH_CUT_SEEDS - 1; p++) {
+        if (g_pp[p].zone != id) continue;
+        float u = ((float)g_pp[p].ox + 0.5f * (float)g_pp[p].w) / PARCH_MAP_W, v = ((float)g_pp[p].oy + 0.5f * (float)g_pp[p].h) / PARCH_MAP_H;
+        seeds[2 * n] = (rz.x0 + u * (rz.x1 - rz.x0) - P->r.x0) / sx; seeds[2 * n + 1] = (rz.y0 + v * (rz.y1 - rz.y0) - P->r.y0) / sy;
+        n++;
+    }
+    seeds[2 * n] = (0.5f * (rz.x0 + rz.x1) - P->r.x0) / sx; seeds[2 * n + 1] = (0.5f * (rz.y0 + rz.y1) - P->r.y0) / sy;
+    return n + 1;
+}
+/* ---- the continent's name, one label in one place (his note, 11 Oct: "the words Eastern Kingdom move slightly, they
+ * disappear, and then they reappear slightly different spot than they were. It would be better to just have it in one
+ * location and not move it"; and for Kalimdor and every zone near either name) ----
+ * The client paints each continent's name twice: on the world's painting (Interface\WorldMap\World) and, larger and a
+ * little elsewhere, on the continent's own (Azeroth, Kalimdor). Kept: the world's, where the opening shows it. As the
+ * world's painting is made (once a session), its two names are cut out of it as pictures of their own (the painting's
+ * own texels, their alpha the letters: what stands out from the painting's local mean by PARCH_WORD_EDGE either way, its
+ * gaps closed, grown a little and softened), and the painting around each continent's own name kept a while. As a
+ * continent's painting is made, its own name is painted out of it from the client's files: inside its letters (found
+ * the same way) and the world's name's place on it, the world's painting there, laid on by the two places on the frame
+ * and given this painting's own colours (its local mean outside the letters), so the only name in it is the world's, in
+ * the world's place. The world's name is then drawn over every painting, the zones' too, at its place on the frame: one
+ * name, never moved, never doubled, scaling with the zoom. Where the names are on each painting: kWords (measured on the
+ * client's paintings, the same in its 256-px and HD tiles: texels of its 1002 x 668 picture), each checked as made (its
+ * letters must be there: a share of its box between PARCH_WORD_FEW and PARCH_WORD_MANY); not found as measured, that
+ * continent's two names are left as the client paints them, and the log says so. Without the world's painting (the
+ * client's world map frame not as read) the glide opens on the continent's painting, its own name the only one. */
+#define PARCH_WORD_EDGE  18           /* a letter: this much darker or lighter than its painting's local mean (0..255) */
+#define PARCH_WORD_MEAN  20           /* that mean over this far either way (texels of an HD painting) */
+#define PARCH_WORD_FEW   0.12f        /* a word's letters this share of its box at least, */
+#define PARCH_WORD_MANY  0.75f        /* and at most */
+#define PARCH_WORD_WORLD 8            /* the world's painting around a continent's name kept this far past it (HD texels) */
+typedef struct { int cont; const char *folder; float x0, y0, x1, y1; } ParchWord;   /* (cont: the world's names' continent) */
+static const ParchWord kWords[] = {
+    { 0, "World", 658, 363, 815, 386 },        /* EASTERN   (the world's, its two lines) */
+    { 0, "World", 633, 384, 827, 404 },        /* KINGDOMS */
+    { 1, "World", 105, 302, 343, 333 },        /* KALIMDOR */
+    { 0, "Azeroth", 350, 367, 546, 399 },      /* EASTERN   (the continents' own) */
+    { 0, "Azeroth", 410, 394, 659, 429 },      /* KINGDOMS */
+    { 1, "Kalimdor", 355, 325, 643, 359 },     /* KALIMDOR */
+};
+#define PARCH_WORDS (int)(sizeof kWords / sizeof kWords[0])
+/* The letters in a box of a painting (px, stride T, its picture pw x ph; the box x0..x1, y0..y1 in its texels, K its
+ * tiles over 256), as the client paints its names: each stroke dark (PARCH_WORD_DARK under the painting's local mean)
+ * between two light rims (PARCH_WORD_RIM over it, within PARCH_WORD_SPAN either side, across or down), where the sea's
+ * hatching, the coasts and the mountains have none. sure: only the strokes that make letters (pieces as tall as a fifth
+ * of the box at least, no taller than it and no wider than two and a half of it: the sprite's alpha); else every
+ * stroke and more round them (all that is to be painted over). Their soft mask (0..255) into m (the box's size); the
+ * share of the box they cover. */
+#define PARCH_WORD_DARK  12
+#define PARCH_WORD_RIM   10
+#define PARCH_WORD_SPAN  6
+static float ParchLetters(const unsigned char *px, int T, int pw, int ph, int x0, int y0, int x1, int y1, int K, int sure, unsigned char *m)
+{
+    int bw = x1 - x0, bh = y1 - y0, r = PARCH_WORD_MEAN * K / 2, span = PARCH_WORD_SPAN * K / 2, n = bw * bh;
+    int ax = x0 - r, ay = y0 - r, aw = bw + 2 * r + 1, ah = bh + 2 * r + 1;   /* (the mean's room around it) */
+    if (bw < 4 || bh < 4 || span < 1) return 0;
+    unsigned *I = (unsigned *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(aw + 1) * (SIZE_T)(ah + 1) * sizeof(unsigned));
+    signed char *d = (signed char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n);
+    unsigned char *a = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n * 3);
+    int *q = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n * sizeof(int));
+    if (!I || !d || !a || !q) {
+        if (I) HeapFree(GetProcessHeap(), 0, I);
+        if (d) HeapFree(GetProcessHeap(), 0, d);
+        if (a) HeapFree(GetProcessHeap(), 0, a);
+        if (q) HeapFree(GetProcessHeap(), 0, q);
+        return 0;
+    }
+    for (int y = 0; y <= ah; y++) I[y * (aw + 1)] = 0;                 /* the luminance's running sums */
+    for (int x = 0; x <= aw; x++) I[x] = 0;
+    for (int y = 1; y <= ah; y++)
+        for (int x = 1; x <= aw; x++) {
+            int X = ax + x - 1, Y = ay + y - 1;
+            X = X < 0 ? 0 : X >= pw ? pw - 1 : X; Y = Y < 0 ? 0 : Y >= ph ? ph - 1 : Y;
+            const unsigned char *p = px + 4 * ((unsigned)Y * (unsigned)T + (unsigned)X);
+            unsigned L = (77u * p[0] + 151u * p[1] + 28u * p[2]) >> 8;
+            I[y * (aw + 1) + x] = L + I[(y - 1) * (aw + 1) + x] + I[y * (aw + 1) + x - 1] - I[(y - 1) * (aw + 1) + x - 1];
+        }
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            int cx = x + r, cy = y + r;
+            unsigned sm = I[(cy + r + 1) * (aw + 1) + cx + r + 1] - I[(cy - r) * (aw + 1) + cx + r + 1] - I[(cy + r + 1) * (aw + 1) + cx - r] + I[(cy - r) * (aw + 1) + cx - r];
+            int mean = (int)(sm / (unsigned)((2 * r + 1) * (2 * r + 1)));
+            const unsigned char *p = px + 4 * ((unsigned)(y0 + y) * (unsigned)T + (unsigned)(x0 + x));
+            int L = (int)((77u * p[0] + 151u * p[1] + 28u * p[2]) >> 8), v = L - mean;
+            d[y * bw + x] = (signed char)(v < -127 ? -127 : v > 127 ? 127 : v);
+        }
+    unsigned char *core = a, *b = a + n, *c = a + 2 * n;
+    for (int i = 0; i < n; i++) core[i] = 0;
+    for (int dir = 0; dir < 2; dir++)                                 /* a dark stroke between two rims: across, then down */
+        for (int l = 0; l < (dir ? bw : bh); l++) {
+            int len = dir ? bh : bw, last = -100000;
+            for (int i = 0; i < len; i++) {                            /* (b: a rim within span before it) */
+                int at = dir ? i * bw + l : l * bw + i;
+                if (d[at] > PARCH_WORD_RIM) last = i;
+                b[at] = i - last <= span;
+            }
+            last = 100000;
+            for (int i = len - 1; i >= 0; i--) {                       /* (and one after it) */
+                int at = dir ? i * bw + l : l * bw + i;
+                if (d[at] > PARCH_WORD_RIM) last = i;
+                if (d[at] < -PARCH_WORD_DARK && b[at] && last - i <= span) core[at] = 1;
+            }
+        }
+    int few = 12 * K * K / 4, kept = 0;
+    for (int round = 0; round < 3; round++) {                         /* its pieces (8 ways), kept or not; then the ones too wide
+                                                                       * or tall (a letter run into the sea's hatching), a texel
+                                                                       * thinner, twice at most */
+        for (int i = 0; i < n; i++) b[i] = 0;
+        for (int s0 = 0; s0 < n; s0++) {
+            if (core[s0] != 1 || b[s0]) continue;
+            int head = 0, tail = 0, mx0 = bw, mx1 = -1, my0 = bh, my1 = -1;
+            b[s0] = 1; q[tail++] = s0;
+            while (head < tail) {
+                int i = q[head++], x = i % bw, y = i / bw;
+                if (x < mx0) mx0 = x;
+                if (x > mx1) mx1 = x;
+                if (y < my0) my0 = y;
+                if (y > my1) my1 = y;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int X = x + dx, Y = y + dy, j = Y * bw + X;
+                        if (X >= 0 && Y >= 0 && X < bw && Y < bh && core[j] == 1 && !b[j]) { b[j] = 1; q[tail++] = j; }
+                    }
+            }
+            int h = my1 - my0 + 1, w = mx1 - mx0 + 1, keep = sure ? 5 * h >= bh && h * 4 <= bh * 5 && 2 * w <= 5 * bh : tail >= few;
+            int wide = sure && round < 2 && !keep && 5 * h >= bh && (2 * w > 5 * bh || h * 4 > bh * 5);
+            for (int k = 0; k < tail; k++) core[q[k]] = keep ? 2 : wide ? 3 : 0;
+            kept += keep;
+        }
+        if (!sure) break;
+        for (int i = 0; i < n; i++) c[i] = core[i] == 3;              /* (the wide ones, a texel thinner) */
+        CutMorph(b, c, bw, bh, 0);
+        for (int i = 0; i < n; i++) if (core[i] == 3) core[i] = b[i] ? 1 : 0;
+    }
+    for (int i = 0; i < n; i++) c[i] = core[i] == 2;
+    for (int g = 0; g < 2; g++) {                                     /* on into its weaker edges, two texels */
+        CutMorph(b, c, bw, bh, 1);
+        for (int i = 0; i < n; i++) if (b[i] && (d[i] < -PARCH_WORD_DARK / 2 || d[i] > PARCH_WORD_RIM / 2)) c[i] = 1;
+    }
+    CutMorph(b, c, bw, bh, 1); CutMorph(c, b, bw, bh, 0);              /* its gaps closed */
+    for (int g = 0; g < (sure ? 1 : 3) * K / 2; g++) { CutMorph(b, c, bw, bh, 1); for (int i = 0; i < n; i++) c[i] = b[i]; }
+    int on = 0;
+    for (int i = 0; i < n; i++) { m[i] = c[i] ? 255 : 0; on += c[i]; }
+    for (int pass = 0; pass < 2; pass++)                              /* softened (1 2 1, twice each way) */
+        for (int dir = 0; dir < 2; dir++)
+            for (int l = 0; l < (dir ? bw : bh); l++) {
+                int len = dir ? bh : bw, prev = -1;
+                for (int i = 0; i < len; i++) {
+                    int at = dir ? i * bw + l : l * bw + i, nx = i < len - 1 ? m[dir ? (i + 1) * bw + l : l * bw + i + 1] : m[at];
+                    int cc = m[at], pv = prev < 0 ? cc : prev;
+                    m[at] = (unsigned char)((pv + 2 * cc + nx + 2) / 4);
+                    prev = cc;
+                }
+            }
+    HeapFree(GetProcessHeap(), 0, I); HeapFree(GetProcessHeap(), 0, d); HeapFree(GetProcessHeap(), 0, a); HeapFree(GetProcessHeap(), 0, q);
+    return kept ? (float)on / (float)n : 0;
+}
+/* A word's box (kWords[i]) in a K painting's texels; 0 when it does not fit pw x ph. */
+static int WordBox(int i, int K, int pw, int ph, int *x0, int *y0, int *x1, int *y1)
+{
+    *x0 = (int)(kWords[i].x0 * (float)K); *y0 = (int)(kWords[i].y0 * (float)K);
+    *x1 = (int)(kWords[i].x1 * (float)K + 0.999f); *y1 = (int)(kWords[i].y1 * (float)K + 0.999f);
+    return *x0 >= 0 && *y0 >= 0 && *x1 <= pw && *y1 <= ph && *x1 > *x0 + 4 && *y1 > *y0 + 4;
+}
+static void ParchPicFree(ParchPic *P) { if (P->px) HeapFree(GetProcessHeap(), 0, P->px); P->px = NULL; P->ok = 0; }
+/* The world's painting just made (g_parchPx): each continent's name cut out as a picture of its own, and the painting
+ * around each continent's own name (on the world's picture, by the continent's box on the frame) kept. The continents'
+ * boxes: their WorldMapArea rows (cont[0], cont[1]; -1 none). */
+static void ParchWorldWords(const int *cont)
+{
+    int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, T = g_parchTW;
+    char m[200];
+    for (int c = 0; c < 2; c++) {
+        ParchPicFree(&g_wordPic[c]); ParchPicFree(&g_wordUnder[c]);
+        int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1, good = 1, words = 0;
+        for (int i = 0; i < PARCH_WORDS; i++) {                       /* the name's lines, each checked */
+            int x0, y0, x1, y1;
+            if (kWords[i].cont != c || lstrcmpiA(kWords[i].folder, "World")) continue;
+            if (!WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) { good = 0; continue; }
+            unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+            float share = mm ? ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 1, mm) : 0;
+            if (mm) HeapFree(GetProcessHeap(), 0, mm);
+            if (!(share >= PARCH_WORD_FEW && share <= PARCH_WORD_MANY)) good = 0;
+            words++;
+            if (x0 < bx0) bx0 = x0;
+            if (y0 < by0) by0 = y0;
+            if (x1 > bx1) bx1 = x1;
+            if (y1 > by1) by1 = y1;
+        }
+        if (!words || !good) {
+            wsprintfA(m, "  the parchment: the world's name for continent %d is not where it was measured; its two names left as the client paints them", c);
+            Log(m);
+            continue;
+        }
+        ParchPic *P = &g_wordPic[c];                                  /* its picture: the painting's texels, the letters' alpha */
+        P->x0 = bx0; P->y0 = by0; P->w = bx1 - bx0; P->h = by1 - by0;
+        P->px = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)P->w * (SIZE_T)P->h * 4);
+        if (!P->px) continue;
+        for (int y = 0; y < P->h; y++)
+            for (int x = 0; x < P->w; x++) {
+                const unsigned char *s = g_parchPx + 4 * ((unsigned)(by0 + y) * (unsigned)T + (unsigned)(bx0 + x));
+                unsigned char *o = P->px + 4 * ((unsigned)y * (unsigned)P->w + (unsigned)x);
+                o[0] = s[0]; o[1] = s[1]; o[2] = s[2]; o[3] = 0;
+            }
+        for (int i = 0; i < PARCH_WORDS; i++) {
+            int x0, y0, x1, y1;
+            if (kWords[i].cont != c || lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) continue;
+            unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+            if (!mm) continue;
+            ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 1, mm);
+            for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++) {
+                    unsigned char *o = P->px + 4 * ((unsigned)(y - by0) * (unsigned)P->w + (unsigned)(x - bx0)) + 3;
+                    if (mm[(y - y0) * (x1 - x0) + (x - x0)] > *o) *o = mm[(y - y0) * (x1 - x0) + (x - x0)];
+                }
+            HeapFree(GetProcessHeap(), 0, mm);
+        }
+        P->ok = 1;
+        if (cont[c] < 0) continue;                                    /* the painting around the continent's own name */
+        ParchRect rc = ParchBox(cont[c]);
+        int ux0 = 1 << 30, uy0 = 1 << 30, ux1 = -1, uy1 = -1;
+        for (int i = 0; i < PARCH_WORDS; i++) {
+            if (kWords[i].cont != c || !lstrcmpiA(kWords[i].folder, "World")) continue;
+            float fx0 = rc.x0 + kWords[i].x0 / PARCH_MAP_W * (rc.x1 - rc.x0), fx1 = rc.x0 + kWords[i].x1 / PARCH_MAP_W * (rc.x1 - rc.x0);
+            float fy0 = rc.y0 + kWords[i].y0 / PARCH_MAP_H * (rc.y1 - rc.y0), fy1 = rc.y0 + kWords[i].y1 / PARCH_MAP_H * (rc.y1 - rc.y0);
+            int wx0 = (int)(fx0 / PARCH_WORLD_FW * (float)pw), wx1 = (int)(fx1 / PARCH_WORLD_FW * (float)pw) + 1;
+            int wy0 = (int)(fy0 / PARCH_WORLD_FH * (float)ph), wy1 = (int)(fy1 / PARCH_WORLD_FH * (float)ph) + 1;
+            if (wx0 < ux0) ux0 = wx0;
+            if (wy0 < uy0) uy0 = wy0;
+            if (wx1 > ux1) ux1 = wx1;
+            if (wy1 > uy1) uy1 = wy1;
+        }
+        if (bx0 < ux0) ux0 = bx0;                                     /* (and the world's own name's place) */
+        if (by0 < uy0) uy0 = by0;
+        if (bx1 > ux1) ux1 = bx1;
+        if (by1 > uy1) uy1 = by1;
+        int e = PARCH_WORD_WORLD * K / 2 + 2;
+        ux0 -= e; uy0 -= e; ux1 += e; uy1 += e;
+        if (ux0 < 0) ux0 = 0;
+        if (uy0 < 0) uy0 = 0;
+        if (ux1 > pw) ux1 = pw;
+        if (uy1 > ph) uy1 = ph;
+        ParchPic *U = &g_wordUnder[c];
+        if (ux1 <= ux0 || uy1 <= uy0) continue;
+        U->x0 = ux0; U->y0 = uy0; U->w = ux1 - ux0; U->h = uy1 - uy0;
+        U->px = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)U->w * (SIZE_T)U->h * 4);
+        if (!U->px) continue;
+        for (int y = 0; y < U->h; y++)
+            for (int x = 0; x < U->w; x++) {
+                *(unsigned *)(void *)(U->px + 4 * ((unsigned)y * (unsigned)U->w + (unsigned)x)) =
+                    *(const unsigned *)(const void *)(g_parchPx + 4 * ((unsigned)(uy0 + y) * (unsigned)T + (unsigned)(ux0 + x)));
+                U->px[4 * ((unsigned)y * (unsigned)U->w + (unsigned)x) + 3] = 0;
+            }
+        for (int i = 0; i < PARCH_WORDS; i++) {                       /* (its alpha: the world's name's letters and all round them) */
+            int x0, y0, x1, y1;
+            if (kWords[i].cont != c || lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) continue;
+            unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+            if (!mm) continue;
+            ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 0, mm);
+            for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++) {
+                    if (x < ux0 || y < uy0 || x >= ux1 || y >= uy1) continue;
+                    unsigned char *o = U->px + 4 * ((unsigned)(y - uy0) * (unsigned)U->w + (unsigned)(x - ux0)) + 3;
+                    if (mm[(y - y0) * (x1 - x0) + (x - x0)] > *o) *o = mm[(y - y0) * (x1 - x0) + (x - x0)];
+                }
+            HeapFree(GetProcessHeap(), 0, mm);
+        }
+        U->ok = 1;
+    }
+}
+
+/* The continent's painting just made (g_parchPx; c its row, on map's continent) with its own name painted out (see
+ * above), the letters marked in its lines (Lc, kept from it just before) so a zone's outline may take them back: 1 when
+ * done, 0 (and the log says why) when it is left as the client paints it. */
+static int ParchContWords(int c, ParchLines *Lc)
+{
+    int map = g_pz[c].map, K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, T = g_parchTW;
+    char m[260];
+    if (map < 0 || map > 1 || !g_wordPic[map].ok || !g_wordUnder[map].ok) return 0;
+    const ParchPic *P = &g_wordPic[map], *U = &g_wordUnder[map];
+    ParchRect rc = ParchBox(c);
+    int Kw = g_worldK, ww = PARCH_MAP_W * Kw, wh = PARCH_MAP_H * Kw;
+    /* the world's texels for this painting's texel x, y: wx = ax + bx x, wy = ay + by y (on the kept piece U) */
+    float bx = (rc.x1 - rc.x0) / (float)pw / PARCH_WORLD_FW * (float)ww, ax = (rc.x0 + 0.5f * (rc.x1 - rc.x0) / (float)pw) / PARCH_WORLD_FW * (float)ww - 0.5f - (float)U->x0;
+    float by = (rc.y1 - rc.y0) / (float)ph / PARCH_WORLD_FH * (float)wh, ay = (rc.y0 + 0.5f * (rc.y1 - rc.y0) / (float)ph) / PARCH_WORLD_FH * (float)wh - 0.5f - (float)U->y0;
+    int rx0 = 1 << 30, ry0 = 1 << 30, rx1 = -1, ry1 = -1, words = 0;
+    for (int i = 0; i < PARCH_WORDS; i++) {                           /* the region: its own name's lines, the world's name's place */
+        int x0, y0, x1, y1;
+        if (lstrcmpiA(kWords[i].folder, g_pz[c].name)) continue;
+        if (!WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) { wsprintfA(m, "  the parchment: %s's own name does not fit its painting; left as the client paints it", g_pz[c].name); Log(m); return 0; }
+        words++;
+        if (x0 < rx0) rx0 = x0;
+        if (y0 < ry0) ry0 = y0;
+        if (x1 > rx1) rx1 = x1;
+        if (y1 > ry1) ry1 = y1;
+    }
+    if (!words) return 0;
+    {
+        int px0 = (int)(((float)(P->x0 - U->x0) - ax) / bx) - 1, py0 = (int)(((float)(P->y0 - U->y0) - ay) / by) - 1;   /* (the world's name) */
+        int px1 = (int)(((float)(P->x0 + P->w - U->x0) - ax) / bx) + 2, py1 = (int)(((float)(P->y0 + P->h - U->y0) - ay) / by) + 2;
+        if (px0 < rx0) rx0 = px0;
+        if (py0 < ry0) ry0 = py0;
+        if (px1 > rx1) rx1 = px1;
+        if (py1 > ry1) ry1 = py1;
+    }
+    int e = 3 * PARCH_WORD_MEAN * K / 2;
+    rx0 -= e; ry0 -= e; rx1 += e; ry1 += e;
+    if (rx0 < 0) rx0 = 0;
+    if (ry0 < 0) ry0 = 0;
+    if (rx1 > pw) rx1 = pw;
+    if (ry1 > ph) ry1 = ph;
+    int rw = rx1 - rx0, rh = ry1 - ry0;
+    unsigned char *A = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)rw * (SIZE_T)rh);
+    float *F = (float *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)rw * (SIZE_T)rh * 3 * sizeof(float));
+    if (!A || !F) { if (A) HeapFree(GetProcessHeap(), 0, A); if (F) HeapFree(GetProcessHeap(), 0, F); return 0; }
+    int good = 1;
+    for (int i = 0; i < PARCH_WORDS && good; i++) {                   /* its own letters */
+        int x0, y0, x1, y1;
+        if (lstrcmpiA(kWords[i].folder, g_pz[c].name) || !WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) continue;
+        unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+        float share = mm ? ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 0, mm) : 0;
+        if (!(share >= PARCH_WORD_FEW && share <= PARCH_WORD_MANY)) good = 0;
+        for (int y = y0; mm && y < y1; y++)
+            for (int x = x0; x < x1; x++) {
+                unsigned char v = mm[(y - y0) * (x1 - x0) + (x - x0)], *o = A + (y - ry0) * rw + (x - rx0);
+                if (v > *o) *o = v;
+            }
+        if (mm) HeapFree(GetProcessHeap(), 0, mm);
+    }
+    if (!good) {
+        wsprintfA(m, "  the parchment: %s's own name is not where it was measured; it and the world's are left as the client paints them", g_pz[c].name);
+        Log(m);
+        HeapFree(GetProcessHeap(), 0, A); HeapFree(GetProcessHeap(), 0, F);
+        return 0;
+    }
+    for (int y = 0; y < rh; y++)                                      /* the world's painting laid on, and its name's letters too */
+        for (int x = 0; x < rw; x++) {
+            float wx = ax + bx * (float)(rx0 + x), wy = ay + by * (float)(ry0 + y), s[4] = { 0, 0, 0, 0 };
+            int ix = wx < 0 ? -1 : (int)wx, iy = wy < 0 ? -1 : (int)wy;
+            float fx = wx - (float)ix, fy = wy - (float)iy;
+            for (int dy = 0; dy < 2; dy++)
+                for (int dx = 0; dx < 2; dx++) {
+                    int X = ix + dx, Y = iy + dy;
+                    X = X < 0 ? 0 : X >= U->w ? U->w - 1 : X; Y = Y < 0 ? 0 : Y >= U->h ? U->h - 1 : Y;
+                    const unsigned char *q = U->px + 4 * ((unsigned)Y * (unsigned)U->w + (unsigned)X);
+                    float k = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy);
+                    for (int ch = 0; ch < 4; ch++) s[ch] += k * q[ch];   /* (its alpha: the world's name's letters there) */
+                }
+            for (int ch = 0; ch < 3; ch++) F[3 * (y * rw + x) + ch] = s[ch];
+            unsigned char *o = A + y * rw + x;
+            if (s[3] > (float)*o) *o = (unsigned char)(int)(s[3] + 0.5f);
+        }
+    /* its own colours: each cell's mean of this painting and of the world's, where there are no letters, the difference
+     * softened between the cells and added to the world's */
+    int cs = 8 * K, nw = (rw + cs - 1) / cs, nh = (rh + cs - 1) / cs;
+    float *g = (float *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)nw * (SIZE_T)nh * 4 + (SIZE_T)(nw > nh ? nw : nh)) * sizeof(float));
+    if (!g) { HeapFree(GetProcessHeap(), 0, A); HeapFree(GetProcessHeap(), 0, F); return 0; }
+    for (int j = 0; j < nh; j++)
+        for (int i = 0; i < nw; i++) {
+            float d[3] = { 0, 0, 0 };
+            int n = 0;
+            for (int y = j * cs; y < (j + 1) * cs && y < rh; y++)
+                for (int x = i * cs; x < (i + 1) * cs && x < rw; x++) {
+                    if (A[y * rw + x] > 24) continue;
+                    const unsigned char *p = g_parchPx + 4 * ((unsigned)(ry0 + y) * (unsigned)T + (unsigned)(rx0 + x));
+                    for (int ch = 0; ch < 3; ch++) d[ch] += (float)p[ch] - F[3 * (y * rw + x) + ch];
+                    n++;
+                }
+            for (int ch = 0; ch < 3; ch++) g[3 * (j * nw + i) + ch] = n ? d[ch] / (float)n : 0;
+            g[3 * nw * nh + j * nw + i] = (float)n;
+        }
+    for (int pass = 0; pass < nw + nh; pass++) {                      /* cells with no samples: their neighbours' */
+        int empty = 0;
+        for (int j = 0; j < nh; j++)
+            for (int i = 0; i < nw; i++) {
+                if (g[3 * nw * nh + j * nw + i] > 0) continue;
+                float d[3] = { 0, 0, 0 };
+                int n = 0;
+                static const int di[4] = { -1, 1, 0, 0 }, dj[4] = { 0, 0, -1, 1 };
+                for (int k = 0; k < 4; k++) {
+                    int I = i + di[k], J = j + dj[k];
+                    if (I < 0 || J < 0 || I >= nw || J >= nh || !(g[3 * nw * nh + J * nw + I] > 0)) continue;
+                    for (int ch = 0; ch < 3; ch++) d[ch] += g[3 * (J * nw + I) + ch];
+                    n++;
+                }
+                if (!n) { empty++; continue; }
+                for (int ch = 0; ch < 3; ch++) g[3 * (j * nw + i) + ch] = d[ch] / (float)n;
+                g[3 * nw * nh + j * nw + i] = 0.5f;
+            }
+        if (!empty) break;
+    }
+    ParchBlur(g, nw, nh, 2, g + 3 * nw * nh);
+    for (int y = 0; y < rh; y++) {
+        float v = ((float)y + 0.5f) / (float)cs - 0.5f;
+        int j0 = v < 0 ? 0 : (int)v, j1 = j0 + 1 < nh ? j0 + 1 : j0;
+        float fy = v < 0 ? 0 : v - (float)j0;
+        for (int x = 0; x < rw; x++) {
+            int a = A[y * rw + x];
+            if (!a) continue;
+            float u = ((float)x + 0.5f) / (float)cs - 0.5f;
+            int i0 = u < 0 ? 0 : (int)u, i1 = i0 + 1 < nw ? i0 + 1 : i0;
+            float fx = u < 0 ? 0 : u - (float)i0, k = (float)a / 255;
+            unsigned char *p = g_parchPx + 4 * ((unsigned)(ry0 + y) * (unsigned)T + (unsigned)(rx0 + x));
+            for (int ch = 0; ch < 3; ch++) {
+                float d = (g[3 * (j0 * nw + i0) + ch] * (1 - fx) + g[3 * (j0 * nw + i1) + ch] * fx) * (1 - fy) +
+                          (g[3 * (j1 * nw + i0) + ch] * (1 - fx) + g[3 * (j1 * nw + i1) + ch] * fx) * fy;
+                p[ch] = (unsigned char)(int)FireClamp((float)p[ch] * (1 - k) + (F[3 * (y * rw + x) + ch] + d) * k + 0.5f, 0, 255);
+            }
+            if (Lc && Lc->m && Lc->w == pw && a > 64) Lc->m[(ry0 + y) * pw + rx0 + x] |= CUT_WORD;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, g); HeapFree(GetProcessHeap(), 0, A); HeapFree(GetProcessHeap(), 0, F);
+    return 1;
+}
+#ifndef PARCH_UPPIC
+#define PARCH_UPPIC ParchUpPic                /* (the tests and the harness keep the picture instead of OpenGL) */
+#endif
+static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th);
+/* The continent's painting just made (g_parchPx, row c): its own lines kept (for its zones' outlines), its own name
+ * painted out (the world's the one), and it cut to its land as the world's painting draws it (seeds: its zones' boxes'
+ * middles; the plain band at its edges when none holds, and why). 1 when its name was painted out. */
+static int ParchContMade(int c, const char **why)
+{
+    ParchLinesKeep(&g_linesCont, ParchBox(c), c, 1);
+    int words = g_worldUp && ParchContWords(c, &g_linesCont);
+    g_contWords = words ? c : -1;
+    static float cseeds[2 * PARCH_ZONES];
+    int cn = 0;
+    for (int i = 0; g_linesWorld.m && i < g_pzN && cn < PARCH_ZONES; i++) {
+        if (g_pz[i].map != g_pz[c].map || !g_pz[i].area) continue;
+        ParchRect b = ParchBox(i);
+        cseeds[2 * cn] = 0.5f * (b.x0 + b.x1) / PARCH_WORLD_FW * (float)g_linesWorld.w;
+        cseeds[2 * cn + 1] = 0.5f * (b.y0 + b.y1) / PARCH_WORLD_FH * (float)g_linesWorld.h;
+        cn++;
+    }
+    *why = "no world's painting under it";
+    g_contShare = 0;
+    g_contCut = g_worldUp && cn && ParchCut(&g_linesWorld, ParchBox(c), cseeds, cn, 1, &g_contShare, why);
+    return words;
+}
+/* The zone's painting just made (g_parchPx, row z on continent row c; the arrival's spot fx, fy on the frame): cut to its
+ * own area as its continent's painting draws it (g_zoneCut; the plain band at its edges when none holds, and why). */
+static void ParchZoneMade(int z, int c, float fx, float fy, const char **why)
+{
+    float zseeds[2 * PARCH_CUT_SEEDS];
+    int zn = g_linesCont.m && g_linesCont.row == c ? CutZoneSeeds(&g_linesCont, ParchBox(z), g_pz[z].id, fx, fy, zseeds) : 0;
+    *why = "its continent's painting is not under it";
+    g_zoneShare = 0;
+    g_zoneCut = zn && ParchCut(&g_linesCont, ParchBox(z), zseeds, zn, 0, &g_zoneShare, why);
+}
 static struct { int world, cont, zone; } g_ptry;     /* tried (once a session; this arrival's), so a failure is not tried again */
 static unsigned char g_pbits[EXPLORED_BYTES], g_pmadeBits[EXPLORED_BYTES];
 static LONG g_pbitsSeq = -1, g_pmadeKnown = -1;
@@ -8858,11 +9765,17 @@ static void ParchWork(DWORD now)
             wsprintfA(m, "  the parchment: the world could not be painted (%s); each glide opens on its continent's painting", why); Log(m);
         } else {
             g_worldTW = g_parchTW; g_worldK = g_parchK;
+            ParchLinesKeep(&g_linesWorld, ParchWorldRect(), -2, 2);     /* (its coasts: the continents' outlines) */
+            int conts[2] = { ParchContinent(0), ParchContinent(1) };
+            ParchWorldWords(conts);                                     /* (its two names, cut out) */
             if (C) ParchLowKeep(&g_lpWorld, ParchWorldRect(), -2);
             if (PARCH_UP(VT_PWORLD)) {
                 g_worldUp = 1; g_worldAt = now;
-                wsprintfA(m, "  the parchment: the world painted from the client's map (%d-px tiles) in %lu ms, the opening over the Maelstrom",
-                          256 * g_worldK, (unsigned long)(ViewNow() - t0)); Log(m);
+                for (int k = 0; k < 2; k++)
+                    g_wordUp[k] = g_wordPic[k].ok && PARCH_UPPIC(VT_PWORD0 + k, &g_wordPic[k], &g_wordTW[k], &g_wordTH[k]);
+                wsprintfA(m, "  the parchment: the world painted from the client's map (%d-px tiles) in %lu ms, the opening over the Maelstrom; "
+                          "its names cut out to stay put: Eastern Kingdoms %s, Kalimdor %s", 256 * g_worldK, (unsigned long)(ViewNow() - t0),
+                          g_wordUp[0] ? "yes" : "no", g_wordUp[1] ? "yes" : "no"); Log(m);
             } else Log("  the parchment: OpenGL would not take the world's painting; each glide opens on its continent's painting");
         }
         ParchFree();
@@ -8890,13 +9803,18 @@ static void ParchWork(DWORD now)
         if (!ParchMake(c, &why)) { wsprintfA(m, "  the parchment: %s could not be painted (%s); the glide goes on without it", g_pz[c].name, why); Log(m); }
         else {
             g_contTW = g_parchTW; g_contK = g_parchK;
+            const char *cwhy = "";
+            int words = ParchContMade(c, &cwhy);
             if (C && !g_worldUp) ParchLowKeep(&g_lpCont, ParchBox(c), c);   /* (the zone's colours: the world's, else its continent's) */
             if (PARCH_UP(VT_PARCH2)) {
                 g_parchCont = c; g_contAt = now;
                 if (C && g_lpWorld.ok && ParchMatch(&g_lpWorld, ParchBox(c)) && PARCH_UP(VT_PCONTM)) { g_contMatch = c; g_contMAt = now; }
-                wsprintfA(m, "  the parchment: %s painted (%d-px tiles) in %lu ms%s", g_pz[c].name, 256 * g_contK, (unsigned long)(ViewNow() - t0),
-                          C ? (g_contMatch == c ? ", and its copy in the world's colours" : ", but not its copy in the world's colours") : "");
+                wsprintfA(m, "  the parchment: %s painted (%d-px tiles) in %lu ms%s; its own name %s; %s", g_pz[c].name, 256 * g_contK,
+                          (unsigned long)(ViewNow() - t0),
+                          C ? (g_contMatch == c ? ", and its copy in the world's colours" : ", but not its copy in the world's colours") : "",
+                          words ? "painted out (the world's stays, in its place)" : "left as painted", g_contCut ? "cut to its land as the world's painting draws it" : "its edges the plain band");
                 Log(m);
+                if (!g_contCut) { wsprintfA(m, "  the parchment: %s not cut to its land: %s", g_pz[c].name, cwhy); Log(m); }
             } else Log("  the parchment: OpenGL would not take the continent's painting; the glide goes on without it");
         }
         ParchFree();
@@ -8912,6 +9830,14 @@ static void ParchWork(DWORD now)
         else {
             int pieces = g_parchPieces, all = g_parchAll;
             g_zoneTW = g_parchTW; g_zoneK = g_parchK;
+            float fx, fy;
+            const char *zwhy = "";
+            ParchSpot(map, x, y, &fx, &fy);
+            ParchZoneMade(z, c, fx, fy, &zwhy);
+            if (g_zoneCut) { wsprintfA(m, "  the parchment: %s cut to its own area as %s's painting draws it (%d%% of its painting%s), grown %d texels", g_pz[z].name,
+                                       c >= 0 ? g_pz[c].name : "its continent", (int)(100 * g_zoneShare + 0.5f), g_cutBoxed ? "; its outline leaked, kept to its own box" : "",
+                                       PARCH_CUT_GROW * g_zoneK / 2); Log(m); }
+            else { wsprintfA(m, "  the parchment: %s not cut to its own area (%s): the plain band at its edges", g_pz[z].name, zwhy); Log(m); }
             if (PARCH_UP(VT_PARCH)) {
                 g_parchZone = z; g_zoneAt = now; g_pmadeKnown = known;
                 for (int i = 0; i < EXPLORED_BYTES; i++) g_pmadeBits[i] = g_pbits[i];
@@ -9348,6 +10274,51 @@ static int ParchUp(int slot)
     return !gl.GetError();
 }
 
+/* A picture (P: w x h RGBA) given to OpenGL in slot, on a texture as many texels as the powers of two holding it (its
+ * last column and row carried on to its edges), with its smaller copies: 1 when it took it, its size in *tw, *th. */
+static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th)
+{
+    int W = 1, H = 1;
+    while (W < P->w) W <<= 1;
+    while (H < P->h) H <<= 1;
+    if (!P->ok || !P->px || W > g_view.maxTex || H > g_view.maxTex) return 0;
+    unsigned *buf = (unsigned *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)W * (SIZE_T)H * 4 * 2);
+    if (!buf) return 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            buf[y * W + x] = *(const unsigned *)(const void *)(P->px + 4 * ((unsigned)(y < P->h ? y : P->h - 1) * (unsigned)P->w + (unsigned)(x < P->w ? x : P->w - 1)));
+    while (gl.GetError()) {}
+    if (!g_viewTex[slot]) gl.GenTextures(1, &g_viewTex[slot]);
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    int w = W, h = H, level = 0;
+    unsigned *cur = buf, *next = buf + W * H;
+    for (;;) {
+        gl.TexImage2D(GL_TEXTURE_2D_, level, GL_RGBA8_, w, h, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, cur);
+        if (w == 1 && h == 1) break;
+        int nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
+        for (int y = 0; y < nh; y++)
+            for (int x = 0; x < nw; x++) {
+                const unsigned char *a = (const unsigned char *)(cur + (2 * y < h ? 2 * y : h - 1) * w + (2 * x < w ? 2 * x : w - 1));
+                const unsigned char *b = (const unsigned char *)(cur + (2 * y < h ? 2 * y : h - 1) * w + (2 * x + 1 < w ? 2 * x + 1 : w - 1));
+                const unsigned char *c = (const unsigned char *)(cur + (2 * y + 1 < h ? 2 * y + 1 : h - 1) * w + (2 * x < w ? 2 * x : w - 1));
+                const unsigned char *d = (const unsigned char *)(cur + (2 * y + 1 < h ? 2 * y + 1 : h - 1) * w + (2 * x + 1 < w ? 2 * x + 1 : w - 1));
+                unsigned char *o = (unsigned char *)(next + y * nw + x);
+                for (int k = 0; k < 4; k++) o[k] = (unsigned char)((a[k] + b[k] + c[k] + d[k] + 2) / 4);
+            }
+        unsigned *t = cur; cur = next; next = t;
+        w = nw; h = nh; level++;
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, level);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_MIPMAP_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    *tw = W; *th = H;
+    return !gl.GetError();
+}
+
 /* The sky's picture (VT_SKY), made here and given anew as each is finished (CloudUpload): CLOUD_TEX_W x CLOUD_TEX_H,
  * premultiplied, smooth between its texels. 0 when OpenGL would not take it (the view then has no weather). */
 static int ViewSkyUp(void)
@@ -9765,6 +10736,7 @@ static void ViewStart(void)
 static void ViewStart(void) {}
 static DWORD ViewNow(void) { return GetTickCount(); }
 static int ParchUp(int slot) { (void)slot; return 0; }      /* (no OpenGL here: the tests' PARCH_UP keeps the painting) */
+static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th) { (void)slot; (void)P; *tw = *th = 0; return 0; }
 #endif
 
 /* ---- the ending's drawing, on the game's own device (see BLUR_MS) ----
