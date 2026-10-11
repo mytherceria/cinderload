@@ -7,8 +7,10 @@ Usage: STORMLIB=/path/to/libstorm.so python3 make_pack.py <client Data dir> <out
        [--test-continents] [--art <map file>] [--bar <dir>] [--fire-bars <dir> --bar-map <file>] [--reveal]
        [--wallpapers <file>] [--drift] [--map <world png> <map.txt>] [--sea <sheet png> <sea.bin>] [--labels <sheet png> <labels.txt>]
        [--logo <logo png> <logo.txt>] [--marks <marks png> <marks.txt>] [--glow <glow png> <glow.txt> <glow.bin>]
-       [--waves <wave tile png>] [--flow <flow png> <flow.bin>]
+       [--waves <wave tile png>] [--flow <flow png> <flow.bin>] [--panel <dir>]
    e.g. ... make_pack.py ~/Games/RavenCraft-fogtest/Data out 21x9 5120 2160 --test-continents
+  --panel <dir>      the /cinderload window's pictures (tools/make_panel_art.py makes them), every one of them, packed
+                     as Interface\CinderLoad\<name>.blp, where the window loads them
 
 The loading bar's fire for each screen (CinderLoad.dll picks the bar by the screen's picture; both options or neither):
   --fire-bars <dir>  one folder per fire family, named for it in letters and digits (fel, arcane, aqua, ...), each
@@ -287,6 +289,14 @@ if __name__ == '__main__':
             if n.lower().startswith('loading-bar') and n.lower().endswith('.blp'):
                 files.append((os.path.join(bar, n), 'Interface\\Glues\\LoadingBar\\' + n))
     files += fire
+    if '--panel' in sys.argv:                           # the /cinderload window's pictures, all of them or none
+        from make_panel_art import NAMES
+        panel = os.path.expanduser(sys.argv[sys.argv.index('--panel') + 1])
+        for name in sorted(NAMES):
+            src = os.path.join(panel, name + '.blp')
+            if not os.path.isfile(src):
+                raise SystemExit(f'--panel: no {name}.blp in {panel} (tools/make_panel_art.py makes them)')
+            files.append((src, 'Interface\\CinderLoad\\' + name + '.blp'))
     if REVEAL:
         note = os.path.join(blps, 'reveal.txt')
         with open(note, 'w') as f:
