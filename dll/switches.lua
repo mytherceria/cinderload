@@ -244,7 +244,8 @@ end
 function CL.Picture(t, name)
     if not t:SetTexture(CL.ART .. name) then t:SetTexture(0.08, 0.08, 0.09, 1) end
 end
--- a section's box (the tooltip's border, darker inside) and its gold title over it
+-- a section's box (the tooltip's border, darker inside) and its gold title over it; what follows is made in it (its
+-- child: a child frame is drawn over its parent's own art, so nothing in the box is ever under the box's backdrop)
 function CL.Box(x, y, w, h, title)
     local b = CreateFrame("Frame", nil, CL.panel)
     CL.At(b, x, y, w, h)
@@ -252,17 +253,18 @@ function CL.Box(x, y, w, h, title)
     b:SetBackdropColor(0.11, 0.11, 0.118, 0.92)
     b:SetBackdropBorderColor(0.8, 0.8, 0.8)
     CL.Text(CL.panel, x + 6, y - 4, title, 14, 1, "ld")
+    CL.host = b
     return b
 end
 function CL.Line(x, y, w)
-    local l = CreateFrame("Frame", nil, CL.panel)
+    local l = CreateFrame("Frame", nil, CL.host)
     CL.At(l, x, y, w, 4)
     l:SetBackdrop(CL.LINE)
     l:SetBackdropBorderColor(0.5, 0.5, 0.5)
 end
 -- a picture in a thin frame, clicked to choose it; chosen, its frame gold (CL.Card's frame redrawn by CL.Refresh)
 function CL.Card(x, y, w, h, art, key, value)
-    local b = CreateFrame("Button", nil, CL.panel)
+    local b = CreateFrame("Button", nil, CL.host)
     CL.At(b, x, y, w, h)
     b:EnableMouse(1)
     local t = b:CreateTexture(nil, "ARTWORK")
@@ -280,7 +282,7 @@ function CL.Card(x, y, w, h, art, key, value)
     return c
 end
 function CL.Radio(x, y, key, value, label)
-    local r = CreateFrame("CheckButton", "CinderLoadPanel" .. key .. value, CL.panel, "UIRadioButtonTemplate")
+    local r = CreateFrame("CheckButton", "CinderLoadPanel" .. key .. value, CL.host, "UIRadioButtonTemplate")
     CL.At(r, x, y, 18, 18)
     local fs = getglobal(r:GetName() .. "Text")
     fs:SetFont(CL.FONT, 13)
@@ -288,6 +290,7 @@ function CL.Radio(x, y, key, value, label)
     fs:SetText(label)
     fs:ClearAllPoints()
     fs:SetPoint("LEFT", r, "RIGHT", 6, 0)
+    fs:SetJustifyH("LEFT")
     r:SetScript("OnClick", CL.Safe("radio", function()
         PlaySound("igMainMenuOptionCheckBoxOn")
         CL.Set(key, value)
@@ -296,7 +299,7 @@ function CL.Radio(x, y, key, value, label)
     return r
 end
 function CL.Check(x, y, size, name, label, fn)
-    local c = CreateFrame("CheckButton", "CinderLoadPanel" .. name, CL.panel, "UICheckButtonTemplate")
+    local c = CreateFrame("CheckButton", "CinderLoadPanel" .. name, CL.host, "UICheckButtonTemplate")
     CL.At(c, x, y, size, size)
     local fs = getglobal(c:GetName() .. "Text")
     fs:SetFont(CL.FONT, 13)
@@ -304,6 +307,7 @@ function CL.Check(x, y, size, name, label, fn)
     fs:SetText(label)
     fs:ClearAllPoints()
     fs:SetPoint("LEFT", c, "RIGHT", 4, 0)
+    fs:SetJustifyH("LEFT")
     c:SetScript("OnClick", CL.Safe("check " .. name, function()
         if c:GetChecked() then PlaySound("igMainMenuOptionCheckBoxOn") else PlaySound("igMainMenuOptionCheckBoxOff") end
         fn(c:GetChecked() and 1 or nil)
@@ -311,7 +315,7 @@ function CL.Check(x, y, size, name, label, fn)
     return c
 end
 function CL.Slider(x, y, w, key, label, low, high)
-    local s = CreateFrame("Slider", "CinderLoadPanel" .. key .. "Slider", CL.panel, "OptionsSliderTemplate")
+    local s = CreateFrame("Slider", "CinderLoadPanel" .. key .. "Slider", CL.host, "OptionsSliderTemplate")
     CL.At(s, x, y + 20, w, 17)
     local r = CL.range[key]
     s:SetMinMaxValues(r[1], r[2])
@@ -323,6 +327,7 @@ function CL.Slider(x, y, w, key, label, low, high)
     t:SetText(label)
     t:ClearAllPoints()
     t:SetPoint("TOPLEFT", s, "TOPLEFT", 0, 20)
+    t:SetJustifyH("LEFT")
     for _, e in ipairs({ { "Low", low, "TOPLEFT", 2 }, { "High", high, "TOPRIGHT", -2 } }) do
         local fs = getglobal(n .. e[1])
         fs:SetFont(CL.FONT, 12)
@@ -330,6 +335,7 @@ function CL.Slider(x, y, w, key, label, low, high)
         fs:SetText(e[2])
         fs:ClearAllPoints()
         fs:SetPoint(e[3], s, "BOTTOM" .. string.sub(e[3], 4), e[4], -4)
+        fs:SetJustifyH(string.sub(e[3], 4))
     end
     local v = s:CreateFontString(n .. "Value", "OVERLAY", "GameFontNormal")
     v:SetFont(CL.FONT, 13)
@@ -345,7 +351,7 @@ function CL.Slider(x, y, w, key, label, low, high)
     return s
 end
 function CL.PanelButton(x, y, name, label, fn)
-    local b = CreateFrame("Button", "CinderLoadPanel" .. name, CL.panel, "UIPanelButtonTemplate")
+    local b = CreateFrame("Button", "CinderLoadPanel" .. name, CL.host, "UIPanelButtonTemplate")
     CL.At(b, x, y, 120, 26)
     b:SetText(label)
     local fs = getglobal(b:GetName() .. "Text")
@@ -360,6 +366,7 @@ function CL.Build()
     p = CreateFrame("Frame", "CinderLoadPanel", UIParent)
     CL.panel = p
     CL.ui = { cards = {}, radios = {}, sliders = {}, effects = {}, qualities = {} }
+    CL.host = p
     p:Hide()
     p:SetWidth(CL.W)
     p:SetHeight(CL.H)
@@ -383,17 +390,17 @@ function CL.Build()
     head:SetScript("OnDragStop", CL.Safe("drop", function() p:StopMovingOrSizing() end))
     local u = { 59, 79, 176, 196 }
     for i = 1, 3 do
-        local t = head:CreateTexture(nil, "ARTWORK")
+        local t = head:CreateTexture(nil, "BACKGROUND")
         t:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header")
         t:SetTexCoord(u[i] / 256, u[i + 1] / 256, 0, 40 / 64)
         local x, w = 0, 24
         if i == 2 then x, w = 24, 152 elseif i == 3 then x, w = 176, 24 end
         CL.At(t, x, 0, w, 48, nil, head)
     end
-    local plate = head:CreateTexture(nil, "OVERLAY")
+    local plate = head:CreateTexture(nil, "BORDER")
     plate:SetTexture(0, 0, 0, 0.55)
     CL.At(plate, 8.4, 10.8, 183.2, 26.4, nil, head)
-    CL.ui.title = CL.Text(p, W / 2, 8.5, "CinderLoad", 18, 1, "mm", CL.TITLEFONT)
+    CL.ui.title = CL.Text(head, W / 2, 8.5, "CinderLoad", 18, 1, "mm", CL.TITLEFONT)      -- (the header's own: over it)
     local close = CreateFrame("Button", "CinderLoadPanelClose", p, "UIPanelCloseButton")
     CL.At(close, W - 36, 4, 32, 32)
     close:SetScript("OnClick", CL.Safe("close", function() p:Hide() end))
@@ -406,7 +413,7 @@ function CL.Build()
     CL.Radio(L + 14, 184, "map", "parchment", "Parchment")
     CL.Radio(L + 176, 184, "map", "satellite", "Satellite")
     CL.Line(L + 10, 214, CW - 20)
-    CL.Text(p, L + 14, 226, "Map areas, on the parchment", 13, 1)
+    CL.Text(CL.host, L + 14, 226, "Map areas, on the parchment", 13, 1)
     CL.Radio(L + 14, 250, "areas", "discovered", "Discovered")
     CL.Radio(L + 176, 250, "areas", "full", "Full map")
     CL.Line(L + 10, 278, CW - 20)
@@ -419,10 +426,10 @@ function CL.Build()
     CL.Radio(L + 14, 440, "bar", "retro", "Retro")
     CL.Radio(L + 176, 440, "bar", "neo", "Neo")
     CL.ui.words = {
-        CL.Text(p, L + 14, 474, "Retro: the game's own bar, in your class's colour.", 12),
-        CL.Text(p, L + 14, 494, "Neo: a blade of light in a metal frame, edge to edge,", 12),
-        CL.Text(p, L + 14, 512, "the RavenCraft logo on it.", 12) }
-    CL.ui.neoTitle = CL.Text(p, L + 14, 470, "Neo's qualities, any of them", 13, 1)
+        CL.Text(CL.host, L + 14, 474, "Retro: the game's own bar, in your class's colour.", 12),
+        CL.Text(CL.host, L + 14, 494, "Neo: a blade of light in a metal frame, edge to edge,", 12),
+        CL.Text(CL.host, L + 14, 512, "the RavenCraft logo on it.", 12) }
+    CL.ui.neoTitle = CL.Text(CL.host, L + 14, 470, "Neo's qualities, any of them", 13, 1)
     for i, o in ipairs(CL.qualities) do
         local value = o.value
         local x, y = L + 14, 490
@@ -447,14 +454,14 @@ function CL.Build()
     for i, o in ipairs(CL.effects) do
         local x = R + 16 + (i - 1) * 106
         CL.ui.effects[o.value] = CL.Card(x, 312, 96, 24, "Panel" .. string.upper(string.sub(o.value, 1, 1)) .. string.sub(o.value, 2), "effect", o.value)
-        CL.Text(p, x + 48, 342, o.text, 12, nil, "ma")
+        CL.Text(CL.host, x + 48, 342, o.text, 12, nil, "ma")
     end
     CL.ui.colour = CL.Check(R + 14, 362, 28, "Colour", "In my class's colour", function(on) CL.Set("ember", not on or nil) end)
 
     -- Preview: the bottom of the screen in miniature, the bar at the chosen thickness and width (a still for now)
     CL.Box(R, 436, CW, 112, "Preview")
     CL.Text(p, R + CW - 4, 432, "a still here; it moves in game", 12, nil, "rd")
-    local strip = CreateFrame("Frame", "CinderLoadPanelPreview", p)
+    local strip = CreateFrame("Frame", "CinderLoadPanelPreview", CL.host)
     CL.At(strip, R + 12, 448, CW - 24, 88)
     local ground = strip:CreateTexture(nil, "BACKGROUND")
     ground:SetAllPoints(strip)
@@ -465,6 +472,7 @@ function CL.Build()
     edge:SetBackdrop(CL.FRAME8)
     edge:SetBackdropBorderColor(0.75, 0.75, 0.75)
 
+    CL.host = p
     CL.PanelButton(L + 4, CL.H - 40, "Defaults", "Defaults", function()
         PlaySound("igMainMenuOptionCheckBoxOn")
         CL.Defaults()

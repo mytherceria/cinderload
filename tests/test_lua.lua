@@ -206,8 +206,10 @@ Check(table.getn(htex) == 3 and htex[1].texture == "Interface\\DialogFrame\\UI-D
       Near(htex[1].texcoord[1], 59 / 256) and Near(htex[3].texcoord[2], 196 / 256) and head.drag == "LeftButton" and head.mouse,
       "the title: the client's dialog header in three (its caps kept, its middle stretched), 200 wide over the top edge, dragged by the left button")
 local title = env.CinderLoad.ui.title
-Check(title.text == "CinderLoad" and title.fontFile == "Fonts\\MORPHEUS.TTF" and title.size == 18 and title.color[1] == 1 and Near(title.color[2], 0.82),
-      "its word, \"CinderLoad\", in the client's MORPHEUS at 18, gold")
+local layered = title.parent == head and title.layer == "OVERLAY"
+for _, k in ipairs(head.kids) do if k.kind == "Texture" and k.layer == "OVERLAY" then layered = false end end
+Check(title.text == "CinderLoad" and title.fontFile == "Fonts\\MORPHEUS.TTF" and title.size == 18 and title.color[1] == 1 and Near(title.color[2], 0.82) and layered,
+      "its word, \"CinderLoad\", in the client's MORPHEUS at 18, gold, the header's own and over its art and its darker plate (drawn after them)")
 Check(At(P("Close"), 724, 4, 32, 32) and P("Close").kind == "Button" and env[P("Close").name] and
       (function() for _, k in ipairs(P("Close").kids) do if k.role == "normal" then return k.texture == "Interface\\Buttons\\UI-Panel-MinimizeButton-Up" end end end)(),
       "the close X: the client's UIPanelCloseButton at the top right")
@@ -244,6 +246,26 @@ Check(P("nearbySlider").backdrop.edgeFile == "Interface\\Buttons\\UI-SliderBar-B
       "Interface\\Buttons\\UI-SliderBar-Button-Horizontal" and env[P("Defaults").name .. "Text"].text == "Defaults" and
       env[P("CloseButton").name .. "Text"].text == "Close" and env[P("Whole").name .. "Text"].text == "Whole width of the screen",
       "the client's own: OptionsSliderTemplate's bar and thumb, UIPanelButtonTemplate's red buttons, UICheckButtonTemplate's box")
+-- what lies inside a box is drawn over it: the box's own child (a frame's children are drawn over all of its own art,
+-- so a word or control of the window's own inside a box would be under the box's backdrop)
+local boxes, under = {}, ""
+for _, f in ipairs(world.made) do
+    if f.backdrop and f.backdrop.edgeFile == "Interface\\Tooltips\\UI-Tooltip-Border" and f.backdrop.edgeSize == 16 then table.insert(boxes, f) end
+end
+for _, f in ipairs(world.made) do
+    local q = not f.blizzard and f ~= p and (f.kind ~= "Texture") and PB(f)
+    if q and f:IsVisible() then
+        for _, b in ipairs(boxes) do
+            local bq = PB(b)
+            if q.l >= bq.l and q.r <= bq.r and q.t >= bq.t and q.b <= bq.b and f ~= b then
+                local a = f.parent
+                while a and a ~= b do a = a.parent end
+                if not a then under = under .. " " .. tostring(f.name or f.text or f.kind) end
+            end
+        end
+    end
+end
+Check(table.getn(boxes) == 5 and under == "", "the five sections' boxes, and everything inside each is drawn over it, never under its backdrop:" .. under)
 -- the choice held, shown
 local function Shows(map, areas, bar)
     return P("map" .. map):GetChecked() and not P("map" .. (map == "parchment" and "satellite" or "parchment")):GetChecked() and
@@ -505,17 +527,13 @@ Fresh({ cvar = false })
 ok, err = Run(setupSrc)
 Check(ok and env.CinderLoad.broken and Said("turned itself off"), "no CVar: the chunk never raises; off, and the chat says why")
 
--- for the picture: the window's frame tree as the harness holds it (tools/render_panel.py draws it with the client's art)
-if opt.layout then
-    Fresh({ cvar = "?" })
-    Run(setupSrc)
-    Slash("")
-    UI.Slide(P("nearbySlider"), 600)
-    UI.Slide(P("thickSlider"), 125)
-    UI.Slide(P("widthSlider"), 50)
-    local f = io.open(opt.layout, "w")
+-- for the picture: the window's frame tree as the harness holds it (tools/render_panel.py draws it with the client's
+-- art): as the mockup shows it (600 yards, 125%, 50%), and (neolayout=) with the satellite and Neo picked
+local function Dump(path)
+    local f = io.open(path, "w")
     local function Q(v) if v == nil then return "" end; return string.gsub(tostring(v), "[\t\n]", " ") end
     local function L(t) if not t then return "" end; local o = {}; for i = 1, table.getn(t) do o[i] = Q(t[i]) end; return table.concat(o, " ") end
+    for _, r in ipairs(world.made) do r.id0 = nil end
     for i, r in ipairs(world.made) do
         local l, b, rr, t = UI.Rect(r)
         local bdp = r.backdrop
@@ -524,10 +542,26 @@ if opt.layout then
                                Q(r.text), Q(r.fontFile or (r.kind == "FontString" and "Fonts\\FRIZQT__.TTF" or nil)), Q(r.size), Q(r.justifyH),
                                r.checked and "1" or "0", bdp and Q(bdp.bgFile) or "", bdp and Q(bdp.edgeFile) or "", bdp and Q(bdp.edgeSize) or "",
                                bdp and bdp.insets and L({ bdp.insets.left, bdp.insets.right, bdp.insets.top, bdp.insets.bottom }) or "",
-                               L(r.backdropColor), L(r.backdropBorderColor), Q(r.min), Q(r.max), Q(r.value), Q(r:GetEffectiveScale()) }, "\t") .. "\n")
+                               L(r.backdropColor), L(r.backdropBorderColor), Q(r.min), Q(r.max), Q(r.value), Q(r:GetEffectiveScale()),
+                               Q(table.getn(r.points or {}) == 1 and r.points[1].p or "") }, "\t") .. "\n")
         r.id0 = i
     end
     f:close()
+end
+if opt.layout then
+    Fresh({ cvar = "?" })
+    Run(setupSrc)
+    Slash("")
+    UI.Slide(P("nearbySlider"), 600)
+    UI.Slide(P("thickSlider"), 125)
+    UI.Slide(P("widthSlider"), 50)
+    Dump(opt.layout)
+    if opt.neolayout then
+        UI.Click(P("mapsatellite"))
+        UI.Click(P("barneo"))
+        UI.Click(P("QualityLiquid"))
+        Dump(opt.neolayout)
+    end
 end
 
 print(string.format("done %d %d", checks, fails))
