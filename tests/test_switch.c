@@ -5647,6 +5647,29 @@ static void TestParchment(void)
     g_makeBits = NULL;
     ok &= ParchMake(1, &why) && g_parchPieces == 1 && g_parchAll == 1 && TestPx(110, 60)[1] == 255;
     Check(ok, "the parchment's painting: the pieces this screen's character has not found left blank, every piece when its explored areas are not known");
+    /* the map's areas (his words, 11 Oct: "a switch that turns on the full map as though it were fully discovered, but it
+     * should default to only what they've discovered"): the work paints the zone as the choice stood as its screen opened */
+    {
+        int dirs = g_mapDirN;
+        g_mapDirN = 0; g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_parchCont = 0; g_parchZone = -1; g_pmadeKnown = -1; g_pmadeFull = -1;
+        g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_destZOk = 0;
+        memset(g_scrBits, 0, EXPLORED_BYTES); g_scrKnown = 1; g_scrSeq++;
+        g_upN = 0; g_upFail = 0;
+        g_parchFullOn = 0; g_viewScreen = 40;
+        ParchWork(1000);
+        ok = g_parchZone == 1 && g_upN == 1 && g_parchPieces == 0 && LogSays("0 of its 1 overlay pieces, the rest not found by this character");
+        g_parchFullOn = 1; g_viewScreen = 41;                           /* (the next screen, the full map chosen) */
+        ParchWork(2000);
+        ok &= g_parchZone == 1 && g_upN == 2 && LogSays("1 of its 1 overlay pieces, the full map chosen");
+        g_viewScreen = 42;                                               /* (the same choice: nothing painted again) */
+        ParchWork(3000);
+        ok &= g_upN == 2;
+        g_parchFullOn = 0; g_viewScreen = 43;                           /* (back to what was discovered) */
+        ParchWork(4000);
+        ok &= g_upN == 3 && g_parchZone == 1;
+        g_scrKnown = 0; g_scrSeq++; g_mapDirN = dirs; g_parchOn = 0; g_destMap = -1; g_parchCont = -1; g_parchZone = -1;
+        Check(ok, "the map's areas (his switch): discovered, the zone painted with only the pieces this character has found; the full map, every piece as though found; the zone painted again when the choice changes, not when it stays");
+    }
     for (int i = 0; i < 12; i++) free((void *)tdata[i]);
     for (int i = 0; i < 2; i++) free((void *)pdata[i]);
 
@@ -7351,27 +7374,30 @@ static void TestExplore(void)
 #define STYLE_REL "Data/CinderLoad/style.txt"
 static void TestStyle(void)
 {
-    int ok, map, bar;
-    map = bar = -1;
-    ok = StyleParse("map parchment\r\nbar retro\r\n", &map, &bar) == 2 && map == 1 && bar == 1;
-    map = bar = -1;
-    ok &= StyleParse("MAP Satellite\tbar NEO", &map, &bar) == 2 && map == 0 && bar == 0;
-    map = bar = 7;
-    ok &= StyleParse("# map: parchment or satellite, bar: retro or neo\nbar neo\n", &map, &bar) == 1 && map == 7 && bar == 0;
-    map = bar = 7;
-    ok &= StyleParse("?", &map, &bar) == 0 && StyleParse("parchments retroneo neon sat", &map, &bar) == 0 &&
-          StyleParse(NULL, &map, &bar) == 0 && map == 7 && bar == 7;
-    ok &= StyleParse("map=satellite,bar=neo fault", &map, &bar) == 2 && map == 0 && bar == 0;
-    char v[32];
-    StyleValue(v, 1, 0);
-    ok &= !strcmp(v, "parchment neo");
-    StyleValue(v, 0, 1);
-    ok &= !strcmp(v, "satellite retro");
-    Check(ok, "the style's words: parchment or satellite, retro or neo, in any case, whole words only, a note after '#' passed over; the CVar's value \"parchment neo\"");
+    int ok, map, bar, full;
+    map = bar = full = -1;
+    ok = StyleParse("map parchment\r\nbar retro\r\nareas discovered\r\n", &map, &bar, &full) == 3 && map == 1 && bar == 1 && full == 0;
+    map = bar = full = -1;
+    ok &= StyleParse("MAP Satellite\tbar NEO areas FULL", &map, &bar, &full) == 3 && map == 0 && bar == 0 && full == 1;
+    map = bar = full = 7;
+    ok &= StyleParse("# map: parchment or satellite, bar: retro or neo, areas: discovered or full\nbar neo\n", &map, &bar, &full) == 1 &&
+          map == 7 && bar == 0 && full == 7;
+    map = bar = full = 7;
+    ok &= StyleParse("?", &map, &bar, &full) == 0 && StyleParse("parchments retroneo neon sat fully discover", &map, &bar, &full) == 0 &&
+          StyleParse(NULL, &map, &bar, &full) == 0 && map == 7 && bar == 7 && full == 7;
+    ok &= StyleParse("map=satellite,bar=neo fault", &map, &bar, &full) == 2 && map == 0 && bar == 0 && full == 7;
+    char v[48];
+    StyleValue(v, 1, 0, 0);
+    ok &= !strcmp(v, "parchment neo discovered");
+    StyleValue(v, 0, 1, 1);
+    ok &= !strcmp(v, "satellite retro full");
+    Check(ok, "the style's words: parchment or satellite, retro or neo, discovered or full, in any case, whole words only, a note after '#' passed over; the CVar's value \"parchment neo discovered\"");
 
     Fresh("style-none"); GameDir();
     StyleLoad();
-    ok = g_parchAsked == 1 && g_vbarAsked == 1 && LogSays("style: the map parchment, the bar retro, from the defaults");
+    g_mapFull = 7;
+    StyleLoad();
+    ok = g_parchAsked == 1 && g_vbarAsked == 1 && g_mapFull == 0 && LogSays("style: the map parchment, the bar retro, the map's areas discovered, from the defaults");
     Fresh("style-old-parchment"); GameDir();
     Put("Data/CinderLoad/parchment.txt", "");
     StyleLoad();
@@ -7398,23 +7424,29 @@ static void TestStyle(void)
     Fresh("style-set"); GameDir();
     StyleLoad();
     const char *t;
-    ok = StyleSet(0, 1, "a test") == 1 && g_parchAsked == 0 && g_vbarAsked == 1 && (t = Get(STYLE_REL)) &&
-         strstr(t, "\r\nmap satellite\r\nbar retro\r\n") && t[0] == '#' && Gone("Data/CinderLoad/style.tmp") &&
-         LogSays("style: the map satellite, the bar retro (a test), from the next loading screen; kept in Data\\CinderLoad\\style.txt");
+    ok = StyleSet(0, 1, 0, "a test") == 1 && g_parchAsked == 0 && g_vbarAsked == 1 && (t = Get(STYLE_REL)) &&
+         strstr(t, "\r\nmap satellite\r\nbar retro\r\nareas discovered\r\n") && t[0] == '#' && Gone("Data/CinderLoad/style.tmp") &&
+         LogSays("style: the map satellite, the bar retro, the map's areas discovered (a test), from the next loading screen; kept in Data\\CinderLoad\\style.txt");
     Put(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
-    ok &= StyleSet(0, 1, "the same") == 0 && Is(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
-    ok &= StyleSet(1, 0, "another") == 1;
+    ok &= StyleSet(0, 1, 0, "the same") == 0 && Is(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
+    ok &= StyleSet(1, 0, 0, "another") == 1;
     StyleLoad();
-    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && g_mapFull == 0;
+    ok &= StyleSet(1, 0, 1, "the full map") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nareas full\r\n") &&
+          LogSays("the map's areas full (the full map)") && StyleSet(1, 0, 1, "again") == 0;
+    g_mapFull = 7;
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && g_mapFull == 1 && LogSays("the map's areas full, from Data\\CinderLoad\\style.txt");
+    ok &= StyleSet(1, 0, 0, "back") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nareas discovered\r\n");
     {
         char p[700];
         snprintf(p, sizeof p, "%sData/CinderLoad", shim_gamedir);
         chmod(p, 0555);
-        int changed = StyleSet(0, 0, "unwritable");
+        int changed = StyleSet(0, 0, 0, "unwritable");
         chmod(p, 0755);
         ok &= changed && g_parchAsked == 0 && g_vbarAsked == 0 && LogSays("could NOT be written, so it holds only until the game closes");
     }
-    Check(ok, "a choice made in game: kept in style.txt (written beside it, then moved over it), read back the same at the next start; the same choice again writes nothing; a file that cannot be written: it holds until the game closes, and the log says so");
+    Check(ok, "a choice made in game (the map, the bar, the map's areas): kept in style.txt (written beside it, then moved over it), read back the same at the next start; the same choice again writes nothing; a file that cannot be written: it holds until the game closes, and the log says so");
 
     /* each screen as the view opens it: the choice, as far as it can be */
     int pzN = g_pzN;
@@ -7484,12 +7516,13 @@ static void FakeExec(const char *code, const char *source)
     if (strcmp(source, "CinderLoad")) return;
     if (!strcmp(code, kLuaProbe)) { g_fkProbes++; if (!g_fkUp && g_fkCv) FkSet("?"); return; }
     g_fkSetups++;
-    snprintf(g_fkHead, sizeof g_fkHead, "%.60s", code);
+    snprintf(g_fkHead, sizeof g_fkHead, "%.90s", code);
     g_fkMarked = Get("Data/CinderLoad/ui-setup.tmp") != NULL;
     if (g_fkIgnore) return;
     g_fkUp = 1;
-    char m[16] = "", b[16] = "";
-    if (sscanf(code, "local CL_MAP, CL_BAR = \"%15[a-z]\", \"%15[a-z]\"", m, b) == 2) { char v[40]; snprintf(v, sizeof v, "%s %s", m, b); FkSet(v); }
+    char m[16] = "", b[16] = "", a[16] = "";
+    if (sscanf(code, "local CL_MAP, CL_BAR, CL_AREAS = \"%15[a-z]\", \"%15[a-z]\", \"%15[a-z]\"", m, b, a) == 3) {
+        char v[56]; snprintf(v, sizeof v, "%s %s %s", m, b, a); FkSet(v); }
 }
 static void *FakeLookup(const char *name) { return !strcmp(name, CV_NAME) && g_fkCv && !g_fkHide ? g_fkCv : NULL; }
 static void *FakeRegister(const char *name, const char *help, int flags, const char *def, void *cb, int cat, int unreg, void *arg)
@@ -7582,32 +7615,32 @@ static void TestSwitches(void)
     g_luaOn = 1; g_luaBroken = 0; g_luaBusy = 0; g_luaFails = 0; g_luaSetups = 0; g_luaSynced = 0;
     g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = 0;
     Tick();
-    ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
+    ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro discovered") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
           !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
-          !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"parchment\", \"retro\"\n-- CinderLoad", 57) && !strcmp(g_fkVal, "parchment retro") &&
-          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro");
+          !strncmp(g_fkHead, "local CL_MAP, CL_BAR, CL_AREAS = \"parchment\", \"retro\", \"discovered\"\n-- CinderLoad", 81) && !strcmp(g_fkVal, "parchment retro discovered") &&
+          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro discovered");
     Check(ok, "a login: the CVar made as RegisterCVar makes one (no help, no flags, the choice its default, no callback, category 9, registered), the probe finds no switches, they are made from the choice held (the setup's mark there while it runs, gone after)");
     Tick();
     ok = g_fkProbes == 2 && g_fkSetups == 1 && g_fkRegisters == 1;
-    FkSet("satellite neo");                                           /* the player's clicks */
+    FkSet("satellite neo discovered");                                           /* the player's clicks */
     Tick();
     ok &= g_parchAsked == 0 && g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo") &&
-          LogSays("style: the map satellite, the bar neo (chosen on the world map or with /cinderload)") && g_fkSetups == 1;
+          LogSays("style: the map satellite, the bar neo, the map's areas discovered (chosen on the world map or with /cinderload)") && g_fkSetups == 1;
     g_fkUp = 0;                                                        /* a /reload */
     Tick();
-    ok &= g_fkSetups == 2 && !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"satellite\", \"neo\"\n", 42) && !strcmp(g_fkVal, "satellite neo") &&
-          LogSays("made (again: at a login or a /reload), set to satellite neo");
-    FkSet("parchment neo");                                           /* a click, then at once a teleport */
+    ok &= g_fkSetups == 2 && !strncmp(g_fkHead, "local CL_MAP, CL_BAR, CL_AREAS = \"satellite\", \"neo\", \"discovered\"\n", 66) && !strcmp(g_fkVal, "satellite neo discovered") &&
+          LogSays("made (again: at a login or a /reload), set to satellite neo discovered");
+    FkSet("parchment neo discovered");                                           /* a click, then at once a teleport */
     StyleAtLoad();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0 && LogSays("(chosen just before this loading screen)");
     FkSet("satellite");                                               /* (one word: not the switches' own value) */
     Tick();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0;
-    FkSet("satellite retro");                                         /* a click, then a teleport: the game's first frame of it */
+    FkSet("satellite retro discovered");                                         /* a click, then a teleport: the game's first frame of it */
     g_dispNew = 1;
     GameStep(0.0f, 777000);
     ok &= g_parchAsked == 0 && g_vbarAsked == 1;
-    FkSet("parchment neo");
+    FkSet("parchment neo discovered");
     GameStep(0.05f, 777100);                                          /* (the same screen: only as one begins) */
     ok &= g_parchAsked == 0 && g_vbarAsked == 1;
     StyleAtLoad();
@@ -7628,27 +7661,27 @@ static void TestSwitches(void)
 
     /* a new session: a CVar already there (Config.wtf's, say) never counts before the switches have set it */
     g_luaSynced = 0; g_fkUp = 0;
-    FkSet("satellite retro");
+    FkSet("satellite retro discovered");
     StyleAtLoad();
     ok = g_parchAsked == 1 && g_vbarAsked == 0;
     Tick();
-    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && !strcmp(g_fkVal, "parchment neo") && g_luaSynced;
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && !strcmp(g_fkVal, "parchment neo discovered") && g_luaSynced;
     Check(ok, "a CVar there before the switches set it (Config.wtf's) never counts: style.txt's choice stands, and the switches set the CVar to it");
 
     /* their fault, a chunk that does not run, a CVar the client will not make: off for the session */
-    FkSet("parchment neo fault");
+    FkSet("parchment neo discovered fault");
     Tick();
     runs = g_fkRuns;
     g_fkUp = 0;
     Tick();
     ok = g_luaBroken && g_fkRuns == runs && LogSays("off for this session, as they met a Lua error");
     g_luaBroken = 0; g_fkUp = 0; g_fkIgnore = 1;
-    FkSet("parchment neo");
+    FkSet("parchment neo discovered");
     Tick();
     ok &= !g_luaBroken && g_luaFails == 1 && LogSays("made, but no word back from them (1 time)");
     Tick();
     ok &= g_luaBroken && LogSays("as they did not run (twice made, no word back)");
-    FkSet("satellite neo");                                           /* off: not even a screen's start asks the client */
+    FkSet("satellite neo discovered");                                           /* off: not even a screen's start asks the client */
     StyleAtLoad();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0;
     g_luaBroken = 0; g_luaFails = 0; g_fkUp = 0;                       /* once with no word back, then a good one: counted again */
@@ -7668,7 +7701,7 @@ static void TestSwitches(void)
     Check(ok, "off for the session (logged; the world map and style.txt as ever): when the switches report a Lua error, when they are made twice and never run, when the client will not make their CVar");
 
     char small[64];
-    Check(LuaChunk(small, sizeof small, 1, 1) == 0, "the switches' chunk: never written past its buffer");
+    Check(LuaChunk(small, sizeof small, 1, 1, 0) == 0, "the switches' chunk: never written past its buffer");
     SwitchesQuiet();
     munmap(low, 1 << 16);
 }
@@ -7752,19 +7785,22 @@ static void TestStyleFiles(void)
     Check(ok, "style.txt read whether saved as ASCII, UTF-8 with its mark, or UTF-16 little or big endian with or without its mark (Notepad's \"Unicode\"); a character past ASCII breaks a word");
 
     /* the CVar: only exactly what the switches write */
-    ok = StyleCvarParse("satellite neo", &map, &bar, &fault) && map == 0 && bar == 0 && !fault;
-    ok &= StyleCvarParse("parchment retro", &map, &bar, &fault) && map == 1 && bar == 1 && !fault;
-    ok &= StyleCvarParse("parchment neo fault", &map, &bar, &fault) && map == 1 && bar == 0 && fault;
-    static const char *const kNot[] = { "?", "", "parchment", "parchment retro ", "parchment  retro", "Parchment retro", "parchment retro faulty",
-                                        "parchment retro f", "parchment retro fault x", "parchment retrofault", "neo satellite",
-                                        "satellite neo retro", "satellites neo", "map=satellite,bar=neo" };
+    int full;
+    ok = StyleCvarParse("satellite neo discovered", &map, &bar, &full, &fault) && map == 0 && bar == 0 && full == 0 && !fault;
+    ok &= StyleCvarParse("parchment retro full", &map, &bar, &full, &fault) && map == 1 && bar == 1 && full == 1 && !fault;
+    ok &= StyleCvarParse("parchment neo discovered fault", &map, &bar, &full, &fault) && map == 1 && bar == 0 && full == 0 && fault;
+    static const char *const kNot[] = { "?", "", "parchment", "parchment retro", "parchment retro fault", "parchment retro discovered ",
+                                        "parchment  retro discovered", "Parchment retro discovered", "parchment retro Full",
+                                        "parchment retro discovered faulty", "parchment retro discovered f", "parchment retro full fault x",
+                                        "parchment retro discoveredfault", "neo satellite full", "satellite neo full retro",
+                                        "satellites neo full", "map=satellite,bar=neo,areas=full", "parchment full retro" };
     for (size_t i = 0; i < sizeof kNot / sizeof kNot[0]; i++) {
-        map = bar = fault = 7;
-        int no = !StyleCvarParse(kNot[i], &map, &bar, &fault) && map == 7 && bar == 7 && fault == 7;
+        map = bar = full = fault = 7;
+        int no = !StyleCvarParse(kNot[i], &map, &bar, &full, &fault) && map == 7 && bar == 7 && full == 7 && fault == 7;
         if (!no) printf("  (the CVar's \"%s\" taken)\n", kNot[i]);
         ok &= no;
     }
-    Check(ok, "the CVar heard only as the switches write it: \"<map> <bar>\", or with \" fault\" after; anything else (a word more or less, another case, the probe's \"?\", a run-on \"faulty\") is not theirs");
+    Check(ok, "the CVar heard only as the switches write it: \"<map> <bar> <areas>\", or with \" fault\" after; anything else (a word more or less, another order, another case, an older two-word value, the probe's \"?\", a run-on \"faulty\") is not theirs");
 
     /* the black first frames: only for a parchment the view will draw */
     {
@@ -7798,7 +7834,7 @@ static void TestSwitchesPump(void)
     Put(STYLE_REL, "map satellite\r\nbar neo\r\n");
     g_parchAsked = g_vbarAsked = 1; g_luaOn = 0; g_vsStarts = 0; g_vsFail = 0; shim_threads = 0;
     ok = ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 1 && g_parchAsked == 0 && g_vbarAsked == 0 && g_viewOn &&
-         g_viewLive && g_luaOn && shim_threads == 1 && LogSays("style: the map satellite, the bar neo, from Data\\CinderLoad\\style.txt") &&
+         g_viewLive && g_luaOn && shim_threads == 1 && LogSays("style: the map satellite, the bar neo, the map's areas discovered, from Data\\CinderLoad\\style.txt") &&
          LogSays("view on:");
     g_viewOn = 0; g_viewLive = 0; g_luaOn = 0;
     Fresh("view-start-no-thread"); GameDir();
@@ -7864,7 +7900,7 @@ static void TestSwitchesPump(void)
     Check(ok, "the switches' pump: our thread registers its message, hooks the game's own thread and sends it one message at a time; the game's thread ticks only on taking it off its queue (not on a look, not on another hook code), and never shows it to the game's window; then the next is sent");
 
     /* a choice made in game kept within a poll (no probe needed), the probe still once a second */
-    FkSet("satellite neo");
+    FkSet("satellite neo discovered");
     int probes = g_fkProbes;
     msg.message = g_luaMsg; shim_ticks = 10550;
     shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);
@@ -7891,7 +7927,7 @@ static void TestSwitchesPump(void)
     Check(ok, "no message during a loading screen; one not taken in 5 s (a long freeze, its window gone) sent again, never stuck; a new game window found and its thread hooked");
 
     /* the game quitting: its WM_QUIT taken, a choice made since the last message kept */
-    FkSet("parchment retro");
+    FkSet("parchment retro discovered");
     MSG quit = { shim_game, WM_QUIT, 0, 0, 0, { 0, 0 } };
     shim_hook(HC_ACTION, PM_NOREMOVE, (LPARAM)&quit);
     ok = g_parchAsked == 0;
@@ -7899,17 +7935,17 @@ static void TestSwitchesPump(void)
     t = Get(STYLE_REL);
     ok &= g_parchAsked == 1 && g_vbarAsked == 1 && t && strstr(t, "map parchment\r\nbar retro") && LogSays("(chosen just before the game closed)");
     g_luaBroken = 1;                                                     /* (off for the session: not even as it quits) */
-    FkSet("satellite neo");
+    FkSet("satellite neo discovered");
     shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
     ok &= g_parchAsked == 1 && (t = Get(STYLE_REL)) && strstr(t, "map parchment\r\nbar retro");
     g_luaBroken = 0;
-    FkSet("parchment retro");
+    FkSet("parchment retro discovered");
     Check(ok, "the game quitting (its WM_QUIT off the queue): a choice made in its last moments kept in style.txt; with the switches off for the session, nothing taken");
 
     /* a choice made just before a loading screen is the style of that screen, its explored areas read for it */
     g_parchAsked = 0; g_parchTablesOk = 1;
-    StyleSet(0, 1, "a test");
-    FkSet("parchment retro");
+    StyleSet(0, 1, 0, "a test");
+    FkSet("parchment retro discovered");
     LONG seq = g_scrSeq;
     g_dispNew = 1;
     GameStep(0.0f, 900000);
@@ -7949,12 +7985,13 @@ static void TestSwitchesLua(void)
     char dir[700];
     snprintf(dir, sizeof dir, "%s/lua", g_root);
     mkdir(dir, 0755);
-    static char chunk[sizeof kSwitchesLua + 128];
-    const struct { const char *name; int map, bar; } kOut[2] = { { "setup.lua", 1, 1 }, { "setup-satellite-neo.lua", 0, 0 } };
-    for (int i = 0; i < 2; i++) {
+    static char chunk[sizeof kSwitchesLua + 160];
+    const struct { const char *name; int map, bar, full; } kOut[3] = { { "setup.lua", 1, 1, 0 }, { "setup-satellite-neo.lua", 0, 0, 0 },
+                                                                        { "setup-full.lua", 1, 1, 1 } };
+    for (int i = 0; i < 3; i++) {
         snprintf(p, sizeof p, "%s/%s", dir, kOut[i].name);
         f = fopen(p, "wb");
-        int len = LuaChunk(chunk, (int)sizeof chunk, kOut[i].map, kOut[i].bar);
+        int len = LuaChunk(chunk, (int)sizeof chunk, kOut[i].map, kOut[i].bar, kOut[i].full);
         if (f) { fwrite(chunk, 1, (size_t)len, f); fclose(f); }
     }
     snprintf(p, sizeof p, "%s/probe.lua", dir);
@@ -8103,7 +8140,7 @@ static void TestSwitchesPath(void)
     /* a login: the first message taken makes the CVar, finds no switches, makes them in the game's UI */
     DWORD now = 20000;
     Pump(now);
-    ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, "parchment retro");
+    ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, "parchment retro discovered");
     Bridge("openmap");
     Bridge("text map");
     ok &= BridgeSaid("Parchment shown");
@@ -8111,7 +8148,7 @@ static void TestSwitchesPath(void)
 
     /* Satellite picked on the world map: the CVar says so; the next message (a quarter second) keeps it; the next screen */
     Bridge("pick map satellite");
-    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "satellite retro") && g_parchAsked == 1;
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "satellite retro discovered") && g_parchAsked == 1;
     now += LUA_POLL_MS;
     Pump(now);
     ok &= g_parchAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar retro");
@@ -8131,7 +8168,7 @@ static void TestSwitchesPath(void)
 
     /* /cinderload bar in the chat */
     Bridge("slash bar");
-    ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, "parchment neo");
+    ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, "parchment neo discovered");
     now += LUA_POLL_MS;
     Pump(now);
     ok &= g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "bar neo");
@@ -8141,6 +8178,28 @@ static void TestSwitchesPath(void)
     ok &= g_parchOn && !g_barVanilla;
     Check(ok, "the whole path: /cinderload bar in the chat, kept the same way; the next screen the parchment with the blade");
 
+    /* the full map picked on the world map: the CVar, the next message keeps it, the next screen paints the whole map */
+    Bridge("pick areas full");
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "parchment neo full") && !g_mapFull;
+    now += LUA_POLL_MS;
+    Pump(now);
+    ok &= g_mapFull == 1 && (t = Get(STYLE_REL)) && strstr(t, "areas full") && !g_parchFullOn;
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= g_parchOn && g_parchFullOn == 1 && LogSays("the parchment's map areas full");
+    Bridge("text areas");
+    ok &= BridgeSaid("Full map shown");
+    Bridge("slash areas");                                                /* (and back with /cinderload) */
+    ok &= BridgeSaid("map areas Discovered") && !strcmp(g_fkVal, "parchment neo discovered");
+    now += LUA_POLL_MS;
+    Pump(now);
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= !g_mapFull && !g_parchFullOn && (t = Get(STYLE_REL)) && strstr(t, "areas discovered");
+    Check(ok, "the whole path, the map's areas: Full map picked from its drop-down, the CVar says so, the game's next message keeps it in style.txt, the next loading screen paints the whole map; /cinderload areas back to what was discovered the same way");
+
     /* a /reload: the UI made anew; the probe finds no switches; made again from the choice held, showing it */
     Bridge("fresh");
     int setups = g_fkSetups;
@@ -8148,7 +8207,7 @@ static void TestSwitchesPath(void)
     Pump(now);
     Bridge("openmap");
     Bridge("text bar");
-    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo") && BridgeSaid("Neo shown");
+    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo discovered") && BridgeSaid("Neo shown");
     Bridge("minimize");
     Bridge("text map");
     ok &= BridgeSaid("hidden");
@@ -8173,7 +8232,7 @@ static void TestSwitchesPath(void)
     memset(&g_pathPump, 0, sizeof g_pathPump);
     g_fkCv = g_fkLow + 0x100;
     TestPut32(g_fkCv + CV_VALUE, TestLow(g_fkVal));
-    FkSet("satellite neo");
+    FkSet("satellite neo discovered");
     g_parchAsked = g_vbarAsked = 7;
     ok = BridgeOpen() && ViewStartFrom(shim_module, FakeViewThreadStart) && g_parchAsked == 1 && g_vbarAsked == 1;
     g_luaExec = BridgeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
@@ -8181,7 +8240,7 @@ static void TestSwitchesPath(void)
     Pump(now);
     Bridge("openmap");
     Bridge("text map");
-    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && !strcmp(g_fkVal, "parchment retro") && BridgeSaid("Parchment shown");
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && !strcmp(g_fkVal, "parchment retro discovered") && BridgeSaid("Parchment shown");
     Bridge("text bar");
     ok &= BridgeSaid("Retro shown");
     BridgeClose();

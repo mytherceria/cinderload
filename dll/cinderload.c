@@ -3785,6 +3785,8 @@ __attribute__((used)) unsigned g_blackCol[4];
  * parchment, in his recording): with the parchment on, the game's own frames of a screen, the ones before the view takes
  * it over, show nothing of the living map's picture, so the screen goes black, then the dark paper. */
 static int g_parchAsked;                         /* (the style's map, below: 1 the parchment, 0 the living map) */
+static int g_mapFull;                             /* (the style's map areas: 1 the full map, 0 only what was discovered) */
+static int g_parchFullOn;                         /* (the view's, as this screen opened: StylePick) */
 static void ParchBlackBuild(void)
 {
     static const float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, 1, 1 };
@@ -10342,6 +10344,7 @@ static void ParchZoneMade(int z, int c, float fx, float fy, const char **why)
 static struct { int world, cont, zone; } g_ptry;     /* tried (once a session; this arrival's), so a failure is not tried again */
 static unsigned char g_pbits[EXPLORED_BYTES], g_pmadeBits[EXPLORED_BYTES];
 static LONG g_pbitsSeq = -1, g_pmadeKnown = -1;
+static int g_pmadeFull = -1;                         /* the map's areas the zone's painting up was made for */
 /* The view's thread, each frame of a screen, outside the step lock: this screen's arrival taken for the glide as soon as
  * it is known, and one painting a frame made and given to OpenGL, the first needed first: the world's (once a session),
  * the arrival's continent's, its zone's (only the pieces this character has found), each with C its colour-matched copy. */
@@ -10425,10 +10428,13 @@ static void ParchWork(DWORD now)
         ParchFree();
         return;
     }
-    if (g_pz[z].area && !g_ptry.zone && (z != g_parchZone || known != g_pmadeKnown || (known && !Same(g_pbits, g_pmadeBits, EXPLORED_BYTES)))) {
-        g_ptry.zone = 1;                                             /* its zone's (another zone, or other areas found) */
+    int full = g_parchFullOn;                                        /* (the map's areas, as this screen opened) */
+    if (g_pz[z].area && !g_ptry.zone && (z != g_parchZone || known != g_pmadeKnown || full != g_pmadeFull ||
+                                         (known && !full && !Same(g_pbits, g_pmadeBits, EXPLORED_BYTES)))) {
+        g_ptry.zone = 1;                                             /* its zone's (another zone, other areas found, the other areas' choice) */
         g_parchZone = -1; g_zoneMatch = -1;
-        g_makeBits = known ? g_pbits : NULL;                         /* the pieces this character has not found left blank */
+        g_makeBits = known && !full ? g_pbits : NULL;                /* the pieces this character has not found left blank, unless
+                                                                      * the full map is chosen */
         int made = ParchMake(z, &why);
         g_makeBits = NULL;
         if (!made) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the glide ends on its continent's painting", g_pz[z].name, why); Log(m); }
@@ -10450,12 +10456,12 @@ static void ParchWork(DWORD now)
                                        PARCH_CUT_GROW * g_zoneK / 2); Log(m); }
             else { wsprintfA(m, "  the parchment: %s not cut to its own area (%s): the plain band at its edges", g_pz[z].name, zwhy); Log(m); }
             if (PARCH_UP(VT_PARCH)) {
-                g_parchZone = z; g_zoneAt = now; g_pmadeKnown = known;
+                g_parchZone = z; g_zoneAt = now; g_pmadeKnown = known; g_pmadeFull = full;
                 for (int i = 0; i < EXPLORED_BYTES; i++) g_pmadeBits[i] = g_pbits[i];
                 const ParchLow *L = g_worldUp && g_lpWorld.ok ? &g_lpWorld : g_lpCont.ok && g_lpCont.z == c ? &g_lpCont : NULL;
                 if (C && L && ParchMatch(L, ParchBox(z)) && PARCH_UP(VT_PZONEM)) { g_zoneMatch = z; g_zoneMAt = now; }
                 wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d of its %d overlay pieces%s) in %lu ms%s",
-                          g_pz[z].name, 256 * g_zoneK, pieces, all, known ? ", the rest not found by this character" : ", its explored areas not known",
+                          g_pz[z].name, 256 * g_zoneK, pieces, all, full ? ", the full map chosen" : known ? ", the rest not found by this character" : ", its explored areas not known",
                           (unsigned long)(ViewNow() - t0), C ? (g_zoneMatch == z ? ", and its copy in the colours under it" : ", but not its copy in the colours under it") : "");
                 Log(m);
             } else Log("  the parchment: OpenGL would not take the zone's painting; the glide ends on its continent's painting");
@@ -11632,25 +11638,29 @@ static void ModeTurnStart(void)
 }
 #endif
 
-/* ---- the style: the player's two choices, the map and the bar (his decision, 10 Oct 2026) ----
+/* ---- the style: the player's three choices, the map, the bar and the map's areas (his decisions, 10 and 11 Oct 2026) ----
  * MAP TYPE: Satellite (the living map) | Parchment; LOADING BAR STYLE: Retro (vanilla's own bar) | Neo (the blade in its
- * frame, the RavenCraft logo on it), each on its own, on both maps. Defaults: the parchment and retro. Chosen in game
+ * frame, the RavenCraft logo on it), each on its own, on both maps; MAP AREAS, the parchment's: Discovered (only the
+ * overlay pieces this character has found, as the client's world map shows them) | Full map (every piece, as though all
+ * were found: his words, 11 Oct, "we could have a switch that turns on the full map as though it were fully discovered,
+ * but it should default to only what they've discovered"). Defaults: the parchment, retro, discovered. Chosen in game
  * (the world map's switches and /cinderload, below) and kept in Data\CinderLoad\style.txt, written here, so it holds over
  * restarts; a choice counts from the next loading screen. Until a choice is made in game (no style.txt), the old switch
  * files still say what they said: parchment.txt the parchment with vanilla's bar, bar-vanilla.txt vanilla's bar on the
  * living map; with neither, the defaults. style.txt wins over them; nothing removes them. g_parchAsked (1: the
- * parchment) and g_vbarAsked (1: retro) hold the choice: the game's thread writes them (at start, the switches, a
- * screen's start), the view's thread reads them as each screen opens (StylePick), when the game's thread is in that
- * screen's loading and cannot change them. */
+ * parchment), g_vbarAsked (1: retro) and g_mapFull (1: the full map) hold the choice: the game's thread writes them (at
+ * start, the switches, a screen's start), the view's thread reads them as each screen opens (StylePick), when the game's
+ * thread is in that screen's loading and cannot change them. */
 #define STYLE_PATH     "Data\\CinderLoad\\style.txt"
 #define STYLE_TMP_PATH "Data\\CinderLoad\\style.tmp"
 static int StyleLetter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 /* The words of text that name a choice, as they come (case aside; '#' to the line's end is a note): parchment or satellite
- * into *map (1, 0), retro or neo into *bar (1, 0); other words pass. The choices named. */
-static int StyleParse(const char *text, int *map, int *bar)
+ * into *map (1, 0), retro or neo into *bar (1, 0), discovered or full into *full (0, 1); other words pass. The choices
+ * named. */
+static int StyleParse(const char *text, int *map, int *bar, int *full)
 {
-    static const struct { const char *word; int which, value; } kWords[4] = {
-        { "parchment", 0, 1 }, { "satellite", 0, 0 }, { "retro", 1, 1 }, { "neo", 1, 0 } };
+    static const struct { const char *word; int which, value; } kWords[6] = {
+        { "parchment", 0, 1 }, { "satellite", 0, 0 }, { "retro", 1, 1 }, { "neo", 1, 0 }, { "discovered", 2, 0 }, { "full", 2, 1 } };
     int named = 0;
     for (const char *s = text; s && *s;) {
         if (*s == '#') { while (*s && *s != '\n') s++; continue; }
@@ -11658,34 +11668,40 @@ static int StyleParse(const char *text, int *map, int *bar)
         const char *w = s;
         while (StyleLetter(*s)) s++;
         int n = (int)(s - w);
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < 6; k++) {
             const char *p = kWords[k].word;
             int i = 0;
             while (i < n && p[i] && (w[i] | 0x20) == p[i]) i++;
-            if (i == n && !p[i]) { *(kWords[k].which ? bar : map) = kWords[k].value; named++; }
+            if (i == n && !p[i]) { *(kWords[k].which == 2 ? full : kWords[k].which ? bar : map) = kWords[k].value; named++; }
         }
     }
     return named;
 }
 static const char *StyleMapName(int map) { return map ? "parchment" : "satellite"; }
 static const char *StyleBarName(int bar) { return bar ? "retro" : "neo"; }
-/* "parchment retro": the choice as the CVar below carries it. */
-static void StyleValue(char *out, int map, int bar)
+static const char *StyleAreasName(int full) { return full ? "full" : "discovered"; }
+/* "parchment retro discovered": the choice as the CVar below carries it. */
+static void StyleValue(char *out, int map, int bar, int full)
 {
     lstrcpyA(out, StyleMapName(map));
     lstrcatA(out, " ");
     lstrcatA(out, StyleBarName(bar));
+    lstrcatA(out, " ");
+    lstrcatA(out, StyleAreasName(full));
 }
 /* style.txt written whole (a file beside it, then moved over it): 1 when it was. */
-static int StyleSave(int map, int bar)
+static int StyleSave(int map, int bar, int full)
 {
-    char path[MAX_PATH], tmp[MAX_PATH], text[400];
+    char path[MAX_PATH], tmp[MAX_PATH], text[500];
     if (!Join(path, g_dir, STYLE_PATH) || !Join(tmp, g_dir, STYLE_TMP_PATH)) return 0;
     lstrcpyA(text, "# CinderLoad's loading screens, as chosen in game (on the world map, M, or with /cinderload); from the next "
-                   "loading screen.\r\n# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade).\r\nmap ");
+                   "loading screen.\r\n# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade). areas: "
+                   "discovered (the parchment shows only what you have discovered) or full (all of it).\r\nmap ");
     lstrcatA(text, StyleMapName(map));
     lstrcatA(text, "\r\nbar ");
     lstrcatA(text, StyleBarName(bar));
+    lstrcatA(text, "\r\nareas ");
+    lstrcatA(text, StyleAreasName(full));
     lstrcatA(text, "\r\n");
     HANDLE f = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
@@ -11716,12 +11732,12 @@ static char *StyleText(char *text, DWORD n)
 static void StyleLoad(void)
 {
     char path[MAX_PATH], m[300];
-    int map = 1, bar = 1;
+    int map = 1, bar = 1, full = 0;
     const char *from = "the defaults (no choice made in game yet)";
     DWORD n = 0;
     char *text = Join(path, g_dir, STYLE_PATH) ? ReadTextN(path, 4096, &n) : NULL;
     if (text) {
-        StyleParse(StyleText(text, n), &map, &bar);
+        StyleParse(StyleText(text, n), &map, &bar, &full);
         HeapFree(GetProcessHeap(), 0, text);
         from = "Data\\CinderLoad\\style.txt (chosen in game)";
     } else {
@@ -11731,20 +11747,23 @@ static void StyleLoad(void)
     }
     *(volatile int *)&g_parchAsked = map;
     *(volatile int *)&g_vbarAsked = bar;
-    wsprintfA(m, "style: the map %s, the bar %s, from %s; set in game on the world map (M) or with /cinderload", StyleMapName(map),
-              StyleBarName(bar), from);
+    *(volatile int *)&g_mapFull = full;
+    wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game on the world map (M) or with /cinderload",
+              StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
     Log(m);
 }
-/* The game's thread: the choice changed to map, bar (how: where it came from, for the log), kept in style.txt. 1 when it
- * changed. */
-static int StyleSet(int map, int bar, const char *how)
+/* The game's thread: the choice changed to map, bar, full (how: where it came from, for the log), kept in style.txt. 1
+ * when it changed. */
+static int StyleSet(int map, int bar, int full, const char *how)
 {
-    if (map == *(volatile int *)&g_parchAsked && bar == *(volatile int *)&g_vbarAsked) return 0;
+    if (map == *(volatile int *)&g_parchAsked && bar == *(volatile int *)&g_vbarAsked && full == *(volatile int *)&g_mapFull) return 0;
     *(volatile int *)&g_parchAsked = map;
     *(volatile int *)&g_vbarAsked = bar;
+    *(volatile int *)&g_mapFull = full;
     char m[300];
-    int saved = StyleSave(map, bar);
-    wsprintfA(m, "style: the map %s, the bar %s (%s), from the next loading screen; %s", StyleMapName(map), StyleBarName(bar), how,
+    int saved = StyleSave(map, bar, full);
+    wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s (%s), from the next loading screen; %s", StyleMapName(map),
+              StyleBarName(bar), StyleAreasName(full), how,
               saved ? "kept in Data\\CinderLoad\\style.txt" : "Data\\CinderLoad\\style.txt could NOT be written, so it holds only "
                                                              "until the game closes");
     Log(m);
@@ -11779,11 +11798,18 @@ static void StylePick(void)
     }
     g_parchOn = parch;
     g_barVanilla = retro;
+    int full = *(volatile int *)&g_mapFull;
+    if (full != g_parchFullOn) {
+        Log(full ? "  the view: the parchment's map areas full (every part of each zone, as though all were discovered)"
+                 : "  the view: the parchment's map areas as discovered (only the parts of each zone this character has found)");
+        g_parchFullOn = full;
+    }
 }
 
 /* ---- the world map's switches (his rule, 10 Oct 2026: on the world map, M, and as /cinderload; Blizzard's own look;
- * "if this breaks, the player still has the normal world map"; his form, 10 Oct night: two drop-downs as the map's own
- * Continent and Zone, "Loading map" and "Loading bar", at the left end of its top bar) ----
+ * "if this breaks, the player still has the normal world map"; his form, 10 Oct night: drop-downs as the map's own
+ * Continent and Zone, "Loading map" and "Loading bar", at the left end of its top bar; and a third the same way, "Map
+ * areas", 11 Oct: "add the switch to 0.3.0 too") ----
  * The release is the DLL and its four packs, so there is no add-on: dll/switches.lua (switches_lua.h) is run inside the
  * game by the client's own FrameScript_Execute, the way its RunScript runs a line, only on the game's own thread, in its
  * message pump between frames (a WH_GETMESSAGE hook of that thread, sent a message of ours four times a second), only
@@ -11793,8 +11819,8 @@ static void StylePick(void)
  * and the thread's loop are the 32-bit build's alone), and the whole path runs there against a stubbed UI.
  * The client checks every C function's address against its own code before Lua may call it (0x42A320, from luaD_precall
  * at 0x6F61A1: "Invalid function pointer"), so a DLL cannot give its Lua a function. The switches tell the DLL through a
- * CVar of its own instead, CinderLoadStyle ("parchment retro"), made here as the client's own RegisterCVar makes one
- * (0x488B8A: CVar::Register) and read here (CVar::Lookup, its value at +0x20, as GetCVar reads it); its third word
+ * CVar of its own instead, CinderLoadStyle ("parchment retro discovered"), made here as the client's own RegisterCVar
+ * makes one (0x488B8A: CVar::Register) and read here (CVar::Lookup, its value at +0x20, as GetCVar reads it); its fourth word
  * "fault" says the switches met an error (they turn themselves off; so does this, for the session). The CVar is only the
  * messenger: style.txt holds the choice, and the switches start from it (nothing depends on Config.wtf keeping a CVar).
  * Each tick: a choice made in game taken (StyleSet: style.txt, so it is kept within a quarter of a second, and again as the
@@ -11905,15 +11931,15 @@ static int CvText(const void *cv, char *out, int size)
     if (size > 0) out[size - 1] = 0;
     return v != NULL;
 }
-/* The CVar's value as the switches set it (CL.Save): exactly "<map> <bar>", or "<map> <bar> fault" when they met an
- * error, each word as StyleMapName and StyleBarName spell it. Anything else (the probe's "?", a value from Config.wtf, a
- * value cut short or run on) is not theirs: 0. */
-static int StyleCvarParse(const char *v, int *map, int *bar, int *fault)
+/* The CVar's value as the switches set it (CL.Save): exactly "<map> <bar> <areas>", or that and " fault" when they met
+ * an error, each word as StyleMapName, StyleBarName and StyleAreasName spell it. Anything else (the probe's "?", a value
+ * from Config.wtf, an older two-word one, a value cut short or run on) is not theirs: 0. */
+static int StyleCvarParse(const char *v, int *map, int *bar, int *full, int *fault)
 {
     for (int m = 0; m < 2; m++)
-        for (int b = 0; b < 2; b++) {
-            char want[40];
-            StyleValue(want, m, b);
+        for (int b = 0; b < 4; b++) {
+            char want[48];
+            StyleValue(want, m, b & 1, b >> 1);
             int i = 0;
             while (want[i] && v[i] == want[i]) i++;
             if (want[i]) continue;
@@ -11921,7 +11947,7 @@ static int StyleCvarParse(const char *v, int *map, int *bar, int *fault)
             int f = 0;
             while (kFault[f] && v[i + f] == kFault[f]) f++;
             if (v[i] && (kFault[f] || v[i + f])) continue;
-            *map = m; *bar = b; *fault = v[i] != 0;
+            *map = m; *bar = b & 1; *full = b >> 1; *fault = v[i] != 0;
             return 1;
         }
     return 0;
@@ -11931,9 +11957,9 @@ static int StyleCvarParse(const char *v, int *map, int *bar, int *fault)
 static int StyleFromCvar(const void *cv, const char *how)
 {
     char v[64];
-    int map, bar, fault;
-    if (!g_luaSynced || !CvText(cv, v, (int)sizeof v) || !StyleCvarParse(v, &map, &bar, &fault)) return 0;
-    int changed = StyleSet(map, bar, how);
+    int map, bar, full, fault;
+    if (!g_luaSynced || !CvText(cv, v, (int)sizeof v) || !StyleCvarParse(v, &map, &bar, &full, &fault)) return 0;
+    int changed = StyleSet(map, bar, full, how);
     return fault ? -1 : changed;
 }
 /* The switches off for the rest of the session, and why (the world map, the game: as they were). */
@@ -11946,15 +11972,17 @@ static void LuaBreak(const char *why)
     Log(m);
 }
 /* The chunk the switches are made by: the choice held, then dll/switches.lua. Its length, or 0 when out is too small. */
-static int LuaChunk(char *out, int size, int map, int bar)
+static int LuaChunk(char *out, int size, int map, int bar, int full)
 {
-    static const char head[] = "local CL_MAP, CL_BAR = \"";
-    int need = (int)sizeof head + 32 + (int)sizeof kSwitchesLua;
+    static const char head[] = "local CL_MAP, CL_BAR, CL_AREAS = \"";
+    int need = (int)sizeof head + 48 + (int)sizeof kSwitchesLua;
     if (size < need) return 0;
     lstrcpyA(out, head);
     lstrcatA(out, StyleMapName(map));
     lstrcatA(out, "\", \"");
     lstrcatA(out, StyleBarName(bar));
+    lstrcatA(out, "\", \"");
+    lstrcatA(out, StyleAreasName(full));
     lstrcatA(out, "\"\n");
     lstrcatA(out, kSwitchesLua);
     return lstrlenA(out);
@@ -11968,8 +11996,8 @@ static void LuaTick(DWORD now)
     char m[300], v[64];
     void *cv = g_cvLookup(CV_NAME);
     if (!cv) {                                                     /* our messenger, made as RegisterCVar makes one */
-        static char def[32];
-        StyleValue(def, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked);
+        static char def[48];
+        StyleValue(def, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked, *(volatile int *)&g_mapFull);
         cv = g_cvRegister(CV_NAME, NULL, 0, def, NULL, CV_CATEGORY, 0, NULL);
         if (!cv || g_cvLookup(CV_NAME) != cv) { LuaBreak("the client would not make its CVar (" CV_NAME ")"); g_luaBusy = 0; return; }
         Log("the world map's switches: their CVar " CV_NAME " made, as the client's own RegisterCVar makes one");
@@ -11984,9 +12012,9 @@ static void LuaTick(DWORD now)
     g_luaProbeAt = now ? now : 1;
     g_luaExec(kLuaProbe, "CinderLoad");
     if (CvText(cv, v, (int)sizeof v) && v[0] == '?' && !v[1]) {    /* not there: made, from the choice held */
-        static char chunk[sizeof kSwitchesLua + 128];
+        static char chunk[sizeof kSwitchesLua + 160];
         char mark[MAX_PATH];
-        int len = LuaChunk(chunk, (int)sizeof chunk, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked);
+        int len = LuaChunk(chunk, (int)sizeof chunk, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked, *(volatile int *)&g_mapFull);
         int marked = len && Join(mark, g_dir, LUA_SETUP_MARK);
         if (marked) WriteText(mark, "CinderLoad was making its world map switches (deleted once they are made)\r\n");
         if (len) g_luaExec(chunk, "CinderLoad");

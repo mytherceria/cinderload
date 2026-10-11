@@ -26,15 +26,15 @@ To remove: delete CinderLoad.dll, its dlls.txt line, the folder Data/CinderLoad,
 
 Check the files against SHA256SUMS on the release.
 
-## Choosing the map and the bar
+## Choosing the map, the bar and the map's areas
 
-Parchment and Retro to begin with. Each is chosen on its own, and a change counts from your next loading screen.
+Parchment, Retro and Discovered to begin with. Each is chosen on its own, and a change counts from your next loading screen.
 
-- **On the world map (M)**: two drop-downs at the left end of its top bar, left of Continent, labelled "Loading map" (Parchment or Satellite) and "Loading bar" (Retro or Neo). They work like the map's own Continent and Zone drop-downs. On the game's small, windowed map they are hidden along with Continent and Zone; maximise the map to use them.
-- **In the chat**: `/cinderload` says what is chosen. `/cinderload map` or `/cinderload bar` switches one. `/cinderload map parchment`, `/cinderload map satellite`, `/cinderload bar retro` or `/cinderload bar neo` sets one (the choice's word alone, such as `/cinderload neo`, works too). Anything else is answered with how to say it, and nothing changes.
-- **In a file**: the choice is kept in Data/CinderLoad/style.txt, two lines: `map parchment` or `map satellite`, and `bar retro` or `bar neo`. You can edit it with the game closed; it may be saved as plain text, UTF-8 or Unicode (UTF-16), as Notepad saves it. A choice made in game is written to it within a quarter of a second, and again as the game quits.
+- **On the world map (M)**: three drop-downs at the left end of its top bar, left of Continent, labelled "Loading map" (Parchment or Satellite), "Loading bar" (Retro or Neo) and "Map areas" (Discovered or Full map). Map areas is for the parchment: Discovered shows only the parts of each zone your character has discovered, as the world map does; Full map shows all of it, as though you had discovered everything. They work like the map's own Continent and Zone drop-downs. On the game's small, windowed map they are hidden along with Continent and Zone; maximise the map to use them.
+- **In the chat**: `/cinderload` says what is chosen. `/cinderload map`, `/cinderload bar` or `/cinderload areas` switches one. `/cinderload map parchment`, `/cinderload map satellite`, `/cinderload bar retro`, `/cinderload bar neo`, `/cinderload areas discovered` or `/cinderload areas full` sets one (the choice's word alone, such as `/cinderload neo`, works too). Anything else is answered with how to say it, and nothing changes.
+- **In a file**: the choice is kept in Data/CinderLoad/style.txt, three lines: `map parchment` or `map satellite`, `bar retro` or `bar neo`, and `areas discovered` or `areas full`. You can edit it with the game closed; it may be saved as plain text, UTF-8 or Unicode (UTF-16), as Notepad saves it. A choice made in game is written to it within a quarter of a second, and again as the game quits.
 
-The drop-downs and `/cinderload` are made by CinderLoad.dll inside the game; there is no add-on to install. They exist only while CinderLoad's view is on (see below): with the view off, the loading screens are the game's own world map zoom with a burning log, and there is no choice to make. They never change the game's own world map or its drop-downs. If they ever meet an error they turn themselves off until the game starts again, and the chat says so. If a game ever closes while they are being made, Data/CinderLoad/ui-off.txt keeps them off until you delete it; style.txt still sets the map and the bar.
+The drop-downs and `/cinderload` are made by CinderLoad.dll inside the game; there is no add-on to install. They exist only while CinderLoad's view is on (see below): with the view off, the loading screens are the game's own world map zoom with a burning log, and there is no choice to make. They never change the game's own world map or its drop-downs. If they ever meet an error they turn themselves off until the game starts again, and the chat says so. If a game ever closes while they are being made, Data/CinderLoad/ui-off.txt keeps them off until you delete it; style.txt still sets the map, the bar and the map's areas.
 
 ## The view
 

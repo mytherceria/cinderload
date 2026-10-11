@@ -1,10 +1,12 @@
--- CinderLoad's two choices, on the world map (M) and as /cinderload (his decisions, 10 Oct 2026): the loading screen's
--- MAP (Parchment | Satellite) and its BAR (Retro | Neo), each on its own. His form (C, picked from four drawn): two
--- drop-downs made exactly as the world map's own Continent and Zone ones are (UIDropDownMenuTemplate, the client's own
--- UIDropDownMenu functions), gold labels "Loading map" and "Loading bar" over them, at the left end of the map's top
--- bar, left of Continent, covering nothing. Run inside the game by CinderLoad.dll, on the game's own thread while no Lua
--- is running (no add-on folder: the release is the DLL and its packs). The DLL puts one line before this text, the
--- choice it holds: local CL_MAP, CL_BAR = "parchment", "retro".
+-- CinderLoad's three choices, on the world map (M) and as /cinderload (his decisions, 10 and 11 Oct 2026): the loading
+-- screen's MAP (Parchment | Satellite), its BAR (Retro | Neo), and the parchment's MAP AREAS (Discovered | Full map: his
+-- words, "we could have a switch that turns on the full map as though it were fully discovered, but it should default to
+-- only what they've discovered"), each on its own. His form (C, picked from four drawn): drop-downs made exactly as the
+-- world map's own Continent and Zone ones are (UIDropDownMenuTemplate, the client's own UIDropDownMenu functions), gold
+-- labels "Loading map", "Loading bar" and "Map areas" over them, at the left end of the map's top bar, left of
+-- Continent, covering nothing. Run inside the game by CinderLoad.dll, on the game's own thread while no Lua is running
+-- (no add-on folder: the release is the DLL and its packs). The DLL puts one line before this text, the choice it
+-- holds: local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered".
 -- Written for the client's Lua 5.0: no #, no %, no ... in a body, no string methods, no string.match.
 -- His rule for anything on the world map: if this breaks, the player still has the normal world map. So only frames of
 -- its own are made, every handler runs inside pcall, a fault switches it all off (CL.broken, the CVar told "fault"),
@@ -12,7 +14,7 @@
 -- not its own: the shared drop-down list's scale, right after the client's ToggleDropDownMenu opened it for one of
 -- these, to this map's (the client opens every list at the UI's scale but the Continent and Zone ones, at 1; it sets
 -- the scale again each time any list opens).
--- The DLL hears a choice through one CVar of its own, CinderLoadStyle ("parchment retro"), and keeps it in
+-- The DLL hears a choice through one CVar of its own, CinderLoadStyle ("parchment retro discovered"), and keeps it in
 -- Data\CinderLoad\style.txt: a DLL cannot give this client's Lua a function of its own (each C function's address is
 -- checked against WoW.exe's code before it is called, 0x42A320 from luaD_precall 0x6F61A1).
 local CL = CinderLoad
@@ -20,6 +22,7 @@ if type(CL) ~= "table" then CL = {}; CinderLoad = CL end
 CL.up = 1
 CL.map = CL_MAP
 CL.bar = CL_BAR
+CL.areas = CL_AREAS
 CL.cvar = "CinderLoadStyle"
 CL.broken = nil
 CL.settings = {
@@ -31,11 +34,16 @@ CL.settings = {
       options = {
           { value = "retro", text = "Retro", tip = "The game's own loading bar, filling in your class's colour." },
           { value = "neo", text = "Neo", tip = "The blade of light in its metal frame, the RavenCraft logo on it." } } },
+    { key = "areas", label = "Map areas", name = "map areas", width = 78,
+      options = {
+          { value = "discovered", text = "Discovered", tip = "The parchment shows only the parts of each zone you have discovered, as this map does." },
+          { value = "full", text = "Full map", tip = "The parchment shows every part of each zone, as though you had discovered it all." } } },
 }
 -- Where they sit, in the world map's 1024 x 768 box (WorldMapPositioningGuide), from its top left: on the row of the
 -- Continent drop-down (its TOP at the box's TOP, -80, -35: x 342 to 522), from x 32 (clear of the top bar's left
--- flourish), each the width WIDTH inside (its frame WIDTH + 50), the second over the first's right end by OVERLAP as Zone
--- is over Continent's: x 32 to 283, Continent's frame from 342.
+-- flourish), each the width WIDTH inside (its frame WIDTH + 50; the third its own, 78, as wide as "Discovered" needs),
+-- each over the one before's right end by OVERLAP as Zone is over Continent's: x 32 to 378, the third's frame over
+-- Continent's (from 342) by 36, three more than Zone's over Continent's.
 CL.X, CL.Y, CL.WIDTH, CL.OVERLAP = 32, -35, 92, -33
 CL.drops = {}
 
@@ -71,9 +79,9 @@ function CL.Describe()
     return t
 end
 
--- The choice to the DLL, through the CVar it reads (its third word: a fault, so it stops too).
+-- The choice to the DLL, through the CVar it reads (its fourth word: a fault, so it stops too).
 function CL.Save(fault)
-    local v = CL.map .. " " .. CL.bar
+    local v = CL.map .. " " .. CL.bar .. " " .. CL.areas
     if fault then v = v .. " fault" end
     SetCVar(CL.cvar, v)
 end
@@ -131,16 +139,17 @@ function CL.Safe(where, fn)
     end
 end
 
--- /cinderload: says the choice; /cinderload map (or bar) switches one; /cinderload map satellite sets one (the value
+-- /cinderload: says the choice; /cinderload map (bar, areas) switches one; /cinderload map satellite sets one (the value
 -- alone does too: /cinderload neo). Words only, at most two, nothing else: anything more or other changes nothing.
-CL.usage = "type /cinderload map or /cinderload bar to switch, or /cinderload map parchment, /cinderload map satellite, "
-           .. "/cinderload bar retro or /cinderload bar neo."
+CL.usage = "type /cinderload map, /cinderload bar or /cinderload areas to switch, or /cinderload map parchment, "
+           .. "/cinderload map satellite, /cinderload bar retro, /cinderload bar neo, /cinderload areas discovered or "
+           .. "/cinderload areas full."
 function CL.Slash(msg)
     local words = {}
     for w in string.gfind(string.lower(msg or ""), "[^%s]+") do table.insert(words, w) end
     local n = table.getn(words)
     if n == 0 then
-        CL.Say(CL.Describe() .. ". Type /cinderload map or /cinderload bar to switch.")
+        CL.Say(CL.Describe() .. ". Type /cinderload map, /cinderload bar or /cinderload areas to switch.")
         return
     end
     local key, value
@@ -234,7 +243,12 @@ function CL.Build()
     CL.panel = p
     p:ClearAllPoints()
     p:SetPoint("TOPLEFT", guide, "TOPLEFT", CL.X, CL.Y)
-    p:SetWidth(2 * (CL.WIDTH + 50) + CL.OVERLAP)
+    local wide = 0
+    for i, s in ipairs(CL.settings) do
+        wide = wide + (s.width or CL.WIDTH) + 50
+        if i > 1 then wide = wide + CL.OVERLAP end
+    end
+    p:SetWidth(wide)
     p:SetHeight(32)
     CL.drops = {}
     local prev
@@ -251,7 +265,7 @@ function CL.Build()
         label:SetPoint("TOPLEFT", f, "TOPLEFT", 20, 10)
         local d = { setting = s, frame = f }
         d.pick = CL.Pick(d)
-        UIDropDownMenu_SetWidth(CL.WIDTH, f)
+        UIDropDownMenu_SetWidth(s.width or CL.WIDTH, f)
         if DropDownList1 and DropDownList1:IsShown() then
             f.initialize = CL.Menu(d)                 -- (a list open: the client's Initialize would empty it; it is set later)
         else
