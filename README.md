@@ -53,7 +53,7 @@ Both maps and both bars are drawn in a window of CinderLoad's own (the view), ov
 
 ## Credits
 
-The world map is stitched from the client's own map tiles. The ravens are made from the client's own raven model, reposed and recoloured, and the bar's rails are Undercity's iron, from the client too. Releases before 0.2.0 carried wallpapers from Turtle WoW's commissioned art by Lionel Schramm, Misho Tenev, Stonegut and Ghor.
+The world map is stitched from the client's own map tiles, and the bar's rails are Undercity's iron, from the client too. Releases before 0.2.0 carried wallpapers from Turtle WoW's commissioned art by Lionel Schramm, Misho Tenev, Stonegut and Ghor.
 
 ## License
 
