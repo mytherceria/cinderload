@@ -8510,6 +8510,7 @@ static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, f
 #define PARCH_LATE_MS   900           /* an arrival taken with less of the bar's time left than this glides on the clock, this long */
 #define PARCH_LATE_SPARE 100          /* (or less: landed this long before the screen goes, EVEN_EARLY_MS - VIEW_WORLD_GAP_MS after the
                                        * bar is full) */
+#define PARCH_NAME_FADE 2.0f          /* the continent's name fades out over this much more zoom once wider than the window */
 #define PARCH_REAIM_MAX 0.98f         /* an arrival changed past this much of the glide (or after it): a fresh glide from there */
 enum { PARCH_FADE_A, PARCH_FADE_B, PARCH_FADE_C, PARCH_FADE_D };
 static const unsigned char kParchFrame[20] = { 0x30, 0x37, 0xC4, 0x3C, 0x75, 0xCF, 0x82, 0x3C, 0x00, 0x00, 0xA7, 0x41,
@@ -8928,14 +8929,20 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         } else
             ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m, !base, clip, &bl);
     }
-    /* the continent's name, the world's, over them all at its own place (its continent's own painted out of its painting) */
+    /* the continent's name, the world's, over them all at its own place (its continent's own painted out of its painting),
+     * fading out once it is wider than the window (his answer, 11 Oct: "yes the continent name should fade out"): whole
+     * up to as wide as the window, as the opening shows it, gone at PARCH_NAME_FADE times that, and by the landing at the
+     * latest (the fade then over the glide's last PARCH_NAME_FADE of zoom) */
     int wc = arrive && map >= 0 && map <= 1 ? map : -1;
     if (world && wc >= 0 && g_wordUp[wc] && g_viewTex[VT_PWORD0 + wc] && g_wordPic[wc].ok && (!contUp || g_contWords == c)) {
         const ParchPic *P = &g_wordPic[wc];
         float sx = PARCH_WORLD_FW / (float)(PARCH_MAP_W * g_worldK), sy = PARCH_WORLD_FH / (float)(PARCH_MAP_H * g_worldK);
         ParchRect nr = { (float)P->x0 * sx, (float)P->y0 * sy, (float)(P->x0 + P->w) * sx, (float)(P->y0 + P->h) * sy };
+        double full = W / ((double)P->w * sx), s1 = full * PARCH_NAME_FADE < b.s ? full * PARCH_NAME_FADE : b.s;   /* (its zoom as wide as
+                                                                     * the window; gone: then twice that, or the landing's) */
+        float gone = (float)((ParchLn(v.s) - ParchLn(s1)) / ParchLn(PARCH_NAME_FADE)) + 1;
         ParchLayerT(VT_PWORD0 + wc, (float)g_wordTW[wc], (float)g_wordTH[wc], (float)P->w, (float)P->h, nr, v, W, H,
-                    ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt), 0, NULL, NULL);
+                    ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt) * (1 - ParchSmooth(gone)), 0, NULL, NULL);
     }
     /* the player's marker over them all, coming up with the finest painting under it */
     if (arrive) ParchMarkDraw(g_pcam.px, g_pcam.py, W, H, now, zoneUp ? g_pcam.mz : contUp && z < 0 ? g_pcam.mc : 0);

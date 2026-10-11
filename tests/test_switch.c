@@ -6690,6 +6690,35 @@ static void TestWords(void)
     ViewBuild(1920, 1080, 0.02f, 2600);
     ok &= TestBatch(VT_PWORD0) < 0;
     Check(ok, "the continent's name, the world's, drawn over every painting (the zone's too) at its own place on the frame, the same place every frame of the glide; none drawn over a continent whose own name was not painted out");
+    /* it fades out once wider than the window (his answer, 11 Oct: "yes the continent name should fade out"): whole up to
+     * as wide as the window, half at 1.41 times, gone at twice that and by the landing at the latest */
+    g_contWords = 0;
+    {
+        float nw = g_wordPic[0].w * PARCH_WORLD_FW / 1002.0f;          /* (its width on the frame, map tiles) */
+        int whole = 1, gone = 1, half = 0, seen = 0, fades[2] = { 0, 0 };
+        for (int run = 0; run < 2; run++) {                            /* Elwynn; then at sea on the name itself (a landing zoom
+                                                                        * under twice its own: gone by the landing all the same) */
+            if (run) TestGlideArrive(0, 0, 0, -7200, 577, 2000); else TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+            ViewBuild(1920, 1080, 0.0f, 2000);
+            for (int f = 1; f <= 100; f++) {
+                ViewBuild(1920, 1080, f / 100.0f, 2600 + 20 * f);
+                float wpx = nw * (float)g_pcam.v.s, r = wpx / 1920;
+                int b = TestBatch(VT_PWORD0), a = 0;
+                for (int i = b >= 0 ? g_vb[b].first : 0; b >= 0 && i < g_vb[b].first + g_vb[b].count; i++) if (g_vv[i].c[3] > a) a = g_vv[i].c[3];
+                if (b >= 0) seen++;
+                if (!run && r <= 1 && b >= 0 && a != 255) whole = 0;
+                if ((!run && r >= 2.0f && b >= 0) || (f == 100 && b >= 0)) gone = 0;
+                if (!run && r > 1.38f && r < 1.45f && b >= 0 && a > 110 && a < 145) half = 1;
+                if (!run && r > 1 && r < 2 && b >= 0) {                     /* (on the zoom's log, eased: smoothstep) */
+                    float t = logf(r) / logf(2), want = 255 * (1 - t * t * (3 - 2 * t));
+                    if (fabsf((float)a - want) > 6) whole = 0;
+                }
+                if (b >= 0 && a > 0 && a < 255) fades[run]++;
+            }
+        }
+        ok = whole && gone && half && seen > 20 && fades[0] > 2 && fades[1] > 2;
+    }
+    Check(ok, "the continent's name fades out once it is wider than the window (his answer: \"yes the continent name should fade out\"): whole up to as wide as the window, as the opening shows it, half at 1.41 times, gone at twice (eased on the zoom's log) and by the landing at the latest, never always drawn");
     /* the work's steps as each painting is made: the continent's lines kept, its own name painted out, it cut to its land
      * (the world's painting under it); the zone cut to its own area */
     TestPaintNew(1);                                                  /* the world's lines: Azeroth's land a block of it */
