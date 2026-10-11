@@ -7662,12 +7662,15 @@ static void VBarBuild(float W, float H, float shown, DWORD now)
  * from, when it was read; 0, and why not. */
 static int ClientPicture(const char *path, const char *base, unsigned char **out, unsigned *len, const char **from)
 {
-    static const char kOrder[] = "ZYXWVUTSRQPONMLKJIHGFEDCBA98765432";
-    static char arch[16];
+    /* (the archives' names, each its own: the view's thread and the parchment's worker read at once) */
+    static const char *const kArch[35] = { "patch-Z.MPQ", "patch-Y.MPQ", "patch-X.MPQ", "patch-W.MPQ", "patch-V.MPQ", "patch-U.MPQ",
+        "patch-T.MPQ", "patch-S.MPQ", "patch-R.MPQ", "patch-Q.MPQ", "patch-P.MPQ", "patch-O.MPQ", "patch-N.MPQ", "patch-M.MPQ",
+        "patch-L.MPQ", "patch-K.MPQ", "patch-J.MPQ", "patch-I.MPQ", "patch-H.MPQ", "patch-G.MPQ", "patch-F.MPQ", "patch-E.MPQ",
+        "patch-D.MPQ", "patch-C.MPQ", "patch-B.MPQ", "patch-A.MPQ", "patch-9.MPQ", "patch-8.MPQ", "patch-7.MPQ", "patch-6.MPQ",
+        "patch-5.MPQ", "patch-4.MPQ", "patch-3.MPQ", "patch-2.MPQ", "patch.MPQ" };
     *from = "in none of the client's archives";
-    for (int a = 0; a <= (int)sizeof kOrder; a++) {
-        if (a < (int)sizeof kOrder - 1) { lstrcpyA(arch, "patch-?.MPQ"); arch[6] = kOrder[a]; }
-        else lstrcpyA(arch, a == (int)sizeof kOrder - 1 ? "patch.MPQ" : base);
+    for (int a = 0; a <= 35; a++) {
+        const char *arch = a < 35 ? kArch[a] : base;
         int r = mpq_read(&kIo, arch, path, out, len);
         if (r == MPQ_E_NOT_FOUND || r == MPQ_E_NO_ARCHIVE || r == MPQ_E_EMPTY) continue;
         if (r != MPQ_OK) { *from = "unreadable"; return 0; }       /* (the newest copy decides) */
@@ -8965,10 +8968,17 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
 
 /* ---- the paintings' making, a frame at a time (the view's thread) ---- */
 static DWORD ViewNow(void);
+#if defined(__i386__) && !defined(PARCH_UP)
+#define PARCH_UP_BEGIN ParchUpBegin          /* (the 32-bit build: a painting goes up a strip a frame) */
+#define PARCH_UP_STEP ParchUpStep
+static int ParchUpBegin(int slot);
+static int ParchUpStep(void);
+#else
 #ifndef PARCH_UP
 #define PARCH_UP ParchUp                     /* (the tests and the harness keep the painting instead of OpenGL) */
 #endif
 static int ParchUp(int slot);
+#endif
 static unsigned char *g_mipPx;               /* the painting's smaller copies, level after level (see ParchMips) */
 static int g_mipLevels;
 /* The painting made (g_parchPx, its picture at its top left) and its smaller copies down to one texel, for the glide
@@ -9013,6 +9023,32 @@ static void ParchFree(void)
     if (g_pieceA) { HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL; }
     if (g_mipPx) { HeapFree(GetProcessHeap(), 0, g_mipPx); g_mipPx = NULL; }
     g_mipLevels = 0;
+}
+/* The painting given to OpenGL a strip a frame (the brief, 11 Oct: the view's thread must not stall): at most
+ * PARCH_UP_BYTES a frame. ParchStrip: of a painting T texels a side, its levels 0 to L each half the last, from the cursor
+ * (*level, *y) on, the next strip: as many whole rows of that level as *budget bytes hold (one at least), never past its
+ * last; its level, first row and rows in *sl, *sy, *rows, the budget less them, the cursor after them. 0 when the budget
+ * is spent or all of it is up. ParchLevelPx: a level's texels (0 the painting's own, then its copies in g_mipPx). */
+#define PARCH_UP_BYTES  (2u << 20)
+static int ParchStrip(int T, int L, int *level, int *y, SIZE_T *budget, int *sl, int *sy, int *rows)
+{
+    if (!*budget || *level > L) return 0;
+    int w = T >> *level, n = (int)(*budget / ((SIZE_T)w * 4));
+    if (n < 1) n = 1;
+    if (n > w - *y) n = w - *y;
+    *sl = *level; *sy = *y; *rows = n;
+    SIZE_T b = (SIZE_T)n * (SIZE_T)w * 4;
+    *budget = b < *budget ? *budget - b : 0;
+    *y += n;
+    if (*y >= w) { (*level)++; *y = 0; }
+    return 1;
+}
+static const unsigned char *ParchLevelPx(int level)
+{
+    if (!level) return g_parchPx;
+    const unsigned char *p = g_mipPx;
+    for (int i = 1; i < level; i++) p += (SIZE_T)(g_parchTW >> i) * (SIZE_T)(g_parchTW >> i) * 4;
+    return p;
 }
 /* C (the detail blend): a coarser painting's colours, kept as PARCH_LP cells across its picture (each its texels'
  * average, then softened), with its place on the world map's frame; and a finer painting's colours brought to them
@@ -10345,9 +10381,243 @@ static struct { int world, cont, zone; } g_ptry;     /* tried (once a session; t
 static unsigned char g_pbits[EXPLORED_BYTES], g_pmadeBits[EXPLORED_BYTES];
 static LONG g_pbitsSeq = -1, g_pmadeKnown = -1;
 static int g_pmadeFull = -1;                         /* the map's areas the zone's painting up was made for */
-/* The view's thread, each frame of a screen, outside the step lock: this screen's arrival taken for the glide as soon as
- * it is known, and one painting a frame made and given to OpenGL, the first needed first: the world's (once a session),
- * the arrival's continent's, its zone's (only the pieces this character has found), each with C its colour-matched copy. */
+/* ---- the paintings made off the view's thread (the brief, 11 Oct: "the view thread must not stall": a painting and its
+ * cut took 40 to 130 ms on the view's thread, a frame each, its land read from the terrain up to 1.6 s the first time) ----
+ * Each step is a job: the arrival's zone found (as the client finds it), the world's painting, its continent's, its
+ * zone's, C's colour-matched copies. The parchment's worker, a thread of its own (the 32-bit build's: ParchWorkerStart),
+ * runs it (the tiles read and laid, the seams, the lines, the cut, the land, the smaller copies) while the view's thread
+ * draws on; done, the view's thread gives the painting to OpenGL a strip a frame (PARCH_UP_BYTES at most: PARCH_UP_BEGIN,
+ * PARCH_UP_STEP), then takes the next. The painting is the worker's from a job's post until it is done, the view's from
+ * then until it is up and freed: never both at once. Without a worker (the tests' build, the harness) a job runs at once
+ * in the call that posts it and its painting goes up whole: one painting a call, as before. */
+enum { PJ_NONE, PJ_WORLD, PJ_FIND, PJ_CONT, PJ_ZONE, PJ_MATCH };
+static struct {
+    volatile LONG state;                                  /* 0 none, 1 posted (the worker's), 2 done (the view's) */
+    int kind, slot, C;                                    /* (PJ_MATCH: its copy's slot, VT_PCONTM or VT_PZONEM) */
+    int map, zok, z, c, known, full;                      /* what it is for */
+    float x, y, h, fx, fy;
+    LONG screen;
+    unsigned char bits[EXPLORED_BYTES];
+    int ok, way, want, wantCont, words, pieces, all;      /* what it made */
+    const char *why, *cwhy;
+    DWORD posted, ran;                                    /* (the view's clock as it was posted; the worker's ms on it) */
+} g_pj;
+static volatile LONG g_pjWorker;                          /* a worker runs the jobs (once started), */
+#ifdef __i386__
+static HANDLE g_pjEvent;                                  /* woken by this as each is posted */
+#endif
+static int g_pjUp = -1;                                   /* the slot going up to OpenGL a strip a frame (-1: none) */
+#ifndef PARCH_UP_BEGIN
+#define PARCH_UP_BEGIN(slot) PARCH_UP(slot)              /* (the tests and the harness: up whole, at once) */
+#define PARCH_UP_STEP() 1
+#endif
+/* The job posted, run (the worker's thread, or at once without one). */
+static void ParchJobRun(void)
+{
+    DWORD t0 = ViewNow();
+    const char *why = "";
+    g_pj.cwhy = "";
+    switch (g_pj.kind) {
+    case PJ_WORLD:                                                /* the world's painting, its coasts, its two names, the marker */
+        g_pj.ok = ParchMakeNamed("World", -1, -2, &why);
+        if (g_pj.ok) {
+            ParchLinesKeep(&g_linesWorld, ParchWorldRect(), -2, 2);
+            int conts[2] = { ParchContinent(0), ParchContinent(1) };
+            ParchWorldWords(conts);
+            if (g_pj.C) ParchLowKeep(&g_lpWorld, ParchWorldRect(), -2);
+            g_pj.words = ParchMarkRead();
+            ParchMips();
+        }
+        break;
+    case PJ_FIND:                                                 /* the arrival's zone, as the client finds it */
+        g_pj.want = ParchZoneAt(g_pj.map, g_pj.x, g_pj.y, g_pj.h, g_pj.zok, &g_pj.way);
+        g_pj.wantCont = ParchContinent(g_pj.map);
+        g_pj.ok = 1;
+        break;
+    case PJ_CONT:                                                 /* its continent's: its lines, its own name painted out, its cut */
+        g_pj.ok = ParchMake(g_pj.c, &why);
+        if (g_pj.ok) {
+            g_pj.words = ParchContMade(g_pj.c, &g_pj.cwhy);
+            if (g_pj.C && !g_worldUp) ParchLowKeep(&g_lpCont, ParchBox(g_pj.c), g_pj.c);   /* (the zone's colours: the world's, else its continent's) */
+            ParchMips();
+        }
+        break;
+    case PJ_ZONE:                                                 /* its zone's: the pieces found (or the full map), its cut */
+        g_makeBits = g_pj.known && !g_pj.full ? g_pj.bits : NULL;
+        g_pj.ok = ParchMake(g_pj.z, &why);
+        g_makeBits = NULL;
+        if (g_pj.ok) {
+            g_pj.pieces = g_parchPieces; g_pj.all = g_parchAll;
+            ParchZoneMade(g_pj.z, g_pj.c, g_pj.fx, g_pj.fy, &g_pj.cwhy);
+            ParchMips();
+        }
+        break;
+    case PJ_MATCH: {                                              /* C: the painting just up, in the colours under it */
+        const ParchLow *L = g_pj.slot == VT_PCONTM ? (g_lpWorld.ok ? &g_lpWorld : NULL)
+                          : g_worldUp && g_lpWorld.ok ? &g_lpWorld : g_lpCont.ok && g_lpCont.z == g_pj.c ? &g_lpCont : NULL;
+        g_pj.ok = L && ParchMatch(L, ParchBox(g_pj.slot == VT_PCONTM ? g_pj.c : g_pj.z)) && ParchMips();
+        break; }
+    }
+    g_pj.why = why;
+    g_pj.ran += ViewNow() - t0;
+}
+/* A job posted (its inputs in g_pj already): the worker's from now, or run at once without one. */
+static void ParchJobPost(int kind, DWORD now)
+{
+    g_pj.kind = kind;
+    if (kind != PJ_MATCH) { g_pj.posted = now; g_pj.ran = 0; }
+    InterlockedExchange(&g_pj.state, 1);
+    if (!g_pjWorker) { ParchJobRun(); InterlockedExchange(&g_pj.state, 2); }
+#ifdef __i386__
+    else SetEvent(g_pjEvent);
+#endif
+}
+/* The next job, the first needed first (the view's thread, nothing posted or going up): 1 when one was posted. */
+static int ParchJobNext(DWORD now, int map, float x, float y, float h, int zok, LONG known, LONG screen)
+{
+    int C = g_parchFade == PARCH_FADE_C || g_parchFade == PARCH_FADE_D;   /* (with C and D, the colour-matched copies too) */
+    if (!g_ptry.world) {                                           /* the world's painting, once a session: the opening */
+        g_ptry.world = 1;
+        if (!g_worldFrameOk) {
+            Log("  the parchment: the client's world map frame is not as read (WoW.exe 0x806524), so each glide opens on its continent's painting");
+            return 0;
+        }
+        g_pj.C = C;
+        ParchJobPost(PJ_WORLD, now);
+        return 1;
+    }
+    if (map < 0) return 0;
+    if (screen != g_parchForScreen || map != g_parchForMap || x != g_parchForX || y != g_parchForY) {   /* the glide's end */
+        g_pj.map = map; g_pj.x = x; g_pj.y = y; g_pj.h = h; g_pj.zok = zok; g_pj.screen = screen;
+        ParchJobPost(PJ_FIND, now);
+        return 1;
+    }
+    int z = g_parchWant, c = g_parchWantCont;
+    if (z < 0) return 0;
+    if (c >= 0 && c != g_parchCont && !g_ptry.cont) {               /* its continent's painting */
+        g_ptry.cont = 1;
+        g_parchCont = -1; g_contMatch = -1;
+        g_pj.c = c; g_pj.C = C;
+        ParchJobPost(PJ_CONT, now);
+        return 1;
+    }
+    int full = g_parchFullOn;                                        /* (the map's areas, as this screen opened) */
+    if (g_pz[z].area && !g_ptry.zone && (z != g_parchZone || known != g_pmadeKnown || full != g_pmadeFull ||
+                                         (known && !full && !Same(g_pbits, g_pmadeBits, EXPLORED_BYTES)))) {
+        g_ptry.zone = 1;                                             /* its zone's (another zone, other areas found, the other areas' choice) */
+        g_parchZone = -1; g_zoneMatch = -1;
+        g_pj.z = z; g_pj.c = c; g_pj.C = C; g_pj.known = known; g_pj.full = full;
+        for (int i = 0; i < EXPLORED_BYTES; i++) g_pj.bits[i] = g_pbits[i];
+        ParchSpot(map, x, y, &g_pj.fx, &g_pj.fy);
+        ParchJobPost(PJ_ZONE, now);
+        return 1;
+    }
+    return 0;
+}
+static int ParchUpDone(DWORD now, int slot, int up);
+/* A job done (the view's thread): the arrival taken, or the painting's upload begun. 1 when work goes on in this call
+ * (an upload begun, or the next job to take), 0 when this call is done. */
+static int ParchJobDone(DWORD now, int map, float x, float y, LONG screen)
+{
+    char m[300];
+    int slot = g_pj.kind == PJ_WORLD ? VT_PWORLD : g_pj.kind == PJ_CONT ? VT_PARCH2 : g_pj.kind == PJ_ZONE ? VT_PARCH :
+               g_pj.kind == PJ_MATCH ? g_pj.slot : -1;
+    if (g_pj.kind == PJ_FIND) {
+        if (g_pj.map != map || g_pj.x != x || g_pj.y != y || g_pj.screen != screen) return 1;   /* (moved meanwhile: found again) */
+        g_parchWant = g_pj.want; g_parchWantCont = g_pj.wantCont;
+        g_parchForMap = map; g_parchForX = x; g_parchForY = y; g_parchForScreen = screen; g_parchAt = now;
+        g_ptry.cont = g_ptry.zone = 0;
+        if (g_parchWant < 0) { wsprintfA(m, "  the parchment: no zone or continent painting for map %d; the opening stays", map); Log(m); }
+        else {
+            static const char *const kWay[4] = { "the smallest box holding it (no terrain file to read)", "its terrain's area, as the client",
+                                                 "the building's floor under it, as the client", "its terrain's zone has no page: its continent's" };
+            char hb[24] = "";
+            if (g_pj.zok) wsprintfA(hb, ", %d high", (int)g_pj.h);
+            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d%s) is in %s, by %s", map, (int)x, (int)y, hb, g_pz[g_parchWant].name, kWay[g_pj.way]);
+            Log(m);
+        }
+        return 1;
+    }
+    if (!g_pj.ok) {                                              /* not made */
+        if (g_pj.kind == PJ_WORLD) { wsprintfA(m, "  the parchment: the world could not be painted (%s); each glide opens on its continent's painting", g_pj.why); Log(m); }
+        else if (g_pj.kind == PJ_CONT) { wsprintfA(m, "  the parchment: %s could not be painted (%s); the glide goes on without it", g_pz[g_pj.c].name, g_pj.why); Log(m); }
+        else if (g_pj.kind == PJ_ZONE) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the glide ends on its continent's painting", g_pz[g_pj.z].name, g_pj.why); Log(m); }
+        else ParchUpDone(now, g_pj.slot, 0);                     /* (a copy not made: its painting's line, without it) */
+        ParchFree();
+        return 0;
+    }
+    if (g_pj.kind == PJ_WORLD) { g_worldTW = g_parchTW; g_worldK = g_parchK; }
+    if (g_pj.kind == PJ_CONT) { g_contTW = g_parchTW; g_contK = g_parchK; }
+    if (g_pj.kind == PJ_ZONE) { g_zoneTW = g_parchTW; g_zoneK = g_parchK; }
+    if (!PARCH_UP_BEGIN(slot)) { ParchUpDone(now, slot, 0); ParchFree(); return 0; }
+    g_pjUp = slot;
+    return 1;
+}
+/* The painting up (the view's thread; up 0: OpenGL would not take it): it drawn from now, logged; C's copy next, or done.
+ * 1 when a job follows in this call. */
+static int ParchUpDone(DWORD now, int slot, int up)
+{
+    char m[400];
+    DWORD ms = g_pj.ran;
+    if (slot == VT_PWORLD) {
+        if (!up) { Log("  the parchment: OpenGL would not take the world's painting; each glide opens on its continent's painting"); return 0; }
+        g_worldUp = 1; g_worldAt = now;
+        for (int k = 0; k < 2; k++)
+            g_wordUp[k] = g_wordPic[k].ok && PARCH_UPPIC(VT_PWORD0 + k, &g_wordPic[k], &g_wordTW[k], &g_wordTH[k]);
+        g_markUp = g_pj.words && PARCH_UPPIC(VT_PMARK, &g_markPic[0], &g_markTW[0], &g_markTH[0]) &&
+                   PARCH_UPPIC(VT_PGLOW, &g_markPic[1], &g_markTW[1], &g_markTH[1]);
+        Log(g_markUp ? "  the parchment: the player's marker, the world map's own arrow (MinimapArrow.blp) and the candle's glow (GenericGlow2_32.blp), read from the client"
+                     : "  the parchment: the player's marker could not be read from the client (MinimapArrow.blp, GenericGlow2_32.blp): none drawn");
+        wsprintfA(m, "  the parchment: the world painted from the client's map (%d-px tiles) in %lu ms (up %lu ms after), the opening over the Maelstrom; "
+                  "its names cut out to stay put: Eastern Kingdoms %s, Kalimdor %s", 256 * g_worldK, (unsigned long)ms,
+                  (unsigned long)(now - g_pj.posted), g_wordUp[0] ? "yes" : "no", g_wordUp[1] ? "yes" : "no"); Log(m);
+        return 0;
+    }
+    int cont = slot == VT_PARCH2 || slot == VT_PCONTM, c = g_pj.c, z = g_pj.z;
+    if (slot == VT_PARCH2 || slot == VT_PARCH) {
+        if (!up) {
+            Log(cont ? "  the parchment: OpenGL would not take the continent's painting; the glide goes on without it"
+                     : "  the parchment: OpenGL would not take the zone's painting; the glide ends on its continent's painting");
+            return 0;
+        }
+        if (cont) { g_parchCont = c; g_contAt = now; }
+        else {
+            g_parchZone = z; g_zoneAt = now; g_pmadeKnown = g_pj.known; g_pmadeFull = g_pj.full;
+            for (int i = 0; i < EXPLORED_BYTES; i++) g_pmadeBits[i] = g_pj.bits[i];
+        }
+        if (g_pj.C) { g_pj.slot = cont ? VT_PCONTM : VT_PZONEM; ParchJobPost(PJ_MATCH, now); return 1; }   /* (C: its copy next) */
+    } else if (up) {                                             /* its copy up */
+        if (cont) { g_contMatch = c; g_contMAt = now; } else { g_zoneMatch = z; g_zoneMAt = now; }
+    }
+    if (cont) {
+        wsprintfA(m, "  the parchment: %s painted (%d-px tiles) in %lu ms (up %lu ms after)%s; its own name %s; %s", g_pz[c].name, 256 * g_contK,
+                  (unsigned long)ms, (unsigned long)(now - g_pj.posted),
+                  g_pj.C ? (g_contMatch == c ? ", and its copy in the world's colours" : ", but not its copy in the world's colours") : "",
+                  g_pj.words ? "painted out (the world's stays, in its place)" : "left as painted", g_contCut ? "cut to its land as the world's painting draws it" : "its edges the plain band");
+        Log(m);
+        if (!g_contCut) { wsprintfA(m, "  the parchment: %s not cut to its land: %s", g_pz[c].name, g_pj.cwhy); Log(m); }
+        return 0;
+    }
+    if (g_zoneCut && g_cutLand) {
+        wsprintfA(m, "  the parchment: %s cut to its land as its terrain gives it (%d chunks, %s), its edge %s (%d%% of its painting), grown %d texels",
+                  g_pz[z].name, g_land.n, g_land.fromFile ? "kept from before" : "read from the client's terrain",
+                  g_cutHeld ? "as its continent's painting draws it" : "its terrain's (its outline not held)", (int)(100 * g_zoneShare + 0.5f),
+                  PARCH_CUT_GROW * g_zoneK / 2); Log(m);
+        if (!g_land.fromFile) { wsprintfA(m, "  the parchment: %s's land read from %d tiles and kept in Data\\CinderLoad\\land-%s.bin", g_pz[z].name, g_land.tiles, g_pz[z].name); Log(m); }
+    } else if (g_zoneCut) { wsprintfA(m, "  the parchment: %s cut to its own area as %s's painting draws it (%d%% of its painting%s), grown %d texels", g_pz[z].name,
+                               c >= 0 ? g_pz[c].name : "its continent", (int)(100 * g_zoneShare + 0.5f), g_cutBoxed ? "; its outline leaked, kept to its own box" : "",
+                               PARCH_CUT_GROW * g_zoneK / 2); Log(m); }
+    else { wsprintfA(m, "  the parchment: %s not cut to its own area (%s): the plain band at its edges", g_pz[z].name, g_pj.cwhy); Log(m); }
+    wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d of its %d overlay pieces%s) in %lu ms (up %lu ms after)%s",
+              g_pz[z].name, 256 * g_zoneK, g_pj.pieces, g_pj.all, g_pj.full ? ", the full map chosen" : g_pj.known ? ", the rest not found by this character" : ", its explored areas not known",
+              (unsigned long)ms, (unsigned long)(now - g_pj.posted), g_pj.C ? (g_zoneMatch == z ? ", and its copy in the colours under it" : ", but not its copy in the colours under it") : "");
+    Log(m);
+    return 0;
+}
+/* The view's thread, each frame of a screen, outside the step lock: this screen's arrival taken for the glide as soon as it
+ * is known (its zone found), and the paintings made and given to OpenGL, the first needed first: the world's (once a
+ * session), the arrival's continent's, its zone's (only the pieces this character has found, unless the full map is
+ * chosen), each with C its colour-matched copy; one job at a time, off this thread when the worker runs (above). */
 static void ParchWork(DWORD now)
 {
     if (!g_parchOn) return;
@@ -10356,118 +10626,22 @@ static void ParchWork(DWORD now)
     LONG seq = g_scrSeq, known = g_scrKnown, screen = g_viewScreen;   /* (this screen's character's explored areas, as it began) */
     if (seq != g_pbitsSeq) { g_pbitsSeq = seq; for (int i = 0; i < EXPLORED_BYTES; i++) g_pbits[i] = g_scrBits[i]; }
     StepUnlock(held);
-    char m[300];
-    const char *why = "";
-    DWORD t0 = ViewNow();
-    int C = g_parchFade == PARCH_FADE_C || g_parchFade == PARCH_FADE_D;   /* (with C and D, the colour-matched copies too) */
-    if (!g_ptry.world) {                                           /* the world's painting, once a session: the opening */
-        g_ptry.world = 1;
-        if (!g_worldFrameOk) Log("  the parchment: the client's world map frame is not as read (WoW.exe 0x806524), so each glide opens on its continent's painting");
-        else if (!ParchMakeNamed("World", -1, -2, &why)) {
-            wsprintfA(m, "  the parchment: the world could not be painted (%s); each glide opens on its continent's painting", why); Log(m);
-        } else {
-            g_worldTW = g_parchTW; g_worldK = g_parchK;
-            ParchLinesKeep(&g_linesWorld, ParchWorldRect(), -2, 2);     /* (its coasts: the continents' outlines) */
-            int conts[2] = { ParchContinent(0), ParchContinent(1) };
-            ParchWorldWords(conts);                                     /* (its two names, cut out) */
-            if (C) ParchLowKeep(&g_lpWorld, ParchWorldRect(), -2);
-            if (PARCH_UP(VT_PWORLD)) {
-                g_worldUp = 1; g_worldAt = now;
-                for (int k = 0; k < 2; k++)
-                    g_wordUp[k] = g_wordPic[k].ok && PARCH_UPPIC(VT_PWORD0 + k, &g_wordPic[k], &g_wordTW[k], &g_wordTH[k]);
-                g_markUp = ParchMarkRead() && PARCH_UPPIC(VT_PMARK, &g_markPic[0], &g_markTW[0], &g_markTH[0]) &&
-                           PARCH_UPPIC(VT_PGLOW, &g_markPic[1], &g_markTW[1], &g_markTH[1]);
-                Log(g_markUp ? "  the parchment: the player's marker, the world map's own arrow (MinimapArrow.blp) and the candle's glow (GenericGlow2_32.blp), read from the client"
-                             : "  the parchment: the player's marker could not be read from the client (MinimapArrow.blp, GenericGlow2_32.blp): none drawn");
-                wsprintfA(m, "  the parchment: the world painted from the client's map (%d-px tiles) in %lu ms, the opening over the Maelstrom; "
-                          "its names cut out to stay put: Eastern Kingdoms %s, Kalimdor %s", 256 * g_worldK, (unsigned long)(ViewNow() - t0),
-                          g_wordUp[0] ? "yes" : "no", g_wordUp[1] ? "yes" : "no"); Log(m);
-            } else Log("  the parchment: OpenGL would not take the world's painting; each glide opens on its continent's painting");
+    for (int steps = 0; steps < 8; steps++) {
+        if (g_pjUp >= 0) {                                       /* a painting going up, a strip a frame */
+            int r = PARCH_UP_STEP();
+            if (!r) return;
+            int slot = g_pjUp;
+            g_pjUp = -1;
+            int more = ParchUpDone(now, slot, r > 0);
+            if (!more) { ParchFree(); return; }                  /* (one painting a call) */
         }
-        ParchFree();
-        return;
-    }
-    if (map < 0) return;
-    if (screen != g_parchForScreen || map != g_parchForMap || x != g_parchForX || y != g_parchForY) {   /* the glide's end */
-        int way = 0;
-        g_parchWant = ParchZoneAt(map, x, y, h, zok, &way); g_parchWantCont = ParchContinent(map);
-        g_parchForMap = map; g_parchForX = x; g_parchForY = y; g_parchForScreen = screen; g_parchAt = now;
-        g_ptry.cont = g_ptry.zone = 0;
-        if (g_parchWant < 0) { wsprintfA(m, "  the parchment: no zone or continent painting for map %d; the opening stays", map); Log(m); }
-        else {
-            static const char *const kWay[4] = { "the smallest box holding it (no terrain file to read)", "its terrain's area, as the client",
-                                                 "the building's floor under it, as the client", "its terrain's zone has no page: its continent's" };
-            char hb[24] = "";
-            if (zok) wsprintfA(hb, ", %d high", (int)h);
-            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d%s) is in %s, by %s", map, (int)x, (int)y, hb, g_pz[g_parchWant].name, kWay[way]);
-            Log(m);
+        if (g_pj.state == 1) return;                             /* (the worker's: done on a later frame) */
+        if (g_pj.state == 2) {
+            InterlockedExchange(&g_pj.state, 0);
+            if (!ParchJobDone(now, map, x, y, screen)) return;
+            continue;
         }
-    }
-    int z = g_parchWant, c = g_parchWantCont;
-    if (z < 0) return;
-    if (c >= 0 && c != g_parchCont && !g_ptry.cont) {               /* its continent's painting */
-        g_ptry.cont = 1;
-        g_parchCont = -1; g_contMatch = -1;
-        if (!ParchMake(c, &why)) { wsprintfA(m, "  the parchment: %s could not be painted (%s); the glide goes on without it", g_pz[c].name, why); Log(m); }
-        else {
-            g_contTW = g_parchTW; g_contK = g_parchK;
-            const char *cwhy = "";
-            int words = ParchContMade(c, &cwhy);
-            if (C && !g_worldUp) ParchLowKeep(&g_lpCont, ParchBox(c), c);   /* (the zone's colours: the world's, else its continent's) */
-            if (PARCH_UP(VT_PARCH2)) {
-                g_parchCont = c; g_contAt = now;
-                if (C && g_lpWorld.ok && ParchMatch(&g_lpWorld, ParchBox(c)) && PARCH_UP(VT_PCONTM)) { g_contMatch = c; g_contMAt = now; }
-                wsprintfA(m, "  the parchment: %s painted (%d-px tiles) in %lu ms%s; its own name %s; %s", g_pz[c].name, 256 * g_contK,
-                          (unsigned long)(ViewNow() - t0),
-                          C ? (g_contMatch == c ? ", and its copy in the world's colours" : ", but not its copy in the world's colours") : "",
-                          words ? "painted out (the world's stays, in its place)" : "left as painted", g_contCut ? "cut to its land as the world's painting draws it" : "its edges the plain band");
-                Log(m);
-                if (!g_contCut) { wsprintfA(m, "  the parchment: %s not cut to its land: %s", g_pz[c].name, cwhy); Log(m); }
-            } else Log("  the parchment: OpenGL would not take the continent's painting; the glide goes on without it");
-        }
-        ParchFree();
-        return;
-    }
-    int full = g_parchFullOn;                                        /* (the map's areas, as this screen opened) */
-    if (g_pz[z].area && !g_ptry.zone && (z != g_parchZone || known != g_pmadeKnown || full != g_pmadeFull ||
-                                         (known && !full && !Same(g_pbits, g_pmadeBits, EXPLORED_BYTES)))) {
-        g_ptry.zone = 1;                                             /* its zone's (another zone, other areas found, the other areas' choice) */
-        g_parchZone = -1; g_zoneMatch = -1;
-        g_makeBits = known && !full ? g_pbits : NULL;                /* the pieces this character has not found left blank, unless
-                                                                      * the full map is chosen */
-        int made = ParchMake(z, &why);
-        g_makeBits = NULL;
-        if (!made) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the glide ends on its continent's painting", g_pz[z].name, why); Log(m); }
-        else {
-            int pieces = g_parchPieces, all = g_parchAll;
-            g_zoneTW = g_parchTW; g_zoneK = g_parchK;
-            float fx, fy;
-            const char *zwhy = "";
-            ParchSpot(map, x, y, &fx, &fy);
-            ParchZoneMade(z, c, fx, fy, &zwhy);
-            if (g_zoneCut && g_cutLand) {
-                wsprintfA(m, "  the parchment: %s cut to its land as its terrain gives it (%d chunks, %s), its edge %s (%d%% of its painting), grown %d texels",
-                          g_pz[z].name, g_land.n, g_land.fromFile ? "kept from before" : "read from the client's terrain",
-                          g_cutHeld ? "as its continent's painting draws it" : "its terrain's (its outline not held)", (int)(100 * g_zoneShare + 0.5f),
-                          PARCH_CUT_GROW * g_zoneK / 2); Log(m);
-                if (!g_land.fromFile) { wsprintfA(m, "  the parchment: %s's land read from %d tiles and kept in Data\\CinderLoad\\land-%s.bin", g_pz[z].name, g_land.tiles, g_pz[z].name); Log(m); }
-            } else if (g_zoneCut) { wsprintfA(m, "  the parchment: %s cut to its own area as %s's painting draws it (%d%% of its painting%s), grown %d texels", g_pz[z].name,
-                                       c >= 0 ? g_pz[c].name : "its continent", (int)(100 * g_zoneShare + 0.5f), g_cutBoxed ? "; its outline leaked, kept to its own box" : "",
-                                       PARCH_CUT_GROW * g_zoneK / 2); Log(m); }
-            else { wsprintfA(m, "  the parchment: %s not cut to its own area (%s): the plain band at its edges", g_pz[z].name, zwhy); Log(m); }
-            if (PARCH_UP(VT_PARCH)) {
-                g_parchZone = z; g_zoneAt = now; g_pmadeKnown = known; g_pmadeFull = full;
-                for (int i = 0; i < EXPLORED_BYTES; i++) g_pmadeBits[i] = g_pbits[i];
-                const ParchLow *L = g_worldUp && g_lpWorld.ok ? &g_lpWorld : g_lpCont.ok && g_lpCont.z == c ? &g_lpCont : NULL;
-                if (C && L && ParchMatch(L, ParchBox(z)) && PARCH_UP(VT_PZONEM)) { g_zoneMatch = z; g_zoneMAt = now; }
-                wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d of its %d overlay pieces%s) in %lu ms%s",
-                          g_pz[z].name, 256 * g_zoneK, pieces, all, full ? ", the full map chosen" : known ? ", the rest not found by this character" : ", its explored areas not known",
-                          (unsigned long)(ViewNow() - t0), C ? (g_zoneMatch == z ? ", and its copy in the colours under it" : ", but not its copy in the colours under it") : "");
-                Log(m);
-            } else Log("  the parchment: OpenGL would not take the zone's painting; the glide ends on its continent's painting");
-        }
-        ParchFree();
-        return;
+        if (!ParchJobNext(now, map, x, y, h, zok, known, screen)) return;
     }
 }
 /* A screen's first frame, made at once as the view opens (before its first step can be: his note, 10 Oct, "for a split
@@ -10903,27 +11077,40 @@ static int ViewSparkUp(void)
 }
 
 /* The painting made (g_parchPx) and its smaller copies (ParchMips) given to OpenGL in slot (its name made once, its
- * pictures replaced each time), drawn smoothly between them: 1 when it took them. g_parchPx stays the caller's. */
-static int ParchUp(int slot)
+ * pictures replaced each time), drawn smoothly between them, a strip a frame so the view's frame never waits on it (the
+ * brief, 11 Oct): ParchUpBegin makes room for every level (1 when OpenGL took it), ParchUpStep gives it the next
+ * PARCH_UP_BYTES (ParchStrip; 1 when all of it is up, 0 more to come, -1 refused). g_parchPx and its copies stay the
+ * caller's until it is up. */
+static struct { int slot, level, y; } g_pul;
+static int ParchUpBegin(int slot)
 {
-    if (!g_parchPx || g_parchTW <= 0 || g_parchTW > g_view.maxTex || !ParchMips()) return 0;
+    if (!g_parchPx || g_parchTW <= 0 || g_parchTW > g_view.maxTex || (!g_mipLevels && !ParchMips())) return 0;
     while (gl.GetError()) {}
     if (!g_viewTex[slot]) gl.GenTextures(1, &g_viewTex[slot]);
     gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
     gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
-    gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA8_, g_parchTW, g_parchTW, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, g_parchPx);
-    const unsigned char *p = g_mipPx;
-    int w = g_parchTW / 2;
-    for (int i = 1; i <= g_mipLevels; i++, w /= 2) {
-        gl.TexImage2D(GL_TEXTURE_2D_, i, GL_RGBA8_, w, w, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, p);
-        p += (SIZE_T)w * (SIZE_T)w * 4;
-    }
+    int w = g_parchTW;
+    for (int i = 0; i <= g_mipLevels; i++, w /= 2) gl.TexImage2D(GL_TEXTURE_2D_, i, GL_RGBA8_, w, w, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, NULL);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, g_mipLevels);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_MIPMAP_LINEAR_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    g_pul.slot = slot; g_pul.level = 0; g_pul.y = 0;
     return !gl.GetError();
+}
+static int ParchUpStep(void)
+{
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[g_pul.slot]);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    SIZE_T budget = PARCH_UP_BYTES;
+    int lv, y0, rows;
+    while (ParchStrip(g_parchTW, g_mipLevels, &g_pul.level, &g_pul.y, &budget, &lv, &y0, &rows)) {
+        int w = g_parchTW >> lv;
+        gl.TexSubImage2D(GL_TEXTURE_2D_, lv, 0, y0, w, rows, GL_RGBA_, GL_UNSIGNED_BYTE_, ParchLevelPx(lv) + 4 * (SIZE_T)y0 * (SIZE_T)w);
+    }
+    if (gl.GetError()) return -1;
+    return g_pul.level > g_mipLevels;
 }
 
 /* A picture (P: w x h RGBA) given to OpenGL in slot, on a texture as many texels as the powers of two holding it (its
@@ -11214,6 +11401,33 @@ static DWORD ViewOff(const char *why)
     Log(m);
     return 0;
 }
+/* The parchment's worker (above, the jobs): a thread of its own, at a lower priority than the view's, that runs each job
+ * posted (woken by g_pjEvent) and says it is done; never touching OpenGL. Started with the view, once the parchment's
+ * tables are read. */
+static DWORD WINAPI ParchWorker(LPVOID arg)
+{
+    (void)arg;
+    while (g_pjWorker) {
+        WaitForSingleObject(g_pjEvent, 100);
+        if (g_pj.state == 1) { ParchJobRun(); InterlockedExchange(&g_pj.state, 2); }
+    }
+    return 0;
+}
+static void ParchWorkerStart(void)
+{
+    if (!g_parchTablesOk || g_pjWorker) return;
+    g_pjEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    InterlockedExchange(&g_pjWorker, 1);                  /* (before it runs: its loop's) */
+    HANDLE t = g_pjEvent ? CreateThread(NULL, 0, ParchWorker, NULL, 0, NULL) : NULL;
+    if (!t) {
+        InterlockedExchange(&g_pjWorker, 0);
+        Log("  the parchment: its worker's thread could not be started; its paintings are made on the view's thread");
+        return;
+    }
+    SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL);
+    CloseHandle(t);
+    Log("  the parchment: its paintings made by a worker thread of their own, given to OpenGL a strip a frame");
+}
 static DWORD WINAPI ViewThread(LPVOID arg)
 {
     const unsigned char *base = (const unsigned char *)arg;
@@ -11236,6 +11450,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         mpq_read(&kIo, "interface.MPQ", TOD_PATH, &g_view.blp[VT_TIME], &g_view.len[VT_TIME]);
     VBarRead(g_view.blp, g_view.len);                   /* vanilla's own bar, for retro (read only) */
     ParchRead();                                        /* the parchment's tables, for the parchment (read only) */
+    ParchWorkerStart();                                 /* (its paintings made off this thread) */
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
     LONG seen = g_gameSeq, worldSeen = 0;
     DWORD fadeAt = 0, waitAt = 0;

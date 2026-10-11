@@ -5538,6 +5538,7 @@ static void TestGlideState(void)
     g_destMap = -1;
     g_ptry.world = g_ptry.cont = g_ptry.zone = 0; g_pbitsSeq = -1; g_pmadeKnown = -1;
     g_lpWorld.ok = g_lpCont.ok = 0;
+    g_pj.state = 0; g_pjUp = -1;
 }
 /* this screen's arrival taken (zone want, its continent cont; want a continent's row: at sea), both painted and up */
 static void TestGlideArrive(int map, int want, int cont, float x, float y, DWORD at)
@@ -7032,6 +7033,116 @@ static void TestGlide(void)
     ParchWork(800);
     ok &= g_upN == 0 && !g_worldUp && LogSays("is not as read");
     Check(ok, "the parchment's work with the fade C: each finer painting and then its copy in the colours under it (the world's); without the client's world frame, no world's painting, and the log says so");
+    /* with the worker (the 32-bit build's thread; here run by hand between frames): each job posted and left to it, the view's
+     * frames going on; done, taken on the next frame; an arrival moved while its zone was being found, found again */
+    TestGlideState();
+    g_parchFade = PARCH_FADE_C; g_upN = 0; g_worldFrameOk = 1;
+    g_pjWorker = 1;
+    g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 50;
+    ParchWork(100);                                                     /* (the world's posted: nothing up yet) */
+    ok = g_pj.state == 1 && g_pj.kind == PJ_WORLD && g_upN == 0 && !g_worldUp && !g_parchPx;
+    ParchWork(116);                                                     /* (still the worker's: nothing done, nothing more posted) */
+    ok &= g_pj.state == 1 && g_upN == 0;
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);                 /* (the worker) */
+    ok &= g_upN == 0 && g_parchPx;                                      /* (made, not up: the view's to do) */
+    ParchWork(132);                                                     /* (done: up, and nothing more this frame) */
+    ok &= g_upN == 1 && g_upOrder[0] == VT_PWORLD && g_worldUp && g_worldAt == 132 && !g_parchPx && g_pj.state == 0;
+    ParchWork(148);                                                     /* (the arrival's zone to find: posted) */
+    ok &= g_pj.state == 1 && g_pj.kind == PJ_FIND && g_parchForScreen != 50;
+    g_destWX = -9300;                                                   /* (moved while it was being found) */
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(164);
+    ok &= g_parchForScreen != 50 && g_pj.state == 1 && g_pj.kind == PJ_FIND && g_pj.x == -9300;   /* (found again, for where it is now) */
+    g_viewScreen = 51;                                                  /* (and a new screen begun while it was) */
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(170);
+    ok &= g_parchForScreen != 51 && g_pj.state == 1 && g_pj.kind == PJ_FIND && g_pj.screen == 51;  /* (found again, for this screen) */
+    g_viewScreen = 50;
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(174);
+    ok &= g_pj.state == 1 && g_pj.kind == PJ_FIND && g_pj.screen == 50;
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(180);                                                     /* (taken; its continent's posted) */
+    ok &= g_parchForScreen == 50 && g_parchAt == 180 && g_parchForX == -9300 && g_pj.state == 1 && g_pj.kind == PJ_CONT && g_parchCont == -1;
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(196);                                                     /* (up; C's copy posted) */
+    ok &= g_upN == 2 && g_upOrder[1] == VT_PARCH2 && g_parchCont == 0 && g_contAt == 196 && g_pj.state == 1 && g_pj.kind == PJ_MATCH;
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(212);
+    ok &= g_upN == 3 && g_upOrder[2] == VT_PCONTM && g_contMatch == 0 && g_pj.state == 0 && !g_parchPx;
+    ParchWork(228);                                                     /* (its zone's) */
+    ok &= g_pj.state == 1 && g_pj.kind == PJ_ZONE && g_parchZone == -1;
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(244);
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(260);
+    ok &= g_upN == 5 && g_upOrder[3] == VT_PARCH && g_upOrder[4] == VT_PZONEM && g_parchZone == 1 && g_zoneMatch == 1 && g_zoneAt == 244 &&
+          LogSays("Elwynn painted from the client's map") && LogSays("(up 32 ms after)");
+    ParchWork(276);                                                     /* (all up: nothing posted) */
+    ok &= g_pj.state == 0 && g_upN == 5;
+    /* a painting made anew is not drawn from its post until it is up (its texture is given to OpenGL anew, a strip a
+     * frame): the last screen's other continent's, and the zone's for the other map areas' choice */
+    g_parchCont = 5; g_parchFullOn = 1;
+    g_destWX = -9310; g_viewScreen = 52;
+    ParchWork(292);                                                     /* (the new arrival's zone to find) */
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(308);                                                     /* (taken; its continent's posted) */
+    int anew = g_pj.state == 1 && g_pj.kind == PJ_CONT && g_parchCont == -1;
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(324);
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(340);
+    anew &= g_parchCont == 0;
+    ParchWork(356);                                                     /* (its zone's, for the whole map) */
+    anew &= g_pj.state == 1 && g_pj.kind == PJ_ZONE && g_pj.full == 1 && g_parchZone == -1 && g_zoneMatch == -1;
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(372);
+    ParchJobRun(); InterlockedExchange(&g_pj.state, 2);
+    ParchWork(388);
+    anew &= g_parchZone == 1 && g_pmadeFull == 1 && g_zoneMatch == 1 && g_pj.state == 0;
+    g_parchFullOn = 0;
+    Check(anew, "with the worker, a painting made anew is not drawn from the moment it is posted until it is up (another continent's, the zone's for the other map areas' choice): never half given to OpenGL");
+    g_pjWorker = 0;
+    Check(ok, "the parchment's work with a worker of its own: each job posted and left to it while the view's frames go on (none waits on it), done, taken on the next frame and given to OpenGL there; the arrival's zone found again when it moved meanwhile or a new screen began; the same order (the world's, the arrival, its continent's and its copy, its zone's and its copy)");
+    /* the painting given to OpenGL a strip a frame (ParchStrip, the 32-bit build's): an HD painting 2048 a side and its 11
+     * smaller copies, every row of every level once and in order, no frame over PARCH_UP_BYTES, all of it in 11 frames
+     * (22.4 MB); a row wider than the budget still goes, alone; each level's texels where ParchMips lays them */
+    {
+        static unsigned char seen[12][2048];
+        memset(seen, 0, sizeof seen);
+        int level = 0, y = 0, frames = 0, order = 1, over = 0, eL = 0, eY = 0;
+        while (frames < 100) {
+            SIZE_T budget = PARCH_UP_BYTES, used = 0;
+            int sl, sy, rows, any = 0;
+            while (ParchStrip(2048, 11, &level, &y, &budget, &sl, &sy, &rows)) {
+                int w = 2048 >> sl;
+                any = 1;
+                if (sl != eL || sy != eY || rows < 1) order = 0;
+                for (int r = 0; r < rows; r++) { if (sy + r >= w) over = 1; else seen[sl][sy + r]++; }
+                used += (SIZE_T)rows * (SIZE_T)w * 4;
+                eY = sy + rows;
+                if (eY >= w) { eL++; eY = 0; }
+            }
+            if (!any) break;
+            if (used > PARCH_UP_BYTES) over = 1;
+            frames++;
+        }
+        int once = 1;
+        for (int l = 0; l <= 11; l++) for (int r = 0; r < (2048 >> l); r++) if (seen[l][r] != 1) once = 0;
+        SIZE_T b1 = 1000;
+        int l1 = 0, y1 = 0, sl, sy, rows = 0;
+        int wide = ParchStrip(2048, 11, &l1, &y1, &b1, &sl, &sy, &rows) && rows == 1 && b1 == 0 && y1 == 1 &&
+                   !ParchStrip(2048, 11, &l1, &y1, &b1, &sl, &sy, &rows);
+        unsigned char px[64 * 4], mip[(16 + 4 + 1) * 4];
+        unsigned char *keepPx = g_parchPx, *keepMip = g_mipPx;
+        int keepTW = g_parchTW;
+        g_parchPx = px; g_mipPx = mip; g_parchTW = 8;
+        int where = ParchLevelPx(0) == px && ParchLevelPx(1) == mip && ParchLevelPx(2) == mip + 16 * 4 && ParchLevelPx(3) == mip + 20 * 4;
+        g_parchPx = keepPx; g_mipPx = keepMip; g_parchTW = keepTW;
+        printf("  the strips: %d frames, in order %d, over the budget %d, each row once %d, a wide row %d, the levels' texels %d\n", frames, order, over, once, wide, where);
+        Check(frames == 11 && order && !over && once && wide && where,
+              "a painting goes up to OpenGL a strip a frame, at most PARCH_UP_BYTES (2 MB) a frame: every row of it and its smaller copies once, in order, an HD zone's 22.4 MB in 11 frames; a row wider than that alone");
+    }
     for (int i = 0; i < 36; i++) free((void *)tdata[i]);
     TestGlideState();
 
