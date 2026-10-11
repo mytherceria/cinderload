@@ -8239,6 +8239,31 @@ static void TestNearbyMake(void)
     ok &= a[0] > 0xC0 && a[2] < 0x40;
     ParchFree();
     Check(ok, "the zones nearby painted as the arrival's zone is: only the pieces of each neighbour's map this character has found (a piece whose area is not found left out, its page bare), every piece with the full map");
+    /* the sheet's size: the arrival zone's texel where that fits (its tiles over 256, K, finer still), 2048 at most */
+    ok = ParchNearMake(1, 0, 0, x, y, 100, NULL, 1, N, &why) && g_parchTW == 512 && g_mipLevels == 9;
+    ParchFree();
+    ok &= ParchNearMake(1, 0, 0, x, y, 100, NULL, 2, N, &why) && g_parchTW == 1024;
+    ParchFree();
+    ok &= ParchNearMake(1, 0, 0, x, y, 300, NULL, 2, N, &why) && g_parchTW == 2048 && Near(N->ydTexel, 600.0f / 2048, 1e-4);
+    ParchFree();
+    ok &= ParchNearMake(1, 0, 0, x, y, 2000, NULL, 1, N, &why) && g_parchTW == 2048;
+    ParchFree();
+    Check(ok, "the zones nearby's sheet at the arrival zone's own texel where that fits: 100 yards, 512 texels a side with 256-px tiles and 1024 with 512-px tiles; 2048 at most (300 yards with 512-px tiles, 2000 yards)");
+    /* nothing kept but the sheet: each neighbour's painting freed as it is laid in; none laid, the sheet freed too */
+    {
+        long live = shim_heap_live;
+        ok = ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why);
+        ParchFree();
+        ok &= shim_heap_live == live;
+        shim_refuse_size = (size_t)1024 * 1024 * 4; shim_refuse_n = 1;   /* (no memory for its painting: none laid) */
+        ok &= !ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why) && N->n == 1 && N->laid == 0 &&
+              !strcmp(why, "none of them could be painted and cut to its land") && !g_parchPx && shim_heap_live == live;
+        shim_refuse_n = 0;
+        g_pj.state = 3;                                                /* (the job gone stale: stopped, nothing kept) */
+        ok &= !ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why) && !strcmp(why, "no longer wanted") && N->n == 0 && !g_parchPx && shim_heap_live == live;
+        g_pj.state = 0;
+        Check(ok, "the zones nearby keep nothing but their sheet (each neighbour's painting freed once laid in); none laid: the sheet freed too, and why; the job gone stale: stopped, nothing kept");
+    }
     ok = !ParchNearMake(1, 0, 0, x, y, 80, NULL, 1, N, &why) && N->n == 0 && !strcmp(why, "no zone's land within the reach") && !g_parchPx;
     ok &= !ParchNearMake(1, 0, 0, x, y, 0, NULL, 1, N, &why) && !ParchNearMake(-1, 0, 0, x, y, 300, NULL, 1, N, &why) && !g_parchPx;
     shim_refuse_size = (size_t)2048 * 2048 * 4; shim_refuse_n = 1;     /* (no memory for its sheet) */
@@ -8259,13 +8284,14 @@ static void TestNearbyMake(void)
          LogSays("the zones nearby within 300 yards of the arrival, under Elwynn: Westfall 83 yd (1 of 1 laid), in a 2048-texel sheet (0.2 yards a texel), whole to 150 yards and gone at 300; their explored areas not known");
     ParchWork(3100);
     ok &= g_upN == 1 && g_nearAt == 3000;
-    g_ptry.nearby = 0;                                                 /* (the next screen, the same arrival: kept, not made again) */
-    ParchWork(3150);
-    ok &= g_upN == 1 && g_nearAt == 3000 && g_nearZ == 1;
-    g_ptry.nearby = 0; g_parchNearOn = 200;                            /* (another reach chosen) */
-    ParchWork(3200);
-    ok &= g_upN == 2 && g_nearReach == 200 && g_nearAt == 3200;
-    g_ptry.nearby = 0; g_parchNearOn = 70;
+    g_viewScreen++;                                                    /* (the next screen, the same arrival: found again, */
+    ParchWork(3150);                                                   /* kept, not made again) */
+    ok &= g_upN == 1 && g_nearAt == 3000 && g_nearZ == 1 && g_parchForScreen == g_viewScreen;
+    g_viewScreen++; g_parchNearOn = 200; g_zoneK = 2;                  /* (the next screen, another reach chosen; the zone's */
+    ParchWork(3200);                                                   /* painting in 512-px tiles: the sheet as fine) */
+    ok &= g_upN == 2 && g_nearReach == 200 && g_nearAt == 3200 && g_nearTW == 2048 && g_parchForScreen == g_viewScreen;
+    g_zoneK = 1;
+    g_viewScreen++; g_parchNearOn = 70;
     ParchWork(3300);
     ParchWork(3400);
     ok &= g_upN == 2 && g_nearZ == -1 && LogSays("no zones nearby within 70 yards of the arrival (no zone's land within the reach)");
@@ -8273,28 +8299,26 @@ static void TestNearbyMake(void)
         const char *lg = Get("Logs/CinderLoad.log"), *f = lg ? strstr(lg, "no zones nearby within 70 yards") : NULL;
         ok &= f && !strstr(f + 1, "no zones nearby within 70 yards");                /* (tried once for this arrival) */
     }
-    g_ptry.nearby = 0; g_parchNearOn = 0;
+    g_viewScreen++; g_parchNearOn = 0;
     ParchWork(3500);
     ok &= g_upN == 2 && g_nearZ == -1 && !LogSays("within 0 yards");
-    g_ptry.nearby = 0; g_parchNearOn = 300; g_parchZone = -1;            /* (its zone not up: tried and not made) */
+    g_ptry.nearby = 0; g_ptry.zone = 1; g_parchNearOn = 300; g_parchZone = -1;   /* (its zone not up: tried and not made) */
     ParchWork(3540);
     ok &= g_upN == 2 && g_nearZ == -1 && g_pj.state == 0;
     g_parchZone = 1;
     ParchWork(3550);
     ok &= g_upN == 3 && g_nearZ == 1;
-    TestGlideArrive(0, 1, 0, x + 20, y, 2000);                         /* (the next screen, another arrival in the zone) */
-    g_destWX = x + 20; g_ptry.nearby = 0;
-    ParchWork(3560);
-    ok &= g_upN == 4 && g_nearZ == 1 && g_nearX == x + 20;
-    TestGlideArrive(0, 1, 0, x, y, 2000);
-    g_destWX = x; g_ptry.nearby = 0;
+    g_destWX = x + 20;                                                 /* (another arrival in the zone, as the game gives it: */
+    ParchWork(3560);                                                   /* found, and its own made) */
+    ok &= g_upN == 4 && g_nearZ == 1 && g_nearX == x + 20 && g_parchForX == x + 20;
+    g_viewScreen++; g_destWX = x;                                      /* (the next screen, back where it was) */
     ParchWork(3570);
-    ok &= g_upN == 5 && g_nearX == x;
+    ok &= g_upN == 5 && g_nearX == x && g_parchForX == x;
     Check(ok, "the zones nearby, by the parchment's work: once the arrival's zone is up, made and given to OpenGL and logged (each one, its distance, the sheet); not again for the same arrival, again for another reach or another arrival; none within it: logged once and not tried again for this arrival; reach 0: none; its zone not up: none");
     /* the areas found, as the screen began, or the full map: as the zone's own (the sheet as it went up to OpenGL) */
     TestGl(1);
     g_viewTex[VT_PNEAR] = 0;
-    memset(g_scrBits, 0, EXPLORED_BYTES); g_scrKnown = 1; g_scrSeq++; g_ptry.nearby = 0;
+    memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[0] = 1 << 1; g_scrKnown = 1; g_scrSeq++; g_ptry.nearby = 0;   /* (Elwynn's found) */
     for (int f = 0; f < 400 && !(g_nearZ == 1 && g_nearKnown == 1); f++) ParchWork(4000 + 10 * (DWORD)f);
     float pfx, pfy;
     TestNearChunk(12, 10, &cx, &cy);
@@ -8303,6 +8327,14 @@ static void TestNearbyMake(void)
     const unsigned char *up = g_tgl[VT_PNEAR].lv[0] ? g_tgl[VT_PNEAR].lv[0] + 4 * ((size_t)pj * g_nearTW + pi) : NULL;
     ok = g_nearZ == 1 && g_nearKnown == 1 && !g_nearFull && up && up[0] < 0x40 && up[2] > 0xB0 && LogSays("Westfall 83 yd (1 of 1 laid)") &&
          LogSays("the rest not found by this character");
+    {                                                                  /* (the next screen, the same arrival and areas: kept) */
+        DWORD at = g_nearAt;
+        for (int i = 0; i < EXPLORED_BYTES; i++) g_pmadeBits[i] = g_pbits[i];
+        g_pmadeKnown = 1; g_viewScreen++;
+        for (int f = 0; f < 40; f++) ParchWork(8000 + 10 * (DWORD)f);
+        ok &= g_nearAt == at && g_nearKnown == 1 && g_parchForScreen == g_viewScreen;
+        g_pmadeKnown = 0;
+    }
     g_parchFullOn = 1; g_ptry.nearby = 0;
     for (int f = 0; f < 400 && !(g_nearZ == 1 && g_nearFull == 1); f++) ParchWork(9000 + 10 * (DWORD)f);
     up = g_tgl[VT_PNEAR].lv[0] ? g_tgl[VT_PNEAR].lv[0] + 4 * ((size_t)pj * g_nearTW + pi) : NULL;
@@ -8330,6 +8362,22 @@ static void TestNearbyMake(void)
     }
     ok &= both && seen >= 3 && part >= 1;
     ok &= TestBatch(VT_PNEAR) >= 0 && TestVertNear(TestBatch(VT_PNEAR), 960, 540)->c[3] == 255;
+    {                                                                  /* (up after its zone: it comes up on its own, a */
+        DWORD was = g_nearAt;                                          /* quarter of the way 100 ms after) */
+        g_nearAt = 9000 - PARCH_FADE_MS / 4;
+        ViewBuild(1920, 1080, 1.0f, 9000);
+        int nb = TestBatch(VT_PNEAR), zb = TestBatch(VT_PARCH);
+        ok &= nb >= 0 && zb >= 0 && abs(TestVertNear(nb, 960, 540)->c[3] - 64) <= 2 && TestVertNear(zb, 960, 540)->c[3] == 255;
+        g_nearAt = was;
+    }
+    g_nearMap = 1;                                                     /* (made for another map: not drawn) */
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
+    g_nearMap = 0;
+    TestGlideArrive(0, 1, 0, x, y + 10, 2000);                         /* (another arrival, by its other coordinate) */
+    ViewBuild(1920, 1080, 0.0f, 5000);
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
     TestGlideArrive(0, 1, 0, x + 10, y, 2000);                         /* (another arrival: its own sheet, not this one) */
     ViewBuild(1920, 1080, 0.0f, 5000);
     ViewBuild(1920, 1080, 1.0f, 9000);
@@ -8339,7 +8387,26 @@ static void TestNearbyMake(void)
     ViewBuild(1920, 1080, 0.0f, 5000);
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
-    Check(ok, "the zones nearby drawn under the arrival's zone and over its continent, coming up with the zone (the same alpha at the arrival all the way in, whole at the landing); not for another arrival, nor with reach 0");
+    Check(ok, "the zones nearby drawn under the arrival's zone and over its continent, coming up with the zone (the same alpha at the arrival all the way in, whole at the landing), and up after it, coming up on their own over the fade's time; not for another arrival (either coordinate) or another map, nor with reach 0");
+
+    /* a sheet for an arrival no longer wanted (re-aimed as it is made, the worker's): stale, stopped, the arrival found again */
+    TestGlideArrive(0, 1, 0, x, y, 2000);
+    g_parchOn = 1; g_ptry.world = 1; g_ptry.cont = g_ptry.zone = 1; g_pmadeKnown = 0; g_pmadeFull = g_parchFullOn = 0; g_scrKnown = 0; g_scrSeq++;
+    g_zoneK = 1; g_parchNearOn = 300; g_nearZ = -1; g_ptry.nearby = 0; g_pj.state = 0; g_pjUp = -1;
+    g_pjWorker = 1;
+    ParchWork(20000);
+    ok = g_pj.state == 1 && g_pj.kind == PJ_NEAR;
+    ParchWork(20016);                                                  /* (the same arrival: left to the worker) */
+    ok &= g_pj.state == 1;
+    g_destWX = x + 30;                                                 /* (re-aimed) */
+    ParchWork(20032);
+    ok &= g_pj.state == 3;
+    ParchWorkerTurn();                                                 /* (the worker: stale, freed, never made) */
+    ok &= g_pj.state == 0 && !g_parchPx && g_nearZ == -1;
+    ParchWork(20048);
+    ok &= g_pj.state == 1 && g_pj.kind == PJ_FIND && g_pj.x == x + 30;
+    g_pjWorker = 0; g_pj.state = 0;
+    Check(ok, "the zones nearby being made for an arrival no longer wanted (re-aimed as the worker makes them): stale at once, stopped and freed by the worker, never drawn, and the new arrival found on the next frame instead of waiting on them");
 
     g_parchNearOn = 0; g_nearZ = -1;
     g_testAreas = NULL; g_testGround = -1e30f; g_testTile[0] = g_testTile[1] = 0;

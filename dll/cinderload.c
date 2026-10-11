@@ -10871,6 +10871,7 @@ static int ParchNearMips(void)
     return 1;
 }
 static ParchLand g_nland;                     /* a neighbour's land, while the zones nearby are made */
+static int ParchJobStale(void);
 typedef struct { int n, laid, row[PARCH_NEAR_MAX], tiles, unread; float yd[PARCH_NEAR_MAX], ydTexel; ParchRect r; } ParchNear;
 /* The zones nearby for arrival zone z (continent row c) at x, y on map, within reach yards (bits: the pieces found, NULL
  * every piece; K: the arrival zone's painting's tiles over 256): the sheet made into g_parchPx (g_parchSheet, its
@@ -10884,6 +10885,7 @@ static int ParchNearMake(int z, int c, int map, float x, float y, float reach, c
     for (int i = 0; i < g_pzN; i++) {                              /* each zone near enough: its land's nearest chunk */
         yd[i] = -1;
         if (!ParchNearMay(z, i, x, y, reach)) continue;
+        if (ParchJobStale()) { *why = "no longer wanted"; return 0; }   /* (stopped: another arrival, or the screen gone) */
         const char *lwhy = "";
         if (ParchLandMake(i, &g_nland, &lwhy) && g_nland.n) yd[i] = LandNearYd(&g_nland, x, y);
         N->tiles += g_nland.tiles; N->unread += g_nland.unread;
@@ -10903,6 +10905,7 @@ static int ParchNearMake(int z, int c, int map, float x, float y, float reach, c
     if (!S) { *why = "no memory for its sheet"; return 0; }
     static const ParchLines none;
     for (int k = 0; k < N->n; k++) {                                /* each one painted, cut to its land, laid in */
+        if (ParchJobStale()) { HeapFree(GetProcessHeap(), 0, S); *why = "no longer wanted"; return 0; }
         int i = N->row[k];
         const char *pwhy = "", *lwhy = "", *cwhy = "";
         float share = 0;
@@ -10957,6 +10960,9 @@ static struct {
     const char *why, *cwhy;
     DWORD posted, ran;                                    /* (the view's clock as it was posted; the job's ms, GetTickCount's) */
 } g_pj;
+/* 1 when the job running has gone stale (its screen gone, the view off, or, for the zones nearby, its arrival no longer
+ * the one wanted): the zones nearby stop between neighbours, so the next job waits on them no longer than one. */
+static int ParchJobStale(void) { return g_pj.state == 3; }
 static volatile LONG g_pjWorker;                          /* a worker runs the jobs (once started), */
 static HANDLE g_pjEvent;                                  /* woken by this as each is posted */
 static int g_pjUp = -1;                                   /* the slot going up to OpenGL a strip a frame (-1: none) */
@@ -11235,7 +11241,9 @@ static void ParchWork(DWORD now)
             int more = ParchUpDone(now, slot, r > 0);
             if (!more) { ParchFree(); return; }                  /* (one painting a call) */
         }
-        if (g_pj.state == 1 || g_pj.state == 3) return;          /* (the worker's: done on a later frame) */
+        if (g_pj.state == 1 && g_pj.kind == PJ_NEAR && (map != g_pj.map || x != g_pj.x || y != g_pj.y || screen != g_parchForScreen))
+            InterlockedCompareExchange(&g_pj.state, 3, 1);       /* (the zones nearby for an arrival no longer wanted: stale, */
+        if (g_pj.state == 1 || g_pj.state == 3) return;          /* stopped by the worker) (the worker's: done on a later frame) */
         if (g_pj.state == 2) {
             InterlockedExchange(&g_pj.state, 0);
             if (!ParchJobDone(now, map, x, y, screen)) return;
