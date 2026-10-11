@@ -6199,6 +6199,88 @@ static void TestSwitches(void)
     munmap(low, 1 << 16);
 }
 
+/* A file of these bytes, in the case's folder. */
+static void PutN(const char *rel, const void *data, size_t n)
+{
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    FILE *f = fopen(p, "wb");
+    if (f) { fwrite(data, 1, n, f); fclose(f); }
+}
+/* The style's file as Notepad and others save it; the CVar's value only as the switches write it; the black first frames
+ * only for a parchment that will be drawn. */
+static void TestStyleFiles(void)
+{
+    int ok = 1, map, bar, fault;
+    /* style.txt in UTF-16 (Notepad's "Unicode", little or big endian, with its mark or without) and UTF-8 with its mark */
+    static const char txt[] = "map satellite\r\nbar neo\r\n";
+    for (int kind = 0; kind < 6; kind++) {
+        unsigned char b[200];
+        size_t n = 0;
+        if (kind == 0) { b[n++] = 0xFF; b[n++] = 0xFE; }
+        if (kind == 1) { b[n++] = 0xFE; b[n++] = 0xFF; }
+        if (kind == 4) { b[n++] = 0xEF; b[n++] = 0xBB; b[n++] = 0xBF; }
+        for (const char *c = txt; *c; c++) {
+            if (kind == 0 || kind == 2) { b[n++] = (unsigned char)*c; b[n++] = 0; }
+            else if (kind == 1 || kind == 3) { b[n++] = 0; b[n++] = (unsigned char)*c; }
+            else b[n++] = (unsigned char)*c;
+        }
+        Fresh("style-unicode"); GameDir();
+        PutN(STYLE_REL, b, n);
+        g_parchAsked = g_vbarAsked = 7;
+        StyleLoad();
+        int one = g_parchAsked == 0 && g_vbarAsked == 0;
+        if (!one) printf("  (style.txt in form %d not read)\n", kind);
+        ok &= one;
+    }
+    {   /* a character past ASCII inside a word breaks it, even one whose low byte is a letter (UTF-16 "bar n", U+0165,
+         * "o": 0x65 is 'e'): not a word of ours, its default */
+        static const unsigned char u[] = { 0xFF, 0xFE, 'b', 0, 'a', 0, 'r', 0, ' ', 0, 'n', 0, 0x65, 0x01, 'o', 0, '\n', 0,
+                                           'm', 0, 'a', 0, 'p', 0, ' ', 0, 's', 0, 'a', 0, 't', 0, 'e', 0, 'l', 0, 'l', 0, 'i', 0, 't', 0, 'e', 0 };
+        Fresh("style-unicode-odd"); GameDir();
+        PutN(STYLE_REL, u, sizeof u);
+        StyleLoad();
+        ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+        static const unsigned char odd[] = { 'm', 'a', 'p', ' ', 's', 'a', 't', 'e', 'l', 'l', 'i', 't', 'e' };   /* (no newline, plain) */
+        PutN(STYLE_REL, odd, sizeof odd);
+        StyleLoad();
+        ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+    }
+    Check(ok, "style.txt read whether saved as ASCII, UTF-8 with its mark, or UTF-16 little or big endian with or without its mark (Notepad's \"Unicode\"); a character past ASCII breaks a word");
+
+    /* the CVar: only exactly what the switches write */
+    ok = StyleCvarParse("satellite neo", &map, &bar, &fault) && map == 0 && bar == 0 && !fault;
+    ok &= StyleCvarParse("parchment retro", &map, &bar, &fault) && map == 1 && bar == 1 && !fault;
+    ok &= StyleCvarParse("parchment neo fault", &map, &bar, &fault) && map == 1 && bar == 0 && fault;
+    static const char *const kNot[] = { "?", "", "parchment", "parchment retro ", "parchment  retro", "Parchment retro", "parchment retro faulty",
+                                        "parchment retro f", "parchment retro fault x", "parchment retrofault", "neo satellite",
+                                        "satellite neo retro", "satellites neo", "map=satellite,bar=neo" };
+    for (size_t i = 0; i < sizeof kNot / sizeof kNot[0]; i++) {
+        map = bar = fault = 7;
+        int no = !StyleCvarParse(kNot[i], &map, &bar, &fault) && map == 7 && bar == 7 && fault == 7;
+        if (!no) printf("  (the CVar's \"%s\" taken)\n", kNot[i]);
+        ok &= no;
+    }
+    Check(ok, "the CVar heard only as the switches write it: \"<map> <bar>\", or with \" fault\" after; anything else (a word more or less, another case, the probe's \"?\", a run-on \"faulty\") is not theirs");
+
+    /* the black first frames: only for a parchment the view will draw */
+    {
+        int pzN = g_pzN, asked = g_parchAsked;
+        LONG live = g_viewLive, drew = g_viewDrew;
+        g_viewLive = 1; g_viewDrew = 1;
+        g_parchAsked = 1; g_pzN = 0;
+        ok = !ParchWillDraw(1000);
+        g_pzN = 3;
+        ok &= ParchWillDraw(1000);
+        g_parchAsked = 0;
+        ok &= !ParchWillDraw(1000);
+        g_parchAsked = 1; g_viewLive = 0;
+        ok &= !ParchWillDraw(1000);
+        g_pzN = pzN; g_parchAsked = asked; g_viewLive = live; g_viewDrew = drew;
+        Check(ok, "the game's first frames black under a parchment screen only when the parchment can be drawn (the client's tables gave zones) and the view draws: chosen but not drawable, the living map as the view will draw it");
+    }
+
+}
 /* The switches' Lua (dll/switches.lua) as the DLL sends it, run by Lua 5.1 against a stubbed 1.12 UI with 5.0's limits
  * (tests/test_lua.lua); and switches_lua.h the same text as switches.lua. */
 static void TestSwitchesLua(void)
@@ -6450,6 +6532,7 @@ int main(int argc, char **argv)
     LiveTests();
     ViewTests();
     TestStyle();
+    TestStyleFiles();
     TestSwitches();
     TestSwitchesLua();
     if (argc > 2) {

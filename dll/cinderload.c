@@ -105,9 +105,11 @@ static int VariantPath(char *out, int shape)
            lstrcatA(out, kShapes[shape].name) && lstrcatA(out, ".MPQ");
 }
 
-/* A small text file, NUL-terminated, on the process heap (HeapFree it); NULL when missing or over limit bytes. */
-static char *ReadText(const char *path, DWORD limit)
+/* A small file whole, NUL-terminated, on the process heap (HeapFree it), its length in *n (it may hold NULs: a file
+ * saved as UTF-16); NULL when missing or over limit bytes. */
+static char *ReadTextN(const char *path, DWORD limit, DWORD *n)
 {
+    *n = 0;
     HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return NULL;
@@ -116,7 +118,14 @@ static char *ReadText(const char *path, DWORD limit)
     if (buf && !ReadFile(f, buf, size, &got, NULL)) got = 0;
     CloseHandle(f);
     if (buf) buf[got] = 0;
+    *n = got;
     return buf;
+}
+/* A small text file, NUL-terminated, on the process heap (HeapFree it); NULL when missing or over limit bytes. */
+static char *ReadText(const char *path, DWORD limit)
+{
+    DWORD n;
+    return ReadTextN(path, limit, &n);
 }
 
 /* 1 when the two files hold the same bytes. */
@@ -5042,6 +5051,7 @@ static void OverlayStrips(void *dev, const float *pos, const float *uv, const un
  * never build the same layer at once. Otherwise all of it, under g_stepLock, so the view cannot take over halfway. */
 void WINAPI OverlayDraw(void) __attribute__((used));
 static void OverlayDrawAll(void);
+static int ParchWillDraw(DWORD now);                              /* (the style's, below) */
 void WINAPI OverlayDraw(void)
 {
     if (!g_ovOn || !g_mapShown) return;
@@ -5060,7 +5070,7 @@ static void OverlayDrawAll(void)
     static DWORD last;
     float dt = last ? (float)(now - last) / 1000.0f : 0;
     last = now;
-    if (g_parchAsked && ViewWillDraw(now)) {                      /* the parchment coming: none of the living map, black */
+    if (ParchWillDraw(now)) {                                      /* the parchment coming: none of the living map, black */
         if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
         if (g_seaTex) {
             ParchBlackBuild();
@@ -9392,15 +9402,32 @@ static int StyleSave(int map, int bar)
     DeleteFileA(tmp);
     return 0;
 }
+/* style.txt's text as plain ASCII, in place (n bytes, with room for one more): UTF-16 (Notepad's "Unicode", little or big
+ * endian) by its byte order mark, or without one by a NUL in its first two bytes. Anything past ASCII (a mark, UTF-8's
+ * bytes, a NUL) becomes a space: no word of ours has one, and none of them may pass for a letter. */
+static char *StyleText(char *text, DWORD n)
+{
+    const unsigned char *b = (const unsigned char *)text;
+    int wide = n >= 2 && ((b[0] == 0xFF && b[1] == 0xFE) || (b[0] == 0xFE && b[1] == 0xFF) || (!b[0] != !b[1]));
+    int le = wide && (b[0] == 0xFF || (b[0] && !b[1]));
+    DWORD i = 0, o = 0;
+    for (; wide ? i + 1 < n : i < n; i += wide ? 2 : 1) {
+        unsigned c = !wide ? b[i] : le ? (unsigned)(b[i] | b[i + 1] << 8) : (unsigned)(b[i] << 8 | b[i + 1]);
+        text[o++] = c && c < 0x80 ? (char)c : ' ';
+    }
+    text[o] = 0;
+    return text;
+}
 /* At start: the choice from style.txt, else the old switch files, else the defaults; logged. */
 static void StyleLoad(void)
 {
     char path[MAX_PATH], m[300];
     int map = 1, bar = 1;
     const char *from = "the defaults (no choice made in game yet)";
-    char *text = Join(path, g_dir, STYLE_PATH) ? ReadText(path, 4096) : NULL;
+    DWORD n = 0;
+    char *text = Join(path, g_dir, STYLE_PATH) ? ReadTextN(path, 4096, &n) : NULL;
     if (text) {
-        StyleParse(text, &map, &bar);
+        StyleParse(StyleText(text, n), &map, &bar);
         HeapFree(GetProcessHeap(), 0, text);
         from = "Data\\CinderLoad\\style.txt (chosen in game)";
     } else {
@@ -9429,12 +9456,19 @@ static int StyleSet(int map, int bar, const char *how)
     Log(m);
     return 1;
 }
+/* The parchment can be drawn: the client's WorldMapArea.dbc gave zones (read on the view's thread as it starts; the game's
+ * thread sees the count once it is there). */
+static int ParchCan(void) { return *(volatile int *)&g_pzN > 0; }
+/* The game's thread, each loading frame (OverlayDrawAll): the view's parchment is coming over this screen, chosen and able
+ * to be drawn, so the game's own frames under it show none of the living map, only black. Chosen but not drawable (no
+ * zones): the view draws the living map, and so do the game's first frames. */
+static int ParchWillDraw(DWORD now) { return *(volatile int *)&g_parchAsked && ParchCan() && ViewWillDraw(now); }
 /* The view's thread, as each screen opens: what it draws, the choice as far as it can be (the parchment needs the client's
  * world map tables; vanilla's bar its two pictures on OpenGL), logged when it changes. */
 static void StylePick(void)
 {
     int map = *(volatile int *)&g_parchAsked, bar = *(volatile int *)&g_vbarAsked;
-    int parch = map && g_pzN > 0, retro = bar && g_viewTex[VT_VBORDER] && g_viewTex[VT_VGLASS];
+    int parch = map && ParchCan(), retro = bar && g_viewTex[VT_VBORDER] && g_viewTex[VT_VGLASS];
     static int said = -1;
     int now = map << 3 | bar << 2 | parch << 1 | retro;
     if (now != said) {
@@ -9568,17 +9602,34 @@ static int CvText(const void *cv, char *out, int size)
     if (size > 0) out[size - 1] = 0;
     return v != NULL;
 }
+/* The CVar's value as the switches set it (CL.Save): exactly "<map> <bar>", or "<map> <bar> fault" when they met an
+ * error, each word as StyleMapName and StyleBarName spell it. Anything else (the probe's "?", a value from Config.wtf, a
+ * value cut short or run on) is not theirs: 0. */
+static int StyleCvarParse(const char *v, int *map, int *bar, int *fault)
+{
+    for (int m = 0; m < 2; m++)
+        for (int b = 0; b < 2; b++) {
+            char want[40];
+            StyleValue(want, m, b);
+            int i = 0;
+            while (want[i] && v[i] == want[i]) i++;
+            if (want[i]) continue;
+            static const char kFault[] = " fault";
+            int f = 0;
+            while (kFault[f] && v[i + f] == kFault[f]) f++;
+            if (v[i] && (kFault[f] || v[i + f])) continue;
+            *map = m; *bar = b; *fault = v[i] != 0;
+            return 1;
+        }
+    return 0;
+}
 /* A choice made in game, from the CVar (once the switches have set it this session: before that it may be Config.wtf's,
  * which never counts): taken. -1 when the CVar says "fault"; else 1 when the choice changed. */
 static int StyleFromCvar(const void *cv, const char *how)
 {
     char v[64];
-    if (!g_luaSynced || !CvText(cv, v, (int)sizeof v)) return 0;
-    int map = *(volatile int *)&g_parchAsked, bar = *(volatile int *)&g_vbarAsked;
-    if (StyleParse(v, &map, &bar) < 2) return 0;             /* ("?", or a value not ours) */
-    int fault = 0;
-    for (const char *s = v; *s; s++)
-        if ((s[0] | 0x20) == 'f' && (s[1] | 0x20) == 'a' && (s[2] | 0x20) == 'u' && (s[3] | 0x20) == 'l' && (s[4] | 0x20) == 't') fault = 1;
+    int map, bar, fault;
+    if (!g_luaSynced || !CvText(cv, v, (int)sizeof v) || !StyleCvarParse(v, &map, &bar, &fault)) return 0;
     int changed = StyleSet(map, bar, how);
     return fault ? -1 : changed;
 }
