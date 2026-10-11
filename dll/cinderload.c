@@ -2493,23 +2493,40 @@ static void GameFacts(float p, DWORD now)
  * rushed): on the clock, not the game's bar, aimed at the moment the world shows (the plan's end, the hold's tail, this
  * machine's freeze at the end, the world's moment after: known exactly once the hold has it), full EVEN_EARLY_MS before
  * it so its last sweep and flash play out; each frame on at the pace that lands it then, so a later end only slows it
- * and never jumps it. The game behind its plan: kept EVEN_AHEAD_MS ahead, slower, and never past EVEN_WAIT until the
- * game's bar is full. Only while the view draws (the game's own frames stop in its stalls). */
+ * and never jumps it. Its pace changes by at most EVEN_PACE_K of itself a millisecond (the skeptic's find, 11 Oct: the
+ * hold moving the end out 620 ms on his first login stepped the pace, and the glide riding on it, by 18% in one frame),
+ * so a moved end eases it slower or quicker over a few frames. The game behind its plan: kept EVEN_AHEAD_MS ahead,
+ * slower, closing on EVEN_WAIT ever more slowly (never stopping dead on it) until the game's bar is full. Only while the
+ * view draws (the game's own frames stop in its stalls). */
 #define EVEN_EARLY_MS  900
 #define EVEN_AHEAD_MS  1500
 #define EVEN_WAIT      0.97f
+#define EVEN_PACE_K    0.001f         /* its pace's change a millisecond, of itself at most (a thirtieth a frame at 30 a second) */
+static float g_evenPace;                                        /* its pace as last stepped (of the bar a millisecond; 0: none yet) */
 static float EvenStep(DWORD gap, DWORD now, float from)
 {
-    if (!g_evenOn) { g_evenOn = 1; if (from > g_evenU) g_evenU = from; }   /* (from the bar as the view takes it: never back) */
+    if (!g_evenOn) { g_evenOn = 1; g_evenPace = 0; if (from > g_evenU) g_evenU = from; }   /* (from the bar as the view takes it: never back) */
     LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS;
     LONG tail = g_blurOn && g_blurMs > HOLD_TAIL_MS ? g_blurMs : HOLD_TAIL_MS;
     DWORD end = g_evenEndAt ? g_evenEndAt : g_planEndAt + (DWORD)tail + (DWORD)fz + VIEW_WORLD_GAP_MS;
     end -= EVEN_EARLY_MS;
     int done = g_dispMax >= 0.999f;
-    if (!done && (LONG)(end - now) < EVEN_AHEAD_MS) end = now + EVEN_AHEAD_MS;
+    float aim = 1;
+    if (!done && (LONG)(end - now) < EVEN_AHEAD_MS) { end = now + EVEN_AHEAD_MS; aim = EVEN_WAIT; }   /* (behind: ever slower) */
     LONG left = (LONG)(end - now);
-    if (gap > 0) g_evenU = left <= 0 ? 1 : g_evenU + (1 - g_evenU) * (float)gap / (float)(left + (LONG)gap);
-    if (!done && g_evenU > EVEN_WAIT) g_evenU = EVEN_WAIT;
+    if (gap > 0) {
+        float want = aim <= g_evenU ? 0 : (aim - g_evenU) / (float)(left > 0 ? left + (LONG)gap : (LONG)gap);
+        if (g_evenPace > 0) {                                     /* (never more than EVEN_PACE_K of itself a ms) */
+            float k = EVEN_PACE_K * (float)gap, lo, hi;
+            if (k > 0.5f) k = 0.5f;
+            lo = g_evenPace * (1 - k); hi = g_evenPace * (1 + k) + want * k;
+            want = want < lo ? lo : want > hi ? hi : want;
+        }
+        g_evenPace = want;
+        float u = g_evenU + want * (float)gap;
+        if (u > aim) u = aim > g_evenU ? aim : g_evenU;
+        g_evenU = u;
+    }
     return g_evenU;
 }
 
@@ -8334,6 +8351,12 @@ static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, f
 #define PARCH_CLIP_F    1.0f          /* a continent's painting kept on the world's, soft this far inside its edges (map tiles) */
 #define PARCH_LP        128           /* C: a coarser painting's colours kept this many cells across */
 #define PARCH_LP_SOFT   6             /* and softened this many times (a three-wide box each way: about two cells) */
+#define PARCH_REF_H     2160.0f       /* the fades' pixels a texel are on a window this tall (his): the same framing on any other
+                                       * (the skeptic's find, 11 Oct: they came later on a smaller window) */
+#define PARCH_LATE_MS   900           /* an arrival taken with less of the bar's time left than this glides on the clock, this long */
+#define PARCH_LATE_SPARE 100          /* (or less: landed this long before the screen goes, EVEN_EARLY_MS - VIEW_WORLD_GAP_MS after the
+                                       * bar is full) */
+#define PARCH_REAIM_MAX 0.98f         /* an arrival changed past this much of the glide (or after it): a fresh glide from there */
 enum { PARCH_FADE_A, PARCH_FADE_B, PARCH_FADE_C, PARCH_FADE_D };
 static const unsigned char kParchFrame[20] = { 0x30, 0x37, 0xC4, 0x3C, 0x75, 0xCF, 0x82, 0x3C, 0x00, 0x00, 0xA7, 0x41,
                                                0x00, 0x80, 0xFA, 0x41, 0x00, 0x00, 0x00, 0x42 };   /* 1/41.75 1/62.625 20.875 31.3125 32 */
@@ -8344,7 +8367,9 @@ static int g_worldFrameOk;                             /* the client's world map
 static int g_parchFade;                                /* PARCH_FADE_A .. D */
 /* The camera as last drawn, for the harness's log: on, the view, the eased progress and its time, the character on the
  * screen. */
-static struct { int on; ParchView v; float e, tau, px, py; } g_pcam;
+static struct { int on; ParchView v; float e, tau, px, py, mc, mz, mk, rate; int c, z; } g_pcam;   /* (and the continent's, the zone's
+                                                       * and C's own colours' mixes, which continent and zone they were for, and
+                                                       * the zoom's pace: its log's change over the glide's time) */
 
 /* WorldMapContinent.dbc's rows for the two continents (map 0, 1): their offsets (fields 6, 7) and scale (8). */
 static void ParchConts(const unsigned char *d, unsigned n)
@@ -8380,14 +8405,25 @@ static ParchRect ParchBox(int z)
     return r;
 }
 static ParchRect ParchWorldRect(void) { ParchRect r = { 0, 0, PARCH_WORLD_FW, PARCH_WORLD_FH }; return r; }
-/* smootherstep: 0 at 0, 1 at 1, no speed and no change of speed at either end (worked in double, so it never steps back
- * where it is flat) */
+/* The glide's ease (the skeptic's find, 11 Oct: smootherstep had it zoomed only 1.16 times at a fifth of its time, about
+ * 1.7 s looking still on his first login): 5t^2 - 5t^3 + t^5, from rest (no speed at 0) but moving at once (its speed
+ * 10 t at first, where smootherstep's is 30 t^2), landing as smootherstep does (no speed and no change of speed at 1);
+ * its speed 5t (1 - t)^2 (t + 2), never below nothing, at most 1.74 at 0.37. At a fifth of the time it is 0.16 of the way
+ * (smootherstep 0.058). Worked in double, so it never steps back where it is flat. */
 static float ParchEase(float t)
 {
-    double d = FireClamp(t, 0, 1), e = d * d * d * (d * (d * 6 - 15) + 10);
+    double d = FireClamp(t, 0, 1), e = d * d * (5 - 5 * d + d * d * d);
     return (float)(e < 0 ? 0 : e > 1 ? 1 : e);
 }
 static float ParchSmooth(float t) { t = FireClamp(t, 0, 1); return t * t * (3 - 2 * t); }
+/* A re-aimed glide's ease: starting at speed v (0..4, of its own way over its own time), landing as ParchEase does (no
+ * speed and no change of speed at 1): v t + (6 - 3v) t^2 + (3v - 8) t^3 + (3 - v) t^4, its speed (1 - t)^2 (v + (12 - 4v) t),
+ * never below nothing for v in 0..4. So the zoom goes on at the pace it had. */
+static float ParchEaseOn(float t, float v)
+{
+    double d = FireClamp(t, 0, 1), w = FireClamp(v, 0, 4), e = d * (w + d * ((6 - 3 * w) + d * ((3 * w - 8) + d * (3 - w))));
+    return (float)(e < 0 ? 0 : e > 1 ? 1 : e);
+}
 /* sqrt for v >= 0 (no C runtime): its exponent halved for a start, then Newton's steps. */
 static float ParchSqrt(float v)
 {
@@ -8522,24 +8558,63 @@ static void ParchLayer(int slot, float tw, float pw, float ph, ParchRect r, Parc
 }
 static LONG g_parchScrSeen = -1;              /* the view's screen the paper last drew for, and when it began */
 static DWORD g_parchScrAt;
-static struct { DWORD at; float u0, tau; } g_glide;   /* this screen's glide: its arrival taken at, the bar then, its time */
+/* This screen's glide (one segment of it): the arrival it is for (g_parchAt) on the view's screen, the view it starts
+ * from (the opening; the view as drawn when the arrival changed), its time on the bar from u0 (or on the clock from t0,
+ * dur long, for an arrival taken late), never back; re-aimed (again): its time then (tr) and its pace then (v: ParchEaseOn
+ * goes on from there in time), and the continent's, zone's and C's own colours' mixes it began with (never back). */
+static struct { DWORD at; LONG screen; ParchView from; float u0, tr, v, tau, mc0, mz0, mk0, dur; int clock, again, c, z; DWORD t0; } g_glide;
 static float ParchUp01(DWORD now, DWORD at) { return FireClamp((float)(LONG)(now - at) / PARCH_FADE_MS, 0, 1); }
+/* C, D: where their own colours come up over the copies (cs0..cs1 of the glide): once the finest of them is up (fin, its
+ * span's end), over PARCH_COLOUR more zoom (per: 1 over the glide's log zoom), never starting past 0.95 so it is whole,
+ * evenly, by the end. */
+static void ParchColourSpan(float fin, double per, float *cs0, float *cs1)
+{
+    *cs0 = fin;
+    *cs1 = FireClamp(fin + (float)(ParchLn(PARCH_COLOUR) * per), fin, 1);
+    if (*cs0 > 0.95f) *cs0 = 0.95f;
+}
+/* This screen's glide begun (or re-aimed) for the arrival taken: from the opening a, on the bar from shown (or on the
+ * clock, when less than PARCH_LATE_MS of the bar's time is left: PARCH_LATE_MS long, or less so it lands PARCH_LATE_SPARE
+ * before the screen goes; the skeptic's find, 11 Oct, its start capped at 95% of the bar jumped it 2.8 times in a frame); or, the arrival changed on this screen, from the view as last drawn,
+ * going on in time (the skeptic's find: it went back to the opening, 5 times back out, with a frame of the opening),
+ * afresh on the clock when it had (all but) landed; c, z its continent and zone. */
+static void ParchGlideBegin(ParchView a, float shown, DWORD now, int c, int z)
+{
+    int again = g_glide.screen == g_viewScreen && g_glide.at && g_pcam.on;
+    float left = g_viewSteps && g_evenPace > 0 ? (1 - shown) / g_evenPace : shown > 0.999f ? 0 : 1e9f;   /* (the bar's time left, ms) */
+    float most = left + (float)(EVEN_EARLY_MS - VIEW_WORLD_GAP_MS - PARCH_LATE_SPARE);
+    g_glide.dur = most < PARCH_LATE_MS ? most : PARCH_LATE_MS;
+    if (g_glide.dur < 150) g_glide.dur = 150;
+    if (again) {
+        float done = g_glide.again ? ParchEaseOn((g_glide.tau - g_glide.tr) / (1 - g_glide.tr), g_glide.v) : ParchEase(g_glide.tau);
+        g_glide.from = g_pcam.v;
+        g_glide.mc0 = c == g_pcam.c ? g_pcam.mc : 0;
+        g_glide.mz0 = z == g_pcam.z ? g_pcam.mz : 0;
+        g_glide.mk0 = z == g_pcam.z && c == g_pcam.c ? g_pcam.mk : 0;
+        if (g_glide.tau >= 1 || done > PARCH_REAIM_MAX) { g_glide.clock = 1; g_glide.t0 = now; g_glide.tau = 0; g_glide.again = 0; }
+        else { g_glide.again = 1; g_glide.tr = g_glide.tau; g_glide.v = -1; }   /* (its pace taken as it draws next: ParchDraw) */
+    } else {
+        g_glide.from = a; g_glide.again = 0; g_glide.tau = 0; g_glide.mc0 = g_glide.mz0 = g_glide.mk0 = 0;
+        g_glide.u0 = shown; g_glide.t0 = now;
+        g_glide.clock = left < PARCH_LATE_MS || shown > 0.999f;
+    }
+    g_glide.at = g_parchAt; g_glide.screen = g_viewScreen; g_glide.c = c; g_glide.z = z;
+}
 /* This frame's paper: dark, the world's painting coming up over it as a screen begins, the camera on the opening until
  * the arrival is taken, then gliding (above) on the even bar as shown (shown: never back), the finer paintings coming up
  * one of four ways (g_parchFade), all by candlelight. */
 static void ParchDraw(float W, float H, float shown, DWORD now)
 {
     ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);         /* the dark paper (while the paintings are made, and under them) */
-    g_pcam.on = 0;
-    if (g_viewScreen != g_parchScrSeen) { g_parchScrSeen = g_viewScreen; g_parchScrAt = now; }
-    int arrive = g_parchForScreen == g_viewScreen && g_parchWant >= 0 && g_destMap == g_parchForMap && g_destWX == g_parchForX &&
-                 g_destWY == g_parchForY;
+    if (g_viewScreen != g_parchScrSeen) { g_parchScrSeen = g_viewScreen; g_parchScrAt = now; g_pcam.on = 0; }
+    int arrive = g_parchForScreen == g_viewScreen && g_parchWant >= 0;   /* (this screen's, as taken: a changed arrival is
+                                                                      * glided to once taken, never a frame of the opening) */
     int map = arrive ? g_parchForMap : -1, c = arrive ? g_parchWantCont : -1, z = arrive ? g_parchWant : -1;
     if (z >= 0 && !g_pz[z].area) z = -1;                          /* (at sea: its continent's painting is the finest) */
     int world = g_worldUp && g_viewTex[VT_PWORLD] && g_worldFrameOk && (!arrive || (map >= 0 && map <= 1 && g_wmc[map].ok));
     int contUp = c >= 0 && g_parchCont == c && g_viewTex[VT_PARCH2], zoneUp = z >= 0 && g_parchZone == z && g_viewTex[VT_PARCH];
     ParchRect wr = ParchWorldRect(), cr = c >= 0 ? ParchBox(c) : wr;
-    if (!arrive && !world) return;
+    if (!arrive && !world) { g_pcam.on = 0; return; }
     ParchView a = ParchStart(W, H, world, cr), b = a, v = a;
     float e = 0, tau = 0;
     if (arrive) {
@@ -8547,17 +8622,29 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         ParchSpot(map, g_parchForX, g_parchForY, &fx, &fy);
         b = ParchEnd(W, H, z >= 0 ? ParchBox(z) : cr, z >= 0 ? PARCH_ZOOM : PARCH_SEA_ZOOM, fx, fy);
         if (!world && c < 0 && z >= 0) a = ParchStart(W, H, 0, ParchBox(z));   /* (no continent either: the zone's whole painting first) */
-        if (g_glide.at != g_parchAt) { g_glide.at = g_parchAt; g_glide.u0 = shown < 0.95f ? shown : 0.95f; g_glide.tau = 0; }
-        float t = FireClamp((shown - g_glide.u0) / (1 - g_glide.u0), 0, 1);
+        if (g_glide.at != g_parchAt || g_glide.screen != g_viewScreen) ParchGlideBegin(a, shown, now, c, z);
+        float t = g_glide.clock ? (float)(LONG)(now - g_glide.t0) / g_glide.dur
+                                : g_glide.u0 < 1 ? (shown - g_glide.u0) / (1 - g_glide.u0) : 1;
+        t = FireClamp(t, 0, 1);
         if (t > g_glide.tau) g_glide.tau = t;                      /* (never back) */
-        tau = g_glide.tau; e = ParchEase(tau);
+        tau = g_glide.tau;
+        a = g_glide.from;
+        double L = ParchLn(b.s) - ParchLn(a.s);
+        if (g_glide.again && g_glide.v < 0)                         /* (re-aimed: on at the zoom's pace as it was) */
+            g_glide.v = L > 1e-3 ? FireClamp((float)(g_pcam.rate * (1 - g_glide.tr) / L), 0, 4) : 0;
+        float t1 = g_glide.again ? (tau - g_glide.tr) / (1 - g_glide.tr) : tau, h = 1e-3f;
+        e = g_glide.again ? ParchEaseOn(t1, g_glide.v) : ParchEase(t1);
+        float e2 = g_glide.again ? ParchEaseOn(t1 + h, g_glide.v) : ParchEase(t1 + h);   /* (its pace, for a re-aim) */
+        g_pcam.rate = (float)(L * (e2 - e) / h / (g_glide.again ? 1 - g_glide.tr : 1));
         v = ParchPath(a, b, e);
         g_pcam.px = (float)((fx - v.x) * v.s) + W / 2; g_pcam.py = (float)((fy - v.y) * v.s) + H / 2;
     }
-    g_pcam.on = 1; g_pcam.v = v; g_pcam.e = e; g_pcam.tau = tau;
-    /* the paintings, coarse to fine: each one's texels a tile, and where on the glide it comes up over the one under it */
-    float dW = (float)(PARCH_MAP_W * g_worldK) / PARCH_WORLD_FW;
-    float dC = c >= 0 ? (float)(PARCH_MAP_W * (contUp ? g_contK : g_worldK)) / (cr.x1 - cr.x0) : dW;
+    g_pcam.on = 1; g_pcam.v = v; g_pcam.e = e; g_pcam.tau = tau; g_pcam.c = c; g_pcam.z = z;
+    /* the paintings, coarse to fine: each one's texels a tile (as drawn on a window PARCH_REF_H tall: the same framing on
+     * any window), and where on the glide it comes up over the one under it */
+    float px = H / PARCH_REF_H;
+    float dW = px * (float)(PARCH_MAP_W * g_worldK) / PARCH_WORLD_FW;
+    float dC = c >= 0 ? px * (float)(PARCH_MAP_W * (contUp ? g_contK : g_worldK)) / (cr.x1 - cr.x0) : dW;
     float ce0 = 0, ce1 = 0, ze0 = 0, ze1 = 0;
     int fade = g_parchFade, haveC = c >= 0 && world, haveZ = z >= 0 && (world || c >= 0);
     int bloom = fade == PARCH_FADE_B || fade == PARCH_FADE_D, blend = fade == PARCH_FADE_C || fade == PARCH_FADE_D;
@@ -8566,11 +8653,11 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
     if (haveZ) ParchSpan(&a, &b, c >= 0 ? dC : dW, PARCH_MAG0, mag1, &ze0, &ze1);
     float cs0 = 1, cs1 = 1;                                         /* C, D: then their own colours, together, once the finest is up */
     if (blend) {
-        double la = ParchLn(a.s), lb = ParchLn(b.s), per = lb - la > 1e-3 ? 1 / (lb - la) : 0;
-        cs0 = haveZ && ze1 > ce1 ? ze1 : ce1;
-        cs1 = FireClamp(cs0 + (float)(ParchLn(PARCH_COLOUR) * per), cs0, 1);
-        if (cs0 > 0.95f) cs0 = 0.95f;
+        double la = ParchLn(a.s), lb = ParchLn(b.s);
+        ParchColourSpan(haveZ && ze1 > ce1 ? ze1 : ce1, lb - la > 1e-3 ? 1 / (lb - la) : 0, &cs0, &cs1);
     }
+    float mk = blend ? g_glide.mk0 + (1 - g_glide.mk0) * ParchMix(e, cs0, cs1) : 1;
+    g_pcam.mk = mk; g_pcam.mc = g_pcam.mz = 0;
     float reach = ParchSqrt(W * W + H * H);
     if (world) ParchLayer(VT_PWORLD, (float)g_worldTW, (float)(PARCH_MAP_W * g_worldK), (float)(PARCH_MAP_H * g_worldK), wr, v, W, H,
                           ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt), 0, NULL, NULL);
@@ -8581,7 +8668,9 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         float e0 = layer ? ze0 : ce0, e1 = layer ? ze1 : ce1;
         float tw = (float)(layer ? g_zoneTW : g_contTW), K = (float)(layer ? g_zoneK : g_contK), pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K;
         ParchRect r = layer ? ParchBox(z) : cr;
-        float up01 = ParchUp01(now, layer ? g_zoneAt : g_contAt), m = base ? 1 : ParchMix(e, e0, e1);
+        float up01 = ParchUp01(now, layer ? g_zoneAt : g_contAt), m0 = layer ? g_glide.mz0 : g_glide.mc0;
+        float m = base ? 1 : m0 + (1 - m0) * ParchMix(e, e0, e1);   /* (re-aimed: on from where it was, never back) */
+        if (layer) g_pcam.mz = m; else g_pcam.mc = m;
         const ParchRect *clip = !layer && world ? &wr : NULL;
         int matched = blend && !base && g_viewTex[mslot] && (layer ? g_zoneMatch == z : g_contMatch == c);
         ParchBloom bl = { 0, 0, 0, 0, 0 };
@@ -8594,7 +8683,7 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         }
         if (matched) {                                               /* C, D: its detail on the coarser one's colours, then its own */
             ParchLayer(mslot, tw, pw, ph, r, v, W, H, up01 * m, 1, clip, &bl);
-            ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m * ParchMix(e, cs0, cs1), 1, clip, NULL);
+            ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m * mk, 1, clip, NULL);
         } else
             ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m, !base, clip, &bl);
     }

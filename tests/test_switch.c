@@ -1485,6 +1485,9 @@ static void LiveTests(void)
         int waited = slow <= EVEN_WAIT + 1e-6f && slow > 0.9f;
         for (int f = 0; f < 600 && slow < 0.999f; f++) { t += 7; slow = DisplayStep(1, t); }
         waited &= slow > 0.999f;
+        g_evenOn = 0; g_evenU = 0; g_dispMax = 0.5f;                     /* (taken past EVEN_WAIT, the game behind: held there, never back) */
+        float hold1 = EvenStep(16, t += 16, 0.985f), hold2 = EvenStep(16, t += 16, 0.985f);
+        waited &= hold1 >= 0.985f && hold2 >= hold1;
         InterlockedExchange(&g_viewSteps, 0);
         Check(waited, "the view's bar with the game behind its plan: on, slower, never full before the game's bar is, then full");
         Check(from < 0.6f && !back && fabsf(full - 10000) <= 30 && step < 1.6f * least && step < 0.01f,
@@ -5663,16 +5666,24 @@ static void TestParchment(void)
     ViewBuild(1920, 1080, 0.0f, 2000);
     float e0, e1, z0, z1;
     ParchView va = ParchStart(1920, 1080, 1, ParchBox(0)), vz = ParchEnd(1920, 1080, zr, PARCH_ZOOM, fx, fy);
-    ParchSpan(&va, &vz, 2004.0f / PARCH_WORLD_FW, PARCH_MAG0, PARCH_MAG1, &e0, &e1);
+    float px = 1080 / PARCH_REF_H;                                      /* (the fades on a window PARCH_REF_H tall) */
+    ParchSpan(&va, &vz, px * 2004.0f / PARCH_WORLD_FW, PARCH_MAG0, PARCH_MAG1, &e0, &e1);
     ParchRect cr0 = ParchBox(0);
-    ParchSpan(&va, &vz, 2004.0f / (cr0.x1 - cr0.x0), PARCH_MAG0, PARCH_MAG1, &z0, &z1);
+    ParchSpan(&va, &vz, px * 2004.0f / (cr0.x1 - cr0.x0), PARCH_MAG0, PARCH_MAG1, &z0, &z1);
     float tm = TestTauFor(0.5f * (e0 + e1));                           /* (the bar where the continent is halfway up) */
     ViewBuild(1920, 1080, tm, 3000);
     int cb = TestBatch(VT_PARCH2);
     const ViewVert *cm = cb >= 0 ? TestVertNear(cb, g_pcam.px, g_pcam.py) : NULL;
-    ok = e0 > 0.02f && e1 > e0 && z0 > e0 && z1 < 1 && cm && cm->c[3] > 100 && cm->c[3] < 155 &&
-         Near(ParchSmooth((float)(ParchLn(g_pcam.v.s * PARCH_WORLD_FW / 2004) - ParchLn(PARCH_MAG0)) /
-                          (float)ParchLn(PARCH_MAG1 / PARCH_MAG0)), 0.5, 0.02);
+    ok = e0 >= 0.02f && e1 > e0 && z0 >= e0 && z1 > e0 && z1 < 0.5f && cm && cm->c[3] > 100 && cm->c[3] < 155;
+    int half1080 = cm ? cm->c[3] : -1;
+    TestGlideArrive(0, 1, 0, -9464, 62, 2000);                         /* (the same framing on a window twice the size: the same fade) */
+    ViewBuild(3840, 2160, 0.0f, 2000);
+    ViewBuild(3840, 2160, tm, 3000);
+    cb = TestBatch(VT_PARCH2);
+    cm = cb >= 0 ? TestVertNear(cb, g_pcam.px, g_pcam.py) : NULL;
+    ok &= cm && abs(cm->c[3] - half1080) <= 2;
+    TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+    ViewBuild(1920, 1080, 0.0f, 2000);
     ViewBuild(1920, 1080, 0.999f, 3100);
     ok &= TestBatch(VT_PARCH) >= 0 && TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255;
     float eHigh = g_pcam.e;
@@ -5683,7 +5694,7 @@ static void TestParchment(void)
     int lateZ = TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3];
     g_zoneAt = 0;
     ok &= lateZ > 50 && lateZ < 80;
-    Check(ok, "the fade A: each finer painting comes up over the coarser one as the coarser one is drawn larger than its own texels (halfway at 1.3 pixels a texel), the continent's over the world's before the zone's over the continent's, the zone's whole well before the end");
+    Check(ok, "the fade A: each finer painting comes up over the coarser one as the coarser one is drawn larger than its own texels (halfway where, on a window PARCH_REF_H tall, it would be drawn 1.3 pixels a texel: the same framing on any window), the continent's over the world's before the zone's over the continent's, the zone's whole well before the end");
     TestGlideArrive(0, 1, 0, -9464, 62, 4000);                         /* (taken late, the bar 40% along: the glide starts there) */
     ViewBuild(1920, 1080, 0.4f, 4000);
     ok = g_pcam.e == 0 && Near(g_pcam.v.s, s0, 1e-6);
@@ -5694,11 +5705,18 @@ static void TestParchment(void)
     g_viewScreen = 8;
     ViewBuild(1920, 1080, 0.5f, 20000);
     ok = TestBatch(VT_PARCH) < 0 && TestBatch(VT_PARCH2) < 0 && Near(g_pcam.v.s, s0, 1e-6) && g_pcam.e == 0;
-    g_viewScreen = 7; g_destWX = -9300;                                /* (or another arrival than the one taken) */
-    ViewBuild(1920, 1080, 0.5f, 20000);
-    ok &= TestBatch(VT_PARCH) < 0 && Near(g_pcam.v.s, s0, 1e-6);
+    Check(ok, "the parchment's glide: a new screen, until its own arrival is taken, on the opening, never the last arrival's end (no flash of it)");
+    g_viewScreen = 7;                                                   /* (on its own screen, the game's arrival written anew: until it is
+                                                                        * taken, the glide goes on to the one taken, no frame of the opening) */
+    TestGlideArrive(0, 1, 0, -9464, 62, 20000);
+    ViewBuild(1920, 1080, 0.0f, 20000);
+    ViewBuild(1920, 1080, 0.3f, 20500);
+    float sHalf = (float)g_pcam.v.s;
+    g_destWX = -9300;
+    ViewBuild(1920, 1080, 0.35f, 20533);
+    ok = TestBatch(VT_PARCH) >= 0 && g_pcam.v.s > sHalf && g_pcam.v.s > 1.5 * s0;
     g_destWX = -9464;
-    Check(ok, "the parchment's glide: a new screen, until its own arrival is taken (the last screen's, or another), on the opening, never the last arrival's end (no flash of it)");
+    Check(ok, "the parchment's glide: the game's arrival written anew on its screen, until it is taken the glide goes on to the one taken, never a frame of the opening");
     /* without the world's painting (the client's frame not as read): the continent's whole across the window first */
     g_worldFrameOk = 0;
     TestGlideArrive(0, 1, 0, -9464, 62, 2000);
@@ -5720,6 +5738,7 @@ static void TestParchment(void)
     Check(ok, "the parchment's glide with neither the world's nor a continent's painting: it opens on the zone's whole painting and glides in to the character's spot");
     /* at sea (no zone holds it): the continent's painting the finest, the glide ending PARCH_SEA_ZOOM in on it */
     TestGlideArrive(0, 0, 0, -500, 500, 2000);
+    ViewBuild(1920, 1080, 0.0f, 2000);
     ViewBuild(1920, 1080, 1.0f, 9000);
     ParchSpot(0, -500, 500, &fx, &fy);
     cb = TestBatch(VT_PARCH2);
@@ -5729,6 +5748,7 @@ static void TestParchment(void)
     /* at a zone's edge: still the character's spot in the middle; the zone's painting where it is, soft at its edge, its
      * continent's past it */
     TestGlideArrive(0, 1, 0, -10254 + 1, 1535 - 1, 2000);              /* (its box's bottom left corner) */
+    ViewBuild(1920, 1080, 0.0f, 2000);
     ViewBuild(1920, 1080, 1.0f, 9000);
     zb = TestBatch(VT_PARCH);
     const ViewVert *z0v = zb >= 0 ? g_vv + g_vb[zb].first : NULL;
@@ -5740,7 +5760,16 @@ static void TestParchment(void)
     TestGlideArrive(0, 1, 0, -9464, 62, 2000);
     ViewBuild(1920, 1080, 0.0f, 2000);
     float b0, b1;
-    ParchSpan(&va, &vz, 2004.0f / (cr0.x1 - cr0.x0), PARCH_MAG0, PARCH_BLOOM, &b0, &b1);
+    ParchSpan(&va, &vz, px * 2004.0f / (cr0.x1 - cr0.x0), PARCH_MAG0, PARCH_BLOOM, &b0, &b1);
+    ViewBuild(1920, 1080, TestTauFor(b0 + 0.05f * (b1 - b0)), 2500);  /* (early, the circle well inside the zone: its own span's radius) */
+    zb = TestBatch(VT_PARCH);
+    float rEarlyGot = 0;
+    for (int i = zb >= 0 ? g_vb[zb].first : 0; zb >= 0 && i < g_vb[zb].first + g_vb[zb].count; i++) {
+        float d = sqrtf((g_vv[i].x - g_pcam.px) * (g_vv[i].x - g_pcam.px) + (g_vv[i].y - g_pcam.py) * (g_vv[i].y - g_pcam.py));
+        if (g_vv[i].c[3] > 0 && d > rEarlyGot) rEarlyGot = d;
+    }
+    float rEarly = ParchSmooth(0.05f) * (sqrtf(1920.0f * 1920 + 1080.0f * 1080) + PARCH_BLOOM_MIN * 1080);
+    int earlyOk = zb >= 0 && fabsf(rEarlyGot - rEarly) < 0.1f * rEarly + 1;
     ViewBuild(1920, 1080, TestTauFor(b0 + 0.3f * (b1 - b0)), 3000);
     zb = TestBatch(VT_PARCH);
     float rx = 0, nearA = zb >= 0 ? TestVertNear(zb, g_pcam.px, g_pcam.py)->c[3] : 0, ext = 0;
@@ -5752,6 +5781,7 @@ static void TestParchment(void)
     float rWant = ParchSmooth(0.3f) * (sqrtf(1920.0f * 1920 + 1080.0f * 1080) + PARCH_BLOOM_MIN * 1080), eWant = rWant * PARCH_BLOOM_EDGE;
     if (eWant < PARCH_BLOOM_MIN * 1080) eWant = PARCH_BLOOM_MIN * 1080;
     ok = zb >= 0 && nearA == 255 && rx < rWant + 1 && ext < rWant * 1.42f + 1 && eWant > 0;
+    ok &= earlyOk;
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255 && TestVertNear(TestBatch(VT_PARCH), 200, 300)->c[3] == 255;
     Check(ok, "the fade B: the finer painting first round the character's spot, whole there, nothing past a soft-edged circle that spreads as the zoom closes in, the whole window by the end");
@@ -5760,7 +5790,7 @@ static void TestParchment(void)
     g_viewTex[VT_PZONEM] = g_viewTex[VT_PCONTM] = 1; g_zoneMatch = 1; g_contMatch = 0;
     TestGlideArrive(0, 1, 0, -9464, 62, 2000);
     ViewBuild(1920, 1080, 0.0f, 2000);
-    ParchSpan(&va, &vz, 2004.0f / (cr0.x1 - cr0.x0), PARCH_MAG0, PARCH_MAG0 * PARCH_DETAIL, &z0, &z1);
+    ParchSpan(&va, &vz, px * 2004.0f / (cr0.x1 - cr0.x0), PARCH_MAG0, PARCH_MAG0 * PARCH_DETAIL, &z0, &z1);
     ViewBuild(1920, 1080, TestTauFor(z1 + 0.001f), 3000);
     int mb = TestBatch(VT_PZONEM), ob = TestBatch(VT_PARCH);
     ok = mb >= 0 && TestVertNear(mb, g_pcam.px, g_pcam.py)->c[3] == 255 && (ob < 0 || TestVertNear(ob, g_pcam.px, g_pcam.py)->c[3] < 10);
@@ -5818,6 +5848,14 @@ static void TestParchment(void)
 #define GL_MAXF 4000
 static float g_glX[GL_MAXF], g_glY[GL_MAXF], g_glS[GL_MAXF], g_glT[GL_MAXF], g_glB[GL_MAXF];
 static int g_glN;
+static float g_glTakeAt, g_glMoveAt = 2, g_glMoveDx;                 /* the arrival taken first at this bar; moved at that bar by so many yards */
+static float g_glPace[GL_MAXF], g_glVX[GL_MAXF], g_glVY[GL_MAXF];
+static int g_glZA[GL_MAXF], g_glCA[GL_MAXF];                          /* the zone's and the continent's alpha at the window's middle */
+static void TestGlideRetake(float x, float y, DWORD at)               /* (the arrival taken anew, as ParchWork takes it) */
+{
+    g_destWX = x; g_destWY = y;
+    g_parchForX = x; g_parchForY = y; g_parchAt = at;
+}
 static void TestGlideLoad(DWORD full, LONG learned, LONG freeze, LONG hold, float W, float H)
 {
     Fresh("glide-load");
@@ -5854,8 +5892,12 @@ static void TestGlideLoad(DWORD full, LONG learned, LONG freeze, LONG hold, floa
         }
         if (held && (LONG)(now - endAt) >= 0) gone = 1;
         if (gone || !ViewStep(g_gameMax, now, W, H)) continue;
-        if (g_parchForScreen != g_viewScreen) TestGlideArrive(0, 1, 0, -9464, 62, now);   /* (taken at its first frame, as ParchWork) */
+        if (g_parchForScreen != g_viewScreen && g_viewShown >= g_glTakeAt) TestGlideArrive(0, 1, 0, -9464, 62, now);   /* (taken, as ParchWork) */
+        else if (g_parchForScreen == g_viewScreen && g_viewShown >= g_glMoveAt && g_parchForX == -9464) TestGlideRetake(-9464 + g_glMoveDx, 62, now);
         g_glX[g_glN] = g_pcam.px; g_glY[g_glN] = g_pcam.py; g_glS[g_glN] = (float)g_pcam.v.s; g_glT[g_glN] = g_pcam.tau; g_glB[g_glN] = g_viewShown;
+        g_glPace[g_glN] = g_evenPace; g_glVX[g_glN] = (float)g_pcam.v.x; g_glVY[g_glN] = (float)g_pcam.v.y;
+        { int zb = TestBatch(VT_PARCH), cb = TestBatch(VT_PARCH2);
+          g_glZA[g_glN] = zb >= 0 ? TestVertNear(zb, W / 2, H / 2)->c[3] : 0; g_glCA[g_glN] = cb >= 0 ? TestVertNear(cb, W / 2, H / 2)->c[3] : 0; }
         g_glN++;
     }
     memset(shim_module + (HOLD_BAR_VA - 0x400000u), 0, 4);
@@ -6072,9 +6114,15 @@ static void TestGlide(void)
     double ofx = (a.s * a.x - b.s * b.x) / (a.s - b.s);
     ok &= Near((ofx - out.x) * out.s, (ofx - b.x) * b.s, 1e-6);
     Check(ok, "the glide's path: one zoom about a single fixed point (it stays put on the screen), every point of the paintings on a straight line on the screen, the zoom's log even in the eased progress, starting and landing exactly on its two views; equal zooms a straight pan");
-    ok = ParchEase(0) == 0 && ParchEase(1) == 1 && Near(ParchEase(0.5f), 0.5, 1e-6) && ParchEase(-1) == 0 && ParchEase(2) == 1 &&
-         ParchEase(0.01f) < 1e-4f && ParchEase(0.99f) > 1 - 1e-4f;
-    Check(ok, "the glide's easing: smootherstep, no speed and no change of speed at either end");
+    ok = ParchEase(0) == 0 && ParchEase(1) == 1 && ParchEase(-1) == 0 && ParchEase(2) == 1 && Near(ParchEase(0.2f), 0.16032, 1e-5) &&
+         Near(ParchEase(0.5f), 0.65625, 1e-5);
+    double sp[100], prevE = 0;                                           /* (its speed, a hundredth at a time) */
+    int calm = 1, never = 1;
+    for (int k = 0; k < 100; k++) { double ek = ParchEase((k + 1) / 100.0f); sp[k] = (ek - prevE) * 100; prevE = ek; never &= sp[k] >= 0; }
+    for (int k = 70; k < 99; k++) calm &= sp[k + 1] <= sp[k] + 1e-3;     /* (slowing all the way in, to nothing) */
+    ok &= sp[0] < 0.06 && sp[99] < 0.01 && sp[98] < 0.02 && calm && never;
+    ok &= ParchEase(0.1f) > 3 * (0.1 * 0.1 * 0.1 * (0.1 * (0.1 * 6 - 15) + 10));   /* (moving at once: three times smootherstep's at a tenth) */
+    Check(ok, "the glide's easing: from rest but moving at once (0.16 of the way at a fifth of its time, smootherstep 0.058), never back, landing with no speed and no change of speed");
 
     /* the world map's frame, as WoW.exe places a continent on it (0x4A5F42, its numbers at 0x806524) */
     TestGlideState();
@@ -6324,6 +6372,106 @@ static void TestGlide(void)
     printf("  the glide: off its line by at most %.5f px; its largest change of speed a frame, of its fastest: %.3f (a first login), %.3f (short), %.3f (long)\n",
            dev1, jump1, jumpS, jump);
     Check(ok && shortOk && longOk, "whole loads through the DLL's own steps (a first login, a very short load, a very long one): the character's spot on one straight line to the middle of the window, never back, the zoom never back out, no sudden change of speed from one frame to the next, landed on the frame the bar is full");
+    /* the even bar's pace (the skeptic's find, 11 Oct: the hold moving the end out stepped it 18% in a frame): at most
+     * EVEN_PACE_K of itself a ms, on his first login and on a long load waiting near the end (never stopping dead) */
+    float worstPace[2] = { 0, 0 };
+    for (int run = 0; run < 2; run++) {
+        TestGlideLoad(run ? 20000 : 5524, 5524, 2619, HOLD_MS, 1280, 540);
+        for (int i = 2; i < g_glN; i++) {
+            if (!(g_glPace[i - 1] > 0) || g_glB[i] >= 1) continue;
+            float d = (g_glPace[i - 1] - g_glPace[i]) / g_glPace[i - 1];
+            if (d > worstPace[run]) worstPace[run] = d;
+        }
+    }
+    printf("  the even bar: its largest slowing a frame %.4f of its pace (a first login), %.4f (a long load, waiting near the end)\n", worstPace[0], worstPace[1]);
+    Check(worstPace[0] <= EVEN_PACE_K * 16 * 1.001f && worstPace[1] <= EVEN_PACE_K * 16 * 1.001f,
+          "the even bar's pace slows at most EVEN_PACE_K of itself a ms (a moved end eases it, never a step); waiting near the end it slows that way too, never stopping dead");
+    /* the arrival written anew mid-screen (the skeptic's find, 11 Oct: the glide went back to the opening, 5 times back
+     * out, with a frame of it): on from the view as it was, the zoom never back out, no jump, landed on the new spot as
+     * the bar is full */
+    g_glMoveAt = 0.5f; g_glMoveDx = 300;
+    TestGlideLoad(5524, 5524, 2619, HOLD_MS, 1280, 540);
+    g_glMoveAt = 2;
+    int reOk = g_glN > 20, landAt = -1, fullAt = -1, moveAt = -1;
+    float lnMost = 0, lnJump = 0, cMost = 0, cJump = 0;
+    for (int i = 1; i < g_glN; i++) {
+        float st = logf(g_glS[i] / g_glS[i - 1]), cs = sqrtf((g_glVX[i] - g_glVX[i - 1]) * (g_glVX[i] - g_glVX[i - 1]) + (g_glVY[i] - g_glVY[i - 1]) * (g_glVY[i] - g_glVY[i - 1])) * g_glS[i];
+        if (st < -1e-6f) reOk = 0;                                       /* (never back out) */
+        if (st > lnMost) lnMost = st;
+        if (cs > cMost) cMost = cs;
+        if (i > 1) { float st0 = logf(g_glS[i - 1] / g_glS[i - 2]); if (fabsf(st - st0) > lnJump) lnJump = fabsf(st - st0); }
+        if (moveAt < 0 && g_glB[i] >= 0.5f) moveAt = i;
+        if (landAt < 0 && g_glT[i] >= 1) landAt = i;
+        if (fullAt < 0 && g_glB[i] >= 1) fullAt = i;
+    }
+    for (int i = moveAt > 2 ? moveAt - 1 : 2; i < g_glN && i < moveAt + 4; i++) {
+        float c1 = sqrtf((g_glVX[i] - g_glVX[i - 1]) * (g_glVX[i] - g_glVX[i - 1]) + (g_glVY[i] - g_glVY[i - 1]) * (g_glVY[i] - g_glVY[i - 1])) * g_glS[i];
+        float c0 = sqrtf((g_glVX[i - 1] - g_glVX[i - 2]) * (g_glVX[i - 1] - g_glVX[i - 2]) + (g_glVY[i - 1] - g_glVY[i - 2]) * (g_glVY[i - 1] - g_glVY[i - 2])) * g_glS[i - 1];
+        if (fabsf(c1 - c0) > cJump) cJump = fabsf(c1 - c0);
+    }
+    reOk &= landAt >= 0 && landAt == fullAt && Near(g_glX[g_glN - 1], 640, 1e-3) && Near(g_glY[g_glN - 1], 270, 1e-3) && lnJump < 0.1f * lnMost &&
+            cJump < 0.5f * cMost && moveAt > 0;
+    int zUp = -1, cUp = -1;                                             /* (its paintings stay up through it: never a frame of them gone) */
+    for (int i = 0; i < g_glN; i++) {
+        if (zUp < 0 && g_glZA[i] == 255) zUp = i;
+        if (cUp < 0 && g_glCA[i] == 255) cUp = i;
+        if ((zUp >= 0 && g_glZA[i] < 250) || (cUp >= 0 && g_glCA[i] < 250)) reOk = 0;
+    }
+    reOk &= zUp >= 0 && zUp < moveAt && cUp >= 0 && cUp < moveAt;
+    printf("  an arrival changed at half the bar: its zoom's largest change of speed a frame %.3f of its fastest, its middle's %.3f, never back out\n",
+           lnMost > 0 ? lnJump / lnMost : 0, cMost > 0 ? cJump / cMost : 0);
+    Check(reOk, "the arrival written anew mid-screen: the glide goes on from the view as it was (never back to the opening, the zoom never back out, no jump in its speed), landing on the new spot as the bar is full");
+    g_glMoveAt = 1.0f; g_glMoveDx = 300;                               /* (written anew after it landed: afresh from there, on the clock) */
+    TestGlideLoad(5524, 5524, 2619, HOLD_MS, 1280, 540);
+    g_glMoveAt = 2;
+    int after = g_glN > 20 && Near(g_glX[g_glN - 1], 640, 1e-3) && Near(g_glY[g_glN - 1], 270, 1e-3) && g_glide.clock;
+    for (int i = 1; i < g_glN; i++) after &= g_glS[i] == g_glS[i] && g_glVX[i] == g_glVX[i] && g_glS[i] >= g_glS[i - 1] * (1 - 1e-6f);
+    Check(after, "the arrival written anew after the glide landed: a fresh glide from there on the clock, landed on the new spot before the screen goes");
+    g_glTakeAt = 0.7f;                                                  /* (taken at 70% of the bar, its time left still long: on the bar from there) */
+    TestGlideLoad(5524, 5524, 2619, HOLD_MS, 1280, 540);
+    g_glTakeAt = 0;
+    int fb = -1, fbLand = -1, fbFull = -1;
+    float fbMost = 0;
+    for (int i = 1; i < g_glN; i++) {
+        float st = logf(g_glS[i] / g_glS[i - 1]);
+        if (st > fbMost) fbMost = st;
+        if (fb < 0 && g_glT[i] > 0) fb = i;
+        if (fbLand < 0 && g_glT[i] >= 1) fbLand = i;
+        if (fbFull < 0 && g_glB[i] >= 1) fbFull = i;
+    }
+    Check(fb > 0 && !g_glide.clock && Near(g_glS[fb - 1], 540.0 / (PARCH_WORLD_FH * PARCH_OPEN_TALL), 1e-3) && fbLand == fbFull && fbMost < logf(1.1f),
+          "an arrival taken at 70% of the bar: from the opening there, on the rest of the bar, no jump, landed as the bar is full");
+    /* an arrival taken late (the skeptic's find: its start capped at 95% of the bar jumped it 2.8 times in a frame): from
+     * the opening, on the clock over PARCH_LATE_MS, no jump, landed before the screen goes */
+    g_glTakeAt = 0.96f;
+    TestGlideLoad(5524, 5524, 2619, HOLD_MS, 1280, 540);
+    g_glTakeAt = 0;
+    int first = -1, lateLand = -1;
+    float lateMost = 0;
+    for (int i = 1; i < g_glN; i++) {
+        float st = logf(g_glS[i] / g_glS[i - 1]);
+        if (st > lateMost) lateMost = st;
+        if (first < 0 && g_glT[i] > 0) first = i;
+        if (lateLand < 0 && g_glT[i] >= 1) lateLand = i;
+    }
+    double sOpen = 540.0 / (PARCH_WORLD_FH * PARCH_OPEN_TALL);
+    int lateOk = first > 0 && Near(g_glS[first - 1], sOpen, 1e-3) && lateLand > first && (lateLand - first) * 16 <= g_glide.dur + 32 &&
+                 (lateLand - first) * 16 >= g_glide.dur - 32 && g_glide.clock && g_glide.dur <= PARCH_LATE_MS && g_glide.dur > 300 &&
+                 lateLand < g_glN - PARCH_LATE_SPARE / 16 + 2 && lateMost < logf(1.25f);
+    printf("  an arrival taken at 96%% of the bar: glided in %d ms, its largest zoom a frame x%.3f\n", (lateLand - first + 1) * 16, expf(lateMost));
+    Check(lateOk, "an arrival taken late (the bar nearly full): from the opening, on the clock (PARCH_LATE_MS, or less to land PARCH_LATE_SPARE before the screen goes), no jump (never a quarter more zoom in one frame), landed before the screen goes");
+    TestGlideState();
+    /* C's own colours: once the finest is up, over PARCH_COLOUR more zoom, never starting past 0.95 (so they are whole,
+     * evenly, by the end, never in one frame); the end at the zone's zoom whether the window is wide or narrow */
+    float k0, k1;
+    ParchColourSpan(0.4f, 1 / 3.0, &k0, &k1);
+    ok = Near(k0, 0.4, 1e-6) && Near(k1, 0.4 + log(PARCH_COLOUR) / 3, 1e-5);
+    ParchColourSpan(1.0f, 1 / 3.0, &k0, &k1);
+    ok &= Near(k0, 0.95, 1e-6) && k1 == 1 && ParchMix(0.975f, k0, k1) > 0.3f && ParchMix(0.975f, k0, k1) < 0.7f;
+    ParchRect tall = { 10, 10, 13, 12 };                                /* (a zone 3 x 2 tiles, in a window narrower than it) */
+    ParchView pe = ParchEnd(1000, 1400, tall, PARCH_ZOOM, 11, 11), pw = ParchEnd(3000, 1000, tall, PARCH_ZOOM, 11, 11);
+    ok &= Near(pe.s, PARCH_ZOOM * 1400 / 2.0, 1e-3) && Near(pw.s, PARCH_ZOOM * 3000 / 3.0, 1e-3);
+    Check(ok, "C's own colours come up once the finest painting is, never starting past 0.95 of the glide (whole, evenly, by its end); the glide's end has the zone the zoom times wider than the window, or taller when the window is narrower than it");
     TestGlideState();
 }
 
