@@ -5705,6 +5705,8 @@ static void TestParchment(void)
     g_viewScreen = 8;
     ViewBuild(1920, 1080, 0.5f, 20000);
     ok = TestBatch(VT_PARCH) < 0 && TestBatch(VT_PARCH2) < 0 && Near(g_pcam.v.s, s0, 1e-6) && g_pcam.e == 0;
+    ViewBuild(1920, 1080, 0.9f, 20500);                                /* (and on: never toward the last screen's arrival) */
+    ok &= TestBatch(VT_PARCH) < 0 && Near(g_pcam.v.s, s0, 1e-6) && g_pcam.e == 0;
     Check(ok, "the parchment's glide: a new screen, until its own arrival is taken, on the opening, never the last arrival's end (no flash of it)");
     g_viewScreen = 7;                                                   /* (on its own screen, the game's arrival written anew: until it is
                                                                         * taken, the glide goes on to the one taken, no frame of the opening) */
