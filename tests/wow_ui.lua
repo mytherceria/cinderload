@@ -243,7 +243,9 @@ function R:SetTexture(p, g, b, a)
 end
 function R:GetTexture() return self.texture end
 function R:SetTexCoord(a, b, c, d) self.texcoord = { a, b, c, d } end
-function R:SetVertexColor(r, g, b, a) self.vertex = { r, g, b, a } end
+function R:SetVertexColor(r, g, b, a) self.vertex, self.gradient = { r, g, b, a }, nil end
+-- 1.12's SetGradient: the colours at the two ends (HORIZONTAL: left, right), each vertex's own; it replaces a vertex colour
+function R:SetGradient(o, r1, g1, b1, r2, g2, b2) self.gradient, self.vertex = { o, r1, g1, b1, r2, g2, b2 }, nil end
 function R:SetBlendMode(m) self.blend = m end
 function R:CreateFontString(name, layer, template)
     if template and not FONTS[template] then error("no such font: " .. tostring(template)) end
@@ -856,6 +858,8 @@ function UI.Fresh(opts)
     env.UIParent:SetAllPoints()
     env.GetScreenWidth = function() return env.UIParent:GetWidth() end
     env.GetScreenHeight = function() return env.UIParent:GetHeight() end
+    -- the player's class (1.12: the class's name, then its token)
+    env.UnitClass = function(unit) if unit == "player" then return opts.className or "Mage", opts.classToken or "MAGE" end end
     -- the chat and the tooltip
     env.DEFAULT_CHAT_FRAME = New("Frame", "ChatFrame1", env.UIParent)
     env.DEFAULT_CHAT_FRAME.AddMessage = function(self, t, r, g, b) table.insert(world.chat, { text = t, r = r, g = g, b = b }) end

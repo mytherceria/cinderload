@@ -37,6 +37,9 @@ CL.qualities = { { value = "liquid", text = "Liquid" }, { value = "pulse", text 
                  { value = "raw", text = "Raw" } }
 -- the sliders: least, most, step (the numbers are his to change); nearby is the DLL's (0 none, 4000 at most)
 CL.range = { nearby = { 0, 4000, 100 }, thick = { 50, 200, 5 }, width = { 20, 100, 5 } }
+-- the bar's size and effect are kept in style.txt from now, but no loading screen draws them yet: said over their boxes
+-- (nil once the DLL draws them)
+CL.COMING = "kept; drawn in a later version"
 CL.ART = "Interface\\CinderLoad\\"             -- the panel's pictures, in CinderLoad's pack (tools/make_panel_art.py)
 
 function CL.Defaults()
@@ -455,12 +458,14 @@ function CL.Build()
 
     -- Bar size
     CL.Box(R, 82, CW, 178, "Bar size")
+    if CL.COMING then CL.ui.coming = { CL.Text(p, R + CW - 4, 78, CL.COMING, 12, nil, "rd") } end
     CL.Slider(R + 16, 94, CW - 32, "thick", "Bar thickness", "Thin", "Thick")
     CL.Slider(R + 16, 158, CW - 32, "width", "Bar width", "Narrow", "Wide")
     CL.ui.whole = CL.Check(R + 14, 222, 28, "Whole", "Whole width of the screen", function(on) CL.Set("whole", on) end)
 
     -- Texture / effect
     CL.Box(R, 300, CW, 96, "Texture / effect")
+    if CL.COMING then table.insert(CL.ui.coming, CL.Text(p, R + CW - 4, 296, CL.COMING, 12, nil, "rd")) end
     for i, o in ipairs(CL.effects) do
         local x = R + 16 + (i - 1) * 106
         CL.ui.effects[o.value] = CL.Card(x, 312, 96, 24, "Panel" .. string.upper(string.sub(o.value, 1, 1)) .. string.sub(o.value, 2), "effect", o.value)
@@ -477,6 +482,11 @@ function CL.Build()
     ground:SetAllPoints(strip)
     CL.ui.preview = { strip = strip, ground = ground, bar = {} }
     for i = 1, 3 do CL.ui.preview.bar[i] = strip:CreateTexture(nil, "ARTWORK") end
+    local over = CreateFrame("Frame", nil, strip)                    -- (the fill: a child, so drawn over the bar's art)
+    CL.At(over, 0, 0, CW - 24, 88, nil, strip)
+    CL.ui.preview.fill = over:CreateTexture(nil, "ARTWORK")
+    CL.ui.preview.rest = over:CreateTexture(nil, "ARTWORK")
+    CL.ui.preview.core = over:CreateTexture(nil, "OVERLAY")
     local edge = CreateFrame("Frame", nil, strip)
     CL.At(edge, -2, -2, CW - 20, 92, nil, strip)
     edge:SetBackdrop(CL.FRAME8)
@@ -529,6 +539,37 @@ function CL.Preview()
         CL.At(t, q[1], top, q[2], bh, nil, v.strip)
     end
     v.size = { x0, top, bw, bh }
+    -- the fill in the bar's channel (retro: its art's texels 28 to 449 of 476 across, 9 to 34 of 42 down; neo: between its
+    -- caps, the blade's 16 rows of 48 at its middle), to 60% (a still), the way still to go dark
+    local cl, cr, ct, ch
+    if neo then cl, cr, ct, ch = x0 + cw, x0 + bw - cw, top + bh * 16 / 48, bh * 16 / 48
+    else cl, cr, ct, ch = x0 + cw * 28 / 34, x0 + bw - cw * 27 / 34, top + bh * 9 / 42, bh * 25 / 42 end
+    local c, fw = CL.FillColour(), (cr - cl) * 0.6
+    v.fill:SetTexture(CL.FILL)
+    if CL.effect == "heat" and v.fill.SetGradient then
+        v.fill:SetGradient("HORIZONTAL", c[1] * 0.35, c[2] * 0.35, c[3] * 0.35, c[1], c[2], c[3])
+    else
+        v.fill:SetVertexColor(c[1], c[2], c[3])
+    end
+    CL.At(v.fill, cl, ct, fw, ch, nil, v.strip)
+    v.rest:SetTexture(0.03, 0.03, 0.035, 1)
+    CL.At(v.rest, cl + fw, ct, cr - cl - fw, ch, nil, v.strip)
+    v.core:SetTexture(CL.FILL)
+    v.core:SetVertexColor(0.75 + c[1] / 4, 0.75 + c[2] / 4, 0.75 + c[3] / 4)
+    CL.At(v.core, cl, ct + ch * 0.3, fw, ch * 0.4, nil, v.strip)
+    if CL.effect == "blade" then v.core:Show() else v.core:Hide() end
+    v.colour = c
+end
+
+-- the fill's colour: the class's (as the DLL's kClassColour has them, the shaman's RavenCraft's blue) or CinderLoad's ember
+CL.EMBER = { 1, 0.541, 0.165 }
+CL.CLASS = { WARRIOR = { 0.78, 0.612, 0.431 }, PALADIN = { 0.961, 0.549, 0.729 }, HUNTER = { 0.671, 0.831, 0.451 },
+             ROGUE = { 1, 0.961, 0.412 }, PRIEST = { 1, 1, 1 }, SHAMAN = { 0, 0.439, 0.871 }, MAGE = { 0.412, 0.8, 0.941 },
+             WARLOCK = { 0.58, 0.51, 0.788 }, DRUID = { 1, 0.49, 0.039 } }
+function CL.FillColour()
+    if CL.ember or not UnitClass then return CL.EMBER end
+    local _, token = UnitClass("player")
+    return CL.CLASS[token or ""] or CL.EMBER
 end
 
 -- every control shows the choice
@@ -556,13 +597,25 @@ function CL.Refresh()
             text = tostring(value) .. "%"
         else
             text = tostring(value) .. "% of the screen"
-            if value == 0 then value = CL.Clamp(CL.OwnWidth(), "width"); text = "each bar's own" end
-            if CL.whole then text = "the whole screen" end
+            if value == 0 then
+                value = CL.Clamp(CL.OwnWidth(), "width")
+                if CL.bar == "neo" then value = 100 end
+                text = "each bar's own"
+            end
+            if CL.whole then value, text = 100, "the whole screen" end
         end
         s.slider:SetValue(value)
         s.value:SetText(text)
     end
     CL.ui.whole:SetChecked(CL.whole)
+    local ws = CL.ui.sliders.width.slider
+    if CL.whole then
+        if ws.Disable then ws:Disable() end
+        ws:SetAlpha(0.5)
+    else
+        if ws.Enable then ws:Enable() end
+        ws:SetAlpha(1)
+    end
     CL.ui.colour:SetChecked(not CL.ember)
     local neo = CL.bar == "neo"
     for _, fs in ipairs(CL.ui.words) do if neo then fs:Hide() else fs:Show() end end
