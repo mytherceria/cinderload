@@ -10672,16 +10672,18 @@ static struct {
     unsigned char bits[EXPLORED_BYTES];
     int ok, way, want, wantCont, words, pieces, all;      /* what it made */
     const char *why, *cwhy;
-    DWORD posted, ran;                                    /* (the view's clock as it was posted; the worker's ms on it) */
+    DWORD posted, ran;                                    /* (the view's clock as it was posted; the job's ms, GetTickCount's) */
 } g_pj;
 static volatile LONG g_pjWorker;                          /* a worker runs the jobs (once started), */
 static HANDLE g_pjEvent;                                  /* woken by this as each is posted */
 static int g_pjUp = -1;                                   /* the slot going up to OpenGL a strip a frame (-1: none) */
 static void ParchWorkerStart(void);
-/* The job posted, run (the worker's thread, or at once without one). */
+/* The job posted, run (the worker's thread, or at once without one), timed on its own clock: GetTickCount, never the
+ * view's ViewNow, whose statics are the view's thread's alone (the skeptic's find on 61c66db: called from both threads
+ * unlocked, its clock could be pushed 15 ms ahead and held, a frame hitched). */
 static void ParchJobRun(void)
 {
-    DWORD t0 = ViewNow();
+    DWORD t0 = GetTickCount();
     const char *why = "";
     g_pj.cwhy = "";
     switch (g_pj.kind) {
@@ -10726,7 +10728,7 @@ static void ParchJobRun(void)
         break; }
     }
     g_pj.why = why;
-    g_pj.ran += ViewNow() - t0;
+    g_pj.ran += GetTickCount() - t0;
 }
 /* A job posted (its inputs in g_pj already): the worker's from now, or run at once without one. */
 static void ParchJobPost(int kind, DWORD now)
@@ -11785,7 +11787,8 @@ static void ViewStart(void)
 }
 #else
 static void ViewStart(void) {}
-static DWORD ViewNow(void) { return GetTickCount(); }
+static int g_viewNowCalls;                                   /* (the tests: the view's clock asked, by whichever thread) */
+static DWORD ViewNow(void) { g_viewNowCalls++; return GetTickCount(); }
 static int ParchUp(int slot) { (void)slot; return 0; }      /* (no OpenGL here: the tests' PARCH_UP keeps the painting) */
 static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th) { (void)slot; (void)P; *tw = *th = 0; return 0; }
 #endif

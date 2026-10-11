@@ -5575,10 +5575,13 @@ static void TestHoldStub(void) {}
  * one pass between the view's frames */
 static LPTHREAD_START_ROUTINE g_testWorker;
 static LPVOID g_testWorkerArg;
+static int g_testWorkerClock;                                          /* (the view's clock asked by the worker's passes) */
 static void TestWorker(void)
 {
     shim_waits = 1; shim_wait_stop = &g_pjWorker;                       /* (its loop told to end after this pass) */
+    int vn = g_viewNowCalls;
     if (g_testWorker) g_testWorker(g_testWorkerArg);
+    g_testWorkerClock += g_viewNowCalls - vn;
     InterlockedExchange(&g_pjWorker, 1);
 }
 /* the tests' OpenGL for a painting's upload (gl, as the 32-bit build's): each texture's levels kept as given */
@@ -7320,6 +7323,7 @@ static void TestGlide(void)
     g_testWorker = shim_thread_fn; g_testWorkerArg = shim_thread_arg;
     ParchWorkerStart();                                                 /* (started once only) */
     started &= g_testWorker == shim_thread_fn && shim_threads == 1;
+    g_testWorkerClock = 0;
     g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 50;
     ParchWork(100);                                                     /* (the world's posted: nothing up yet) */
     ok = started && g_pj.state == 1 && g_pj.kind == PJ_WORLD && g_upN == 0 && !g_worldUp && !g_parchPx && shim_events_set == 1;
@@ -7366,6 +7370,7 @@ static void TestGlide(void)
           LogSays("Elwynn painted from the client's map") && LogSays("(up 32 ms after)");
     ParchWork(276);                                                     /* (all up: nothing posted) */
     ok &= g_pj.state == 0 && g_upN == 5;
+    Check(g_testWorkerClock == 0, "the parchment's worker times its jobs on its own clock (GetTickCount), never the view's (ViewNow, whose statics are the view's thread's alone: the skeptic's find on 61c66db)");
     /* a painting made anew is not drawn from its post until it is up (its texture is given to OpenGL anew, a strip a
      * frame): the last screen's other continent's, and the zone's for the other map areas' choice */
     g_parchCont = 5; g_parchFullOn = 1;
