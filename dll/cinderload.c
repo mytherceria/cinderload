@@ -3788,7 +3788,7 @@ static int g_parchAsked;                         /* (the style's map, below: 1 t
 static int g_mapFull;                             /* (the style's map areas: 1 the full map, 0 only what was discovered) */
 static int g_parchFullOn;                         /* (the view's, as this screen opened: StylePick) */
 #ifndef PARCH_NEAR_YD
-#define PARCH_NEAR_YD   1200                        /* the zones nearby: the reach, yards, unless style.txt says (0: none) */
+#define PARCH_NEAR_YD   1600                        /* the zones nearby: the reach, yards, unless style.txt says (0: none) */
 #endif
 static int g_nearYd = PARCH_NEAR_YD;                /* (the style's reach for the zones nearby, yards: 0 none) */
 static int g_parchNearOn;                           /* (the view's, as this screen opened: StylePick) */

@@ -8700,7 +8700,7 @@ static void TestNearbyStyle(void)
     Fresh("style-nearby"); GameDir();
     g_nearYd = 7;
     StyleLoad();
-    ok = g_nearYd == PARCH_NEAR_YD && LogSays("style: the parchment's zones nearby out to 1200 yards of the arrival (whole to 600), from the default");
+    ok = g_nearYd == PARCH_NEAR_YD && LogSays("style: the parchment's zones nearby out to 1600 yards of the arrival (whole to 800), from the default") && PARCH_NEAR_YD == 1600;
     Put(STYLE_REL, "map parchment\r\nbar retro\r\nareas discovered\r\n");      /* (0.3.0's three lines: the default reach) */
     StyleLoad();
     ok &= g_nearYd == PARCH_NEAR_YD && g_parchAsked == 1 && g_mapFull == 0;
@@ -8723,7 +8723,7 @@ static void TestNearbyStyle(void)
     g_nearYd = 900;
     StylePick();
     ok &= g_parchNearOn == 900 && LogSays("  the view: the parchment's zones nearby out to 900 yards of the arrival, under its zone");
-    Check(ok, "the reach at start: the default (1200 yards) without style.txt or with 0.3.0's three lines; style.txt's nearby line read beside the three choices, other lines passed over; kept when a choice is written; 0: none; each screen takes it as it opens");
+    Check(ok, "the reach at start: the default (1600 yards) without style.txt or with 0.3.0's three lines; style.txt's nearby line read beside the three choices, other lines passed over; kept when a choice is written; 0: none; each screen takes it as it opens");
     g_nearYd = PARCH_NEAR_YD; g_parchNearOn = 0; g_pzN = 0;
 }
 static void TestStyleFiles(void)
