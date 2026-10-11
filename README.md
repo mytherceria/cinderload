@@ -6,7 +6,7 @@ Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client: 
 - Every loading screen is the world map, stitched from the client's own map tiles. As the bar fills, the view zooms in on where you are arriving; for a dungeon, raid or battleground, on its entrance. Cities, zones with their levels, towns, flight paths and every instance entrance are marked, more of them as you get closer.
 - The place's name appears across the top as you arrive: the continent, the zone, then the part of the zone you land in. Under the zone's name is its level range, coloured against your level as the game colours quests, and whose territory it is.
 - The map is alive. Ships and zeppelins sail their real routes, currents run across the sea and into the Maelstrom, clouds drift with each zone's usual rain, snow or sand, and the light follows the realm's clock, from dawn to night.
-- The bar is a blade of light in your class's colour: Druid orange, Hunter green, Mage light blue, Paladin pink, Priest white, Rogue yellow, Shaman blue, Warlock purple, Warrior tan. Two ravens in RavenCraft purple stand at its ends, in honour of RavenCraft.
+- The bar is a blade of light in your class's colour: Druid orange, Hunter green, Mage light blue, Paladin pink, Priest white, Rogue yellow, Shaman blue, Warlock purple, Warrior tan. The bar is a blade of light in your class's colour: Druid orange, Hunter green, Mage light blue, Paladin pink, Priest white, Rogue yellow, Shaman blue, Warlock purple, Warrior tan. Two ravens in RavenCraft purple stand at its ends, in honour of RavenCraft.
 - The sounds are built at run time from your own client's sound files (none are shipped).
 - Everything is checked against your WoW.exe first and changed in memory only. If anything differs, that part stays off and Logs/CinderLoad.log says why. WoW.exe on disk is never changed.
 
@@ -41,7 +41,7 @@ The living map, the place's name, the ships, the weather and the blade are drawn
 
 ## Credits
 
-The world map is stitched from the client's own map tiles. The ravens are made from the client's own raven model, reposed and recoloured, and the bar's rails are Undercity's iron, from the client too. Releases before 0.2.0 carried wallpapers from Turtle WoW's commissioned art by Lionel Schramm, Misho Tenev, Stonegut and Ghor.
+The world map is stitched from the client's own map tiles. The bar's rails are Undercity's iron, from the client too. Releases before 0.2.0 carried wallpapers from Turtle WoW's commissioned art by Lionel Schramm, Misho Tenev, Stonegut and Ghor.
 
 ## License
 
