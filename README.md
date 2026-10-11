@@ -4,7 +4,7 @@ Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client. 
 
 - Every loading screen fills the whole screen instead of sitting in a 4:3 box: 16:10, 16:9, 21:9 and 32:9.
 - The map is one of two, your choice:
-  - **Parchment**: the zone you arrive in, painted as the game's own world map paints it from the client's own map tiles, by candlelight. Only the parts of it your character has explored are painted; the rest is left blank, as on the world map. The view closes in on where you arrive as the bar fills.
+  - **Parchment**: the world painted as the game's own world map paints it, from the client's own map tiles, by candlelight. It opens on the whole world over the Maelstrom and glides in one straight zoom to where you arrive as the bar fills, the continent's painting and then the zone's coming up as it closes in. Only the parts of the zone your character has explored are painted; the rest is left blank, as on the world map.
   - **Satellite**: the living map of Azeroth, stitched from the client's own map tiles, zooming in on where you arrive (for a dungeon, raid or battleground, its entrance). Cities, zones with their levels, towns, flight paths and instance entrances are marked, and the place's name appears across the top as you arrive. Ships and zeppelins sail their real routes, currents run across the sea and into the Maelstrom, clouds drift with each zone's usual weather, and the light follows the realm's clock.
 - The loading bar is one of two, your choice:
   - **Retro**: the game's own loading bar, filling in your class's colour.

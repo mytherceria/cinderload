@@ -25,7 +25,7 @@ CL.broken = nil
 CL.settings = {
     { key = "map", label = "Loading map", name = "loading map",
       options = {
-          { value = "parchment", text = "Parchment", tip = "The zone you arrive in, painted as this map paints it." },
+          { value = "parchment", text = "Parchment", tip = "The world as this map paints it, gliding to where you arrive." },
           { value = "satellite", text = "Satellite", tip = "The living map of Azeroth: ships, currents and weather." } } },
     { key = "bar", label = "Loading bar", name = "loading bar",
       options = {

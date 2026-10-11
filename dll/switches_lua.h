@@ -27,7 +27,7 @@ static const char kSwitchesLua[] =
     "CL.settings = {\n"
     "    { key = \"map\", label = \"Loading map\", name = \"loading map\",\n"
     "      options = {\n"
-    "          { value = \"parchment\", text = \"Parchment\", tip = \"The zone you arrive in, painted as this map paints it.\" },\n"
+    "          { value = \"parchment\", text = \"Parchment\", tip = \"The world as this map paints it, gliding to where you arrive.\" },\n"
     "          { value = \"satellite\", text = \"Satellite\", tip = \"The living map of Azeroth: ships, currents and weather.\" } } },\n"
     "    { key = \"bar\", label = \"Loading bar\", name = \"loading bar\",\n"
     "      options = {\n"
