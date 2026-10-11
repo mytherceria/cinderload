@@ -9506,21 +9506,24 @@ static void StylePick(void)
 }
 
 /* ---- the world map's switches (his rule, 10 Oct 2026: on the world map, M, and as /cinderload; Blizzard's own look;
- * "if this breaks, the player still has the normal world map") ----
+ * "if this breaks, the player still has the normal world map"; his form, 10 Oct night: two drop-downs as the map's own
+ * Continent and Zone, "Loading map" and "Loading bar", at the left end of its top bar) ----
  * The release is the DLL and its four packs, so there is no add-on: dll/switches.lua (switches_lua.h) is run inside the
  * game by the client's own FrameScript_Execute, the way its RunScript runs a line, only on the game's own thread, in its
- * message pump between frames (a WH_GETMESSAGE hook of that thread, sent a message of ours about once a second), only
+ * message pump between frames (a WH_GETMESSAGE hook of that thread, sent a message of ours four times a second), only
  * with no Lua running (the UI's lua_State idle: no C call into it, its call stack at its base), no loading screen up and
  * a player in the world. Every address is checked byte for byte before any is used; anything unexpected and it stays
- * off, the game as it was.
+ * off, the game as it was. The pump, the hook and the tick are built in the tests' build too (only the window lookup
+ * and the thread's loop are the 32-bit build's alone), and the whole path runs there against a stubbed UI.
  * The client checks every C function's address against its own code before Lua may call it (0x42A320, from luaD_precall
  * at 0x6F61A1: "Invalid function pointer"), so a DLL cannot give its Lua a function. The switches tell the DLL through a
  * CVar of its own instead, CinderLoadStyle ("parchment retro"), made here as the client's own RegisterCVar makes one
  * (0x488B8A: CVar::Register) and read here (CVar::Lookup, its value at +0x20, as GetCVar reads it); its third word
  * "fault" says the switches met an error (they turn themselves off; so does this, for the session). The CVar is only the
  * messenger: style.txt holds the choice, and the switches start from it (nothing depends on Config.wtf keeping a CVar).
- * Each tick: a choice made in game taken (StyleSet: style.txt); then a probe marks the CVar "?" when the switches are not
- * there (a login, a /reload); then they are made, from the choice held. Twice made with no word back (it did not run),
+ * Each tick: a choice made in game taken (StyleSet: style.txt, so it is kept within a quarter of a second, and again as the
+ * game quits); then, at most once a second, a probe marks the CVar "?" when the switches are not there (a login, a
+ * /reload), and they are made, from the choice held. Twice made with no word back (it did not run),
  * a fault, or a session that ended while they were being made (Data\CinderLoad\ui-off.txt, which keeps them off until it
  * is deleted): off, logged. */
 #define LUA_EXEC_VA     0x704CD0u   /* FrameScript_Execute (fastcall: code, its source's name), as RunScript calls it */
