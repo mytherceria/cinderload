@@ -10706,12 +10706,13 @@ static float ParchBoxYd(int i, float x, float y)
     float dy = y < g_pz[i].r ? g_pz[i].r - y : y > g_pz[i].l ? y - g_pz[i].l : 0;
     return ParchSqrt(dx * dx + dy * dy);
 }
-/* 1 when zone i's box lies wholly inside another zone's box on its map (a city's or an entrance's page). */
+/* 1 when zone i's box lies wholly inside another zone's box on its map (an entrance's page, a city's, or a zone's own:
+ * Mulgore's is inside the Barrens'). */
 static int ParchInsideOther(int i)
 {
     for (int j = 0; j < g_pzN; j++)
-        if (j != i && g_pz[j].map == g_pz[i].map && g_pz[j].area > 0 && g_pz[j].area != g_pz[i].area && g_pz[i].t <= g_pz[j].t &&
-            g_pz[i].b >= g_pz[j].b && g_pz[i].l <= g_pz[j].l && g_pz[i].r >= g_pz[j].r) return 1;
+        if (j != i && g_pz[j].map == g_pz[i].map && g_pz[j].area > 0 && g_pz[i].t <= g_pz[j].t && g_pz[i].b >= g_pz[j].b &&
+            g_pz[i].l <= g_pz[j].l && g_pz[i].r >= g_pz[j].r) return 1;
     return 0;
 }
 /* 1 when page i may be shown as a neighbour at all: not a capital's, nor an instance entrance's (inside another zone's

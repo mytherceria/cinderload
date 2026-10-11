@@ -8019,7 +8019,7 @@ static void TestNearby(void)
         { "Westfall", 39, 0, 40, 3017, -483, -9400, -11733 }, { "Elwynn2", 31, 0, 12, 1535, -1935, -7939, -10254 },
         { "Far", 37, 0, 33, 100, 0, -14000, -15000 }, { "Lake", 41, 0, 77, 1600, 1400, -9300, -9500 },
         { "Kalimdor's", 42, 1, 15, -1571, -3742, -8575, -10023 }, { "Capital", 43, 0, 1600, -1950, -2000, -8200, -8300 },
-        { "Valley", 44, 0, 215, -1580, -1700, -9000, -9600 } };
+        { "Valley", 44, 0, 215, -1580, -1700, -9000, -9600 }, { "Huge", 45, 1, 16, 20000, -20000, 20000, -20000 } };
     g_pzN = (int)(sizeof kz / sizeof kz[0]);
     for (int i = 0; i < g_pzN; i++) {
         snprintf(g_pz[i].name, sizeof g_pz[i].name, "%s", kz[i].n);
@@ -8034,10 +8034,11 @@ static void TestNearby(void)
     g_atN = 6; g_atSorted = 1;                                          /* (the areas: Redridge's and a valley's the open world,
                                                                          * the entrance's an instance's, two capitals) */
     for (int i = 0; i < 6; i++) { g_atId[i] = kat[i][0]; g_atParent[i] = kat[i][1]; g_atFlags[i] = kat[i][2]; }
-    int may[13];
-    for (int i = 0; i < 13; i++) may[i] = ParchNearMay(1, i, -9454, -1404, 1200);   /* (Eastvale) */
+    int may[14];
+    for (int i = 0; i < 14; i++) may[i] = ParchNearMay(1, i, -9454, -1404, 1200);   /* (Eastvale) */
     ok = !may[0] && !may[1] && may[2] && !may[4] && !may[5] && !may[7] && !may[8] && !may[9] && !may[10] && may[12];
-    ok &= !ParchInsideOther(11) && !ParchNearMay(1, 11, -9454, -1404, 2000);
+    ok &= !may[13] && !ParchInsideOther(11) && !ParchNearMay(1, 11, -9454, -1404, 2000);   /* (11 inside no box of its own map:
+                                                                         * the other map's Huge holds it) */
     g_atFlags[4] = 0x40;                                                /* (the same page, its area no capital: it may) */
     ok &= ParchNearMay(1, 11, -9454, -1404, 2000);
                                                                         /* (10: the other map's, its box Redridge's; 11: a capital's
