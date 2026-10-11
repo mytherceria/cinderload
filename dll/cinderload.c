@@ -3791,6 +3791,8 @@ static int g_parchFullOn;                         /* (the view's, as this screen
 #define PARCH_NEAR_YD   1600                        /* the zones nearby: the reach, yards, unless style.txt says (0: none) */
 #endif
 static int g_nearYd = PARCH_NEAR_YD;                /* (the style's reach for the zones nearby, yards: 0 none) */
+static int g_nearNamed;                             /* (1 when style.txt named the reach: only then written back, so a
+                                                     * choice made in game never pins the default into the file) */
 static int g_parchNearOn;                           /* (the view's, as this screen opened: StylePick) */
 static void ParchBlackBuild(void)
 {
@@ -12587,7 +12589,8 @@ static int StyleSave(int map, int bar, int full)
     lstrcatA(text, "\r\nareas ");
     lstrcatA(text, StyleAreasName(full));
     char nearby[32];
-    wsprintfA(nearby, "\r\nnearby %d\r\n", *(volatile int *)&g_nearYd);
+    if (*(volatile int *)&g_nearNamed) wsprintfA(nearby, "\r\nnearby %d\r\n", *(volatile int *)&g_nearYd);
+    else lstrcpyA(nearby, "\r\n");
     lstrcatA(text, nearby);
     HANDLE f = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
@@ -12636,6 +12639,7 @@ static void StyleLoad(void)
     *(volatile int *)&g_vbarAsked = bar;
     *(volatile int *)&g_mapFull = full;
     *(volatile int *)&g_nearYd = reach;
+    *(volatile int *)&g_nearNamed = reachNamed;
     wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game on the world map (M) or with /cinderload",
               StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
     Log(m);

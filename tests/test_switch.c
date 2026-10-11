@@ -8813,6 +8813,14 @@ static void TestNearbyStyle(void)
     Put(STYLE_REL, "map parchment\r\nbar retro\r\nareas discovered\r\n");      /* (0.3.0's three lines: the default reach) */
     StyleLoad();
     ok &= g_nearYd == PARCH_NEAR_YD && g_parchAsked == 1 && g_mapFull == 0;
+    {                                                                  /* (a choice written: no reach pinned into the file, */
+        const char *t0;                                                /* so a later default still reaches it) */
+        ok &= StyleSet(0, 1, 0, "a test") == 1 && (t0 = Get(STYLE_REL)) && strstr(t0, "\r\nmap satellite\r\nbar retro\r\nareas discovered\r\n") &&
+              !strstr(t0, "\nnearby") && strstr(t0, "# nearby: how far round");
+        g_nearYd = 7;
+        StyleLoad();
+        ok &= g_nearYd == PARCH_NEAR_YD && g_parchAsked == 0 && LogSays("from the default");
+    }
     Put(STYLE_REL, "map satellite\r\nbar neo\r\nareas full\r\nnearby 600\r\nsomething else 9\r\n");
     StyleLoad();
     ok &= g_nearYd == 600 && g_parchAsked == 0 && g_vbarAsked == 0 && g_mapFull == 1 &&
@@ -8832,7 +8840,7 @@ static void TestNearbyStyle(void)
     g_nearYd = 900;
     StylePick();
     ok &= g_parchNearOn == 900 && LogSays("  the view: the parchment's zones nearby out to 900 yards of the arrival, under its zone");
-    Check(ok, "the reach at start: the default (1600 yards) without style.txt or with 0.3.0's three lines; style.txt's nearby line read beside the three choices, other lines passed over; kept when a choice is written; 0: none; each screen takes it as it opens");
+    Check(ok, "the reach at start: the default (1600 yards) without style.txt or with 0.3.0's three lines; style.txt's nearby line read beside the three choices, other lines passed over; kept when a choice is written, and not written when the file never named it (the default not pinned); 0: none; each screen takes it as it opens");
     g_nearYd = PARCH_NEAR_YD; g_parchNearOn = 0; g_pzN = 0;
 }
 static void TestStyleFiles(void)
