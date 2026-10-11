@@ -7661,8 +7661,9 @@ static void VBarBuild(float W, float H, float shown, DWORD now)
 
 /* One of the client's own pictures, read only: the newest copy across its archives, in the order the client lets them
  * win (patch-~, ours, passed over; a zero-length stub passed over), then base, its last word. 1, and where it came
- * from, when it was read; 0, and why not. */
-static int ClientPicture(const char *path, const char *base, unsigned char **out, unsigned *len, const char **from)
+ * from, when it was read; 0 when it is in none of them; -1 when the newest copy could not be read (out of memory, a read
+ * come back short, a damaged entry). ClientPicture: 1 read, else 0. */
+static int ClientFile(const char *path, const char *base, unsigned char **out, unsigned *len, const char **from)
 {
     /* (the archives' names, each its own: the view's thread and the parchment's worker read at once) */
     static const char *const kArch[35] = { "patch-Z.MPQ", "patch-Y.MPQ", "patch-X.MPQ", "patch-W.MPQ", "patch-V.MPQ", "patch-U.MPQ",
@@ -7675,11 +7676,15 @@ static int ClientPicture(const char *path, const char *base, unsigned char **out
         const char *arch = a < 35 ? kArch[a] : base;
         int r = mpq_read(&kIo, arch, path, out, len);
         if (r == MPQ_E_NOT_FOUND || r == MPQ_E_NO_ARCHIVE || r == MPQ_E_EMPTY) continue;
-        if (r != MPQ_OK) { *from = "unreadable"; return 0; }       /* (the newest copy decides) */
+        if (r != MPQ_OK) { *from = "unreadable"; return -1; }      /* (the newest copy decides) */
         *from = arch;
         return 1;
     }
     return 0;
+}
+static int ClientPicture(const char *path, const char *base, unsigned char **out, unsigned *len, const char **from)
+{
+    return ClientFile(path, base, out, len, from) > 0;
 }
 /* Vanilla's own bar (retro, the style's bar, either map): its frame and glass read into the view's files (blp, len: by
  * picture slot) as the view starts, whichever bar is chosen (it may be chosen in game at any time), each logged. */
@@ -9167,14 +9172,17 @@ static int ParchMatch(const ParchLow *L, ParchRect rf)
  * though its area is the coast's. On a grid of the map's chunks (gx = 16 x the tile's column and the chunk's in it, gy
  * the same down: 1024 each way), over the zone's box and ParchLandMargin past it. Read once a zone from the client's
  * own files (terrain.MPQ and its patches, newest first, read only) and kept in Data\CinderLoad\land-<zone>.bin, with a
- * print of the archives (their sizes) and the box it was made for; another print, another box: made again. The zone's
+ * print of the archives (their sizes) and the box it was made for and its body's sum (LandSum); another print, another
+ * box, a body not its sum: made again. Never kept when a tile could not be read (out of memory, an I/O error): that
+ * screen's zone is cut as though it had no land, and its land is read again the next time. The zone's
  * cut keeps every texel of its land whole (ParchLandCut), and the same grid, chunk for chunk, is each zone's share of the
  * map: no chunk is two zones' land. */
 #define LAND_MAGIC      0x444E4C43u   /* "CLND" */
-#define LAND_VERSION    1
+#define LAND_VERSION    2             /* (2: its body's sum after the box; a version 1 file is made again) */
+#define LAND_HEAD       40            /* its header's bytes: magic, version, print, id, area, the box (4), its body's sum */
 #define LAND_CHUNKS     1024          /* the map's chunks across and down (64 tiles of 16) */
 #define ADT_OCEAN       0x8u          /* a chunk's header flags: ocean */
-typedef struct { int z, gx0, gy0, w, h, n, tiles, fromFile; unsigned char *m; } ParchLand;   /* m: w x h, 1 the zone's own land,
+typedef struct { int z, gx0, gy0, w, h, n, tiles, fromFile, unread; unsigned char *m; } ParchLand;   /* m: w x h, 1 the zone's own land,
                                                        * 2 its own sea (its area's, under the sea); n: its land's chunks */
 static ParchLand g_land;                      /* the land of the zone last cut */
 static unsigned g_landPrint;                  /* the archives' print (their sizes), once a session; 0 not yet */
@@ -9199,7 +9207,8 @@ static unsigned LandPrint(void)
     return g_landPrint;
 }
 /* A tile's 256 chunks (t: World\Maps\<folder>\<folder>_<tx>_<ty>.adt): each one's area (0 none) and whether it is dry
- * (not the sea, above): 1 when the tile was read. */
+ * (not the sea, above): 1 when the tile was read, 0 when it is in no archive (no terrain there), -1 when it could not be
+ * read (out of memory, an I/O error: the skeptic's find on 61c66db, a land kept without it for good). */
 static int LandTile(const char *dir, int tx, int ty, int *area, unsigned char *dry)
 {
     char path[160];
@@ -9207,7 +9216,8 @@ static int LandTile(const char *dir, int tx, int ty, int *area, unsigned char *d
     unsigned char *d = NULL;
     unsigned n = 0, sz = 0;
     const char *from;
-    if (!ClientPicture(path, "terrain.MPQ", &d, &n, &from)) return 0;
+    int r = ClientFile(path, "terrain.MPQ", &d, &n, &from);
+    if (r <= 0) return r;
     unsigned in = AdtChunk(d, n, ADT_MCIN, &sz);
     for (int c = 0; c < 256; c++) {
         area[c] = AdtArea(d, n, c % 16, c / 16);
@@ -9266,15 +9276,17 @@ static int FileGet(const char *rel, void *buf, unsigned cap)
     return ok ? (int)size : -1;
 }
 /* Tile tx, ty's buildings whose WMOAreaTable rows (any group's, or the root's) name zone z's own area: the chunks of L
- * whose middles their placements' bounds hold, marked. Those marked. */
-static int LandBuilding(const char *dir, int tx, int ty, int z, ParchLand *L)
+ * whose middles their placements' bounds hold, marked. Those marked; the tile or a building that could not be read
+ * counted in *bad. */
+static int LandBuilding(const char *dir, int tx, int ty, int z, ParchLand *L, int *bad)
 {
     char path[160];
     wsprintfA(path, "World\\Maps\\%s\\%s_%d_%d.adt", dir, dir, tx, ty);
     unsigned char *d = NULL;
     unsigned n = 0, msz = 0, wsz = 0, isz = 0;
     const char *from;
-    if (!ClientPicture(path, "terrain.MPQ", &d, &n, &from)) return 0;
+    int r = ClientFile(path, "terrain.MPQ", &d, &n, &from);
+    if (r <= 0) { *bad += r < 0; return 0; }
     unsigned mo = AdtChunk(d, n, ADT_MODF, &msz), mw = AdtChunk(d, n, ADT_MWMO, &wsz), mi = AdtChunk(d, n, ADT_MWID, &isz);
     int got = 0;
     for (unsigned k = 0; mo && mw && mi && k < msz / 64; k++) {
@@ -9287,7 +9299,9 @@ static int LandBuilding(const char *dir, int tx, int ty, int z, ParchLand *L)
         wp[i] = 0;
         unsigned char *w = NULL;
         unsigned wl = 0, hs = 0;
-        if (!wp[0] || !ClientPicture(wp, "wmo.MPQ", &w, &wl, &from)) continue;
+        int wr = wp[0] ? ClientFile(wp, "wmo.MPQ", &w, &wl, &from) : 0;
+        *bad += wr < 0;
+        if (wr <= 0) continue;
         unsigned hd = AdtChunk(w, wl, WMO_MOHD, &hs);
         int wmo = hd && hs >= 0x24 ? (int)Rd32(w + hd + 0x20) : -1, its = 0;
         HeapFree(GetProcessHeap(), 0, w);
@@ -9305,13 +9319,20 @@ static int LandBuilding(const char *dir, int tx, int ty, int z, ParchLand *L)
     HeapFree(GetProcessHeap(), 0, d);
     return got;
 }
-/* Zone z's land (its row) into L: from its file when it is there and holds this box and the archives' print, else from
- * the tiles (and its file written): 1 when made (its land may be none: a city inside its building, an instance's map),
- * 0 and why not. */
+/* A land file's body's sum (FNV-1a over its bytes), so a body changed under a header as made is not trusted. */
+static unsigned LandSum(const unsigned char *body, int bytes)
+{
+    unsigned h = 2166136261u;
+    for (int i = 0; i < bytes; i++) h = (h ^ body[i]) * 16777619u;
+    return h;
+}
+/* Zone z's land (its row) into L: from its file when it is there whole and holds this box, the archives' print and its
+ * body's sum, else from the tiles (and its file written when every tile was read): 1 when made (its land may be none: a
+ * city inside its building, an instance's map), 0 and why not (a tile that could not be read among them: none kept). */
 static int ParchLandMake(int z, ParchLand *L, const char **why)
 {
     ParchLandFree(L);
-    L->tiles = 0; L->fromFile = 0;
+    L->tiles = 0; L->fromFile = 0; L->unread = 0;
     const char *dir = NULL;
     for (int i = 0; i < g_mapDirN; i++) if (g_mapDir[i].id == g_pz[z].map) dir = g_mapDir[i].dir;
     if (!dir) { *why = "its map has no folder (Map.dbc)"; return 0; }
@@ -9327,26 +9348,29 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
     if (gx1 < gx0 || gy1 < gy0) { *why = "its box is off the map"; return 0; }
     int w = gx1 - gx0 + 1, h = gy1 - gy0 + 1, bytes = (w * h + 3) / 4;
     L->m = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)w * (SIZE_T)h);
-    unsigned char *file = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(36 + bytes));
+    unsigned char *file = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(LAND_HEAD + bytes));
     if (!L->m || !file) { if (file) HeapFree(GetProcessHeap(), 0, file); ParchLandFree(L); *why = "no memory for it"; return 0; }
     L->z = z; L->gx0 = gx0; L->gy0 = gy0; L->w = w; L->h = h;
-    unsigned head[9] = { LAND_MAGIC, LAND_VERSION, LandPrint(), (unsigned)g_pz[z].id, (unsigned)g_pz[z].area, (unsigned)gx0, (unsigned)gy0, (unsigned)w, (unsigned)h };
+    unsigned head[10] = { LAND_MAGIC, LAND_VERSION, LandPrint(), (unsigned)g_pz[z].id, (unsigned)g_pz[z].area, (unsigned)gx0, (unsigned)gy0, (unsigned)w, (unsigned)h };
     char rel[96];
     wsprintfA(rel, "Data\\CinderLoad\\land-%s.bin", g_pz[z].name);
-    int got = FileGet(rel, file, (unsigned)(36 + bytes));
-    int same = got == 36 + bytes;
+    int got = FileGet(rel, file, (unsigned)(LAND_HEAD + bytes));
+    int same = got == LAND_HEAD + bytes;
     for (int k = 0; same && k < 9; k++) same = Rd32(file + 4 * k) == head[k];
-    if (same) {                                                     /* (as kept) */
-        for (int i = 0; i < w * h; i++) { L->m[i] = (file[36 + i / 4] >> (2 * (i % 4))) & 3; L->n += L->m[i] == 1; }
+    if (same && Rd32(file + 36) == LandSum(file + LAND_HEAD, bytes)) {   /* (as kept) */
+        for (int i = 0; i < w * h; i++) { L->m[i] = (file[LAND_HEAD + i / 4] >> (2 * (i % 4))) & 3; L->n += L->m[i] == 1; }
         L->fromFile = 1;
         HeapFree(GetProcessHeap(), 0, file);
         return 1;
     }
     static int area[256];
     static unsigned char dry[256];
+    int bad = 0;                                                    /* (tiles, or buildings, that could not be read) */
     for (int ty = gy0 / 16; ty <= gy1 / 16; ty++)
         for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) {
-            if (!LandTile(dir, tx, ty, area, dry)) continue;
+            int r = LandTile(dir, tx, ty, area, dry);
+            bad += r < 0;
+            if (r <= 0) continue;
             L->tiles++;
             for (int c = 0; c < 256; c++) {
                 int gx = tx * 16 + c % 16, gy = ty * 16 + c / 16;
@@ -9357,10 +9381,19 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
         }
     for (int ty = gy0 / 16; !L->n && ty <= gy1 / 16; ty++)           /* none: a city inside its building (Ironforge, Undercity):
                                                                      * the chunks its building's placement covers */
-        for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) L->n += LandBuilding(dir, tx, ty, z, L);
-    for (int k = 0; k < 9; k++) { file[4 * k] = (unsigned char)head[k]; file[4 * k + 1] = (unsigned char)(head[k] >> 8); file[4 * k + 2] = (unsigned char)(head[k] >> 16); file[4 * k + 3] = (unsigned char)(head[k] >> 24); }
-    for (int i = 0; i < w * h; i++) file[36 + i / 4] |= (unsigned char)((L->m[i] & 3) << (2 * (i % 4)));
-    FilePut(rel, file, (unsigned)(36 + bytes));
+        for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) L->n += LandBuilding(dir, tx, ty, z, L, &bad);
+    if (bad) {                                                      /* (not all of it: neither kept nor used) */
+        HeapFree(GetProcessHeap(), 0, file);
+        int tiles = L->tiles;
+        ParchLandFree(L);
+        L->tiles = tiles; L->unread = bad;
+        *why = "a tile of its terrain could not be read";
+        return 0;
+    }
+    for (int i = 0; i < w * h; i++) file[LAND_HEAD + i / 4] |= (unsigned char)((L->m[i] & 3) << (2 * (i % 4)));
+    head[9] = LandSum(file + LAND_HEAD, bytes);
+    for (int k = 0; k < 10; k++) { file[4 * k] = (unsigned char)head[k]; file[4 * k + 1] = (unsigned char)(head[k] >> 8); file[4 * k + 2] = (unsigned char)(head[k] >> 16); file[4 * k + 3] = (unsigned char)(head[k] >> 24); }
+    FilePut(rel, file, (unsigned)(LAND_HEAD + bytes));
     HeapFree(GetProcessHeap(), 0, file);
     return 1;
 }
@@ -10810,6 +10843,8 @@ static int ParchUpDone(DWORD now, int slot, int up)
         if (!g_contCut) { wsprintfA(m, "  the parchment: %s not cut to its land: %s", g_pz[c].name, g_pj.cwhy); Log(m); }
         return 0;
     }
+    if (g_land.unread) { wsprintfA(m, "  the parchment: %s's land not kept: %d of its terrain's files could not be read (%d were); cut as though it had none, read again next time",
+                                   g_pz[z].name, g_land.unread, g_land.tiles); Log(m); }
     if (g_zoneCut && g_cutLand) {
         wsprintfA(m, "  the parchment: %s cut to its land as its terrain gives it (%d chunks, %s), its edge %s (%d%% of its painting), grown %d texels",
                   g_pz[z].name, g_land.n, g_land.fromFile ? "kept from before" : "read from the client's terrain",

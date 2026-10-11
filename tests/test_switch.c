@@ -6475,6 +6475,31 @@ static void TestLandCont(int what)
     ParchLinesKeep(&g_linesCont, rc, 0, 1);
 }
 /* another archive (a patch with one small file of its own: the archives' print differs) */
+/* A file of the game's folder, bytes: read (its size, -1 none), written (n bytes), removed. */
+static int TestBytes(const char *rel, unsigned char *buf, int cap)
+{
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    FILE *f = fopen(p, "rb");
+    if (!f) return -1;
+    int n = (int)fread(buf, 1, (size_t)cap, f);
+    fclose(f);
+    return n;
+}
+static void TestBytesPut(const char *rel, const unsigned char *buf, int n)
+{
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    FILE *f = fopen(p, "wb");
+    fwrite(buf, 1, (size_t)n, f);
+    fclose(f);
+}
+static void TestBytesGone(const char *rel)
+{
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    remove(p);
+}
 static void TestLandPatch(const char *rel, const char *text)
 {
     static const char *nm[1] = { "Interface\\Test\\x.txt" };
@@ -6542,6 +6567,52 @@ static void TestLand(void)
     ok &= ParchLandMake(1, &L2, &why) && !L2.fromFile;
     ok &= ParchLandMake(1, &L2, &why) && L2.fromFile;
     Check(ok, "a zone's land as its terrain gives it: every chunk of its box whose area's zone is its own (a town's, an island's), not the sea under its own coast's area; made once and kept in Data/CinderLoad/land-<zone>.bin, read back from it while the client's archives and its box are as they were, made again when either changes");
+    /* its file trusted only whole and as made: its body's sum, its exact size, its box (the skeptic's finds on 61c66db) */
+    {
+        static const char lrel[] = "Data/CinderLoad/land-Elwynn.bin";
+        static unsigned char lf[4096], lf2[4096];
+        int n = TestBytes(lrel, lf, sizeof lf), bytes = (L.w * L.h + 3) / 4;
+        ParchLand L3 = { 0 };
+        int okf = n == LAND_HEAD + bytes && Rd32(lf + 4) == LAND_VERSION && Rd32(lf + 36) == LandSum(lf + LAND_HEAD, bytes) && lf[n - 1] == 0;
+        memcpy(lf2, lf, (size_t)n); lf2[LAND_HEAD + 20] ^= 0x04;          /* (a chunk's bits changed under the header as made) */
+        TestBytesPut(lrel, lf2, n);
+        okf &= ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && L3.n == L.n && TestBytes(lrel, lf2, sizeof lf2) == n && !memcmp(lf2, lf, (size_t)n);
+        okf &= ParchLandMake(1, &L3, &why) && L3.fromFile && L3.n == L.n;
+        Check(okf, "a zone's land file whose body is not its sum (changed under a header as made) is not trusted: made again from the terrain and kept as made");
+        TestBytesPut(lrel, lf, n - 1);                                   /* (cut short by a byte that was 0: its sum the same) */
+        okf = ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && TestBytes(lrel, lf2, sizeof lf2) == n;
+        memcpy(lf2, lf, (size_t)n); lf2[20]++;                             /* (its box moved a chunk, its size the same) */
+        TestBytesPut(lrel, lf2, n);
+        okf &= ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && TestBytes(lrel, lf2, sizeof lf2) == n && !memcmp(lf2, lf, (size_t)n);
+        memcpy(lf2, lf, 36); lf2[4] = 1; memcpy(lf2 + 36, lf + LAND_HEAD, (size_t)bytes);   /* (a version 1 file, no sum) */
+        TestBytesPut(lrel, lf2, 36 + bytes);
+        okf &= ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && TestBytes(lrel, lf2, sizeof lf2) == n;
+        memcpy(lf2, lf, (size_t)n); lf2[4] = 99;                           /* (another version's, whole, its sum held) */
+        TestBytesPut(lrel, lf2, n);
+        okf &= ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && TestBytes(lrel, lf2, sizeof lf2) == n && !memcmp(lf2, lf, (size_t)n);
+        Check(okf, "a zone's land file cut short (even where its sum holds), or for another box of the same size, or of the version before the sum or another, is not trusted: made again");
+        /* two tiles, the first not read (its memory refused): no file, no land, the screen's cut as though it had none */
+        g_testTile[0] = 32;
+        unsigned nb = TestAdt(g_adt[1], 0, 0, 0, 0, NULL, 0, NULL);
+        g_testTile[0] = 31;
+        static const char *tn2[2] = { "World\\Maps\\Azeroth\\Azeroth_31_50.adt", "World\\Maps\\Azeroth\\Azeroth_32_50.adt" };
+        const char *td2[2] = { (const char *)g_adt[0], (const char *)g_adt[1] };
+        unsigned tl2[2] = { n0, nb };
+        MakeMpq("Data/terrain.MPQ", 2, tn2, td2, tl2);
+        g_landPrint = 0;
+        TestBytesGone(lrel);
+        shim_refuse_size = n0; shim_refuse_n = 1;
+        okf = nb == n0 && !ParchLandMake(1, &L3, &why) && shim_refuse_n == 0 && L3.unread == 1 && L3.tiles == 1 && !L3.m && !L3.n &&
+              strstr(why, "could not be read") && TestBytes(lrel, lf2, sizeof lf2) < 0;
+        Check(okf, "a zone's land with one of its tiles not read (out of memory, an I/O error) is neither kept in its file nor used: no land, and why");
+        shim_refuse_size = n0; shim_refuse_n = 2;                          /* (every tile not read) */
+        okf = !ParchLandMake(1, &L3, &why) && shim_refuse_n == 0 && L3.unread == 2 && L3.tiles == 0 && !L3.m && TestBytes(lrel, lf2, sizeof lf2) < 0;
+        okf &= ParchLandMake(1, &L3, &why) && L3.tiles == 2 && !L3.unread && !L3.fromFile && L3.n >= L.n && TestBytes(lrel, lf2, sizeof lf2) > 0;
+        okf &= ParchLandMake(1, &L3, &why) && L3.fromFile && L3.tiles == 0;
+        Check(okf, "a zone's land with none of its tiles read is not kept either (no file of no land); once they read, it is made and kept");
+        shim_refuse_n = 0;
+        ParchLandFree(&L3);
+    }
     /* a city inside its building: its placement's chunks */
     static unsigned char modf[64];
     TestModf(modf, -9900, 200, -9800, 300, 0);
@@ -6559,6 +6630,19 @@ static void TestLand(void)
     float gx, gy;
     LandChunkAt(-9850, 250, &gx, &gy);
     ok = ParchLandMake(2, &Lc, &why) && Lc.n >= 9 && Lc.n <= 16 && LandOwn(&Lc, (int)gx, (int)gy) && !LandOwn(&Lc, (int)gx + 5, (int)gy);
+    {                                                                  /* its tile or its building not read: no file, no land */
+        char crel[96];
+        snprintf(crel, sizeof crel, "Data/CinderLoad/land-%s.bin", g_pz[2].name);
+        TestBytesGone(crel);
+        shim_refuse_size = n1; shim_refuse_skip = 1; shim_refuse_n = 1;  /* (its tile read, then not as its buildings are looked for) */
+        int okc = !ParchLandMake(2, &Lc, &why) && !shim_refuse_n && Lc.unread == 1 && Lc.tiles == 1 && !Lc.n && Gone(crel);
+        TestBytesGone(crel);
+        shim_refuse_size = wl[0]; shim_refuse_skip = 0; shim_refuse_n = 1;   /* (its building's root not read) */
+        okc &= !ParchLandMake(2, &Lc, &why) && !shim_refuse_n && Lc.unread == 1 && !Lc.n && Gone(crel);
+        okc &= ParchLandMake(2, &Lc, &why) && Lc.n >= 9 && !Lc.fromFile && !Gone(crel);
+        shim_refuse_n = shim_refuse_skip = 0;
+        Check(okc, "a city's land inside its building with its tile or its building not read (out of memory) is neither kept in its file nor used");
+    }
     g_waArea[0] = 40;                                                  /* (its building another zone's: none) */
     TestLandPatch("Data/patch-3.MPQ", "xy");
     ok &= ParchLandMake(2, &Lc, &why) && Lc.n == 0;
