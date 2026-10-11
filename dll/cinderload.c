@@ -8893,7 +8893,7 @@ static int ParchMatch(const ParchLow *L, ParchRect rf)
 #define PARCH_CUT_MEAN   15           /* that over this far either way (its borders are lighter in places than PARCH_CUT_DARK) */
 #define PARCH_CUT_REACH  6            /* the region grown into its border line by at most this much of the coarser painting */
 #ifndef PARCH_CUT_GAP
-#define PARCH_CUT_GAP    2            /* a continent's lines: gaps up to twice this closed (texels of an HD painting) */
+#define PARCH_CUT_GAP    3            /* a continent's lines: gaps up to twice this closed (texels of an HD painting) */
 #endif
 #define PARCH_CUT_COAST  3            /* the world's coasts (kept at half its HD size): gaps up to twice this closed (Kalimdor's east
                                        * coast is drawn thin, and a fill of its land leaked into the sea through one) */
