@@ -19,6 +19,8 @@ static const float kWholeUV[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };   /* the whole pict
 #include <dirent.h>
 #include <ctype.h>
 #include <strings.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 char shim_gamedir[512];
 unsigned char shim_module[SHIM_MODULE_SIZE];
@@ -28,11 +30,19 @@ int shim_vq;
 int shim_screen_w = 3440, shim_screen_h = 1440;
 char shim_cmdline[512] = "\"C:\\Games\\WoW\\WoW.exe\"";
 int shim_wine;
+HWND shim_game;
+int shim_game_alive;
+DWORD shim_game_tid = 77;
+HOOKPROC shim_hook;
+DWORD shim_hook_tid;
+int shim_hooks, shim_unhooks, shim_hook_fail, shim_posted, shim_post_fail;
+UINT shim_posted_msg;
 
 static int fails, checks;
 static void Check(int cond, const char *what) { checks++; if (!cond) { printf("FAIL: %s\n", what); fails++; } }
 
 static const char *g_root;
+static const char *g_client;                        /* a real client's folder, when given */
 static void Fresh(const char *name)
 {
     snprintf(shim_gamedir, sizeof shim_gamedir, "%s/%s/", g_root, name);
@@ -1133,6 +1143,26 @@ static void FireBarRealClient(const char *client)
 
 /* The mock's timeline (render_frames.py KEYS) through the sound built from a real client's files, polled as the game
  * would be: the fill changes every 20 ms. Written as 16-bit stereo for listening; a few checks on the way. */
+/* The case's Data folder given every archive of a real client (symlinks, read only), named as the DLL asks for them. */
+static int LinkClient(const char *client)
+{
+    char from[1024], to[1024];
+    DIR *dd = NULL;
+    snprintf(from, sizeof from, "%s/Data", client);
+    if (!(dd = opendir(from))) { printf("FAIL: could not read %s\n", from); fails++; return 0; }
+    for (struct dirent *de; (de = readdir(dd));) {
+        size_t nl = strlen(de->d_name);
+        if (nl < 5 || strcasecmp(de->d_name + nl - 4, ".mpq")) continue;
+        char name[256];
+        snprintf(name, sizeof name, "%.*s.MPQ", (int)(nl - 4), de->d_name);
+        if (!strncasecmp(name, "patch-", 6) && name[6]) name[6] = (char)toupper((unsigned char)name[6]);
+        snprintf(from, sizeof from, "%s/Data/%s", client, de->d_name);
+        snprintf(to, sizeof to, "%sData/%s", shim_gamedir, name);
+        if (symlink(from, to)) { printf("FAIL: could not link %s\n", from); fails++; closedir(dd); return 0; }
+    }
+    closedir(dd);
+    return 1;
+}
 static void FireRealClient(const char *client)
 {
     static const float keys[][2] = { { 0, 0 }, { 0.6f, 0.02f }, { 1.6f, 0.15f }, { 2.8f, 0.18f }, { 3.1f, 0.42f }, { 5.8f, 0.55f },
@@ -1153,21 +1183,7 @@ static void FireRealClient(const char *client)
 
     Fresh("fire-real");
     GameDir();                                              /* the log goes to this folder */
-    char from[1024], to[1024];
-    DIR *dd = NULL;
-    snprintf(from, sizeof from, "%s/Data", client);
-    if (!(dd = opendir(from))) { printf("FAIL: could not read %s\n", from); fails++; return; }
-    for (struct dirent *de; (de = readdir(dd));) {          /* every archive, named as the DLL asks for it */
-        size_t nl = strlen(de->d_name);
-        if (nl < 5 || strcasecmp(de->d_name + nl - 4, ".mpq")) continue;
-        char name[256];
-        snprintf(name, sizeof name, "%.*s.MPQ", (int)(nl - 4), de->d_name);
-        if (!strncasecmp(name, "patch-", 6) && name[6]) name[6] = (char)toupper((unsigned char)name[6]);
-        snprintf(from, sizeof from, "%s/Data/%s", client, de->d_name);
-        snprintf(to, sizeof to, "%sData/%s", shim_gamedir, name);
-        if (symlink(from, to)) { printf("FAIL: could not link %s\n", from); fails++; closedir(dd); return; }
-    }
-    closedir(dd);
+    if (!LinkClient(client)) return;
     /* every recipe, from this client's own files, over the timeline: all its sounds made, it builds, it never clips;
      * each written out for listening (sound-<name>.wav), with its loudness to set the recipes' levels against */
     static short pcm[2 * 12 * 44100 + 2 * 44100];
@@ -5434,16 +5450,15 @@ static void TestVanillaBar(void)
     Check(blade, "vanilla's bar off (no bar-vanilla.txt, or its pictures never reached OpenGL): the blade as it was");
     g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 0; g_class = 0; g_vbFullAt = 0;
 
-    /* reading it: only when bar-vanilla.txt is there; each picture the client's newest copy, ours (patch-~) and a
-     * zero-length stub passed over, the base archive its last word; the log says where each came from */
+    /* reading it (whichever bar is chosen: it may be chosen in game at any time): each picture the client's newest copy,
+     * ours (patch-~) and a zero-length stub passed over, the base archive its last word; the log says where each came from */
     static const char *const names[2] = { VBAR_BORDER_PATH, VBAR_GLASS_PATH };
     unsigned char *vblp[VT_COUNT] = { 0 };
     unsigned vlen[VT_COUNT] = { 0 };
     Fresh("vanilla-bar");
     GameDir();
     VBarRead(vblp, vlen);
-    ok = !g_vbarAsked && !vblp[VT_VBORDER] && !vblp[VT_VGLASS];
-    Put("Data/CinderLoad/bar-vanilla.txt", "");
+    ok = !vblp[VT_VBORDER] && !vblp[VT_VGLASS] && LogSays("not read: in none of the client's archives");
     static const char *const inBase[2] = { "base-border", "base-glass" }, *const inFive[1] = { "patch5-border" };
     static const char *const ours[2] = { "ours-border", "ours-glass" }, *const stub[1] = { "" };
     MakeMpq("Data/interface.MPQ", 2, names, inBase, NULL);
@@ -5451,18 +5466,16 @@ static void TestVanillaBar(void)
     MakeMpq("Data/patch-~.MPQ", 2, names, ours, NULL);
     MakeMpq("Data/patch-9.MPQ", 1, names + 1, stub, NULL);
     VBarRead(vblp, vlen);
-    ok &= g_vbarAsked && vblp[VT_VBORDER] && vlen[VT_VBORDER] == 13 && !memcmp(vblp[VT_VBORDER], "patch5-border", 13) &&
+    ok &= vblp[VT_VBORDER] && vlen[VT_VBORDER] == 13 && !memcmp(vblp[VT_VBORDER], "patch5-border", 13) &&
           vblp[VT_VGLASS] && vlen[VT_VGLASS] == 10 && !memcmp(vblp[VT_VGLASS], "base-glass", 10) &&
           LogSays("Loading-BarBorder.blp read from patch-5.MPQ") && LogSays("Loading-BarGlass.blp read from interface.MPQ");
     for (int i = VT_VBORDER; i <= VT_VGLASS; i++) { if (vblp[i]) HeapFree(GetProcessHeap(), 0, vblp[i]); vblp[i] = NULL; }
     Fresh("vanilla-bar-ours-only");
     GameDir();
-    Put("Data/CinderLoad/bar-vanilla.txt", "");
     MakeMpq("Data/patch-~.MPQ", 2, names, ours, NULL);
     VBarRead(vblp, vlen);
-    ok &= g_vbarAsked && !vblp[VT_VBORDER] && !vblp[VT_VGLASS] && LogSays("not read: in none of the client's archives");
-    g_vbarAsked = 0;
-    Check(ok, "vanilla's bar read: only when Data/CinderLoad/bar-vanilla.txt is there; the client's newest copy of each picture (patch-5 over the base), ours and a zero-length stub passed over; none of the client's: not read, and the log says so");
+    ok &= !vblp[VT_VBORDER] && !vblp[VT_VGLASS] && LogSays("not read: in none of the client's archives");
+    Check(ok, "vanilla's bar read as the view starts, whichever bar is chosen (no switch file needed); the client's newest copy of each picture (patch-5 over the base), ours and a zero-length stub passed over; none of the client's: not read, and the log says so");
 }
 
 /* The parchment (his "fix it", 10 Oct 2026: he had seen only the living map under the new bar): the client's world map
@@ -5823,12 +5836,12 @@ static void TestParchment(void)
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
     if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
 
-    /* asked for: only by parchment.txt, which brings vanilla's bar too; the tables from the client's dbc archive */
+    /* read as the view starts, whichever map is chosen (it may be chosen in game at any time): the tables from the
+     * client's dbc archive */
     Fresh("parchment-asked");
     GameDir();
     ParchRead();
-    ok = !g_parchAsked;
-    Put("Data/CinderLoad/parchment.txt", "");
+    ok = g_pzN == 0;
     static const char *dn[2] = { "DBFilesClient\\WorldMapArea.dbc", "DBFilesClient\\WorldMapOverlay.dbc" };
     const char *dd[2] = { (const char *)wma, (const char *)wmo };
     unsigned dl[2] = { wn, on };
@@ -5837,9 +5850,9 @@ static void TestParchment(void)
     unsigned char *vb[VT_COUNT] = { 0 };
     unsigned vl[VT_COUNT] = { 0 };
     VBarRead(vb, vl);
-    ok &= g_parchAsked && g_pzN == 4 && g_ppN == 2 && LogSays("the parchment: 4 zones (WorldMapArea.dbc from dbc.MPQ)") && g_vbarAsked;
-    g_parchAsked = 0; g_vbarAsked = 0;
-    Check(ok, "the parchment asked for: only by Data/CinderLoad/parchment.txt (vanilla's bar with it); the client's world map tables read and logged");
+    ok &= g_pzN == 4 && g_ppN == 2 && LogSays("the parchment: 4 zones (WorldMapArea.dbc from dbc.MPQ)");
+    for (int i = VT_VBORDER; i <= VT_VGLASS; i++) if (vb[i]) HeapFree(GetProcessHeap(), 0, vb[i]);
+    Check(ok, "the parchment's tables read as the view starts, whichever map is chosen (no switch file needed), and logged");
 }
 
 /* One load through the DLL's own steps (the game's frames, its hold at a full bar, the view's frames), the camera logged:
@@ -6659,10 +6672,888 @@ static void TestExplore(void)
     munmap(low, 1 << 16);
 }
 
+/* ---- the style: the map and the bar, each the player's (his decision, 10 Oct 2026), and the world map's switches ---- */
+#define STYLE_REL "Data/CinderLoad/style.txt"
+static void TestStyle(void)
+{
+    int ok, map, bar;
+    map = bar = -1;
+    ok = StyleParse("map parchment\r\nbar retro\r\n", &map, &bar) == 2 && map == 1 && bar == 1;
+    map = bar = -1;
+    ok &= StyleParse("MAP Satellite\tbar NEO", &map, &bar) == 2 && map == 0 && bar == 0;
+    map = bar = 7;
+    ok &= StyleParse("# map: parchment or satellite, bar: retro or neo\nbar neo\n", &map, &bar) == 1 && map == 7 && bar == 0;
+    map = bar = 7;
+    ok &= StyleParse("?", &map, &bar) == 0 && StyleParse("parchments retroneo neon sat", &map, &bar) == 0 &&
+          StyleParse(NULL, &map, &bar) == 0 && map == 7 && bar == 7;
+    ok &= StyleParse("map=satellite,bar=neo fault", &map, &bar) == 2 && map == 0 && bar == 0;
+    char v[32];
+    StyleValue(v, 1, 0);
+    ok &= !strcmp(v, "parchment neo");
+    StyleValue(v, 0, 1);
+    ok &= !strcmp(v, "satellite retro");
+    Check(ok, "the style's words: parchment or satellite, retro or neo, in any case, whole words only, a note after '#' passed over; the CVar's value \"parchment neo\"");
+
+    Fresh("style-none"); GameDir();
+    StyleLoad();
+    ok = g_parchAsked == 1 && g_vbarAsked == 1 && LogSays("style: the map parchment, the bar retro, from the defaults");
+    Fresh("style-old-parchment"); GameDir();
+    Put("Data/CinderLoad/parchment.txt", "");
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && LogSays("from the old switch files");
+    Fresh("style-old-vanilla-bar"); GameDir();
+    Put("Data/CinderLoad/bar-vanilla.txt", "");
+    StyleLoad();
+    ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+    Fresh("style-file"); GameDir();
+    Put("Data/CinderLoad/parchment.txt", ""); Put("Data/CinderLoad/bar-vanilla.txt", "");
+    Put(STYLE_REL, "map satellite\r\nbar neo\r\n");
+    StyleLoad();
+    ok &= g_parchAsked == 0 && g_vbarAsked == 0 && LogSays("from Data\\CinderLoad\\style.txt (chosen in game)");
+    Fresh("style-half"); GameDir();
+    Put(STYLE_REL, "bar neo\n");
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    Fresh("style-garbage"); GameDir();
+    Put(STYLE_REL, "\x01\x02 zzz satellit");
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1;
+    Check(ok, "the style at start: Data/CinderLoad/style.txt, ahead of all; without it the old switch files (parchment.txt: the parchment and vanilla's bar; bar-vanilla.txt: vanilla's bar on the living map); neither: the parchment and retro; a word missing, its default");
+
+    Fresh("style-set"); GameDir();
+    StyleLoad();
+    const char *t;
+    ok = StyleSet(0, 1, "a test") == 1 && g_parchAsked == 0 && g_vbarAsked == 1 && (t = Get(STYLE_REL)) &&
+         strstr(t, "\r\nmap satellite\r\nbar retro\r\n") && t[0] == '#' && Gone("Data/CinderLoad/style.tmp") &&
+         LogSays("style: the map satellite, the bar retro (a test), from the next loading screen; kept in Data\\CinderLoad\\style.txt");
+    Put(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
+    ok &= StyleSet(0, 1, "the same") == 0 && Is(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
+    ok &= StyleSet(1, 0, "another") == 1;
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    {
+        char p[700];
+        snprintf(p, sizeof p, "%sData/CinderLoad", shim_gamedir);
+        chmod(p, 0555);
+        int changed = StyleSet(0, 0, "unwritable");
+        chmod(p, 0755);
+        ok &= changed && g_parchAsked == 0 && g_vbarAsked == 0 && LogSays("could NOT be written, so it holds only until the game closes");
+    }
+    Check(ok, "a choice made in game: kept in style.txt (written beside it, then moved over it), read back the same at the next start; the same choice again writes nothing; a file that cannot be written: it holds until the game closes, and the log says so");
+
+    /* each screen as the view opens it: the choice, as far as it can be */
+    int pzN = g_pzN;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    g_pzN = 4; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
+    g_parchAsked = 1; g_vbarAsked = 1;
+    StylePick();
+    ok = g_parchOn == 1 && g_barVanilla == 1 && LogSays("  the view: the parchment (each screen") && LogSays("vanilla's own bar (retro");
+    g_parchAsked = 0; g_vbarAsked = 0;
+    StylePick();
+    ok &= !g_parchOn && !g_barVanilla && LogSays("  the view: the living map (satellite), the blade for the bar (neo)");
+    g_parchAsked = 1; g_pzN = 0;
+    StylePick();
+    ok &= !g_parchOn && LogSays("gave no zones: the living map");
+    g_pzN = 4; g_vbarAsked = 1; g_viewTex[VT_VGLASS] = 0;
+    StylePick();
+    ok &= g_parchOn && !g_barVanilla && LogSays("did not reach OpenGL: the blade");
+    Check(ok, "each screen as the view opens: the parchment when chosen and the client's tables were read, else the living map; vanilla's bar when chosen and its pictures are on OpenGL, else the blade; logged as it changes");
+
+    /* the four, drawn: each map with each bar (neo: the blade in its frame, the logo on it; retro: vanilla's frame and
+     * glass); the first frame of a parchment screen with its bar empty */
+    static const char frameTxt[] = "sheet 1024 512\nleft 0 0 422 313\nrail 426 0 554 313\ncentre 558 0 598 313\nright 602 0 1024 313\n"
+                                   "band 223 313\nchannel 236 301\nends 0 422\nlips 0 422\n";
+    FrameParse(frameTxt, sizeof frameTxt - 1);
+    { const char *lg = "logo 1024 512 4 4 1020 484\n"; LogoParse(lg, (unsigned)strlen(lg)); }
+    static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
+    memcpy(g_bgUV, uv, sizeof uv);
+    ok = g_frame.ok && g_logo.ok;
+    int all = 1;
+    for (int c = 0; c < 4; c++) {
+        map = c >> 1; bar = c & 1;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+        g_viewTex[VT_MAP] = g_viewTex[VT_FRAME] = g_viewTex[VT_LOGO] = g_viewTex[VT_SPARK] = 1;
+        g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
+        g_ovOn = 0; g_frameOn = 1; g_logoOn = 1; g_class = 4; g_vbFullAt = 0; g_sbFullAt = 0;
+        g_pzN = 4; g_parchZone = -1; g_parchCont = -1;
+        g_parchAsked = map; g_vbarAsked = bar;
+        StylePick();
+        int n[VT_COUNT + 1] = { 0 };
+        ViewBuild(1920, 1080, 0.6f, 5000);
+        for (int b = 0; b < g_vbN; b++) n[g_vb[b].tex >= 0 ? g_vb[b].tex : VT_COUNT]++;
+        int one = map ? !n[VT_MAP] && n[VT_COUNT] : n[VT_MAP] == 1;
+        one &= bar ? n[VT_VBORDER] && n[VT_VGLASS] && !n[VT_FRAME] && !n[VT_LOGO] : n[VT_FRAME] && n[VT_LOGO] && !n[VT_VBORDER] && !n[VT_VGLASS];
+        for (int i = 0; i <= VT_COUNT; i++) n[i] = 0;
+        ViewFirstList(1920, 1080, 5000);
+        for (int b = 0; b < g_vbN; b++) n[g_vb[b].tex >= 0 ? g_vb[b].tex : VT_COUNT]++;
+        one &= !map ? g_vbN == 0 : bar ? n[VT_VBORDER] && !n[VT_FRAME] : n[VT_FRAME] && !n[VT_VBORDER];
+        if (!one) printf("  (the %s map with the %s bar is not as it should be)\n", StyleMapName(map), StyleBarName(bar));
+        all &= one;
+    }
+    Check(ok && all, "the four, drawn: the parchment or the living map, each with vanilla's bar (its frame and glass) or the blade (its frame, the logo on it); a parchment screen's first frame: the dark paper and its own bar, empty");
+    g_frame.ok = 0; g_logo.ok = 0; g_frameOn = 0; g_logoOn = 0; g_parchOn = 0; g_barVanilla = 0; g_class = 0;
+    g_parchAsked = 0; g_vbarAsked = 0; g_pzN = pzN;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+}
+
+/* The fakes of the client's three calls, over a CVar in low memory (its value a 32-bit pointer, as the client's) */
+static unsigned char *g_fkLow, *g_fkCv;
+static char *g_fkVal;
+static int g_fkUp, g_fkRuns, g_fkProbes, g_fkSetups, g_fkIgnore, g_fkRegisters, g_fkRegFail, g_fkMarked, g_fkHide;
+static char g_fkHead[96], g_fkDef[64];
+static int g_fkArgs[6];
+static void FkSet(const char *v) { snprintf(g_fkVal, 64, "%s", v); }
+static void FakeExec(const char *code, const char *source)
+{
+    g_fkRuns++;
+    if (strcmp(source, "CinderLoad")) return;
+    if (!strcmp(code, kLuaProbe)) { g_fkProbes++; if (!g_fkUp && g_fkCv) FkSet("?"); return; }
+    g_fkSetups++;
+    snprintf(g_fkHead, sizeof g_fkHead, "%.60s", code);
+    g_fkMarked = Get("Data/CinderLoad/ui-setup.tmp") != NULL;
+    if (g_fkIgnore) return;
+    g_fkUp = 1;
+    char m[16] = "", b[16] = "";
+    if (sscanf(code, "local CL_MAP, CL_BAR = \"%15[a-z]\", \"%15[a-z]\"", m, b) == 2) { char v[40]; snprintf(v, sizeof v, "%s %s", m, b); FkSet(v); }
+}
+static void *FakeLookup(const char *name) { return !strcmp(name, CV_NAME) && g_fkCv && !g_fkHide ? g_fkCv : NULL; }
+static void *FakeRegister(const char *name, const char *help, int flags, const char *def, void *cb, int cat, int unreg, void *arg)
+{
+    g_fkRegisters++;
+    g_fkArgs[0] = help != NULL; g_fkArgs[1] = flags; g_fkArgs[2] = cb != NULL; g_fkArgs[3] = cat; g_fkArgs[4] = unreg; g_fkArgs[5] = arg != NULL;
+    snprintf(g_fkDef, sizeof g_fkDef, "%s", def);
+    if (g_fkRegFail || strcmp(name, CV_NAME)) return NULL;
+    g_fkCv = g_fkLow + 0x100;
+    TestPut32(g_fkCv + CV_VALUE, TestLow(g_fkVal));
+    FkSet(def);
+    return g_fkCv;
+}
+static void LuaPlant(void)
+{
+    for (int i = 0; i < LUA_CODE_COUNT; i++) memcpy(shim_module + (kLuaCode[i].va - 0x400000u), kLuaCode[i].bytes, (size_t)kLuaCode[i].n);
+}
+static void SwitchesQuiet(void);
+static DWORD g_tk = 5000;                                /* the switches' clock in these tests */
+static void Tick(void) { g_tk += LUA_TICK_MS; LuaTick(g_tk); } /* a tick a probe may come on */
+static void TestSwitches(void)
+{
+    int ok;
+    const char *what = "";
+    /* every place the switches use, checked byte for byte first */
+    Fresh("switches-code"); GameDir();
+    LuaPlant();
+    ok = LuaCodeOk(&what);
+    for (int i = 0; i < LUA_CODE_COUNT; i++) {
+        unsigned char *at = shim_module + (kLuaCode[i].va - 0x400000u) + kLuaCode[i].n / 2;
+        *at ^= 0x40;
+        ok &= !LuaCodeOk(&what) && what == kLuaCode[i].what;
+        *at ^= 0x40;
+    }
+    ok &= LuaCodeOk(&what);
+    Check(ok, "the world map's switches: each of the client's places they use checked byte for byte before any is used (any one off: off)");
+
+    ok = LuaWanted() && g_luaExec == (LuaExecFn)(void *)ClientAt(LUA_EXEC_VA) && g_cvLookup == (CvLookupFn)(void *)ClientAt(CV_LOOKUP_VA) &&
+         g_cvRegister == (CvRegisterFn)(void *)ClientAt(CV_REGISTER_VA);
+    Put("Data/CinderLoad/ui-setup.tmp", "x");
+    ok &= !LuaWanted() && Gone("Data/CinderLoad/ui-setup.tmp") && Get("Data/CinderLoad/ui-off.txt") &&
+          LogSays("the last session ended while they were being made");
+    ok &= !LuaWanted() && LogSays("Data\\CinderLoad\\ui-off.txt is there");
+    Fresh("switches-unwritable"); GameDir();                           /* (the mark found, and ui-off.txt cannot be written: off still) */
+    LuaPlant();
+    Put("Data/CinderLoad/ui-setup.tmp", "x");
+    {
+        char p[700];
+        snprintf(p, sizeof p, "%sData/CinderLoad", shim_gamedir);
+        chmod(p, 0555);
+        ok &= !LuaWanted() && Gone("Data/CinderLoad/ui-off.txt");
+        chmod(p, 0755);
+    }
+    Fresh("switches-other-exe"); GameDir();
+    LuaPlant();
+    shim_module[LUA_EXEC_VA - 0x400000u] = 0xC3;
+    ok &= !LuaWanted() && LogSays("the world map's switches: off, as WoW.exe is not as read (FrameScript_Execute");
+    Check(ok, "the switches at start: on with the client as read; off with another WoW.exe, or when the last session ended while they were being made (ui-off.txt then keeps them off until it is deleted)");
+
+    /* the game's thread at a safe moment: a player in the world, no loading screen, the UI's Lua idle */
+    unsigned char *low = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    if (low == MAP_FAILED) { Check(0, "low memory for the switches' test"); return; }
+    memset(low, 0, 1 << 16);
+    unsigned char *mgr = low + 0x1000, *L = low + 0x2000;
+    g_fkLow = low + 0x3000; g_fkVal = (char *)(low + 0x4000);
+    Fresh("switches"); GameDir();
+    LuaPlant();
+    TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));
+    TestPut32(mgr + OBJ_MGR_GUID, 0x1234);
+    TestPut32(shim_module + (LUA_STATE_VA - 0x400000), TestLow(L));
+    TestPut32(L + LUA_L_CI, 0x5000); TestPut32(L + LUA_L_BASE_CI, 0x5000);
+    ok = LuaSafeNow();
+    TestPut32(shim_module + FIRE_LAYER_RVA, 7);    ok &= !LuaSafeNow(); TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    TestPut32(mgr + OBJ_MGR_GUID, 0);              ok &= !LuaSafeNow(); TestPut32(mgr + OBJ_MGR_GUID + 4, 9); ok &= LuaSafeNow();
+    TestPut32(mgr + OBJ_MGR_GUID + 4, 0); TestPut32(mgr + OBJ_MGR_GUID, 0x1234);
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), 0); ok &= !LuaSafeNow(); TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));
+    TestPut32(shim_module + (LUA_STATE_VA - 0x400000), 0); ok &= !LuaSafeNow(); TestPut32(shim_module + (LUA_STATE_VA - 0x400000), TestLow(L));
+    L[LUA_L_NCCALLS] = 1;                          ok &= !LuaSafeNow(); L[LUA_L_NCCALLS] = 0;
+    L[LUA_L_NCCALLS + 1] = 1;                      ok &= !LuaSafeNow(); L[LUA_L_NCCALLS + 1] = 0;
+    TestPut32(L + LUA_L_CI, 0x5010);               ok &= !LuaSafeNow(); TestPut32(L + LUA_L_CI, 0x5000);
+    ok &= LuaSafeNow();
+    Check(ok, "the switches run only at a safe moment of the game's thread: a player in the world, no loading screen, the UI's Lua there and running nothing (no C call into it, its call stack at its base)");
+
+    /* the ticks, through fakes of the client's calls */
+    const char *t;
+    StyleLoad();
+    ok = LuaWanted();
+    g_luaExec = FakeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+    g_luaOn = 1; g_luaBroken = 0; g_luaBusy = 0; g_luaFails = 0; g_luaSetups = 0; g_luaSynced = 0;
+    g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = 0;
+    Tick();
+    ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
+          !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
+          !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"parchment\", \"retro\"\n-- CinderLoad", 57) && !strcmp(g_fkVal, "parchment retro") &&
+          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro");
+    Check(ok, "a login: the CVar made as RegisterCVar makes one (no help, no flags, the choice its default, no callback, category 9, registered), the probe finds no switches, they are made from the choice held (the setup's mark there while it runs, gone after)");
+    Tick();
+    ok = g_fkProbes == 2 && g_fkSetups == 1 && g_fkRegisters == 1;
+    FkSet("satellite neo");                                           /* the player's clicks */
+    Tick();
+    ok &= g_parchAsked == 0 && g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo") &&
+          LogSays("style: the map satellite, the bar neo (chosen on the world map or with /cinderload)") && g_fkSetups == 1;
+    g_fkUp = 0;                                                        /* a /reload */
+    Tick();
+    ok &= g_fkSetups == 2 && !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"satellite\", \"neo\"\n", 42) && !strcmp(g_fkVal, "satellite neo") &&
+          LogSays("made (again: at a login or a /reload), set to satellite neo");
+    FkSet("parchment neo");                                           /* a click, then at once a teleport */
+    StyleAtLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && LogSays("(chosen just before this loading screen)");
+    FkSet("satellite");                                               /* (one word: not the switches' own value) */
+    Tick();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    FkSet("satellite retro");                                         /* a click, then a teleport: the game's first frame of it */
+    g_dispNew = 1;
+    GameStep(0.0f, 777000);
+    ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+    FkSet("parchment neo");
+    GameStep(0.05f, 777100);                                          /* (the same screen: only as one begins) */
+    ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+    StyleAtLoad();
+    Check(ok, "each tick: a choice made on the world map or with /cinderload taken and kept in style.txt; after a /reload made again from it; one made just before a loading screen, taken as it begins (the game's first frame of it); a value not the switches' own never");
+
+    int runs = g_fkRuns;
+    TestPut32(shim_module + FIRE_LAYER_RVA, 3);
+    Tick();
+    ok = g_fkRuns == runs;
+    TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    g_luaBusy = 1; Tick(); g_luaBusy = 0;
+    ok &= g_fkRuns == runs;
+    L[LUA_L_NCCALLS] = 2; Tick(); L[LUA_L_NCCALLS] = 0;
+    ok &= g_fkRuns == runs;
+    g_luaOn = 0; Tick(); g_luaOn = 1;
+    ok &= g_fkRuns == runs;
+    Check(ok, "no tick in a loading screen, inside another tick, with the UI's Lua running, or with the switches off");
+
+    /* a new session: a CVar already there (Config.wtf's, say) never counts before the switches have set it */
+    g_luaSynced = 0; g_fkUp = 0;
+    FkSet("satellite retro");
+    StyleAtLoad();
+    ok = g_parchAsked == 1 && g_vbarAsked == 0;
+    Tick();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && !strcmp(g_fkVal, "parchment neo") && g_luaSynced;
+    Check(ok, "a CVar there before the switches set it (Config.wtf's) never counts: style.txt's choice stands, and the switches set the CVar to it");
+
+    /* their fault, a chunk that does not run, a CVar the client will not make: off for the session */
+    FkSet("parchment neo fault");
+    Tick();
+    runs = g_fkRuns;
+    g_fkUp = 0;
+    Tick();
+    ok = g_luaBroken && g_fkRuns == runs && LogSays("off for this session, as they met a Lua error");
+    g_luaBroken = 0; g_fkUp = 0; g_fkIgnore = 1;
+    FkSet("parchment neo");
+    Tick();
+    ok &= !g_luaBroken && g_luaFails == 1 && LogSays("made, but no word back from them (1 time)");
+    Tick();
+    ok &= g_luaBroken && LogSays("as they did not run (twice made, no word back)");
+    FkSet("satellite neo");                                           /* off: not even a screen's start asks the client */
+    StyleAtLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    g_luaBroken = 0; g_luaFails = 0; g_fkUp = 0;                       /* once with no word back, then a good one: counted again */
+    Tick();
+    g_fkIgnore = 0; g_fkUp = 0;
+    Tick();
+    g_fkIgnore = 1; g_fkUp = 0;
+    Tick();
+    ok &= !g_luaBroken && g_luaFails == 1;
+    g_luaBroken = 0; g_luaFails = 0; g_fkIgnore = 0; g_fkCv = NULL; g_fkRegFail = 1;
+    Tick();
+    ok &= g_luaBroken && LogSays("the client would not make its CVar");
+    g_luaBroken = 0; g_fkCv = NULL; g_fkRegFail = 0; g_fkHide = 1;      /* made, but the client's lookup does not find it */
+    Tick();
+    ok &= g_luaBroken;
+    g_fkHide = 0;
+    Check(ok, "off for the session (logged; the world map and style.txt as ever): when the switches report a Lua error, when they are made twice and never run, when the client will not make their CVar");
+
+    char small[64];
+    Check(LuaChunk(small, sizeof small, 1, 1) == 0, "the switches' chunk: never written past its buffer");
+    SwitchesQuiet();
+    munmap(low, 1 << 16);
+}
+
+/* A file of these bytes, in the case's folder. */
+static void PutN(const char *rel, const void *data, size_t n)
+{
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    FILE *f = fopen(p, "wb");
+    if (f) { fwrite(data, 1, n, f); fclose(f); }
+}
+/* The game in the world at a safe moment for the switches (a player, no loading screen, the UI's Lua idle), over low
+ * memory: low + 0x1000 the object manager, + 0x2000 the lua_State, + 0x3000 the fake CVar, + 0x4000 its value. */
+static void SwitchesWorld(unsigned char *low)
+{
+    memset(low, 0, 1 << 16);
+    unsigned char *mgr = low + 0x1000, *L = low + 0x2000;
+    g_fkLow = low + 0x3000; g_fkVal = (char *)(low + 0x4000);
+    LuaPlant();
+    TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));
+    TestPut32(mgr + OBJ_MGR_GUID, 0x1234);
+    TestPut32(shim_module + (LUA_STATE_VA - 0x400000), TestLow(L));
+    TestPut32(L + LUA_L_CI, 0x5000); TestPut32(L + LUA_L_BASE_CI, 0x5000);
+    g_luaExec = FakeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+    g_luaOn = 1; g_luaBroken = 0; g_luaBusy = 0; g_luaFails = 0; g_luaSetups = 0; g_luaSynced = 0; g_luaProbeAt = 0; g_luaCv = NULL;
+    g_luaPosted = 0; g_luaPostedAt = 0; g_luaMsg = 0;
+    g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = g_fkHide = 0;
+    shim_game = (HWND)(long)0x1234; shim_game_alive = 1; shim_game_tid = 77; shim_hook = NULL;
+    shim_hooks = shim_unhooks = shim_hook_fail = shim_posted = shim_post_fail = 0; shim_posted_msg = 0;
+}
+static void SwitchesQuiet(void)
+{
+    g_luaOn = 0; g_luaBroken = 0; g_luaFails = 0; g_luaSynced = 0; g_luaProbeAt = 0; g_luaCv = NULL; g_luaPosted = 0; g_luaMsg = 0;
+    g_luaExec = NULL; g_cvLookup = NULL; g_cvRegister = NULL;
+    shim_game = NULL; shim_game_alive = 0; shim_hook = NULL;
+    g_parchAsked = 0; g_vbarAsked = 0;
+}
+static int g_vsStarts, g_vsFail;
+static int FakeViewThreadStart(const unsigned char *base) { (void)base; g_vsStarts++; return !g_vsFail; }
+/* The style's file as Notepad and others save it; the CVar's value only as the switches write it; the black first frames
+ * only for a parchment that will be drawn. */
+static void TestStyleFiles(void)
+{
+    int ok = 1, map, bar, fault;
+    /* style.txt in UTF-16 (Notepad's "Unicode", little or big endian, with its mark or without) and UTF-8 with its mark */
+    static const char txt[] = "map satellite\r\nbar neo\r\n";
+    for (int kind = 0; kind < 6; kind++) {
+        unsigned char b[200];
+        size_t n = 0;
+        if (kind == 0) { b[n++] = 0xFF; b[n++] = 0xFE; }
+        if (kind == 1) { b[n++] = 0xFE; b[n++] = 0xFF; }
+        if (kind == 4) { b[n++] = 0xEF; b[n++] = 0xBB; b[n++] = 0xBF; }
+        for (const char *c = txt; *c; c++) {
+            if (kind == 0 || kind == 2) { b[n++] = (unsigned char)*c; b[n++] = 0; }
+            else if (kind == 1 || kind == 3) { b[n++] = 0; b[n++] = (unsigned char)*c; }
+            else b[n++] = (unsigned char)*c;
+        }
+        Fresh("style-unicode"); GameDir();
+        PutN(STYLE_REL, b, n);
+        g_parchAsked = g_vbarAsked = 7;
+        StyleLoad();
+        int one = g_parchAsked == 0 && g_vbarAsked == 0;
+        if (!one) printf("  (style.txt in form %d not read)\n", kind);
+        ok &= one;
+    }
+    {   /* a character past ASCII inside a word breaks it, even one whose low byte is a letter (UTF-16 "bar n", U+0165,
+         * "o": 0x65 is 'e'): not a word of ours, its default */
+        static const unsigned char u[] = { 0xFF, 0xFE, 'b', 0, 'a', 0, 'r', 0, ' ', 0, 'n', 0, 0x65, 0x01, 'o', 0, '\n', 0,
+                                           'm', 0, 'a', 0, 'p', 0, ' ', 0, 's', 0, 'a', 0, 't', 0, 'e', 0, 'l', 0, 'l', 0, 'i', 0, 't', 0, 'e', 0 };
+        Fresh("style-unicode-odd"); GameDir();
+        PutN(STYLE_REL, u, sizeof u);
+        StyleLoad();
+        ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+        static const unsigned char odd[] = { 'm', 'a', 'p', ' ', 's', 'a', 't', 'e', 'l', 'l', 'i', 't', 'e' };   /* (no newline, plain) */
+        PutN(STYLE_REL, odd, sizeof odd);
+        StyleLoad();
+        ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+    }
+    Check(ok, "style.txt read whether saved as ASCII, UTF-8 with its mark, or UTF-16 little or big endian with or without its mark (Notepad's \"Unicode\"); a character past ASCII breaks a word");
+
+    /* the CVar: only exactly what the switches write */
+    ok = StyleCvarParse("satellite neo", &map, &bar, &fault) && map == 0 && bar == 0 && !fault;
+    ok &= StyleCvarParse("parchment retro", &map, &bar, &fault) && map == 1 && bar == 1 && !fault;
+    ok &= StyleCvarParse("parchment neo fault", &map, &bar, &fault) && map == 1 && bar == 0 && fault;
+    static const char *const kNot[] = { "?", "", "parchment", "parchment retro ", "parchment  retro", "Parchment retro", "parchment retro faulty",
+                                        "parchment retro f", "parchment retro fault x", "parchment retrofault", "neo satellite",
+                                        "satellite neo retro", "satellites neo", "map=satellite,bar=neo" };
+    for (size_t i = 0; i < sizeof kNot / sizeof kNot[0]; i++) {
+        map = bar = fault = 7;
+        int no = !StyleCvarParse(kNot[i], &map, &bar, &fault) && map == 7 && bar == 7 && fault == 7;
+        if (!no) printf("  (the CVar's \"%s\" taken)\n", kNot[i]);
+        ok &= no;
+    }
+    Check(ok, "the CVar heard only as the switches write it: \"<map> <bar>\", or with \" fault\" after; anything else (a word more or less, another case, the probe's \"?\", a run-on \"faulty\") is not theirs");
+
+    /* the black first frames: only for a parchment the view will draw */
+    {
+        int pzN = g_pzN, asked = g_parchAsked;
+        LONG live = g_viewLive, drew = g_viewDrew;
+        g_viewLive = 1; g_viewDrew = 1;
+        g_parchAsked = 1; g_pzN = 0;
+        ok = !ParchWillDraw(1000);
+        g_pzN = 3;
+        ok &= ParchWillDraw(1000);
+        g_parchAsked = 0;
+        ok &= !ParchWillDraw(1000);
+        g_parchAsked = 1; g_viewLive = 0;
+        ok &= !ParchWillDraw(1000);
+        g_pzN = pzN; g_parchAsked = asked; g_viewLive = live; g_viewDrew = drew;
+        Check(ok, "the game's first frames black under a parchment screen only when the parchment can be drawn (the client's tables gave zones) and the view draws: chosen but not drawable, the living map as the view will draw it");
+    }
+
+}
+/* The view's start and each screen's opening (outside the 32-bit part now, so these reach them); the switches' message
+ * pump, hook and exit. */
+static void TestSwitchesPump(void)
+{
+    int ok;
+    /* the view's start: the gate, then the style from style.txt, the view's thread, then the switches */
+    Fresh("view-start"); GameDir();
+    LuaPlant();
+    int wine = shim_wine, threads = shim_threads;
+    shim_wine = 1;                                                       /* (the gate: on under Wine with no files) */
+    g_map.ok = 1; g_driftOn = 1;
+    Put(STYLE_REL, "map satellite\r\nbar neo\r\n");
+    g_parchAsked = g_vbarAsked = 1; g_luaOn = 0; g_vsStarts = 0; g_vsFail = 0; shim_threads = 0;
+    ok = ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 1 && g_parchAsked == 0 && g_vbarAsked == 0 && g_viewOn &&
+         g_viewLive && g_luaOn && shim_threads == 1 && LogSays("style: the map satellite, the bar neo, from Data\\CinderLoad\\style.txt") &&
+         LogSays("view on:");
+    g_viewOn = 0; g_viewLive = 0; g_luaOn = 0;
+    Fresh("view-start-no-thread"); GameDir();
+    LuaPlant();
+    g_map.ok = 1; g_driftOn = 1;                                         /* (Fresh takes them away) */
+    g_vsFail = 1; shim_threads = 0;
+    ok &= !ViewStartFrom(shim_module, FakeViewThreadStart) && !g_viewOn && !g_viewLive && !g_luaOn && shim_threads == 0 &&
+          LogSays("view off: its thread could not be started");
+    g_vsFail = 0;
+    Fresh("view-start-off"); GameDir();
+    LuaPlant();
+    g_map.ok = 1; g_driftOn = 1;
+    Put("Data/CinderLoad/view-off.txt", "");
+    Put(STYLE_REL, "map satellite\r\n");
+    g_parchAsked = 1; g_vsStarts = 0;
+    ok &= !ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 0 && g_parchAsked == 1 && !g_luaOn && LogSays("view off:");
+    Fresh("view-start-no-map"); GameDir();
+    LuaPlant();
+    g_map.ok = 0; g_driftOn = 1;
+    ok &= !ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 0 && !g_luaOn;
+    g_map.ok = 0; g_driftOn = 0; shim_wine = wine; shim_threads = threads;
+    Check(ok, "the view's start: past its gate, the style from style.txt, the view's thread, then the world map's switches (their thread); no thread for the view, no switches; the view off, neither");
+
+    /* each screen as the view opens it: the choice of this moment, and the first frame's list for it */
+    {
+        int pzN = g_pzN;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+        g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
+        g_pzN = 4; g_parchZone = -1; g_parchCont = -1; g_class = 4; g_vbFullAt = 0;
+        g_parchAsked = 1; g_vbarAsked = 1;
+        ViewOpenFirst(1920, 1080, 5000);
+        ok = g_parchOn && g_barVanilla && g_vbN > 0;
+        g_parchAsked = 0;
+        ViewOpenFirst(1920, 1080, 5000);
+        ok &= !g_parchOn && g_vbN == 0;
+        g_parchAsked = 1; g_vbarAsked = 0;
+        ViewOpenFirst(1920, 1080, 5000);
+        ok &= g_parchOn && !g_barVanilla;
+        g_parchOn = 0; g_barVanilla = 0; g_class = 0; g_parchAsked = 0; g_vbarAsked = 0; g_pzN = pzN;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+        Check(ok, "each screen as the view opens it: the choice of that moment (a parchment screen's first frame its dark paper and bar, the living map's none of its own), changed from one screen to the next");
+    }
+
+    /* the pump: our thread's message, the game's thread's hook */
+    unsigned char *low = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    if (low == MAP_FAILED) { Check(0, "low memory for the switches' pump"); return; }
+    Fresh("switches-pump"); GameDir();
+    SwitchesWorld(low);
+    StyleLoad();
+    LuaPump pump = { NULL, NULL, 0, 0 };
+    ok = LuaPumpStep(&pump, 10000) && g_luaMsg == 0xC0DE && shim_hooks == 1 && shim_hook == LuaHook && shim_hook_tid == 77 &&
+         shim_posted == 1 && shim_posted_msg == g_luaMsg && g_luaPosted;
+    ok &= LuaPumpStep(&pump, 10250) && shim_posted == 1;                 /* (on its way: not sent again) */
+    MSG msg = { shim_game, g_luaMsg, 0, 0, 0, { 0, 0 } };
+    shim_ticks = 10300;
+    shim_hook(HC_ACTION, PM_NOREMOVE, (LPARAM)&msg);                     /* the game looks at its queue: no tick */
+    ok &= g_fkRuns == 0 && g_luaPosted && msg.message == g_luaMsg;
+    shim_hook(1, PM_REMOVE, (LPARAM)&msg);                               /* (not HC_ACTION: never) */
+    ok &= g_fkRuns == 0 && g_luaPosted;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);                       /* taken: the tick, made WM_NULL for the game's window */
+    ok &= g_fkSetups == 1 && g_luaSynced && msg.message == WM_NULL && !g_luaPosted;
+    ok &= LuaPumpStep(&pump, 10500) && shim_posted == 2;
+    Check(ok, "the switches' pump: our thread registers its message, hooks the game's own thread and sends it one message at a time; the game's thread ticks only on taking it off its queue (not on a look, not on another hook code), and never shows it to the game's window; then the next is sent");
+
+    /* a choice made in game kept within a poll (no probe needed), the probe still once a second */
+    FkSet("satellite neo");
+    int probes = g_fkProbes;
+    msg.message = g_luaMsg; shim_ticks = 10550;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);
+    const char *t = Get(STYLE_REL);
+    ok = g_fkProbes == probes && t && strstr(t, "map satellite\r\nbar neo") && g_parchAsked == 0 && g_vbarAsked == 0;
+    msg.message = g_luaMsg; shim_ticks = 10300 + LUA_TICK_MS;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);
+    ok &= g_fkProbes == probes + 1;
+    Check(ok, "a choice made on the world map kept in style.txt on the next message, a quarter of a second at most, not the next probe's second");
+
+    /* in a loading screen nothing is sent; a message never taken is sent again after 5 s; a window gone is found again */
+    TestPut32(shim_module + FIRE_LAYER_RVA, 3);
+    int posted = shim_posted;
+    ok = LuaPumpStep(&pump, 11000) && shim_posted == posted;
+    TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    ok &= LuaPumpStep(&pump, 11250) && shim_posted == posted + 1;
+    ok &= LuaPumpStep(&pump, 11250 + LUA_POST_STALE_MS - 1) && shim_posted == posted + 1;
+    ok &= LuaPumpStep(&pump, 11250 + LUA_POST_STALE_MS) && shim_posted == posted + 2 && LogSays("our message was not taken in 5 s");
+    shim_game_alive = 0;                                                 /* the window gone with ours queued */
+    ok &= LuaPumpStep(&pump, 17000) && !g_luaPosted;
+    shim_game = (HWND)(long)0x5678; shim_game_alive = 1; shim_game_tid = 78;   /* a new one, on another thread */
+    ok &= LuaPumpStep(&pump, 17250) && shim_unhooks == 1 && shim_hooks == 2 && shim_hook_tid == 78 && g_luaPosted &&
+          shim_posted == posted + 3;
+    Check(ok, "no message during a loading screen; one not taken in 5 s (a long freeze, its window gone) sent again, never stuck; a new game window found and its thread hooked");
+
+    /* the game quitting: its WM_QUIT taken, a choice made since the last message kept */
+    FkSet("parchment retro");
+    MSG quit = { shim_game, WM_QUIT, 0, 0, 0, { 0, 0 } };
+    shim_hook(HC_ACTION, PM_NOREMOVE, (LPARAM)&quit);
+    ok = g_parchAsked == 0;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
+    t = Get(STYLE_REL);
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && t && strstr(t, "map parchment\r\nbar retro") && LogSays("(chosen just before the game closed)");
+    g_luaBroken = 1;                                                     /* (off for the session: not even as it quits) */
+    FkSet("satellite neo");
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
+    ok &= g_parchAsked == 1 && (t = Get(STYLE_REL)) && strstr(t, "map parchment\r\nbar retro");
+    g_luaBroken = 0;
+    FkSet("parchment retro");
+    Check(ok, "the game quitting (its WM_QUIT off the queue): a choice made in its last moments kept in style.txt; with the switches off for the session, nothing taken");
+
+    /* a choice made just before a loading screen is the style of that screen, its explored areas read for it */
+    g_parchAsked = 0; g_parchTablesOk = 1;
+    StyleSet(0, 1, "a test");
+    FkSet("parchment retro");
+    LONG seq = g_scrSeq;
+    g_dispNew = 1;
+    GameStep(0.0f, 900000);
+    ok = g_parchAsked == 1 && g_scrSeq == seq + 1;
+    g_parchTablesOk = 0;
+    Check(ok, "the parchment chosen a moment before a loading screen: taken as it begins, before its explored areas are read, so they are read for that very screen");
+
+    /* off for good: the hook out, the thread ends; a thread that will not take a hook: off */
+    g_luaBroken = 1;
+    ok = !LuaPumpStep(&pump, 18000) && shim_unhooks == 2 && shim_hook == NULL;
+    g_luaBroken = 0; shim_hook_fail = 1;
+    LuaPump pump2 = { NULL, NULL, 0, 0 };
+    ok &= !LuaPumpStep(&pump2, 18250) && g_luaBroken && LogSays("the game's thread would not take a message hook");
+    shim_hook_fail = 0;
+    Check(ok, "the switches off for good: the hook taken out and their thread ended; a game thread that will not take the hook: off, logged");
+    SwitchesQuiet();
+    munmap(low, 1 << 16);
+}
+
+static const char *g_luaBin;                             /* (TestSwitchesLua's finds) */
+static char g_testsDir[1024], g_fxDir[800];
+/* The switches' Lua (dll/switches.lua) as the DLL sends it, run by Lua 5.1 against a stubbed 1.12 UI with 5.0's limits
+ * (tests/test_lua.lua); and switches_lua.h the same text as switches.lua. */
+static void TestSwitchesLua(void)
+{
+    char here[1024], p[1200];
+    snprintf(here, sizeof here, "%s", __FILE__);
+    char *slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(p, sizeof p, "%s/../dll/switches.lua", here);
+    FILE *f = fopen(p, "rb");
+    static char src[65536];
+    size_t n = f ? fread(src, 1, sizeof src - 1, f) : 0;
+    if (f) fclose(f);
+    src[n] = 0;
+    Check(n > 0 && !strcmp(src, kSwitchesLua), "dll/switches_lua.h holds dll/switches.lua as it is (tools/lua_to_c.py)");
+    char dir[700];
+    snprintf(dir, sizeof dir, "%s/lua", g_root);
+    mkdir(dir, 0755);
+    static char chunk[sizeof kSwitchesLua + 128];
+    const struct { const char *name; int map, bar; } kOut[2] = { { "setup.lua", 1, 1 }, { "setup-satellite-neo.lua", 0, 0 } };
+    for (int i = 0; i < 2; i++) {
+        snprintf(p, sizeof p, "%s/%s", dir, kOut[i].name);
+        f = fopen(p, "wb");
+        int len = LuaChunk(chunk, (int)sizeof chunk, kOut[i].map, kOut[i].bar);
+        if (f) { fwrite(chunk, 1, (size_t)len, f); fclose(f); }
+    }
+    snprintf(p, sizeof p, "%s/probe.lua", dir);
+    f = fopen(p, "wb");
+    if (f) { fputs(kLuaProbe, f); fclose(f); }
+    const char *lua = !system("lua5.1 -v >/dev/null 2>&1") ? "lua5.1" : !system("luajit -v >/dev/null 2>&1") ? "luajit" : NULL;
+    if (!lua) { printf("  (no lua5.1 or luajit here: the switches' Lua not run)\n"); return; }
+    g_luaBin = lua;
+    snprintf(g_testsDir, sizeof g_testsDir, "%s", here);
+    const char *layout = getenv("CINDERLOAD_LAYOUT"), *widths = getenv("CINDERLOAD_WIDTHS");
+    char fx[800] = "";
+    if (g_client) {                                      /* the client's own drop-down and world map code, out of its archives */
+        static const char *const kFx[2] = { "UIDropDownMenu.lua", "WorldMapFrame.lua" };
+        Fresh("framexml"); GameDir();
+        int got = LinkClient(g_client);
+        snprintf(fx, sizeof fx, "%s/framexml", dir);
+        mkdir(fx, 0755);
+        for (int i = 0; got && i < 2; i++) {
+            char in[200], outp[1000];
+            unsigned char *data = NULL;
+            unsigned len = 0;
+            const char *from = "";
+            snprintf(in, sizeof in, "Interface\\FrameXML\\%s", kFx[i]);
+            got = ClientPicture(in, "interface.MPQ", &data, &len, &from);
+            snprintf(outp, sizeof outp, "%s/%s", fx, kFx[i]);
+            FILE *o = got ? fopen(outp, "wb") : NULL;
+            if (o) { fwrite(data, 1, len, o); fclose(o); printf("  lua: the client's %s, from its %s\n", kFx[i], from); }
+            got = o != NULL;
+            if (data) HeapFree(GetProcessHeap(), 0, data);
+        }
+        Check(got, "a real client: its own UIDropDownMenu.lua and WorldMapFrame.lua read out of its archives for the switches' Lua");
+        if (!got) fx[0] = 0;
+        snprintf(g_fxDir, sizeof g_fxDir, "%s", fx);
+    }
+    char cmd[4000];
+    snprintf(cmd, sizeof cmd, "%s %s/test_lua.lua '%s' '%s%s' '%s%s' '%s%s' 2>&1", lua, here, dir, layout ? "layout=" : "", layout ? layout : "",
+             widths ? "widths=" : "", widths ? widths : "", fx[0] ? "framexml=" : "", fx);
+    FILE *r = popen(cmd, "r");
+    char line[1200];
+    int seen = 0, done = 0;
+    while (r && fgets(line, sizeof line, r)) {
+        line[strcspn(line, "\n")] = 0;
+        if (!strncmp(line, "ok ", 3)) { Check(1, line + 3); seen++; }
+        else if (!strncmp(line, "FAIL ", 5)) { Check(0, line + 5); seen++; }
+        else if (!strncmp(line, "done ", 5)) done = 1;
+        else printf("  lua: %s\n", line);
+    }
+    int st = r ? pclose(r) : -1;
+    Check(r && done && st == 0 && seen >= 60, "the switches' Lua ran whole under the stubbed UI");
+}
+
+/* ---- the whole path, run (the skeptic's finding, 11 Oct: it had never run anywhere): the DLL's start, its thread's
+ * message, the game's thread taking it, the CVar, the switches' chunk run in the game's UI, a player's pick on the world
+ * map's drop-down, style.txt, a loading screen drawn as picked, a /reload, the game quitting, the next session. The game's
+ * UI is tests/wow_ui.lua's (the client's own drop-down and world map code with a client folder), in a Lua of its own
+ * (tests/lua_bridge.lua, over a pipe); the client's three calls are the bridge (FrameScript_Execute) and the fake CVar. */
+static FILE *g_brTo, *g_brFrom;
+static pid_t g_brPid;
+static char g_brInfo[8][400];
+static int g_brInfoN;
+static int BridgeOpen(void)
+{
+    int to[2], from[2];
+    char script[1100], fx[900];
+    snprintf(script, sizeof script, "%s/lua_bridge.lua", g_testsDir);
+    snprintf(fx, sizeof fx, "framexml=%s", g_fxDir);
+    if (!g_luaBin || pipe(to) || pipe(from)) return 0;
+    fflush(stdout);
+    g_brPid = fork();
+    if (g_brPid < 0) return 0;
+    if (!g_brPid) {
+        dup2(to[0], 0); dup2(from[1], 1);
+        close(to[0]); close(to[1]); close(from[0]); close(from[1]);
+        execlp(g_luaBin, g_luaBin, script, fx, (char *)NULL);
+        _exit(127);
+    }
+    close(to[0]); close(from[1]);
+    g_brTo = fdopen(to[1], "w"); g_brFrom = fdopen(from[0], "r");
+    return g_brTo && g_brFrom;
+}
+static void BridgeClose(void)
+{
+    if (g_brTo) fclose(g_brTo);
+    if (g_brFrom) fclose(g_brFrom);
+    g_brTo = g_brFrom = NULL;
+    if (g_brPid > 0) waitpid(g_brPid, NULL, 0);
+    g_brPid = 0;
+}
+/* One request: the CVar as the client holds it, the command (and data); the UI's answer taken (its info lines, the CVar). */
+static int BridgeSend(const char *cmd, const char *data, size_t n)
+{
+    g_brInfoN = 0;
+    if (!g_brTo) return 0;
+    if (g_fkCv) fprintf(g_brTo, "cvar %s\n", g_fkVal); else fputs("nocvar\n", g_brTo);
+    fprintf(g_brTo, "%s\n", cmd);
+    if (data) fwrite(data, 1, n, g_brTo);
+    fflush(g_brTo);
+    char line[1200];
+    while (fgets(line, sizeof line, g_brFrom)) {
+        line[strcspn(line, "\n")] = 0;
+        if (!strcmp(line, "end")) return 1;
+        if (!strncmp(line, "cvar ", 5)) { if (g_fkCv) FkSet(line + 5); }
+        else if (!strncmp(line, "info ", 5) && g_brInfoN < 8) snprintf(g_brInfo[g_brInfoN++], sizeof g_brInfo[0], "%s", line + 5);
+    }
+    return 0;
+}
+static int Bridge(const char *cmd) { return BridgeSend(cmd, NULL, 0); }
+static int BridgeSaid(const char *s) { for (int i = 0; i < g_brInfoN; i++) if (strstr(g_brInfo[i], s)) return 1; return 0; }
+static void BridgeExec(const char *code, const char *source)          /* FrameScript_Execute, in the stubbed UI */
+{
+    g_fkRuns++;
+    if (strcmp(source, "CinderLoad")) return;
+    if (!strcmp(code, kLuaProbe)) g_fkProbes++; else g_fkSetups++;
+    char cmd[40];
+    snprintf(cmd, sizeof cmd, "exec %u", (unsigned)strlen(code));
+    BridgeSend(cmd, code, strlen(code));
+}
+static LuaPump g_pathPump;
+/* Our thread's poll at now, and the game's thread taking our message off its queue if one was sent. */
+static void Pump(DWORD now)
+{
+    LuaPumpStep(&g_pathPump, now);
+    if (!g_luaPosted || !shim_hook) return;
+    MSG msg = { shim_game, g_luaMsg, 0, 0, 0, { 0, 0 } };
+    shim_ticks = now;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);
+}
+static void TestSwitchesPath(void)
+{
+    if (!g_luaBin) { printf("  (no lua5.1 or luajit here: the whole path not run)\n"); return; }
+    signal(SIGPIPE, SIG_IGN);
+    unsigned char *low = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    if (low == MAP_FAILED) { Check(0, "low memory for the whole path"); return; }
+    int wine = shim_wine, pzN = g_pzN, ok;
+    const char *t;
+    Fresh("switches-path"); GameDir();
+    SwitchesWorld(low);
+    shim_wine = 1; g_map.ok = 1; g_driftOn = 1;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
+    g_pzN = 4; g_parchZone = -1; g_parchCont = -1; g_class = 4;
+    memset(&g_pathPump, 0, sizeof g_pathPump);
+    /* the game starts (DllMain's ViewStart): the style (none chosen yet), the view, the switches' thread */
+    ok = BridgeOpen() && ViewStartFrom(shim_module, FakeViewThreadStart) && g_luaOn && g_parchAsked == 1 && g_vbarAsked == 1;
+    g_luaExec = BridgeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+    /* a login: the first message taken makes the CVar, finds no switches, makes them in the game's UI */
+    DWORD now = 20000;
+    Pump(now);
+    ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, "parchment retro");
+    Bridge("openmap");
+    Bridge("text map");
+    ok &= BridgeSaid("Parchment shown");
+    Check(ok, "the whole path, a login: the DLL starts (the style the defaults), its thread's message is taken on the game's thread, which makes the CVar and the switches in the game's UI: the world map's drop-down says Parchment");
+
+    /* Satellite picked on the world map: the CVar says so; the next message (a quarter second) keeps it; the next screen */
+    Bridge("pick map satellite");
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "satellite retro") && g_parchAsked == 1;
+    now += LUA_POLL_MS;
+    Pump(now);
+    ok &= g_parchAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar retro");
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= !g_parchOn && g_barVanilla && g_vbN == 0;
+    Check(ok, "the whole path: Satellite picked from the drop-down, the CVar says so, the game's next message keeps it in style.txt, and the next loading screen is the living map");
+
+    /* the parchment picked a moment before a loading screen, no message between: that screen the parchment */
+    Bridge("pick map parchment");
+    g_dispNew = 1;
+    GameStep(0.0f, now + 100);
+    ViewOpenFirst(1920, 1080, now + 110);
+    ok = g_parchAsked == 1 && g_parchOn && g_vbN > 0 && (t = Get(STYLE_REL)) && strstr(t, "map parchment");
+    Check(ok, "the whole path: the parchment picked just before a loading screen is that very screen's (taken as it begins), and kept");
+
+    /* /cinderload bar in the chat */
+    Bridge("slash bar");
+    ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, "parchment neo");
+    now += LUA_POLL_MS;
+    Pump(now);
+    ok &= g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "bar neo");
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= g_parchOn && !g_barVanilla;
+    Check(ok, "the whole path: /cinderload bar in the chat, kept the same way; the next screen the parchment with the blade");
+
+    /* a /reload: the UI made anew; the probe finds no switches; made again from the choice held, showing it */
+    Bridge("fresh");
+    int setups = g_fkSetups;
+    now += LUA_TICK_MS;
+    Pump(now);
+    Bridge("openmap");
+    Bridge("text bar");
+    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo") && BridgeSaid("Neo shown");
+    Bridge("minimize");
+    Bridge("text map");
+    ok &= BridgeSaid("hidden");
+    Bridge("maximize");
+    Bridge("text map");
+    ok &= BridgeSaid("Parchment shown");
+    Check(ok, "the whole path: a /reload, the switches made again from what the DLL holds (the drop-downs say it); the map minimised, they hide with its own; maximised, back");
+
+    /* Retro picked in the game's last moment, then it quits: kept (its WM_QUIT) */
+    Bridge("pick bar retro");
+    MSG quit = { shim_game, WM_QUIT, 0, 0, 0, { 0, 0 } };
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
+    ok = (t = Get(STYLE_REL)) && strstr(t, "map parchment\r\nbar retro");
+    Bridge("errors");
+    ok &= BridgeSaid("0 ");
+    BridgeClose();
+    Check(ok, "the whole path: Retro picked in the game's last moment, kept as it quits; no Lua error in its UI all along");
+
+    /* the next session: style.txt at start; a CVar left in Config.wtf (an old choice) never counts; the switches made from
+     * style.txt's, the drop-downs saying it */
+    SwitchesWorld(low);
+    memset(&g_pathPump, 0, sizeof g_pathPump);
+    g_fkCv = g_fkLow + 0x100;
+    TestPut32(g_fkCv + CV_VALUE, TestLow(g_fkVal));
+    FkSet("satellite neo");
+    g_parchAsked = g_vbarAsked = 7;
+    ok = BridgeOpen() && ViewStartFrom(shim_module, FakeViewThreadStart) && g_parchAsked == 1 && g_vbarAsked == 1;
+    g_luaExec = BridgeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+    now += 60000;
+    Pump(now);
+    Bridge("openmap");
+    Bridge("text map");
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && !strcmp(g_fkVal, "parchment retro") && BridgeSaid("Parchment shown");
+    Bridge("text bar");
+    ok &= BridgeSaid("Retro shown");
+    BridgeClose();
+    Check(ok, "the whole path, the next session: the style from style.txt at start, the switches made from it (an old value of the CVar in Config.wtf never counts), the drop-downs saying it");
+
+    g_viewOn = 0; g_viewLive = 0; shim_wine = wine; g_pzN = pzN; g_map.ok = 0; g_driftOn = 0;
+    g_parchOn = 0; g_barVanilla = 0; g_class = 0;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    SwitchesQuiet();
+    munmap(low, 1 << 16);
+}
+
+/* A real client's WoW.exe: the places the switches use, and the check that keeps a DLL's own functions out of its Lua */
+static void LuaRealClient(const char *client)
+{
+    char exe[1024];
+    snprintf(exe, sizeof exe, "%s/WoW.exe", client);
+    FILE *x = fopen(exe, "rb");
+    int match = x != NULL;
+    for (int i = 0; x && match && i < LUA_CODE_COUNT; i++) {
+        unsigned char got[64];
+        long off = ExeOffset(x, kLuaCode[i].va - 0x400000u);
+        match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, (size_t)kLuaCode[i].n, x) == (size_t)kLuaCode[i].n &&
+                 !memcmp(got, kLuaCode[i].bytes, (size_t)kLuaCode[i].n);
+        if (!match) printf("FAIL: VA 0x%X (%s) differs in %s\n", kLuaCode[i].va, kLuaCode[i].what, exe);
+    }
+    /* luaD_precall hands each C function's address to 0x42A320 before it calls it ("Invalid function pointer: %p" when it
+     * is outside the client's code): why the switches speak through a CVar */
+    static const unsigned char kPrecall[12] = { 0x8B, 0xCF, 0xE8, 0x7A, 0x41, 0xD3, 0xFF, 0x8B, 0xCE, 0xFF, 0xD7, 0xC1 };
+    static const unsigned char kRange[8] = { 0x3B, 0xF0, 0x72, 0x04, 0x3B, 0xF1, 0x72, 0x1D };
+    unsigned char got[32];
+    long off = x ? ExeOffset(x, 0x6F619F - 0x400000u) : -1;
+    int checked = off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, 12, x) == 12 && !memcmp(got, kPrecall, 12);
+    off = x ? ExeOffset(x, 0x42A34C - 0x400000u) : -1;
+    checked &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, 8, x) == 8 && !memcmp(got, kRange, 8);
+    off = x ? ExeOffset(x, 0x833124 - 0x400000u) : -1;
+    checked &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, 28, x) == 28 && !memcmp(got, "Invalid function pointer: %p", 28);
+    if (x) fclose(x);
+    Check(match, "a real client: every place the world map's switches use holds the bytes they were made for, in its WoW.exe");
+    Check(checked, "a real client: its Lua checks each C function's address against its own code before calling it (so the switches speak through a CVar, never a function of the DLL's)");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
     g_root = argv[1];
+    g_client = argc > 2 ? argv[2] : NULL;
     g_todForce = 720;                                    /* noon (the plain day) unless a test says otherwise */
 
     Fresh("nothing");
@@ -6830,9 +7721,16 @@ int main(int argc, char **argv)
     FireBarTests();
     LiveTests();
     ViewTests();
+    TestStyle();
+    TestStyleFiles();
+    TestSwitches();
+    TestSwitchesPump();
+    TestSwitchesLua();
+    TestSwitchesPath();
     if (argc > 2) {
         FireBarRealClient(argv[2]);
         FireRealClient(argv[2]);
+        LuaRealClient(argv[2]);
     }
 
     TestShips();
