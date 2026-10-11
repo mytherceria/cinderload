@@ -11157,7 +11157,8 @@ static int ParchUpDone(DWORD now, int slot, int up)
         g_nearZ = g_pj.z; g_nearAt = now; g_nearRect = N->r; g_nearMap = g_pj.map; g_nearX = g_pj.x; g_nearY = g_pj.y;
         g_nearReach = (int)g_pj.reach; g_nearKnown = g_pj.known; g_nearFull = g_pj.full;
         for (int i = 0; i < EXPLORED_BYTES; i++) g_nearBits[i] = g_pj.bits[i];
-        char names[480] = "";
+        char names[480];
+        names[0] = 0;                                            /* (no initializer: the 32-bit build has no memset) */
         for (int k = 0; k < N->n; k++) {
             char one[64];
             wsprintfA(one, "%s%s %d yd", k ? ", " : "", g_pz[N->row[k]].name, (int)(N->yd[k] + 0.5f));
