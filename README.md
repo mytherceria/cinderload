@@ -22,7 +22,7 @@ Download the latest release from [Releases](https://github.com/mytherceria/cinde
 2. Make a folder Data/CinderLoad and put the pack for your screen shape in it: LoadingScreens-16x10.MPQ, -16x9, -21x9 or -32x9.
 3. Start the game. CinderLoad reads your resolution from WTF/Config.wtf and copies the matching pack into place as Data/patch-~.MPQ.
 
-Optional: the HD world map patch, Data/patch-M.mpq ("Reforged HD Patch-M" in the RavenCraft launcher), makes the parchment sharp with 512-pixel map tiles; without it the client's own 256-pixel tiles are used and look soft. Its Faithful variant installs as Data/patch-M_faithful.mpq, which CinderLoad does not read.
+Strongly recommended, though not required: the HD world map patch, Data/patch-M.mpq ("Reforged HD Patch-M" in the RavenCraft launcher). It makes the parchment sharp with 512-pixel map tiles; without it CinderLoad works just the same, but the client's own 256-pixel tiles are used and look soft. Its Faithful variant installs as Data/patch-M_faithful.mpq, which CinderLoad does not read.
 
 To remove: delete CinderLoad.dll, its dlls.txt line, the folder Data/CinderLoad, Data/patch-~.MPQ and Data/patch-~.cinderload.
 
