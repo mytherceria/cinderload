@@ -1401,6 +1401,7 @@ static int BarFamily(const BarTable *t)
 #define MAP_DEST_MAP_VA 0x88262C   /* int: the map SMSG_NEW_WORLD / LOGIN_VERIFY_WORLD put the player on (VA 0x401B00) */
 #define MAP_DEST_X_VA   0x88268C   /* float: x there, in yards */
 #define MAP_DEST_Y_VA   0x882690   /* float: y there */
+#define MAP_DEST_Z_VA   0x882694   /* float: its height there (read with them: VA 0x401B2B, written at 0x401E62) */
 #define MAP_TAU         0.15f      /* seconds: how smoothly the view follows, so a late position glides in */
 #define MAP_BAR_TAU     0.15f      /* seconds: how closely the zoom follows the bar (a quick load is over in a second) */
 /* Every screen after the session's first (his rule, 4 Oct 2026: "start halfway to the spot the character is loading to
@@ -2269,12 +2270,32 @@ static float MapLn(float x)
 #define CHAR_MAP        0x38
 #define CHAR_X          0x44
 #define CHAR_Y          0x48
+#define CHAR_Z          0x4C
 static unsigned g_destSnap[3];                                  /* the game's arrival as this screen began */
 static volatile LONG g_destEnd[3], g_destEndOk;                 /* the game's arrival as the last screen ended */
 static int g_destWay;                                           /* how MapDest knew it (the screen's log line) */
 static int g_destMap = -1;
 static int g_titleMapId = -1;                                   /* the screen's map (BAR_MAP_VA), as MapDest last read it */
-static float g_destWX, g_destWY;                                /* the arrival in world yards, once known */
+static float g_destWX, g_destWY, g_destWZ;                      /* the arrival in world yards, once known, */
+static int g_destZOk;                                           /* its height with it when the game wrote one */
+/* Where the game's arrival's height is read and written, as WoW.exe 1.12.1 does (11 Oct 2026): NEW_WORLD's handler
+ * reads map, x, y, height and facing into 0x88262C, 0x88268C, 0x882690, 0x882694, 0x882680 (VA 0x401B07..), and
+ * LOGIN_VERIFY_WORLD's writes them there (VA 0x401E4B..). The height is taken only where these bytes are as read. */
+static const struct { DWORD rva; int n; unsigned char bytes[6]; } kDestZCode[2] = {
+    { 0x001B2B, 5, { 0x68, 0x94, 0x26, 0x88, 0x00 } },             /* push 0x882694 (the packet's height read there) */
+    { 0x001E62, 6, { 0x89, 0x15, 0x94, 0x26, 0x88, 0x00 } } };      /* mov [0x882694], edx */
+static int g_destZSure = -1;                                    /* those bytes as read (-1: not looked at yet) */
+static int DestZHolds(void)
+{
+    if (g_destZSure < 0) {
+        g_destZSure = 1;
+        for (int i = 0; i < 2; i++) {
+            const unsigned char *at = ClientAt(0x400000u + kDestZCode[i].rva);
+            if (!at || !Readable(at, kDestZCode[i].n) || !Same(at, kDestZCode[i].bytes, kDestZCode[i].n)) g_destZSure = 0;
+        }
+    }
+    return g_destZSure;
+}
 static int g_classSure;                                         /* the character list's code is all there (below) */
 
 /* The game's arrival as it stands, into g_destSnap: called as a screen begins. */
@@ -2286,14 +2307,14 @@ static void ArrivalSnap(void)
 }
 
 /* World x, y on screen map id, on the picture: 1 with its u, v and the view's half size there. */
-static int MapPlace(unsigned id, float x, float y, float *du, float *dv, float *hEnd)
+static int MapPlace(unsigned id, float x, float y, float z, int zok, float *du, float *dv, float *hEnd)
 {
     if (!(x > -20000 && x < 20000 && y > -20000 && y < 20000) || (x == 0 && y == 0)) return 0;
     float u = g_map.m[id].au + g_map.m[id].bu * y, v = g_map.m[id].av + g_map.m[id].bv * x;
     float bv = g_map.m[id].bv < 0 ? -g_map.m[id].bv : g_map.m[id].bv, h = 0.5f * g_map.endYards * bv;
     if (!(u > 0 && u < 1 && v > 0 && v < 1 && h > 0.001f && h < 0.45f)) return 0;
     *du = u; *dv = v; *hEnd = h;
-    g_destMap = (int)id; g_destWX = x; g_destWY = y;
+    g_destMap = (int)id; g_destWX = x; g_destWY = y; g_destWZ = z; g_destZOk = zok;
     return 1;
 }
 
@@ -2311,25 +2332,27 @@ static unsigned CharEntry(void)
  * there and kept. Only the game's thread reads the list: the game frees it during a login's load, and a read from the
  * view's thread could meet that memory as it goes, so the view's thread (g_viewSteps: it is the one stepping) has what
  * the game's last frame read (GameFacts keeps it each frame while the view is on). */
-static volatile LONG g_charKept[4];                             /* 1 when kept, its map, x, y */
-static int CharRead(unsigned *m, unsigned *x, unsigned *y)
+static volatile LONG g_charKept[5];                             /* 1 when kept, its map, x, y, height */
+static int CharRead(unsigned *m, unsigned *x, unsigned *y, unsigned *z)
 {
     unsigned e = CharEntry();
     const unsigned char *pm = e ? ClientAt(e + CHAR_MAP) : 0, *px = e ? ClientAt(e + CHAR_X) : 0, *py = e ? ClientAt(e + CHAR_Y) : 0;
-    int ok = pm && px && py && Readable(pm, 4) && Readable(px, 4) && Readable(py, 4);
+    const unsigned char *pz = e ? ClientAt(e + CHAR_Z) : 0;
+    int ok = pm && px && py && pz && Readable(pm, 4) && Readable(px, 4) && Readable(py, 4) && Readable(pz, 4);
     if (ok) {
         *m = *(volatile const unsigned *)pm; *x = *(volatile const unsigned *)px; *y = *(volatile const unsigned *)py;
+        *z = *(volatile const unsigned *)pz;
         InterlockedExchange(&g_charKept[1], (LONG)*m); InterlockedExchange(&g_charKept[2], (LONG)*x);
-        InterlockedExchange(&g_charKept[3], (LONG)*y);
+        InterlockedExchange(&g_charKept[3], (LONG)*y); InterlockedExchange(&g_charKept[4], (LONG)*z);
     }
     InterlockedExchange(&g_charKept[0], ok);
     return ok;
 }
-static int CharPlace(unsigned *m, unsigned *x, unsigned *y)
+static int CharPlace(unsigned *m, unsigned *x, unsigned *y, unsigned *z)
 {
-    if (!g_viewSteps) return CharRead(m, x, y);
+    if (!g_viewSteps) return CharRead(m, x, y, z);
     if (!g_charKept[0]) return 0;
-    *m = (unsigned)g_charKept[1]; *x = (unsigned)g_charKept[2]; *y = (unsigned)g_charKept[3];
+    *m = (unsigned)g_charKept[1]; *x = (unsigned)g_charKept[2]; *y = (unsigned)g_charKept[3]; *z = (unsigned)g_charKept[4];
     return 1;
 }
 
@@ -2337,30 +2360,31 @@ static int CharPlace(unsigned *m, unsigned *x, unsigned *y)
  * known (see above). p: the bar so far. */
 static int MapDest(float *du, float *dv, float *hEnd, float p)
 {
-    unsigned id, dm, xb, yb, e, c, xb2, yb2;
+    unsigned id, dm, xb, yb, zb = 0, e, c, xb2, yb2, zb2;
     float ex, ey;
     if (!ClientWord(BAR_MAP_VA, &id)) return 0;
     g_titleMapId = (int)id;
     g_destWay = 1;
     if (id > 1)                                      /* a dungeon, raid or battleground: its entrance, from the start */
-        return MapEntrance(id, &c, &ex, &ey) && MapPlace(c, ex, ey, du, dv, hEnd);
+        return MapEntrance(id, &c, &ex, &ey) && MapPlace(c, ex, ey, 0, 0, du, dv, hEnd);   /* (its height not known) */
     if (!g_map.m[id].ok) return 0;
     int game = ClientWord(MAP_DEST_MAP_VA, &dm) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb);
+    int gz = game && DestZHolds() && ClientWord(MAP_DEST_Z_VA, &zb);   /* (its height, written with them) */
     int fresh = game && (dm != g_destSnap[0] || xb != g_destSnap[1] || yb != g_destSnap[2]);
     /* the game wrote it before this screen began: it differs from where the last screen left it (a later load's
      * NEW_WORLD; a login's stale place is still the last screen's, so it never counts this way) */
     int moved = game && g_destEndOk && (dm != (unsigned)g_destEnd[0] || xb != (unsigned)g_destEnd[1] ||
                                         yb != (unsigned)g_destEnd[2]);
-    if ((fresh || moved) && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd)) {
+    if ((fresh || moved) && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), MapBits(zb), gz, du, dv, hEnd)) {
         g_destWay = fresh ? 2 : 5;
         return 1;
     }
-    if (CharPlace(&e, &xb2, &yb2) && e == id && MapPlace(id, MapBits(xb2), MapBits(yb2), du, dv, hEnd)) {
+    if (CharPlace(&e, &xb2, &yb2, &zb2) && e == id && MapPlace(id, MapBits(xb2), MapBits(yb2), MapBits(zb2), 1, du, dv, hEnd)) {
         g_destWay = 3;                                               /* a login: the list's own place */
         return 1;
     }
     g_destWay = 4;
-    return game && p >= 0.5f && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd);
+    return game && p >= 0.5f && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), MapBits(zb), gz, du, dv, hEnd);
 }
 
 static float g_driftMax;                                        /* the bar's highest this screen */
@@ -2464,7 +2488,7 @@ static void GameFacts(float p, DWORD now)
         g_planEndAt = now + (DWORD)(plan > 300 ? plan : 300);
     }
     InterlockedExchange(&g_gameSeq, g_gameSeq + 1);                   /* the game thread is these counts' only writer */
-    if (g_viewOn) { unsigned m, x, y; CharRead(&m, &x, &y); }       /* the character list's place, for the view's */
+    if (g_viewOn) { unsigned m, x, y, z; CharRead(&m, &x, &y, &z); }       /* the character list's place, for the view's */
     g_loadFrame = 1;                                                  /* this frame is a loading screen's (the present) */
     if (p >= 0.999f && !g_fullMs)                                     /* the game's bar full: the time it took */
         InterlockedExchange(&g_fullMs, now - g_scrStartAt > 0 ? (LONG)(now - g_scrStartAt) : 1);
@@ -3522,7 +3546,8 @@ static const struct { DWORD rva; int n; unsigned char bytes[8]; const char *what
     { 0x1B4440, 6, { 0x8D, 0x4E, 0x44, 0x51, 0x8B, 0xCF }, "its x at +0x44" },
     { 0x1B444B, 6, { 0x8D, 0x56, 0x48, 0x52, 0x8B, 0xCF }, "its y at +0x48" },
     { 0x073308, 7, { 0x0F, 0xB6, 0x87, 0x00, 0x01, 0x00, 0x00 }, "GetCharacterInfo's race at +0x100" },
-    { 0x07337A, 7, { 0x0F, 0xB6, 0x87, 0x08, 0x01, 0x00, 0x00 }, "GetCharacterInfo's level at +0x108" } };
+    { 0x07337A, 7, { 0x0F, 0xB6, 0x87, 0x08, 0x01, 0x00, 0x00 }, "GetCharacterInfo's level at +0x108" },
+    { 0x1B4456, 6, { 0x8D, 0x46, 0x4C, 0x50, 0x8B, 0xCF }, "the character list's height at +0x4C" } };
 #define CLASS_CODE ((int)(sizeof kClassCode / sizeof kClassCode[0]))
 
 /* 1 when every place the class's addresses were read from holds the bytes it did in the client this was made for. */
@@ -7826,21 +7851,24 @@ static int PieceFound(const ParchPiece *p, const unsigned char *bits)
  * The client knows which area a place is in from its terrain: each map tile's file (World\Maps\<map's folder>\<folder>_
  * <x>_<y>.adt, x = 32 - y / 533 1/3, y = 32 - x / 533 1/3; the folder Map.dbc's field 1) holds 16 x 16 chunks (MCIN
  * lists them, MCNK each), and each chunk's header says its area (AreaTable.dbc's id, at +0x34); inside a building the
- * building's own (its WMO file's id, MOHD +0x20, and the name set its placement picks: its root row in WMOAreaTable.dbc,
- * group -1, field 10). An area's zone is its last parent (AreaTable field 2), and the world map's page for it the
- * WorldMapArea row with that zone (its field 2). Here: the terrain's chunk under the place; a capital the terrain does
- * not know (Ironforge, Undercity: their streets are inside their buildings) by its building's placement holding the
- * place (its bounds across, MODF +32: the arrival has no height, so only a capital's (AreaTable flag 0x100) is taken);
- * a zone with no page, its continent's (as the client's map shows). Read from the client's own files (terrain.MPQ,
- * wmo.MPQ and their patches, newest first; read only), once an arrival. Without the tile's file (a map with no folder,
- * no terrain read): the smallest box, as before. */
+ * building's own: the group of it whose floor is under the place (WMOAreaTable.dbc's row for its WMO file's id, MOHD
+ * +0x20, the name set its placement picks and the group's own id, MOGP +0x38; else its root row, group -1; field 10),
+ * unless the terrain lies between that floor and the place (the place on the ground over it, or within AREA_ABOVE of
+ * it). An area's zone is its last parent (AreaTable field 2), and the world map's page for it the WorldMapArea row with
+ * that zone (its field 2). Here: the building (AdtBuildingArea) by the arrival's height, which the game writes with its
+ * place (the skeptic's find, 11 Oct: the whole of a capital's box, with no height, took the open ground at its gates:
+ * the Gates of Ironforge, the Ruins of Lordaeron, outside Stormwind's and Orgrimmar's gates); else, or with no height
+ * (an instance's entrance), the terrain's chunk under the place; a zone with no page, its continent's (as the client's
+ * map shows). Read from the client's own files (terrain.MPQ, wmo.MPQ and their patches, newest first; read only), once
+ * an arrival. Without the tile's file (a map with no folder, no terrain read): the smallest box, as before. */
 #define MAP_DIRS        256
-#define WMO_AREAS       8192
+#define WMO_AREAS       16384
 #define AREA_CAPITAL    0x100         /* AreaTable flags: a main capital city */
 #define ADT_TILE_YD     533.333333    /* yards a map tile */
 static struct { int id; char dir[40]; } g_mapDir[MAP_DIRS];
 static int g_mapDirN;
-static int g_waN, g_waWmo[WMO_AREAS], g_waSet[WMO_AREAS], g_waArea[WMO_AREAS];   /* WMOAreaTable's root rows */
+static int g_waN, g_waWmo[WMO_AREAS], g_waSet[WMO_AREAS], g_waGroup[WMO_AREAS], g_waArea[WMO_AREAS];   /* WMOAreaTable's rows
+                                                                                       * with an area (a group's, or the root's: -1) */
 /* Map.dbc's folders (id, field 1), from the file's bytes. */
 static void ParchMaps(const unsigned char *d, unsigned n)
 {
@@ -7856,7 +7884,8 @@ static void ParchMaps(const unsigned char *d, unsigned n)
         if (g_mapDir[g_mapDirN].dir[0]) g_mapDirN++;
     }
 }
-/* WMOAreaTable.dbc's root rows (group -1): the building's id (field 1), its name set (2), its area (10). */
+/* WMOAreaTable.dbc's rows with an area: the building's id (field 1), its name set (2), its group (3: -1 the root), its
+ * area (10). */
 static void ParchWmoAreas(const unsigned char *d, unsigned n)
 {
     unsigned rows, fields, size, sl;
@@ -7866,10 +7895,17 @@ static void ParchWmoAreas(const unsigned char *d, unsigned n)
     if (!DbcTable(d, n, &rows, &fields, &size, &rec, &str, &sl) || fields < 11) return;
     for (unsigned i = 0; i < rows && g_waN < WMO_AREAS; i++) {
         const unsigned char *r = rec + i * size;
-        if ((int)Rd32(r + 12) != -1 || !Rd32(r + 40)) continue;
-        g_waWmo[g_waN] = (int)Rd32(r + 4); g_waSet[g_waN] = (int)Rd32(r + 8); g_waArea[g_waN] = (int)Rd32(r + 40);
+        if (!Rd32(r + 40)) continue;
+        g_waWmo[g_waN] = (int)Rd32(r + 4); g_waSet[g_waN] = (int)Rd32(r + 8); g_waGroup[g_waN] = (int)Rd32(r + 12);
+        g_waArea[g_waN] = (int)Rd32(r + 40);
         g_waN++;
     }
+}
+/* The area WMOAreaTable gives building wmo (its name set set) for group (-1 its root), or 0. */
+static int WmoArea(int wmo, int set, int group)
+{
+    for (int r = 0; r < g_waN; r++) if (g_waWmo[r] == wmo && g_waSet[r] == set && g_waGroup[r] == group) return g_waArea[r];
+    return 0;
 }
 /* Area id's zone (its last parent), or -1 when AreaTable has no such area. */
 static int AreaZone(int area)
@@ -7903,6 +7939,7 @@ static unsigned AdtChunk(const unsigned char *d, unsigned n, unsigned id, unsign
 }
 #define ADT_MCIN 0x4D43494Eu
 #define ADT_MCNK 0x4D434E4Bu
+#define ADT_MCVT 0x4D435654u
 #define ADT_MODF 0x4D4F4446u
 #define ADT_MWMO 0x4D574D4Fu
 #define ADT_MWID 0x4D574944u
@@ -7918,41 +7955,140 @@ static int AdtArea(const unsigned char *d, unsigned n, int cx, int cy)
     if (Rd32(h + 4) != (unsigned)cx || Rd32(h + 8) != (unsigned)cy) return -1;
     return (int)Rd32(h + 0x34);
 }
-/* A capital's page for world x, y on map, by a building of the tile's file placed over it (see above), or -1. */
-static int AdtCapital(const unsigned char *d, unsigned n, int map, float x, float y)
+#define WMO_MOGI 0x4D4F4749u
+#define WMO_MOGP 0x4D4F4750u
+#define WMO_MOVT 0x4D4F5654u
+#define WMO_MOVI 0x4D4F5649u
+#define WMO_MOPY 0x4D4F5059u
+#define WMO_GROUPS      1024          /* a building's groups at most */
+#define AREA_ABOVE      2.0f          /* the terrain counts over a building's floor when the place is above it, or within this */
+#define ADT_ZERO        17066.666f    /* the placements' own axes: 32 tiles less world y, world z, 32 tiles less world x */
+/* The terrain's height at world x, y in a tile's file (its chunk cx, cy's outer heights, between the four round it), or
+ * -1e30 when it cannot be read. */
+static float AdtHeight(const unsigned char *d, unsigned n, int cx, int cy, float x, float y)
+{
+    unsigned sz = 0, in = AdtChunk(d, n, ADT_MCIN, &sz);
+    if (!in || sz < 256 * 16) return -1e30f;
+    unsigned at = Rd32(d + in + 16 * (unsigned)(cy * 16 + cx));
+    if (at > n || n - at < 8 + 0x74) return -1e30f;
+    const unsigned char *h = d + at + 8;
+    unsigned oh = Rd32(h + 0x14);
+    if (oh > n - at || n - at - oh < 8 + 145 * 4 || Rd32(d + at + oh) != ADT_MCVT) return -1e30f;
+    const unsigned char *v = d + at + oh + 8;
+    float unit = (float)(ADT_TILE_YD / 128), r = FireClamp((DbcFloat(h + 0x68) - x) / unit, 0, 7.999f), c = FireClamp((DbcFloat(h + 0x6C) - y) / unit, 0, 7.999f);
+    int r0 = (int)r, c0 = (int)c;
+    float fr = r - (float)r0, fc = c - (float)c0;
+    #define ADT_HV(R, C) DbcFloat(v + 4 * (unsigned)((R) * 17 + (C)))
+    float top = ADT_HV(r0, c0) * (1 - fc) + ADT_HV(r0, c0 + 1) * fc, bot = ADT_HV(r0 + 1, c0) * (1 - fc) + ADT_HV(r0 + 1, c0 + 1) * fc;
+    #undef ADT_HV
+    return DbcFloat(h + 0x70) + top * (1 - fr) + bot * fr;
+}
+/* A placement's (e: its MODF entry) point p (its own axes) in its building's: the building's own axes (x, y across, z up),
+ * as the client turns it (its angles a, b, c in degrees: about z by -a, about y by b - 90, about x by c, the building's
+ * y and z swapped), back. */
+static void WmoLocal(const unsigned char *e, float px, float py, float pz, float *lx, float *ly, float *lz)
+{
+    float rad = 3.14159265f / 180, a = DbcFloat(e + 20) * rad, t = 1.5707963f - DbcFloat(e + 24) * rad, c = -DbcFloat(e + 28) * rad;
+    float qx = px, qy = py, qz = pz;
+    float ax = qx * SeaCos(t) + qz * SeaSin(t), az = -qx * SeaSin(t) + qz * SeaCos(t), ay = qy;      /* about y by 90 - b */
+    float bx = ax * SeaCos(a) - ay * SeaSin(a), by = ax * SeaSin(a) + ay * SeaCos(a), bz = az;      /* about z by a */
+    float gy = by * SeaCos(c) - bz * SeaSin(c), gz = by * SeaSin(c) + bz * SeaCos(c);               /* about x by -c */
+    *lx = bx; *ly = -gz; *lz = gy;
+}
+/* A ray from o along dir (the building's axes) against triangle a, b, c: its length to it, or -1. */
+static float WmoRay(const float *o, const float *dir, const float *a, const float *b, const float *c)
+{
+    float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+    float p[3] = { dir[1] * e2[2] - dir[2] * e2[1], dir[2] * e2[0] - dir[0] * e2[2], dir[0] * e2[1] - dir[1] * e2[0] };
+    float det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+    if (det > -1e-8f && det < 1e-8f) return -1;
+    float inv = 1 / det, s[3] = { o[0] - a[0], o[1] - a[1], o[2] - a[2] };
+    float u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * inv;
+    if (u < 0 || u > 1) return -1;
+    float q[3] = { s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0] };
+    float w = (dir[0] * q[0] + dir[1] * q[1] + dir[2] * q[2]) * inv;
+    if (w < 0 || u + w > 1) return -1;
+    float t = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv;
+    return t >= 0 ? t : -1;
+}
+/* The building a place (world x, y, z) is in, as the client finds it (his rule, 11 Oct: "the way the client does
+ * (height, and the building's own groups), not a wider box"; the skeptic's find: the whole of a capital's box took the
+ * open ground at its gates): of the tile's placements (d, n) whose bounds hold the place, each of its building's groups
+ * whose box holds it (MOGI), the nearest floor under it in the group's own faces (MOVT, MOVI; the faces that collide, MOPY:
+ * 0x08, or drawn (0x20) and not detail (0x04)), from a tenth of a yard above it straight down. The area WMOAreaTable gives
+ * that group (its MOGP's id; else the building's root row), and its floor's height in *floor; 0 when it is in none. */
+static int AdtBuildingArea(const unsigned char *d, unsigned n, float x, float y, float z, float *floor)
 {
     unsigned msz = 0, wsz = 0, isz = 0, mo = AdtChunk(d, n, ADT_MODF, &msz), mw = AdtChunk(d, n, ADT_MWMO, &wsz),
              mi = AdtChunk(d, n, ADT_MWID, &isz);
-    if (!mo || !mw || !mi) return -1;
-    float px = 17066.666f - y, pz = 17066.666f - x;               /* (the placements' own axes) */
+    if (!mo || !mw || !mi) return 0;
+    float px = ADT_ZERO - y, py = z, pz = ADT_ZERO - x, best = 1e30f;
+    int area = 0;
     for (unsigned k = 0; k < msz / 64; k++) {
         const unsigned char *e = d + mo + 64 * k;
-        if (!(px >= DbcFloat(e + 32) && px <= DbcFloat(e + 44) && pz >= DbcFloat(e + 40) && pz <= DbcFloat(e + 52))) continue;
+        if (!(px >= DbcFloat(e + 32) && px <= DbcFloat(e + 44) && py >= DbcFloat(e + 36) - 0.5f && py <= DbcFloat(e + 48) &&
+              pz >= DbcFloat(e + 40) && pz <= DbcFloat(e + 52))) continue;
         unsigned name = Rd32(e), set = Rd32(e + 60) & 0xFFFFu;
         if (name >= isz / 4 || Rd32(d + mi + 4 * name) >= wsz) continue;
-        char path[160];
-        unsigned at = Rd32(d + mi + 4 * name), i = 0;
-        while (at + i < wsz && d[mw + at + i] && i < sizeof path - 1) { path[i] = (char)d[mw + at + i]; i++; }
+        char path[168];
+        unsigned at = Rd32(d + mi + 4 * name), i = 0, dot = 0;
+        while (at + i < wsz && d[mw + at + i] && i < 159) { path[i] = (char)d[mw + at + i]; if (path[i] == '.') dot = i; i++; }
         path[i] = 0;
         unsigned char *w = NULL;
-        unsigned wl = 0, hs = 0;
+        unsigned wl = 0, hs = 0, gs = 0;
         const char *from;
-        if (!path[0] || !ClientPicture(path, "wmo.MPQ", &w, &wl, &from)) continue;
-        unsigned hd = AdtChunk(w, wl, WMO_MOHD, &hs);
+        if (!dot || !ClientPicture(path, "wmo.MPQ", &w, &wl, &from)) continue;
+        unsigned hd = AdtChunk(w, wl, WMO_MOHD, &hs), gi = AdtChunk(w, wl, WMO_MOGI, &gs);
         int wmo = hd && hs >= 0x24 ? (int)Rd32(w + hd + 0x20) : -1;
-        HeapFree(GetProcessHeap(), 0, w);
-        for (int r = 0; wmo >= 0 && r < g_waN; r++) {
-            if (g_waWmo[r] != wmo || g_waSet[r] != (int)set) continue;
-            int zone = AreaZone(g_waArea[r]), zr = zone > 0 ? AreaRow(zone) : -1, page = zone > 0 ? ParchPage(map, zone) : -1;
-            if (zr >= 0 && (g_atFlags[zr] & AREA_CAPITAL) && page >= 0) return page;
+        float o[3], dn[3], t0[3];
+        WmoLocal(e, px - DbcFloat(e + 8), py - DbcFloat(e + 12), pz - DbcFloat(e + 16), &o[0], &o[1], &o[2]);
+        WmoLocal(e, 0, -1, 0, &dn[0], &dn[1], &dn[2]);                      /* (down, in its axes) */
+        for (int c = 0; c < 3; c++) t0[c] = o[c] - 0.1f * dn[c];
+        for (unsigned g = 0; wmo >= 0 && gi && g < gs / 32 && g < WMO_GROUPS; g++) {
+            const unsigned char *q = w + gi + 32 * g;
+            if (!(o[0] >= DbcFloat(q + 4) && o[0] <= DbcFloat(q + 16) && o[1] >= DbcFloat(q + 8) && o[1] <= DbcFloat(q + 20) &&
+                  o[2] >= DbcFloat(q + 12) && o[2] <= DbcFloat(q + 24))) continue;
+            char gp[176];
+            for (unsigned j = 0; j < dot; j++) gp[j] = path[j];
+            wsprintfA(gp + dot, "_%03u.wmo", g);
+            unsigned char *gf = NULL;
+            unsigned gl = 0, ps = 0, ys = 0, is = 0, vs = 0;
+            if (!ClientPicture(gp, "wmo.MPQ", &gf, &gl, &from)) continue;
+            unsigned gpd = AdtChunk(gf, gl, WMO_MOGP, &ps);
+            if (gpd && ps >= 0x44) {
+                const unsigned char *sub = gf + gpd + 0x44;
+                unsigned sn = ps - 0x44, mp = AdtChunk(sub, sn, WMO_MOPY, &ys), mx = AdtChunk(sub, sn, WMO_MOVI, &is), mv = AdtChunk(sub, sn, WMO_MOVT, &vs);
+                unsigned tris = mx ? is / 6 : 0, verts = mv ? vs / 12 : 0;
+                for (unsigned t = 0; t < tris && mp && t < ys / 2; t++) {
+                    unsigned f = sub[mp + 2 * t];
+                    if (!((f & 0x08) || ((f & 0x20) && !(f & 0x04)))) continue;
+                    float P[3][3];
+                    unsigned bad = 0;
+                    for (int k2 = 0; k2 < 3; k2++) {
+                        unsigned vi = (unsigned)sub[mx + 6 * t + 2 * k2] | (unsigned)sub[mx + 6 * t + 2 * k2 + 1] << 8;
+                        if (vi >= verts) { bad = 1; break; }
+                        for (int c = 0; c < 3; c++) P[k2][c] = DbcFloat(sub + mv + 12 * vi + 4 * (unsigned)c);
+                    }
+                    float len = bad ? -1 : WmoRay(t0, dn, P[0], P[1], P[2]);
+                    if (len >= 0 && len - 0.1f < best) {
+                        best = len - 0.1f;
+                        int ga = WmoArea(wmo, (int)set, (int)Rd32(gf + gpd + 0x38));
+                        area = ga ? ga : WmoArea(wmo, (int)set, -1);
+                        if (!area) area = -1;                                  /* (in it, but it names no area) */
+                    }
+                }
+            }
+            HeapFree(GetProcessHeap(), 0, gf);
         }
+        HeapFree(GetProcessHeap(), 0, w);
     }
-    return -1;
+    *floor = z - best;
+    return best < 1e29f ? area : 0;
 }
-/* The arrival's page (a WorldMapArea row: its zone's, its continent's when its zone has none) for world x, y on map, as
- * the client finds it (above), and how (*way: 1 its terrain, 2 a capital's building, 3 its zone has no page, 0 the
- * boxes: no tile's file); -1 when neither. */
-static int ParchZoneAt(int map, float x, float y, int *way)
+/* The arrival's page (a WorldMapArea row: its zone's, its continent's when its zone has none) for world x, y on map, at
+ * height z (zok: known), as the client finds it (above), and how (*way: 1 its terrain, 2 a building's group over its
+ * floor, 3 its zone has no page, 0 the boxes: no tile's file); -1 when neither. */
+static int ParchZoneAt(int map, float x, float y, float z, int zok, int *way)
 {
     *way = 0;
     const char *dir = NULL;
@@ -7967,13 +8103,18 @@ static int ParchZoneAt(int map, float x, float y, int *way)
     const char *from;
     if (!ClientPicture(path, "terrain.MPQ", &d, &n, &from)) return ParchFind(map, x, y);
     int cx = (int)((fx - tx) * 16), cy = (int)((fy - ty) * 16);
-    int area = AdtArea(d, n, cx > 15 ? 15 : cx, cy > 15 ? 15 : cy), page = AdtCapital(d, n, map, x, y);
+    if (cx > 15) cx = 15;
+    if (cy > 15) cy = 15;
+    int area = AdtArea(d, n, cx, cy), in = 0;
+    if (zok) {                                                      /* a building's floor under it, the terrain not between */
+        float floor = 0, ground = AdtHeight(d, n, cx, cy, x, y);
+        int wa = AdtBuildingArea(d, n, x, y, z, &floor);
+        if (wa > 0 && !(z + AREA_ABOVE > ground && ground > floor)) { area = wa; in = 1; }
+    }
     HeapFree(GetProcessHeap(), 0, d);
-    if (page >= 0) { *way = 2; return page; }
     if (area < 0) return ParchFind(map, x, y);
-    int zone = AreaZone(area);
-    page = zone > 0 ? ParchPage(map, zone) : -1;
-    if (page >= 0) { *way = 1; return page; }
+    int zone = AreaZone(area), page = zone > 0 ? ParchPage(map, zone) : -1;
+    if (page >= 0) { *way = in ? 2 : 1; return page; }
     *way = 3;
     return ParchContinent(map);
 }
@@ -9752,8 +9893,8 @@ static LONG g_pbitsSeq = -1, g_pmadeKnown = -1;
 static void ParchWork(DWORD now)
 {
     if (!g_parchOn) return;
-    int held = StepLock(), map = g_destMap;
-    float x = g_destWX, y = g_destWY;
+    int held = StepLock(), map = g_destMap, zok = g_destZOk;
+    float x = g_destWX, y = g_destWY, h = g_destWZ;
     LONG seq = g_scrSeq, known = g_scrKnown, screen = g_viewScreen;   /* (this screen's character's explored areas, as it began) */
     if (seq != g_pbitsSeq) { g_pbitsSeq = seq; for (int i = 0; i < EXPLORED_BYTES; i++) g_pbits[i] = g_scrBits[i]; }
     StepUnlock(held);
@@ -9787,14 +9928,16 @@ static void ParchWork(DWORD now)
     if (map < 0) return;
     if (screen != g_parchForScreen || map != g_parchForMap || x != g_parchForX || y != g_parchForY) {   /* the glide's end */
         int way = 0;
-        g_parchWant = ParchZoneAt(map, x, y, &way); g_parchWantCont = ParchContinent(map);
+        g_parchWant = ParchZoneAt(map, x, y, h, zok, &way); g_parchWantCont = ParchContinent(map);
         g_parchForMap = map; g_parchForX = x; g_parchForY = y; g_parchForScreen = screen; g_parchAt = now;
         g_ptry.cont = g_ptry.zone = 0;
         if (g_parchWant < 0) { wsprintfA(m, "  the parchment: no zone or continent painting for map %d; the opening stays", map); Log(m); }
         else {
             static const char *const kWay[4] = { "the smallest box holding it (no terrain file to read)", "its terrain's area, as the client",
-                                                 "the capital's building over it", "its terrain's zone has no page: its continent's" };
-            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d) is in %s, by %s", map, (int)x, (int)y, g_pz[g_parchWant].name, kWay[way]);
+                                                 "the building's floor under it, as the client", "its terrain's zone has no page: its continent's" };
+            char hb[24] = "";
+            if (zok) wsprintfA(hb, ", %d high", (int)h);
+            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d%s) is in %s, by %s", map, (int)x, (int)y, hb, g_pz[g_parchWant].name, kWay[way]);
             Log(m);
         }
     }
