@@ -460,6 +460,26 @@ Check(SliderSays("nearby", 600, "600 yards") and SliderSays("thick", 150, "150%"
 UI.Click(P("barneo"))
 Check(P("QualityLiquid"):GetChecked() and P("QualityUnstable"):GetChecked() and not P("QualityPulse"):GetChecked() and not P("QualityRaw"):GetChecked(),
       "and Neo's qualities held: Liquid and Unstable")
+-- a look set by hand in style.txt, off the sliders' steps: said back exactly at a login (no click), so style.txt is never
+-- rewritten by a login; only the slider a player moves puts its own value on a step
+for _, odd in ipairs({ "nearby 1250 thick 123 width 33 whole off effect heat colour class quality pulse raw",
+                       "nearby 40 thick 51 width 99 whole off effect smooth colour class quality raw" }) do
+    Fresh({ cvar = "?" })
+    Run((string.gsub(setupSrc, 'local CL_LOOK = "[^"]*"', 'local CL_LOOK = "' .. odd .. '"', 1)))
+    local said = CV()
+    Slash("")
+    u = env.CinderLoad.ui
+    local _, _, yd = string.find(odd, "^nearby (%d+)")
+    local held = CV() == said and SliderSays("nearby", tonumber(yd), yd .. " yards")
+    UI.Slide(P("thickSlider"), 127)
+    Check(said == Value("parchment retro discovered", odd) and held and
+          CV() == Value("parchment retro discovered", (string.gsub(odd, "thick %d+", "thick 125"))) and NoErrors(),
+          "a look set by hand off the sliders' steps (" .. odd .. "): said back word for word at a login and as the window opens; the thickness slider moved puts only itself on a step")
+end
+Fresh({ cvar = "?" })
+Run(setupLook)
+Slash("")
+u = env.CinderLoad.ui
 env.CinderLoad.ReadLook("thick 9999 width 3 nearby -5 whole maybe effect fire colour red quality raw pulse banana thick")
 Check(env.CinderLoad.thick == 200 and env.CinderLoad.width == 20 and env.CinderLoad.nearby == 0 and env.CinderLoad.whole and env.CinderLoad.effect == "blade" and
       env.CinderLoad.ember and env.CinderLoad.quality.raw and env.CinderLoad.quality.pulse and not env.CinderLoad.quality.liquid,

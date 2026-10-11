@@ -9407,6 +9407,34 @@ static void TestSwitchesPath(void)
     BridgeClose();
     Check(ok, "the whole path, the next session: the style from style.txt at start (the look with it), the switches made from it (an old value of the CVar in Config.wtf never counts), the window saying it");
 
+    /* sessions whose style.txt was set by hand off the sliders' steps (README: nearby any yards 0 to 4000): a login, no
+     * click, leaves style.txt and the DLL's reach and look exactly as they were (nearby 40 is never made 0, 1250 never 1300) */
+    static const char *const kOdd[2] = { "map parchment\r\nbar retro\r\nareas discovered\r\nnearby 40\r\nthick 123\r\nwidth 33\r\n",
+                                         "map parchment\r\nbar retro\r\nareas discovered\r\nnearby 1250\r\nthick 100\r\nwidth own\r\n" };
+    static const int kOddYd[2] = { 40, 1250 }, kOddThick[2] = { 123, 100 }, kOddWidth[2] = { 33, 0 };
+    ok = 1;
+    for (int i = 0; i < 2; i++) {
+        Put(STYLE_REL, kOdd[i]);
+        SwitchesWorld(low);
+        memset(&g_pathPump, 0, sizeof g_pathPump);
+        g_fkCv = g_fkLow + 0x100;
+        TestPut32(g_fkCv + CV_VALUE, TestLow(g_fkVal));
+        FkSet("parchment retro discovered");
+        ok &= BridgeOpen() && ViewStartFrom(shim_module, FakeViewThreadStart) && g_nearYd == kOddYd[i];
+        g_luaExec = BridgeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+        now += 60000;
+        Pump(now);
+        Bridge("open");
+        now += LUA_POLL_MS; Pump(now);
+        now += LUA_POLL_MS; Pump(now);
+        char said[40];
+        snprintf(said, sizeof said, " nearby %d thick %d ", kOddYd[i], kOddThick[i]);
+        ok &= g_luaSynced && strstr(g_fkVal, said) && g_nearYd == kOddYd[i] && g_look.thick == kOddThick[i] && g_look.width == kOddWidth[i] &&
+              Is(STYLE_REL, kOdd[i]);
+        BridgeClose();
+    }
+    Check(ok, "the whole path, style.txt set by hand off the sliders' steps (nearby 40, thick 123, width 33; nearby 1250): a login and the window opened, no click, leave style.txt, the reach and the look as they were");
+
     g_viewOn = 0; g_viewLive = 0; shim_wine = wine; g_pzN = pzN; g_map.ok = 0; g_driftOn = 0;
     g_parchOn = 0; g_barVanilla = 0; g_class = 0;
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;

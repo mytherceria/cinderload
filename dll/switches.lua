@@ -45,16 +45,23 @@ function CL.Defaults()
     CL.quality = { pulse = 1, raw = 1 }
 end
 
-function CL.Clamp(v, key)
+-- a number held to its range, whole (as the DLL keeps it): what style.txt or the CVar says, unchanged when it is in range
+function CL.Hold(v, key)
     local r = CL.range[key]
-    v = math.floor((v - r[1]) / r[3] + 0.5) * r[3] + r[1]
+    v = math.floor(v + 0.5)
     if v < r[1] then v = r[1] end
     if v > r[2] then v = r[2] end
     return v
 end
+-- a slider's value: on its steps, then held to its range (only what a slider gives is put on a step)
+function CL.Clamp(v, key)
+    local r = CL.range[key]
+    return CL.Hold(math.floor((v - r[1]) / r[3] + 0.5) * r[3] + r[1], key)
+end
 
 -- the look as the DLL sends it (CL_LOOK) or as the CVar carries it: "nearby 1200 thick 100 width own whole off effect
--- heat colour class quality pulse raw"; a part missing or not ours: as it was
+-- heat colour class quality pulse raw"; a part missing or not ours: as it was. Numbers are held to their range only, never
+-- put on a slider's step: Setup sends back what it read, so a login never rewrites style.txt (a hand-set "nearby 40" stays)
 function CL.ReadLook(s)
     local w = {}
     for t in string.gfind(s or "", "[^%s]+") do table.insert(w, t) end
@@ -63,9 +70,9 @@ function CL.ReadLook(s)
         local k, v = w[i], w[i + 1]
         local num = tonumber(v or "")
         i = i + 1
-        if k == "nearby" and num then CL.nearby = CL.Clamp(num, "nearby"); i = i + 1
-        elseif k == "thick" and num then CL.thick = CL.Clamp(num, "thick"); i = i + 1
-        elseif k == "width" and num then CL.width = CL.Clamp(num, "width"); i = i + 1
+        if k == "nearby" and num then CL.nearby = CL.Hold(num, "nearby"); i = i + 1
+        elseif k == "thick" and num then CL.thick = CL.Hold(num, "thick"); i = i + 1
+        elseif k == "width" and num then CL.width = CL.Hold(num, "width"); i = i + 1
         elseif k == "width" and v == "own" then CL.width = 0; i = i + 1
         elseif k == "whole" and (v == "on" or v == "off") then CL.whole = (v == "on") or nil; i = i + 1
         elseif k == "effect" and CL.Find(CL.effects, v) then CL.effect = v; i = i + 1
