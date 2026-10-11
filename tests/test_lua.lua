@@ -1,10 +1,10 @@
--- The world map's two drop-downs (dll/switches.lua) and the DLL's probe, run as the DLL sends them (test_switch.c writes
--- them out) against a stubbed 1.12 UI (tests/wow_ui.lua): Lua 5.1 with 5.0's limits put on (no string methods, only
--- 5.0's library; the source checked for 5.1-only syntax). With the client's own UIDropDownMenu.lua and WorldMapFrame.lua
--- (framexml=<dir>, read out of a client's archives by test_switch.c), the drop-downs open, pick and share their list
--- through the client's own code, and the map is minimised and maximised by it.
---   lua5.1 tests/test_lua.lua <dir with probe.lua, setup.lua, setup-satellite-neo.lua> [layout=<out>] [widths=<in>]
---          [framexml=<dir>]
+-- CinderLoad's window (dll/switches.lua: /cinderload, his design of 11 Oct 2026) and the DLL's probe, run as the DLL
+-- sends them (test_switch.c writes them out) against a stubbed 1.12 UI (tests/wow_ui.lua): Lua 5.1 with 5.0's limits
+-- put on (no string methods, only 5.0's library; the source checked for 5.1-only syntax). Every control driven as a
+-- player drives it; the CVar it leaves checked word for word. With the client's own UIDropDownMenu.lua and
+-- WorldMapFrame.lua (framexml=<dir>), the world map is the client's own, and is checked untouched.
+--   lua5.1 tests/test_lua.lua <dir with probe.lua, setup.lua, setup-satellite-neo.lua, setup-full.lua, setup-look.lua>
+--          [layout=<out>] [widths=<in>] [framexml=<dir>]
 -- One line a check: "ok <what>" or "FAIL <what>"; test_switch.c counts them.
 local here = string.gsub(arg[0], "[^/]*$", "")
 if here == "" then here = "./" end
@@ -29,8 +29,9 @@ local function ReadFile(p)
 end
 local probeSrc, setupSrc = ReadFile(dir .. "/probe.lua"), ReadFile(dir .. "/setup.lua")
 local setupSN, setupFull = ReadFile(dir .. "/setup-satellite-neo.lua"), ReadFile(dir .. "/setup-full.lua")
-Check(probeSrc and setupSrc and setupSN and setupFull, "the DLL's probe and its switches' chunk written out")
-if not (probeSrc and setupSrc and setupSN and setupFull) then print("done"); os.exit(1) end
+local setupLook = ReadFile(dir .. "/setup-look.lua")
+Check(probeSrc and setupSrc and setupSN and setupFull and setupLook, "the DLL's probe and its switches' chunk written out")
+if not (probeSrc and setupSrc and setupSN and setupFull and setupLook) then print("done"); os.exit(1) end
 
 -- 5.1-only syntax (and 5.2+ tokens) the client's Lua 5.0 would not take: found outside strings and comments
 local function Lex50(src)
@@ -77,6 +78,11 @@ Check(Lex50(probeSrc) == nil, "the probe: Lua 5.0's syntax only (" .. tostring(L
 Check(string.find(setupSrc, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"\n') ~= nil and
       string.find(setupSN, '^local CL_MAP, CL_BAR, CL_AREAS = "satellite", "neo", "discovered"\n') ~= nil and
       string.find(setupFull, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "full"\n') ~= nil, "the chunk begins with the choice the DLL holds")
+local DEF = "nearby 1200 thick 100 width own whole off effect heat colour class quality pulse raw"
+local LOOK = "nearby 600 thick 150 width 60 whole on effect blade colour ember quality liquid unstable"
+Check(string.find(setupSrc, '^[^\n]*\nlocal CL_LOOK = "' .. DEF .. '"\n%-%- CinderLoad') ~= nil and
+      string.find(setupLook, '\nlocal CL_LOOK = "' .. LOOK .. '"\n', 1, true) ~= nil,
+      "and its second line the zones nearby and the bar's look the DLL holds, as the CVar carries them")
 
 -- string widths, as the client's font gives them (the look's measure, else about 5.5 a letter at 10)
 if opt.widths then
@@ -99,53 +105,40 @@ local function Fresh(o)
     return world
 end
 local function Run(src, name) return UI.Run50(src, name) end
-local function D(key) return env["CinderLoadMap" .. key .. "DropDown"] end
-local function Arrow(key) return env["CinderLoadMap" .. key .. "DropDownButton"] end
+local function P(name) return env["CinderLoadPanel" .. (name or "")] end
 local function Said(s)
     for _, t in ipairs(world.chat) do if string.find(t.text, s, 1, true) then return t end end
 end
 local function Slash(msg) world.chat = {}; env.SlashCmdList.CINDERLOAD(msg) end
 local function OpenMap() if not env.WorldMapFrame:IsVisible() then env.ToggleWorldMap() end; UI.Frame() end
 local function CloseMap() if env.WorldMapFrame:IsVisible() then env.ToggleWorldMap() end end
-local function List()                         -- the shared list as shown: its buttons' words, values and checks
-    local l, out = env.DropDownList1, {}
-    if not l:IsShown() then return nil end
-    for j = 1, l.numButtons do
-        local b = env["DropDownList1Button" .. j]
-        table.insert(out, { text = b:GetText(), value = b.value, checked = env[b:GetName() .. "Check"]:IsShown() and 1 or nil,
-                            button = b, shown = b:IsShown() })
-    end
-    return out
-end
-local function ListSays(a, b)                 -- two buttons, these words, the check on the one with a "*"
-    local l = List()
-    if not l or table.getn(l) ~= 2 then return false end
-    for i, want in ipairs({ a, b }) do
-        local _, _, name, star = string.find(want, "^(.-)(%*?)$")
-        if l[i].text ~= name or not l[i].shown or (star == "*") ~= (l[i].checked == 1) then return false end
-    end
-    return true
-end
-local function PickInList(text)
-    local l = List()
-    if not l then return false end
-    for _, b in ipairs(l) do if b.text == text then return UI.Click(b.button) end end
-    return false
-end
 local function NoErrors() return table.getn(world.errors) == 0 end
-local function Near(a, b) return a and b and math.abs(a - b) < 0.01 end
-local function Boxed(r) local l, t, rr, b = UI.Box(r); return { l = l, t = t, r = rr, b = b } end
+local function Near(a, b, e) return a and b and math.abs(a - b) < (e or 0.01) end
+local function CV() return world.cvars.CinderLoadStyle end
+local function Value(three, rest) return three .. " " .. (rest or DEF) end
+-- where a region is in the window, in the mockup's units (760 x 608, from its top left, y down)
+local function PB(r)
+    local l, b, rr, t = UI.Rect(r)
+    local pl, pb, pr, pt = UI.Rect(P())
+    if not l or not pl then return nil end
+    local es = P():GetEffectiveScale()
+    return { l = (l - pl) / es, t = (pt - t) / es, r = (rr - pl) / es, b = (pt - b) / es }
+end
+local function At(r, x, y, w, h)
+    local q = PB(r)
+    return q and Near(q.l, x) and Near(q.t, y) and (not w or Near(q.r - q.l, w)) and (not h or Near(q.b - q.t, h))
+end
 local BLIZZ = { "ToggleDropDownMenu", "UIDropDownMenu_Initialize", "UIDropDownMenu_AddButton", "UIDropDownMenu_SetSelectedValue",
                 "UIDropDownMenu_SetWidth", "UIDropDownMenu_SetText", "UIDropDownMenu_Refresh", "UIDropDownMenuButton_OnClick",
                 "CloseDropDownMenus", "ToggleWorldMap", "WorldMapFrame_Minimize", "WorldMapFrame_Maximize", "WorldMapFrame_Update",
-                "WorldMapContinentsDropDown_OnLoad", "WorldMapZoneDropDown_OnLoad", "WorldMapContinentButton_OnClick" }
+                "WorldMapContinentsDropDown_OnLoad", "WorldMapZoneDropDown_OnLoad", "WorldMapContinentButton_OnClick", "HideUIPanel",
+                "ShowUIPanel", "SetCVar", "GetCVar", "CreateFrame", "PlaySound" }
 local function Functions() local t = {}; for _, n in ipairs(BLIZZ) do t[n] = env[n] end; return t end
 local function SameFunctions(t) for _, n in ipairs(BLIZZ) do if env[n] ~= t[n] then return false end end; return true end
 local function Scripts()
     local t = {}
-    for _, f in ipairs({ env.WorldMapFrame, env.WorldMapContinentDropDown, env.WorldMapContinentDropDownButton, env.WorldMapZoneDropDown,
-                         env.WorldMapZoneDropDownButton, env.DropDownList1, env.DropDownList1Button1 }) do
-        for h, fn in pairs(f.scripts) do t[f.name .. "." .. h] = fn end
+    for _, f in ipairs(world.made) do
+        if f.blizzard then for h, fn in pairs(f.scripts) do t[tostring(f) .. "." .. h] = fn end end
     end
     return t
 end
@@ -156,11 +149,18 @@ local function SameScripts(t)
     return true
 end
 local function Touched() return table.concat(world.touched, ", ") end
-local function OnlyScale()                    -- every touch of ours the shared list's scale, once a list of ours opened
-    for _, t in ipairs(world.touched) do if t ~= "DropDownList1:SetScale" then return false end end
+-- nothing of ours on the world map: no frame of ours made under it, none of its old drop-downs, the map's own as ever
+local function MapUntouched()
+    for _, f in ipairs(world.made) do
+        if not f.blizzard then
+            local p = f
+            while p do if p == env.WorldMapFrame then return false end; p = p.parent end
+        end
+    end
+    for k in pairs(env) do if type(k) == "string" and string.find(k, "^CinderLoadMap") then return false end end
     return true
 end
-print("the drop-downs' code: " .. (real and "the client's own UIDropDownMenu.lua and WorldMapFrame.lua" or "this test's stand-ins"))
+print("the world map's code: " .. (real and "the client's own UIDropDownMenu.lua and WorldMapFrame.lua" or "this test's stand-ins"))
 
 -- ---- the probe ----
 Fresh({ cvar = false })
@@ -168,362 +168,364 @@ local ok, err = Run(probeSrc, "probe")
 Check(ok, "the probe never raises, even before the CVar is there (" .. tostring(err) .. ")")
 Fresh()
 Run(probeSrc, "probe")
-Check(world.cvars.CinderLoadStyle == "?", "the probe: the switches not there (a login, a /reload), the CVar marked \"?\"")
+Check(CV() == "?", "the probe: the switches not there (a login, a /reload), the CVar marked \"?\"")
 Fresh({ noMap = true })
 Run(probeSrc, "probe")
-Check(world.cvars.CinderLoadStyle == "parchment retro discovered", "the probe: no world map frame (not in the world's UI), nothing marked")
+Check(CV() == "parchment retro discovered", "the probe: no world map frame (not in the world's UI), nothing marked")
 
--- ---- made, at a login (the map closed) ----
+-- ---- made, at a login ----
 Fresh({ cvar = "?" })
 local fns, scripts = Functions(), Scripts()
 ok, err = Run(setupSrc)
-Check(ok and NoErrors(), "the switches' chunk runs whole (" .. tostring(err) .. table.concat(world.errors, "; ") .. ")")
-Check(world.cvars.CinderLoadStyle == "parchment retro discovered", "made: the CVar told the choice held (the DLL hears that they ran)")
+Check(ok and NoErrors(), "the chunk runs whole (" .. tostring(err) .. table.concat(world.errors, "; ") .. ")")
+Check(CV() == Value("parchment retro discovered"), "made: the CVar told the whole choice held, the reach and the look with it (the DLL hears that it ran): " .. tostring(CV()))
 Check(type(env.CinderLoad) == "table" and env.CinderLoad.up == 1 and not env.CinderLoad.broken, "made: CinderLoad.up, not broken")
-local panel = env.CinderLoadMapPanel
-Check(panel and panel.parent == env.WorldMapFrame and panel.kind == "Frame", "a frame of its own on the world map's (shown with it)")
-local m, b, a = D("map"), D("bar"), D("areas")
-Check(m and b and a and m.parent == panel and b.parent == panel and a.parent == panel and env[m.name .. "Left"] and env[m.name .. "Middle"] and
-      env[m.name .. "Right"] and env[m.name .. "Text"] and Arrow("map") and Arrow("bar") and Arrow("areas"),
-      "three drop-downs made from the client's own UIDropDownMenuTemplate")
-local ml, bl, al = env[m.name .. "Label"], env[b.name .. "Label"], env[a.name .. "Label"]
-Check(ml and bl and ml.text == "Loading map" and bl.text == "Loading bar" and ml.font == "GameFontNormalSmall" and bl.font == "GameFontNormalSmall" and
-      ml.layer == "OVERLAY" and ml.points[1].p == "TOPLEFT" and ml.points[1].rel == m and ml.points[1].x == 20 and ml.points[1].y == 10,
-      "his labels, \"Loading map\" and \"Loading bar\", in gold over each (GameFontNormalSmall at the template's top left, 20, 10: as the map's \"Continent\" and \"Zone\")")
-Check(env[m.name .. "Middle"].w == 92 and m.w == 142 and env[m.name .. "Text"].w == 74 and b.w == 142 and m.noResize == 1,
-      "the first two each 92 wide inside, as UIDropDownMenu_SetWidth makes it (its frame 142), their words 74 (the box's whole middle)")
-Check(al and al.text == "Map areas" and al.font == "GameFontNormalSmall" and al.points[1].rel == a and al.points[1].x == 20 and
-      env[a.name .. "Middle"].w == 78 and a.w == 128 and env[a.name .. "Text"].w == 60,
-      "the third, \"Map areas\" in gold over it, 78 wide inside (its frame 128, its words 60, the box's whole middle)")
--- each choice's words as the client draws them on a 5120 x 2160 screen, in the map's units: FRIZQT__ at whole pixels a
--- letter, the widest of 28 px (the whole-screen map, at 1), 24 px (the map as a window at 0.85) and 23 px (the UI's 0.82).
--- The same measure gives "Discover...", "Parchment" and "Eastern Kingdoms" 51.9, 52.7 and 89.1 where a recording of the
--- map as a window at 0.85 (11 Oct 2026) shows them 51.1, 52.3 and 89.5; in the template's 53 "Discovered" showed as
--- "Discover...".
-local DRAWN = { Parchment = 52.7, Satellite = 39.7, Retro = 26.8, Neo = 20.8, Discovered = 55.5, ["Full map"] = 42.2 }
-local fit, inside, said = true, true, ""
-for _, d in ipairs(env.CinderLoad.drops) do
-    local t = env[d.frame.name .. "Text"]
-    for _, o in ipairs(d.setting.options) do
-        if not DRAWN[o.text] or DRAWN[o.text] > t:GetWidth() then fit = false; said = said .. " " .. o.text .. " in " .. t:GetWidth() end
-    end
-    local tl, lr = UI.Box(t), Boxed(env[d.frame.name .. "Left"]).r
-    if not (tl and lr and tl >= lr - 0.01) then inside = false end
-end
-Check(fit and inside, "every choice's words whole in its drop-down as the client draws them (\"Discovered\" 55.5, not cut to \"Discover...\"), " ..
-      "and within the box, from the end of its left cap" .. said)
-Check(env[m.name .. "Text"].text == "Parchment" and env[b.name .. "Text"].text == "Retro" and env[a.name .. "Text"].text == "Discovered" and
-      m.selectedValue == "parchment" and b.selectedValue == "retro" and a.selectedValue == "discovered", "the choice held shows: Parchment, Retro, Discovered")
-Check(env.SLASH_CINDERLOAD1 == "/cinderload" and type(env.SlashCmdList.CINDERLOAD) == "function", "/cinderload made")
-Check(table.getn(world.chat) == 0, "made quietly (nothing said in the chat)")
-Check(Touched() == "" and SameFunctions(fns) and SameScripts(scripts),
-      "no frame of the game's own changed by it, no Blizzard function replaced or hooked, no script of the game's set (" .. Touched() .. ")")
+Check(not P() and env.SLASH_CINDERLOAD1 == "/cinderload" and type(env.SlashCmdList.CINDERLOAD) == "function" and table.getn(world.chat) == 0,
+      "made quietly: /cinderload, and no window until it is asked for")
+Check(MapUntouched() and Touched() == "" and SameFunctions(fns) and SameScripts(scripts),
+      "nothing on the world map (the map is CinderMap's): no frame of ours on it, none of the old drop-downs; nothing of the game's changed (" .. Touched() .. ")")
 
--- ---- the map opened: where they are ----
-OpenMap()
-Check(m:IsVisible() and b:IsVisible() and a:IsVisible() and env.WorldMapContinentDropDown:IsVisible() and NoErrors(), "the map opened: all three shown, as Continent and Zone")
-local mb, bb, ab, cb, zb = Boxed(m), Boxed(b), Boxed(a), Boxed(env.WorldMapContinentDropDown), Boxed(env.WorldMapZoneDropDown)
-local cl = Boxed(env.WorldMapContinentDropDown.label)
-local mlb, blb, alb = Boxed(ml), Boxed(bl), Boxed(al)
-Check(Near(mb.l, 32) and Near(mb.t, 35) and Near(bb.l, 141) and Near(bb.r, 283) and Near(ab.l, 250) and Near(ab.r, 378) and Near(mb.t, cb.t) and
-      Near(bb.t, cb.t) and Near(ab.t, cb.t) and Near(mb.b, cb.b),
-      "on the top bar, on Continent's row, from x 32 (clear of the bar's flourish): the first two to 283 of the map's 1024 as the mock's, the third from 250 to 378")
-Check(Near(Boxed(panel).l, 32) and Near(Boxed(panel).r, 378), "their own frame spans the three, from 32 to 378")
-local ar, cleft, zl, crt = Boxed(env[a.name .. "Right"]), Boxed(env.WorldMapContinentDropDownLeft), Boxed(env.WorldMapZoneDropDownLeft), Boxed(env.WorldMapContinentDropDownRight)
-Check(blb.r < alb.l and alb.r < cl.l and mlb.r < blb.l and Near(Boxed(env[m.name .. "Left"]).t, Boxed(env.WorldMapContinentDropDownLeft).t) and
-      ab.r - cb.l <= 36.01 and ab.r - cb.l > 33 and (crt.r - zl.l) <= 33.01,
-      "the third over Continent's frame by 36 (Zone over Continent's by 33: their art three closer than the map's own two), the labels apart, the art at Continent's height")
-if opt.layout then              -- for the look: each region of ours and the map's top row, in the map's box
-    local f = io.open(opt.layout, "w")
-    local function Out(state, r)
-        local l, t, rr, bt = UI.Box(r)
-        if not l or not r:IsVisible() then return end
-        local tc = r.texcoord and table.concat(r.texcoord, " ") or ""
-        f:write(string.format("%s\t%s\t%s\t%.3f %.3f %.3f %.3f\t%s\t%s\t%s\t%s\t%s\n", state, r.name or "?", r.kind, l, t, rr, bt,
-                              r.texture or r.font or "", tc, r.text or "", r.justifyH or "", r.checked and "1" or ""))
-    end
-    local function All(state)
-        for _, d in ipairs({ m, b, a, env.WorldMapContinentDropDown, env.WorldMapZoneDropDown }) do
-            for _, k in ipairs({ "Left", "Middle", "Right", "Text", "ButtonNormalTexture" }) do Out(state, env[d.name .. k]) end
-            Out(state, d.label or env[d.name .. "Label"])
-        end
-        if env.DropDownList1:IsShown() then
-            Out(state, env.DropDownList1)
-            for j = 1, env.DropDownList1.numButtons do
-                local bt = env["DropDownList1Button" .. j]
-                Out(state, bt)
-                Out(state, env[bt.name .. "Check"])
-                Out(state, env[bt.name .. "NormalText"])
-                Out(state, env[bt.name .. "Highlight"])
-            end
-        end
-    end
-    All("closed")
-    UI.Click(Arrow("areas"))
-    UI.Enter(env.DropDownList1Button2)
-    All("open")
-    UI.Leave(env.DropDownList1Button2)
-    UI.Click(Arrow("areas"))
-    f:close()
-    world.sounds = {}
-    world.touched = {}
-end
-
--- ---- its list: opened, picked ----
-UI.Click(Arrow("map"))
-local list = env.DropDownList1
-local lb = Boxed(list)
-Check(list:IsShown() and env.UIDROPDOWNMENU_OPEN_MENU == m.name and ListSays("Parchment*", "Satellite") and NoErrors(),
-      "its arrow clicked: the shared list opens with its two choices, Parchment checked (the client's own ToggleDropDownMenu)")
-Check(list:GetScale() == 1 and Near(lb.l, 40) and Near(lb.t, Boxed(env[m.name .. "Left"]).b - 22) and world.sounds[1] == "igMainMenuOptionCheckBoxOn",
-      "the list at the map's own size under it, where the client puts Continent's (its UI scale of 0.82 not put on it), with the arrow's sound")
-Check(Touched() == "DropDownList1:SetScale", "opening it, nothing of the game's changed but that list's scale (set again as any list opens): " .. Touched())
-UI.Enter(env.DropDownList1Button2)
-local tip = env.GameTooltip
-Check(tip.shown and tip.lines[1] == "Satellite" and string.find(tip.lines[2] or "", "From your next loading screen.", 1, true),
-      "a choice pointed at (beginner's tips on): the game's tooltip says what it is and when it counts")
-UI.Leave(env.DropDownList1Button2)
+-- ---- /cinderload alone: the window ----
 world.sounds = {}
-PickInList("Satellite")
-Check(world.cvars.CinderLoadStyle == "satellite retro discovered" and not list:IsShown() and env[m.name .. "Text"].text == "Satellite" and
-      m.selectedValue == "satellite" and env[b.name .. "Text"].text == "Retro" and world.sounds[1] == "UChatScrollButton" and NoErrors(),
-      "Satellite picked: the CVar says so, the list closes, the drop-down says Satellite, the bar as it was, the list's sound")
-UI.Click(Arrow("map"))
-Check(ListSays("Parchment", "Satellite*"), "opened again: Satellite checked")
-UI.Click(Arrow("map"))
-Check(not list:IsShown(), "its arrow again: the list closes")
-UI.Click(Arrow("bar"))
-Check(ListSays("Retro*", "Neo") and env.UIDROPDOWNMENU_OPEN_MENU == b.name, "the bar's: Retro, Neo")
-PickInList("Neo")
-Check(world.cvars.CinderLoadStyle == "satellite neo discovered" and env[b.name .. "Text"].text == "Neo" and env[m.name .. "Text"].text == "Satellite",
-      "Neo picked: the bar on its own, the map as it was")
-UI.Click(Arrow("areas"))
-Check(ListSays("Discovered*", "Full map") and env.UIDROPDOWNMENU_OPEN_MENU == a.name and Near(list:GetScale(), 1), "the map areas': Discovered, Full map")
-UI.Enter(env.DropDownList1Button2)
-Check(tip.shown and tip.lines[1] == "Full map" and string.find(tip.lines[2] or "", "as though you had discovered it all", 1, true) and
-      string.find(tip.lines[2] or "", "From your next loading screen.", 1, true), "Full map pointed at: what it is (the parchment, every part as though discovered) and when it counts")
-UI.Leave(env.DropDownList1Button2)
-PickInList("Full map")
-Check(world.cvars.CinderLoadStyle == "satellite neo full" and env[a.name .. "Text"].text == "Full map" and env[m.name .. "Text"].text == "Satellite" and
-      env[b.name .. "Text"].text == "Neo" and NoErrors(), "Full map picked: the map's areas on their own, the map and the bar as they were")
-UI.Click(Arrow("areas"))
-PickInList("Discovered")
-Check(world.cvars.CinderLoadStyle == "satellite neo discovered" and env[a.name .. "Text"].text == "Discovered", "Discovered picked: back")
-
--- ---- the shared list: Continent and Zone as ever ----
-world.touched = {}
-local cArrow, zArrow = env.WorldMapContinentDropDownButton, env.WorldMapZoneDropDownButton
-UI.Click(cArrow)
-local before = List()
-Check(before and table.getn(before) == 2 and before[1].text == "Kalimdor" and before[2].text == "Eastern Kingdoms" and list:GetScale() == 1 and
-      env.UIDROPDOWNMENU_OPEN_MENU == "WorldMapContinentDropDown" and Near(Boxed(list).l, cb.l + 8) and NoErrors(),
-      "after ours, Continent's list: its continents, at its place and size")
-PickInList("Kalimdor")
-Check(env.UIDropDownMenu_GetSelectedID(env.WorldMapContinentDropDown) == 1 and world.map.c == 1 and not list:IsShown(), "Kalimdor picked from it: the map's own")
-UI.Click(Arrow("map"))
-UI.Click(cArrow)
-Check(ListSays("Kalimdor*", "Eastern Kingdoms") and env.UIDROPDOWNMENU_OPEN_MENU == "WorldMapContinentDropDown",
-      "ours opened, then Continent's straight after: its own two, its own check")
-local snap = {}
-for j = 1, 2 do
-    local bt = env["DropDownList1Button" .. j]
-    snap[j] = { bt:GetText(), env[bt.name .. "Check"]:IsShown(), bt.lockedHighlight, bt.w }
-end
-Slash("map parchment")
-local same = list:IsShown()
-for j = 1, 2 do
-    local bt = env["DropDownList1Button" .. j]
-    local now = { bt:GetText(), env[bt.name .. "Check"]:IsShown(), bt.lockedHighlight, bt.w }
-    for k = 1, 4 do if now[k] ~= snap[j][k] then same = false end end
-end
-Check(same and env[m.name .. "Text"].text == "Parchment" and world.cvars.CinderLoadStyle == "parchment neo discovered",
-      "a choice made with /cinderload while Continent's list is open: ours shows it, that list untouched (its words, check, highlight, width)")
-UI.Click(cArrow)
-UI.Click(zArrow)
-Check(ListSays("Ashenvale", "Darkshore") and env.UIDROPDOWNMENU_OPEN_MENU == "WorldMapZoneDropDown" and list:GetScale() == 1,
-      "and Zone's after them: Kalimdor's zones")
-UI.Click(Arrow("bar"))
-Check(ListSays("Retro", "Neo*") and env.UIDROPDOWNMENU_OPEN_MENU == b.name, "ours over Zone's open list: ours")
-Check(OnlyScale() and SameFunctions(fns) and SameScripts(scripts) and NoErrors(),
-      "all along, nothing of the game's changed but the list's scale; no function or script of the game's replaced (" .. Touched() .. ")")
-CloseMap()
-Check(not list:IsShown(), "the map closed with our list open: the list closes with it")
-
--- ---- the windowed map (this client's minimised one), in the client's own order ----
-OpenMap()
-env.WorldMapFrame_Minimize()
-Check(env.WORLDMAP_WINDOWED == 1 and env.WorldMapFrame:IsVisible() and env.WorldMapContinentDropDown:GetAlpha() == 0 and
-      not m:IsShown() and not b:IsShown() and NoErrors(),
-      "the open map minimised (shown again before WORLDMAP_WINDOWED is set): ours hidden with Continent and Zone, never too big in the window")
-UI.Frame()
-Check(not m:IsShown() and panel.scripts.OnUpdate == nil, "its first frame: still hidden, and nothing left running each frame")
-CloseMap()
-OpenMap()
-Check(not m:IsShown() and not b:IsShown(), "the windowed map opened again: hidden")
-Slash("bar")
-Check(world.cvars.CinderLoadStyle == "parchment retro discovered" and Said("loading bar Retro"), "/cinderload with the windowed map: still there")
-env.WorldMapFrame_Maximize()
-local mb2 = Boxed(m)
-Check(env.WORLDMAP_WINDOWED == 0 and m:IsVisible() and b:IsVisible() and Near(mb2.l, 32) and Near(mb2.t, 35) and
-      env[b.name .. "Text"].text == "Retro" and NoErrors(), "maximised again: shown in their place, the choice made meanwhile showing")
-CloseMap()
-env.WorldMapFrame_Minimize()                                             -- (closed: the client's way at login when saved so)
-OpenMap()
-Check(not m:IsShown(), "minimised while closed, then opened: hidden")
-env.WorldMapFrame_Maximize()
-Check(m:IsVisible(), "and maximised: shown")
-env.WorldMapContinentDropDown:SetAlpha(0)                                 -- (an add-on hiding the map's top row after it shows)
-UI.Frame()
-Check(not m:IsShown(), "the map's top row hidden by something after it showed: ours too, on the next frame")
-env.WorldMapContinentDropDown:SetAlpha(1)
-CloseMap()
-OpenMap()
-Check(m:IsShown(), "and back when it is back")
-
--- ---- a map made a movable window by an add-on (ShaguTweaks' WorldMap Window, pfUI's map) ----
-env.WorldMapFrame:SetScale(0.85)
-env.WorldMapFrame:ClearAllPoints()
-env.WorldMapFrame:SetPoint("CENTER", env.UIParent, "CENTER", 0, 30)
-env.WorldMapFrame:SetWidth(1017)
-env.WorldMapFrame:SetHeight(723)
-CloseMap()
-OpenMap()
-local mb3 = Boxed(m)
-UI.Click(Arrow("map"))
-Check(m:IsVisible() and Near(mb3.l, 32) and Near(mb3.t, 35) and Near(m:GetEffectiveScale(), 0.85) and Near(list:GetScale(), 0.85) and
-      ListSays("Parchment*", "Satellite") and NoErrors(), "the map a window at 0.85: ours in the same place on it, at its size, the list too")
-UI.Click(Arrow("map"))
-env.WorldMapFrame:SetScale(1)
-env.WorldMapFrame:SetAllPoints()
-
--- ---- /cinderload ----
 Slash("")
-local said = world.chat[1]
-Check(said and said.text == "CinderLoad: loading map Parchment, loading bar Retro, map areas Discovered. Type /cinderload map, /cinderload bar or /cinderload areas to switch." and
-      said.r == 1 and said.g == 1 and said.b == 0, "/cinderload: the choice, in the system's yellow, as the mock has it")
+local p = P()
+Check(p and p:IsVisible() and p.parent == env.UIParent and p.kind == "Frame" and table.getn(world.chat) == 0 and world.sounds[1] == "igMainMenuOpen" and NoErrors(),
+      "/cinderload alone: the window opens over the game (its own frame on UIParent), with the game's open sound, nothing said")
+Check(p.strata == "DIALOG" and p.toplevel and p.movable and p.clamped and p.mouse and p.w == 760 and p.h == 608,
+      "a dialog: 760 x 608 as the mockup, on top, movable, kept on the screen, taking the mouse (no click through to the world)")
+local cx, cy = p:GetCenter()
+local ux, uy = env.UIParent:GetCenter()
+Check(Near(cx, ux) and Near(cy, uy + 40), "it opens in the middle of the screen, a little high")
+local bd = p.backdrop
+Check(bd and bd.edgeFile == "Interface\\DialogFrame\\UI-DialogBox-Border" and bd.edgeSize == 32 and bd.insets.left == 11 and bd.insets.top == 12 and
+      p.backdropColor[1] == 0 and Near(p.backdropColor[4], 0.88), "the client's dialog border (UI-DialogBox-Border, 32), its black 88% opaque (the plus)")
+local head = P("Title")
+local htex = {}
+for _, k in ipairs(head.kids) do if k.kind == "Texture" and k.texture then table.insert(htex, k) end end
+Check(table.getn(htex) == 3 and htex[1].texture == "Interface\\DialogFrame\\UI-DialogBox-Header" and At(head, 280, -16, 200, 48) and
+      Near(htex[1].texcoord[1], 59 / 256) and Near(htex[3].texcoord[2], 196 / 256) and head.drag == "LeftButton" and head.mouse,
+      "the title: the client's dialog header in three (its caps kept, its middle stretched), 200 wide over the top edge, dragged by the left button")
+local title = env.CinderLoad.ui.title
+Check(title.text == "CinderLoad" and title.fontFile == "Fonts\\MORPHEUS.TTF" and title.size == 18 and title.color[1] == 1 and Near(title.color[2], 0.82),
+      "its word, \"CinderLoad\", in the client's MORPHEUS at 18, gold")
+Check(At(P("Close"), 724, 4, 32, 32) and P("Close").kind == "Button" and env[P("Close").name] and
+      (function() for _, k in ipairs(P("Close").kids) do if k.role == "normal" then return k.texture == "Interface\\Buttons\\UI-Panel-MinimizeButton-Up" end end end)(),
+      "the close X: the client's UIPanelCloseButton at the top right")
+local present = 0
+for _, f in ipairs(env.UISpecialFrames) do if f == "CinderLoadPanel" then present = present + 1 end end
+Check(present == 1, "Escape closes it as it closes the game's own windows (one entry in UISpecialFrames)")
+-- every word: its size, the mockup's, and none smaller than 12
+local small, texts, golds = 0, {}, {}
+for _, f in ipairs(world.made) do
+    if f.kind == "FontString" and not f.blizzard and f.text and f.text ~= "" then
+        if (f.size or 0) < 12 then small = small + 1 end
+        texts[f.text] = f
+    end
+end
+Check(small == 0 and texts["Loading map"] and texts["Loading map"].size == 14 and texts["Bar size"] and texts["Texture / effect"] and texts["Preview"] and
+      texts["Loading bar"] and texts["Loading map"].color[2] == 0.82 and texts["Parchment"] and texts["Parchment"].size == 13 and
+      texts["a still here; it moves in game"] and texts["Drag the title to move this window.  Each change shows from your next loading screen."],
+      "its words as the mockup's: the sections' titles gold at 14, the choices white at 13, nothing under 12 (larger type: the plus)")
+-- where everything is (the mockup's units)
+local u = env.CinderLoad.ui
+local cards = {}
+for _, c in ipairs(u.cards) do cards[c.key .. " " .. c.value] = c.button end
+Check(At(cards["map parchment"], 40, 96, 150, 80) and At(cards["map satellite"], 202, 96, 150, 80) and At(cards["bar retro"], 40, 400, 150, 31) and
+      At(cards["bar neo"], 202, 400, 150, 31) and At(cards["effect heat"], 410, 312, 96, 24) and At(cards["effect smooth"], 516, 312, 96, 24) and
+      At(cards["effect blade"], 622, 312, 96, 24), "the pictures where the mockup has them: the two maps' 150 x 80, the two bars' 150 x 31, the three effects' 96 x 24")
+Check(At(P("mapparchment"), 40, 184, 18, 18) and At(P("mapsatellite"), 202, 184, 18, 18) and At(P("areasdiscovered"), 40, 250, 18, 18) and
+      At(P("areasfull"), 202, 250, 18, 18) and At(P("barretro"), 40, 440, 18, 18) and At(P("barneo"), 202, 440, 18, 18),
+      "the radio buttons where the mockup has them (the client's UIRadioButtonTemplate)")
+Check(At(P("nearbySlider"), 42, 308, 308, 17) and At(P("thickSlider"), 410, 114, 308, 17) and At(P("widthSlider"), 410, 178, 308, 17) and
+      At(P("Whole"), 408, 222, 28, 28) and At(P("Colour"), 408, 362, 28, 28) and At(P("Preview"), 406, 448, 316, 88) and
+      At(P("Defaults"), 30, 568, 120, 26) and At(P("CloseButton"), 610, 568, 120, 26),
+      "the sliders, check boxes, preview and the two buttons where the mockup has them")
+Check(P("nearbySlider").backdrop.edgeFile == "Interface\\Buttons\\UI-SliderBar-Border" and env[P("nearbySlider").name .. "Thumb"].texture ==
+      "Interface\\Buttons\\UI-SliderBar-Button-Horizontal" and env[P("Defaults").name .. "Text"].text == "Defaults" and
+      env[P("CloseButton").name .. "Text"].text == "Close" and env[P("Whole").name .. "Text"].text == "Whole width of the screen",
+      "the client's own: OptionsSliderTemplate's bar and thumb, UIPanelButtonTemplate's red buttons, UICheckButtonTemplate's box")
+-- the choice held, shown
+local function Shows(map, areas, bar)
+    return P("map" .. map):GetChecked() and not P("map" .. (map == "parchment" and "satellite" or "parchment")):GetChecked() and
+           P("areas" .. areas):GetChecked() and not P("areas" .. (areas == "full" and "discovered" or "full")):GetChecked() and
+           P("bar" .. bar):GetChecked() and not P("bar" .. (bar == "retro" and "neo" or "retro")):GetChecked()
+end
+local function Gold(key, value)
+    for _, c in ipairs(u.cards) do
+        if c.key == key and (c.value == value) ~= (c.on == true) then return false end
+    end
+    return true
+end
+local function SliderSays(key, v, text)
+    local s = u.sliders[key]
+    return Near(s.slider:GetValue(), v) and s.value.text == text
+end
+Check(Shows("parchment", "discovered", "retro") and Gold("map", "parchment") and Gold("bar", "retro") and Gold("effect", "heat") and
+      SliderSays("nearby", 1200, "1200 yards") and SliderSays("thick", 100, "100%") and SliderSays("width", 30, "each bar's own") and
+      not P("Whole"):GetChecked() and P("Colour"):GetChecked() and u.words[1]:IsVisible() and not u.neoTitle:IsVisible() and
+      not P("QualityPulse"):IsVisible(), "the choice held shows: Parchment, Discovered, 1200 yards, Retro (its words), 100%, each bar's own width (Retro's on this screen), Heat in my class's colour")
+
+-- ---- every control, as a player uses it ----
+world.sounds = {}
+UI.Click(P("mapsatellite"))
+Check(CV() == Value("satellite retro discovered") and Shows("satellite", "discovered", "retro") and Gold("map", "satellite") and
+      world.sounds[1] == "igMainMenuOptionCheckBoxOn" and NoErrors(), "Satellite's radio: the CVar says so, its radio alone checked, its picture framed in gold")
+UI.Click(cards["map parchment"])
+Check(CV() == Value("parchment retro discovered") and Shows("parchment", "discovered", "retro") and Gold("map", "parchment"), "the parchment's picture clicked: chosen")
+UI.Click(P("areasfull"))
+Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retro"), "Full map's radio: the map's areas full")
+UI.Click(P("areasfull"))
+Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retro"), "Full map's radio again: still full (a radio, not a switch)")
+UI.Click(P("areasdiscovered"))
+Check(CV() == Value("parchment retro discovered"), "Discovered's radio: back")
+UI.Slide(P("nearbySlider"), 600)
+Check(CV() == Value("parchment retro discovered", "nearby 600 thick 100 width own whole off effect heat colour class quality pulse raw") and
+      SliderSays("nearby", 600, "600 yards"), "the zones nearby's slider to 600: \"600 yards\", the CVar's nearby 600")
+UI.Slide(P("nearbySlider"), 0)
+Check(string.find(CV(), " nearby 0 ", 1, true) and SliderSays("nearby", 0, "off"), "to its left end: off (nearby 0)")
+UI.Slide(P("nearbySlider"), 9000)
+Check(string.find(CV(), " nearby 4000 ", 1, true) and SliderSays("nearby", 4000, "4000 yards"), "past its right end: 4000 yards, the most")
+UI.Slide(P("nearbySlider"), 1234)
+Check(string.find(CV(), " nearby 1200 ", 1, true) and SliderSays("nearby", 1200, "1200 yards"), "between its steps: the nearest hundred yards (1234: 1200)")
+UI.Click(P("barneo"))
+Check(CV() == Value("parchment neo discovered") and Shows("parchment", "discovered", "neo") and Gold("bar", "neo") and not u.words[1]:IsVisible() and
+      u.neoTitle:IsVisible() and P("QualityPulse"):IsVisible() and P("QualityRaw"):GetChecked() and P("QualityPulse"):GetChecked() and
+      not P("QualityLiquid"):GetChecked() and not P("QualityUnstable"):GetChecked(), "Neo's radio: chosen; Retro's words give way to Neo's four qualities, Pulse and Raw ticked (today's)")
+Check(At(P("QualityLiquid"), 40, 490, 26, 26) and At(P("QualityPulse"), 202, 490, 26, 26) and At(P("QualityUnstable"), 40, 516, 26, 26) and
+      At(P("QualityRaw"), 202, 516, 26, 26), "the four in the bar's box, two by two, where Retro's words were")
+UI.Click(P("QualityLiquid"))
+Check(string.find(CV(), " quality liquid pulse raw$") and P("QualityLiquid"):GetChecked(), "Liquid ticked: quality liquid pulse raw")
+UI.Click(P("QualityPulse"))
+Check(string.find(CV(), " quality liquid raw$") and not P("QualityPulse"):GetChecked(), "Pulse unticked: quality liquid raw")
+UI.Click(P("QualityLiquid")); UI.Click(P("QualityRaw"))
+Check(string.find(CV(), " quality none$"), "none ticked: quality none")
+UI.Click(P("QualityUnstable")); UI.Click(P("QualityPulse")); UI.Click(P("QualityRaw")); UI.Click(P("QualityLiquid"))
+Check(string.find(CV(), " quality liquid pulse unstable raw$"), "all four: liquid pulse unstable raw, in the DLL's order whatever the clicks'")
+UI.Click(P("QualityLiquid")); UI.Click(P("QualityUnstable"))
+UI.Click(cards["bar retro"])
+Check(CV() == Value("parchment retro discovered") and u.words[1]:IsVisible() and not P("QualityPulse"):IsVisible() and Gold("bar", "retro"),
+      "Retro's picture: chosen, its words back, Neo's qualities kept as they were (pulse raw)")
+UI.Slide(P("thickSlider"), 125)
+Check(string.find(CV(), " thick 125 ", 1, true) and SliderSays("thick", 125, "125%"), "the thickness slider to 125: \"125%\", thick 125")
+UI.Slide(P("thickSlider"), 10)
+Check(string.find(CV(), " thick 50 ", 1, true) and SliderSays("thick", 50, "50%"), "to its left end: 50%, the least")
+UI.Slide(P("thickSlider"), 999)
+Check(string.find(CV(), " thick 200 ", 1, true) and SliderSays("thick", 200, "200%"), "to its right end: 200%, the most")
+UI.Slide(P("thickSlider"), 127)
+Check(string.find(CV(), " thick 125 ", 1, true), "between its steps: the nearest 5% (127: 125)")
+UI.Slide(P("widthSlider"), 50)
+Check(string.find(CV(), " width 50 ", 1, true) and SliderSays("width", 50, "50% of the screen"), "the width slider to 50: \"50% of the screen\", width 50")
+UI.Slide(P("widthSlider"), 0)
+Check(string.find(CV(), " width 20 ", 1, true) and SliderSays("width", 20, "20% of the screen"), "to its left end: 20%, the least")
+UI.Slide(P("widthSlider"), 100)
+Check(string.find(CV(), " width 100 ", 1, true), "to its right end: 100%")
+UI.Slide(P("widthSlider"), 50)
+UI.Click(P("Whole"))
+Check(string.find(CV(), " width 50 whole on ", 1, true) and P("Whole"):GetChecked() and u.sliders.width.value.text == "the whole screen",
+      "Whole width of the screen ticked: whole on, the width kept under it, the slider says the whole screen")
+UI.Click(P("Whole"))
+Check(string.find(CV(), " width 50 whole off ", 1, true) and not P("Whole"):GetChecked() and u.sliders.width.value.text == "50% of the screen",
+      "unticked: whole off, back to its 50%")
+UI.Click(cards["effect smooth"])
+Check(string.find(CV(), " effect smooth ", 1, true) and Gold("effect", "smooth"), "Smooth's picture: effect smooth, framed in gold")
+UI.Click(cards["effect blade"])
+Check(string.find(CV(), " effect blade ", 1, true) and Gold("effect", "blade"), "Blade light's: effect blade")
+UI.Click(cards["effect heat"])
+Check(string.find(CV(), " effect heat ", 1, true) and Gold("effect", "heat"), "Heat's: effect heat")
+UI.Click(P("Colour"))
+Check(string.find(CV(), " colour ember ", 1, true) and not P("Colour"):GetChecked(), "In my class's colour unticked: colour ember (CinderLoad's own)")
+UI.Click(P("Colour"))
+Check(string.find(CV(), " colour class ", 1, true) and P("Colour"):GetChecked(), "ticked again: colour class")
+-- the preview: the bottom of the screen at 316 wide, the bar as the choice lays it
+local pv = u.preview
+local H = 316 * env.GetScreenHeight() / env.GetScreenWidth()
+local function Bar() return PB(pv.bar[1]), PB(pv.bar[2]), PB(pv.bar[3]) end
+local a1, a2, a3 = Bar()
+Check(pv.ground.texture == "Interface\\CinderLoad\\PreviewParchment" and pv.bar[2].texture == "Interface\\CinderLoad\\PreviewRetro" and
+      Near(a3.r - a1.l, 158) and Near(a1.b - a1.t, 42 / 720 * H * 1.25) and Near(a1.l - 406, 79) and Near(a2.l, a1.r) and Near(a3.l, a2.r),
+      "the preview: the parchment's foot, Retro's bar 125% thick and half the strip wide, its caps kept and its middle stretched")
+UI.Click(P("Whole"))
+a1, a2, a3 = Bar()
+Check(Near(a3.r - a1.l, 316) and Near(a1.l, 406), "whole width: the bar across the strip")
+UI.Click(P("Whole"))
+UI.Click(P("mapsatellite")); UI.Click(P("barneo"))
+a1, a2, a3 = Bar()
+Check(pv.ground.texture == "Interface\\CinderLoad\\PreviewSatellite" and pv.bar[2].texture == "Interface\\CinderLoad\\PreviewNeo" and
+      Near(a1.b - a1.t, 0.066 * H * 1.25), "Satellite and Neo: the living map's foot and the blade's frame band (0.066 of the screen's height)")
+-- Defaults
+world.sounds = {}
+UI.Click(P("Defaults"))
+Check(CV() == Value("parchment retro discovered") and Shows("parchment", "discovered", "retro") and SliderSays("thick", 100, "100%") and
+      SliderSays("width", 30, "each bar's own") and SliderSays("nearby", 1200, "1200 yards") and P("Colour"):GetChecked() and not P("Whole"):GetChecked() and
+      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it began (the parchment, Discovered, 1200 yards, Retro, 100%, each bar's own, Heat, the class's colour, Pulse and Raw)")
+-- moved by its title
+local l0, t0 = p:GetLeft(), p:GetTop()
+Check(UI.Drag(P("Title"), 100, -50) and Near(p:GetLeft(), l0 + 100 / 0.82) and Near(p:GetTop(), t0 - 50 / 0.82) and NoErrors(),
+      "dragged by its title: it moves with the mouse")
+Check(not UI.Drag(p, 100, 0) and not UI.Drag(P("Preview"), 100, 0) and Near(p:GetLeft(), l0 + 100 / 0.82), "dragged anywhere else: it stays")
+world.sounds = {}
+UI.Click(P("CloseButton"))
+Check(not p:IsShown() and world.sounds[1] == "igMainMenuClose", "Close: shut, with the game's close sound")
+Slash("")
+Check(p:IsShown() and Near(p:GetLeft(), l0 + 100 / 0.82), "/cinderload again: open where it was left")
+UI.Click(P("Close"))
+Check(not p:IsShown(), "the close X: shut")
+Slash("")
+p:Hide()                                                    -- (Escape: the game's CloseSpecialWindows hides each in UISpecialFrames)
+Check(not p:IsShown() and NoErrors(), "Escape: shut")
+
+-- ---- /cinderload's words, as before ----
+Slash("")
 Slash("map")
-Check(world.cvars.CinderLoadStyle == "satellite retro discovered" and env[m.name .. "Text"].text == "Satellite" and
-      Said("CinderLoad: loading map Satellite, loading bar Retro, map areas Discovered, from your next loading screen."), "/cinderload map: switched; the drop-down follows")
+Check(CV() == Value("satellite retro discovered") and Shows("satellite", "discovered", "retro") and
+      Said("CinderLoad: loading map Satellite, loading bar Retro, map areas Discovered, from your next loading screen."), "/cinderload map: switched; the open window follows")
 Slash("bar")
-Check(world.cvars.CinderLoadStyle == "satellite neo discovered", "/cinderload bar: switched")
+Check(CV() == Value("satellite neo discovered") and Shows("satellite", "discovered", "neo"), "/cinderload bar: switched")
 Slash("map")
 Slash("bar")
-Check(world.cvars.CinderLoadStyle == "parchment retro discovered", "/cinderload map, bar: back")
+Check(CV() == Value("parchment retro discovered"), "/cinderload map, bar: back")
 Slash("map satellite")
-Check(world.cvars.CinderLoadStyle == "satellite retro discovered", "/cinderload map satellite: set")
+Check(CV() == Value("satellite retro discovered"), "/cinderload map satellite: set")
 Slash("map satellite")
-Check(world.cvars.CinderLoadStyle == "satellite retro discovered", "/cinderload map satellite again: still satellite (set, not switched)")
+Check(CV() == Value("satellite retro discovered"), "/cinderload map satellite again: still satellite (set, not switched)")
 Slash("  BAR   Neo ")
-Check(world.cvars.CinderLoadStyle == "satellite neo discovered", "/cinderload BAR Neo (any case, any spaces): set")
+Check(CV() == Value("satellite neo discovered"), "/cinderload BAR Neo (any case, any spaces): set")
 Slash("parchment")
-Check(world.cvars.CinderLoadStyle == "parchment neo discovered", "/cinderload parchment (the value alone): set")
+Check(CV() == Value("parchment neo discovered"), "/cinderload parchment (the value alone): set")
+Slash("map parchment")
+Slash("bar retro")
+Check(CV() == Value("parchment retro discovered"), "/cinderload map parchment, /cinderload bar retro: set")
+Slash("satellite")
+Slash("neo")
+Slash("retro")
+Check(CV() == Value("satellite retro discovered"), "/cinderload satellite, neo, retro (each value alone): set")
 Slash("areas")
-Check(world.cvars.CinderLoadStyle == "parchment neo full" and env[a.name .. "Text"].text == "Full map" and
-      Said("CinderLoad: loading map Parchment, loading bar Neo, map areas Full map, from your next loading screen."), "/cinderload areas: switched; the drop-down follows")
+Check(CV() == Value("satellite retro full") and Shows("satellite", "full", "retro") and
+      Said("CinderLoad: loading map Satellite, loading bar Retro, map areas Full map, from your next loading screen."), "/cinderload areas: switched; the window follows")
 Slash("areas full")
-Check(world.cvars.CinderLoadStyle == "parchment neo full", "/cinderload areas full: set")
+Check(CV() == Value("satellite retro full"), "/cinderload areas full: set")
 Slash("discovered")
-Check(world.cvars.CinderLoadStyle == "parchment neo discovered", "/cinderload discovered (the value alone): set")
+Check(CV() == Value("satellite retro discovered"), "/cinderload discovered (the value alone): set")
 Slash("full")
 Slash("Areas  Discovered")
-Check(world.cvars.CinderLoadStyle == "parchment neo discovered", "/cinderload Areas Discovered (any case, any spaces): set")
+Check(CV() == Value("satellite retro discovered"), "/cinderload Areas Discovered (any case, any spaces): set")
+Slash("areas discovered")
+Slash("map parchment")
 local strict = true
 for _, bad in ipairs({ "map=satellite", "map: satellite", "map, satellite", "map 2", "map satellite now", "bar blue", "zoom", "neo retro",
                        "map map", "help", "map=", "bar neo neo", "retro please", "areas all", "areas full full", "full map", "map full",
-                       "areas=full", "discovered full" }) do
+                       "areas=full", "discovered full", "thick 125", "open", "panel" }) do
     Slash(bad)
-    local held = world.cvars.CinderLoadStyle == "parchment neo discovered" and env.CinderLoad.map == "parchment" and env.CinderLoad.bar == "neo"
-    if not (held and env.CinderLoad.areas == "discovered" and Said("nothing changed:") and Said("/cinderload areas full")) then strict = false; print("/cinderload " .. bad .. " was taken") end
+    local held = CV() == Value("parchment retro discovered") and env.CinderLoad.map == "parchment" and env.CinderLoad.bar == "retro"
+    if not (held and env.CinderLoad.areas == "discovered" and Said("nothing changed:") and Said("/cinderload areas full") and
+            Said("type /cinderload to open its window")) then strict = false; print("/cinderload " .. bad .. " was taken") end
 end
-Check(strict, "/cinderload strict: \"map=satellite\", \"map: satellite\", \"map, satellite\", \"map 2\", a word too many, a word not ours: nothing changed, how to say it")
-
--- ---- a fault: off, the map and its drop-downs as ever ----
+Check(strict, "/cinderload strict: \"map=satellite\", \"map: satellite\", a word too many, a word not ours: nothing changed, how to say it (the window's way first)")
+Check(MapUntouched() and Touched() == "" and SameFunctions(fns) and NoErrors(),
+      "all along, nothing on the world map and nothing of the game's changed (" .. Touched() .. ")")
 OpenMap()
-local add = env.UIDropDownMenu_AddButton
-env.UIDropDownMenu_AddButton = function(info, level)                     -- (a fault in ours: our menu's button refused)
-    if env.UIDROPDOWNMENU_INIT_MENU == m.name then error("refused") end
-    return add(info, level)
+Check(env.WorldMapFrame:IsVisible() and not env.CinderLoadMapPanel and MapUntouched() and NoErrors(), "the world map opened: the map's own, nothing of ours on it")
+CloseMap()
+
+-- ---- the look the DLL holds, at a login ----
+Fresh({ cvar = "?" })
+Run(setupLook)
+Check(CV() == Value("parchment retro discovered", LOOK) and NoErrors(), "made with a look held (style.txt's): the CVar says it back word for word")
+Slash("")
+u = env.CinderLoad.ui
+Check(SliderSays("nearby", 600, "600 yards") and SliderSays("thick", 150, "150%") and SliderSays("width", 60, "the whole screen") and
+      P("Whole"):GetChecked() and not P("Colour"):GetChecked() and Gold("effect", "blade") and NoErrors(), "the window shows it: 600 yards, 150%, the whole screen (60% under it), Blade light, not the class's colour")
+UI.Click(P("barneo"))
+Check(P("QualityLiquid"):GetChecked() and P("QualityUnstable"):GetChecked() and not P("QualityPulse"):GetChecked() and not P("QualityRaw"):GetChecked(),
+      "and Neo's qualities held: Liquid and Unstable")
+env.CinderLoad.ReadLook("thick 9999 width 3 nearby -5 whole maybe effect fire colour red quality raw pulse banana thick")
+Check(env.CinderLoad.thick == 200 and env.CinderLoad.width == 20 and env.CinderLoad.nearby == 0 and env.CinderLoad.whole and env.CinderLoad.effect == "blade" and
+      env.CinderLoad.ember and env.CinderLoad.quality.raw and env.CinderLoad.quality.pulse and not env.CinderLoad.quality.liquid,
+      "a look read with numbers out of range held to them, words not ours passed over (kept as they were)")
+
+-- ---- the pack older than the window: dark plates where its pictures go ----
+Fresh({ cvar = "?", noPack = true })
+Run(setupSrc)
+Slash("")
+u = env.CinderLoad.ui
+Check(P():IsVisible() and u.preview.ground.color and not u.preview.ground.texture and u.cards[1].picture.color and NoErrors(),
+      "the pictures not in the client (an older pack): dark plates in their place, everything else as ever")
+
+-- ---- a fault: off, the game's UI as ever ----
+Fresh({ cvar = "?" })
+Run(setupSrc)
+Slash("")
+local set = env.SetCVar
+local refused = nil
+env.SetCVar = function(n, v)                                             -- (a fault in ours: its first word refused)
+    if not refused and string.find(tostring(v), "satellite", 1, true) then refused = 1; error("refused") end
+    return set(n, v)
 end
 world.errors = {}
-UI.Click(Arrow("map"))
-env.UIDropDownMenu_AddButton = add
-Check(env.CinderLoad.broken and not panel:IsShown() and not m:IsVisible() and world.cvars.CinderLoadStyle == "parchment neo discovered fault" and
-      Said("turned themselves off") and Said("refused") and NoErrors(),
-      "a fault in ours: off and hidden, the CVar says \"fault\", the chat says where; no error left to the game")
-UI.Run(Arrow("map"), "OnClick")                                       -- (clicked by something else while hidden: Button:Click())
-Check(not list:IsShown() and NoErrors(), "after a fault: its arrow clicked anyway (hidden, by something else) does nothing")
-Slash("map")
-Check(world.cvars.CinderLoadStyle == "parchment neo discovered fault" and Said("off until the game starts again"), "after a fault: /cinderload says it is off")
-UI.Click(cArrow)
-Check(ListSays("Kalimdor*", "Eastern Kingdoms") and PickInList("Eastern Kingdoms") and world.map.c == 2 and NoErrors(),
-      "after a fault: Continent's drop-down as ever")
-CloseMap()
-
--- a fault in the client's own drop-down code while ours opens: caught as ours, off, never left to the game
+UI.Click(P("mapsatellite"))
+env.SetCVar = set
+Check(env.CinderLoad.broken and not P():IsShown() and CV() == Value("satellite retro discovered") .. " fault" and Said("turned itself off") and
+      Said("refused") and NoErrors(), "a fault in ours: off and hidden, the CVar says \"fault\", the chat says where; no error left to the game")
+Slash("")
+Check(not P():IsShown() and Said("off until the game starts again"), "after a fault: /cinderload says it is off, and opens nothing")
+UI.Run(P("mapparchment"), "OnClick")
+Check(string.find(CV(), " fault$") and NoErrors(), "after a fault: a control clicked anyway (by something else) does nothing")
 Fresh({ cvar = "?" })
 Run(setupSrc)
-OpenMap()
-local toggle = env.ToggleDropDownMenu
-env.ToggleDropDownMenu = function(level, value, frame, a, x, y)
-    if frame == D("map") then error("the list broke") end
-    return toggle(level, value, frame, a, x, y)
-end
-UI.Click(Arrow("map"))
-env.ToggleDropDownMenu = toggle
-Check(env.CinderLoad.broken and not D("map"):IsVisible() and world.cvars.CinderLoadStyle == "parchment retro discovered fault" and Said("the list broke") and
-      NoErrors(), "a fault in the client's drop-down code as ours opens: caught, off, said; no error left to the game")
-CloseMap()
+Slash("")
+env.CinderLoad.ui.preview.bar[1].SetTexCoord = function() error("the art broke") end
+UI.Slide(P("thickSlider"), 150)
+Check(env.CinderLoad.broken and not P():IsShown() and string.find(CV(), " fault$") and Said("the art broke") and NoErrors(),
+      "a fault while the window redraws: caught, off, said; no error left to the game")
 
--- ---- made again in the same UI; a /reload; made while a list is open ----
+-- ---- made again in the same UI; a /reload ----
 Fresh({ cvar = "?" })
 Run(setupSrc)
-local creates, m1, p1 = world.creates, D("map"), env.CinderLoadMapPanel
+Slash("")
+local creates, p1 = world.creates, P()
 Run(setupSrc)
-OpenMap()
-Check(world.creates == creates and table.getn(env.CinderLoad.drops) == 3 and env.CinderLoadMapPanel == p1 and m1 == D("map") and
-      world.cvars.CinderLoadStyle == "parchment retro discovered" and D("map"):IsVisible() and NoErrors(),
-      "made again in the same UI: the same frames, three drop-downs, the choice the DLL sent")
+Slash("")
+Check(world.creates == creates and P() == p1 and P():IsShown() and CV() == Value("parchment retro discovered") and NoErrors(),
+      "made again in the same UI: the same window, nothing made twice, the choice the DLL sent")
 Fresh({ cvar = "?" })
 Run(setupSN)
-OpenMap()
-Check(world.cvars.CinderLoadStyle == "satellite neo discovered" and env[D("map").name .. "Text"].text == "Satellite" and env[D("bar").name .. "Text"].text == "Neo",
-      "a /reload after satellite and neo were chosen: made showing them")
+Slash("")
+Check(CV() == Value("satellite neo discovered") and Shows("satellite", "discovered", "neo") and NoErrors(), "a /reload after Satellite and Neo were chosen: the window shows them")
 Fresh({ cvar = "?" })
 Run(setupFull)
-OpenMap()
-Check(world.cvars.CinderLoadStyle == "parchment retro full" and env[D("areas").name .. "Text"].text == "Full map" and NoErrors(),
-      "a /reload after the full map was chosen: made showing it")
-Fresh({ cvar = "?" })
-OpenMap()
-UI.Click(env.WorldMapContinentDropDownButton)
-Run(setupSrc)
-Check(ListSays("Kalimdor", "Eastern Kingdoms") and NoErrors(), "made while Continent's list is open: that list left whole")
-UI.Click(env.WorldMapContinentDropDownButton)
-UI.Click(Arrow("map"))
-Check(ListSays("Parchment*", "Satellite"), "and ours opens after it")
+Slash("")
+Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retro") and NoErrors(), "a /reload after the full map was chosen: shows it")
 
--- ---- without the world map's frame, or its guide; without the CVar ----
+-- ---- without the world map at all; without the CVar ----
 Fresh({ cvar = "?", noMap = true })
 ok, err = Run(setupSrc)
-Check(ok and world.cvars.CinderLoadStyle == "parchment retro discovered" and not env.CinderLoadMapPanel and type(env.SlashCmdList.CINDERLOAD) == "function",
-      "no world map frame (an add-on took it away): no drop-downs, /cinderload still")
-Fresh({ cvar = "?", noGuide = true })
-Run(setupSrc)
-Check(env.CinderLoadMapPanel.points[1].rel == env.WorldMapFrame and NoErrors(), "no positioning guide: at the map frame's own top left")
+Slash("")
+Check(ok and CV() == Value("parchment retro discovered") and P() and P():IsShown() and NoErrors(), "no world map frame (an add-on took it away): the window works the same")
 Fresh({ cvar = false })
 ok, err = Run(setupSrc)
-Check(ok and env.CinderLoad.broken and Said("turned themselves off"), "no CVar: the chunk never raises; off, and the chat says why")
+Check(ok and env.CinderLoad.broken and Said("turned itself off"), "no CVar: the chunk never raises; off, and the chat says why")
 
--- for the look: what /cinderload says, then /cinderload map (a fresh session, the defaults)
+-- for the picture: the window's frame tree as the harness holds it (tools/render_panel.py draws it with the client's art)
 if opt.layout then
     Fresh({ cvar = "?" })
     Run(setupSrc)
-    local f = io.open(opt.layout, "a")
-    for _, msg in ipairs({ "", "map" }) do
-        Slash(msg)
-        for _, t in ipairs(world.chat) do
-            f:write("chat\t/cinderload" .. (msg ~= "" and " " .. msg or "") .. "\t" .. t.text .. "\t" .. t.r .. " " .. t.g .. " " .. t.b .. "\n")
-        end
+    Slash("")
+    UI.Slide(P("nearbySlider"), 600)
+    UI.Slide(P("thickSlider"), 125)
+    UI.Slide(P("widthSlider"), 50)
+    local f = io.open(opt.layout, "w")
+    local function Q(v) if v == nil then return "" end; return string.gsub(tostring(v), "[\t\n]", " ") end
+    local function L(t) if not t then return "" end; local o = {}; for i = 1, table.getn(t) do o[i] = Q(t[i]) end; return table.concat(o, " ") end
+    for i, r in ipairs(world.made) do
+        local l, b, rr, t = UI.Rect(r)
+        local bdp = r.backdrop
+        f:write(table.concat({ Q(i), Q(r.kind), Q(r.name), Q(r.parent and r.parent.id0), Q(r.role), Q(r.layer), Q(r.strata), Q(r.level),
+                               r:IsVisible() and "1" or "0", Q(l), Q(b), Q(rr), Q(t), Q(r.texture), L(r.texcoord), L(r.color), Q(r.blend),
+                               Q(r.text), Q(r.fontFile or (r.kind == "FontString" and "Fonts\\FRIZQT__.TTF" or nil)), Q(r.size), Q(r.justifyH),
+                               r.checked and "1" or "0", bdp and Q(bdp.bgFile) or "", bdp and Q(bdp.edgeFile) or "", bdp and Q(bdp.edgeSize) or "",
+                               bdp and bdp.insets and L({ bdp.insets.left, bdp.insets.right, bdp.insets.top, bdp.insets.bottom }) or "",
+                               L(r.backdropColor), L(r.backdropBorderColor), Q(r.min), Q(r.max), Q(r.value), Q(r:GetEffectiveScale()) }, "\t") .. "\n")
+        r.id0 = i
     end
     f:close()
 end

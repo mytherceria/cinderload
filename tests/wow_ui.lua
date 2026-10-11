@@ -122,20 +122,21 @@ function R:EnableMouse(on) Note(self, "EnableMouse"); self.mouse = on and on ~= 
 function R:IsMouseEnabled() return self.mouse and 1 or nil end
 function R:EnableKeyboard(on) self.keyboard = on end
 function R:EnableMouseWheel(on) self.wheel = on end
-function R:SetMovable(on) Note(self, "SetMovable"); self.movable = on end
-function R:RegisterForDrag() end
+function R:SetMovable(on) Note(self, "SetMovable"); self.movable = on and on ~= 0 end
+function R:IsMovable() return self.movable and 1 or nil end
+function R:RegisterForDrag(b) self.drag = b end
 function R:RegisterForClicks() end
-function R:StartMoving() end
-function R:StopMovingOrSizing() end
+function R:StartMoving() if self.movable then world.moving = self end end
+function R:StopMovingOrSizing() if world.moving == self then world.moving = nil end end
 function R:SetClampedToScreen(on) self.clamped = on end
 function R:SetToplevel(on) self.toplevel = on end
 function R:RegisterEvent(e) self.events = self.events or {}; self.events[e] = 1 end
 function R:UnregisterEvent(e) if self.events then self.events[e] = nil end end
 function R:UnregisterAllEvents() self.events = {} end
 function R:SetHitRectInsets(l, r, t, b) self.hit = { l, r, t, b } end
-function R:SetBackdrop(b) self.backdrop = b end
-function R:SetBackdropColor() end
-function R:SetBackdropBorderColor() end
+function R:SetBackdrop(b) Note(self, "SetBackdrop"); self.backdrop = b end
+function R:SetBackdropColor(r, g, b, a) self.backdropColor = { r, g, b, a or 1 } end
+function R:SetBackdropBorderColor(r, g, b, a) self.backdropBorderColor = { r, g, b, a or 1 } end
 
 -- ---- layout ----
 local PT = { TOPLEFT = { 0, 1 }, TOP = { 0.5, 1 }, TOPRIGHT = { 1, 1 }, LEFT = { 0, 0.5 }, CENTER = { 0.5, 0.5 },
@@ -232,7 +233,14 @@ function R:CreateTexture(name, layer)
     t.layer = layer
     return t
 end
-function R:SetTexture(p) Note(self, "SetTexture"); self.texture = p end
+-- a file (true when the client has it: world.missing says which it has not) or a colour (r, g, b, a)
+function R:SetTexture(p, g, b, a)
+    Note(self, "SetTexture")
+    if type(p) == "number" then self.texture, self.color = nil, { p, g, b, a or 1 }; return 1 end
+    self.texture, self.color = p, nil
+    if p and world.missing and world.missing(p) then self.texture = nil; return nil end
+    return p and 1 or nil
+end
 function R:GetTexture() return self.texture end
 function R:SetTexCoord(a, b, c, d) self.texcoord = { a, b, c, d } end
 function R:SetVertexColor(r, g, b, a) self.vertex = { r, g, b, a } end
@@ -286,8 +294,24 @@ function R:SetNormalTexture(t) self.normalTexture = t end
 function R:SetPushedTexture(t) self.pushedTexture = t end
 function R:SetHighlightTexture(t) self.highlightTexture = t end
 function R:SetDisabledTexture(t) self.disabledTexture = t end
-function R:SetChecked(c) if c == 0 or c == false then c = nil end; self.checked = c end
+function R:SetChecked(c) if c == 0 or c == false then c = nil end; self.checked = c and 1 or nil end
 function R:GetChecked() return self.checked end
+-- ---- sliders (1.12's Slider: SetValue runs OnValueChanged, arg1 the value, when the value changes) ----
+function R:SetMinMaxValues(lo, hi) self.min, self.max = lo, hi end
+function R:GetMinMaxValues() return self.min, self.max end
+function R:SetValueStep(s) self.step = s end
+function R:GetValueStep() return self.step end
+function R:SetOrientation(o) self.orientation = o end
+function R:SetValue(v)
+    if self.min and v < self.min then v = self.min end
+    if self.max and v > self.max then v = self.max end
+    if self.value == v then return end
+    self.value = v
+    UI.Run(self, "OnValueChanged", v)
+end
+function R:GetValue() return self.value or self.min or 0 end
+function R:SetShadowColor(r, g, b, a) self.shadowColor = { r, g, b, a } end
+function R:SetShadowOffset(x, y) self.shadowOffset = { x, y } end
 
 -- ---- the client's templates, as its XML builds them ----
 local function Tex(parent, name, file, w, h)
@@ -325,6 +349,74 @@ function UI.DropDownTemplate(f)
     b.scripts.OnClick = function() env.ToggleDropDownMenu(); env.PlaySound("igMainMenuOptionCheckBoxOn") end
     f.scripts.OnHide = function() env.CloseDropDownMenus() end
 end
+-- the panel's templates, as the client's UIPanelTemplates.xml and OptionsFrameTemplates.xml build them (1.12.1): a
+-- button's textures are regions of its own with a role (normal, pushed, highlight, checked, disabled, thumb), drawn as
+-- the client draws them (the checked one only when checked; highlight and pushed only under the mouse)
+local function Art(f, role, file, tc)
+    local t = Tex(f, nil, file, 0, 0)
+    t.role, t.texcoord = role, tc
+    t.points = { { p = "TOPLEFT", rel = f, relp = "TOPLEFT", x = 0, y = 0 }, { p = "BOTTOMRIGHT", rel = f, relp = "BOTTOMRIGHT", x = 0, y = 0 } }
+    return t
+end
+UI.templates = {}
+UI.templates.UIPanelButtonTemplate = function(f)
+    local tc = { 0, 0.625, 0, 0.6875 }
+    Art(f, "normal", "Interface\\Buttons\\UI-Panel-Button-Up", tc)
+    Art(f, "pushed", "Interface\\Buttons\\UI-Panel-Button-Down", tc)
+    Art(f, "disabled", "Interface\\Buttons\\UI-Panel-Button-Disabled", tc)
+    Art(f, "highlight", "Interface\\Buttons\\UI-Panel-Button-Highlight", tc).blend = "ADD"
+    local t = f:CreateFontString(f.name .. "Text", "OVERLAY", "GameFontNormal")
+    t.justifyH = "CENTER"
+    t.points = { { p = "CENTER", rel = f, relp = "CENTER", x = 0, y = 0 } }
+    f.textRegion = t
+end
+UI.templates.UIPanelCloseButton = function(f)
+    f.w, f.h = 32, 32
+    Art(f, "normal", "Interface\\Buttons\\UI-Panel-MinimizeButton-Up")
+    Art(f, "pushed", "Interface\\Buttons\\UI-Panel-MinimizeButton-Down")
+    Art(f, "highlight", "Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight").blend = "ADD"
+    f.scripts.OnClick = function() world.env.HideUIPanel(world.env.this:GetParent()) end
+end
+UI.templates.UICheckButtonTemplate = function(f)
+    f.w, f.h = 32, 32
+    local t = f:CreateFontString(f.name .. "Text", "ARTWORK", "GameFontNormalSmall")
+    t.points = { { p = "LEFT", rel = f, relp = "RIGHT", x = -2, y = 0 } }
+    Art(f, "normal", "Interface\\Buttons\\UI-CheckBox-Up")
+    Art(f, "pushed", "Interface\\Buttons\\UI-CheckBox-Down")
+    Art(f, "highlight", "Interface\\Buttons\\UI-CheckBox-Highlight").blend = "ADD"
+    Art(f, "checked", "Interface\\Buttons\\UI-CheckBox-Check")
+    Art(f, "disabledchecked", "Interface\\Buttons\\UI-CheckBox-Check-Disabled")
+end
+UI.templates.UIRadioButtonTemplate = function(f)
+    f.w, f.h = 16, 16
+    local t = f:CreateFontString(f.name .. "Text", "BACKGROUND", "GameFontNormalSmall")
+    t.points = { { p = "LEFT", rel = f, relp = "RIGHT", x = 5, y = 0 } }
+    Art(f, "normal", "Interface\\Buttons\\UI-RadioButton", { 0, 0.25, 0, 1 })
+    Art(f, "highlight", "Interface\\Buttons\\UI-RadioButton", { 0.5, 0.75, 0, 1 }).blend = "ADD"
+    Art(f, "checked", "Interface\\Buttons\\UI-RadioButton", { 0.25, 0.5, 0, 1 })
+end
+UI.templates.OptionsSliderTemplate = function(f)
+    f.w, f.h, f.orientation = 128, 17, "HORIZONTAL"
+    f.hit = { 0, 0, -10, -10 }
+    f.backdrop = { bgFile = "Interface\\Buttons\\UI-SliderBar-Background", edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
+                   tile = 1, edgeSize = 8, tileSize = 8, insets = { left = 3, right = 3, top = 6, bottom = 6 } }
+    local t = f:CreateFontString(f.name .. "Text", "ARTWORK", "GameFontNormalSmall")
+    t.points = { { p = "BOTTOM", rel = f, relp = "TOP", x = 0, y = 0 } }
+    local lo = f:CreateFontString(f.name .. "Low", "ARTWORK", "GameFontHighlightSmall")
+    lo.text, lo.points = "LOW", { { p = "TOPLEFT", rel = f, relp = "BOTTOMLEFT", x = 2, y = 3 } }
+    local hi = f:CreateFontString(f.name .. "High", "ARTWORK", "GameFontHighlightSmall")
+    hi.text, hi.points = "HIGH", { { p = "TOPRIGHT", rel = f, relp = "BOTTOMRIGHT", x = -2, y = 3 } }
+    local th = Tex(f, f.name .. "Thumb", "Interface\\Buttons\\UI-SliderBar-Button-Horizontal", 32, 32)
+    th.role, th.points = "thumb", {}
+    f.scripts.OnEnter = function()
+        local this = world.env.this
+        if this.tooltipText then world.env.GameTooltip:SetOwner(this, "ANCHOR_RIGHT"); world.env.GameTooltip:SetText(this.tooltipText) end
+    end
+    f.scripts.OnLeave = function() world.env.GameTooltip:Hide() end
+end
+UI.templateKind = { UIPanelButtonTemplate = "Button", UIPanelCloseButton = "Button", UICheckButtonTemplate = "CheckButton",
+                    UIRadioButtonTemplate = "CheckButton", OptionsSliderTemplate = "Slider" }
+
 -- UIDropDownListTemplate and its 40 UIDropDownMenuButtonTemplate buttons (UIDropDownMenu.xml)
 local function DropDownList(i)
     local env = world.env
@@ -703,15 +795,21 @@ function UI.Fresh(opts)
     env.tContains = function(t, x) for _, v in pairs(t) do if v == x then return 1 end end end
     env.message = function(m) error("message(): " .. tostring(m)) end
     env.CreateFrame = function(kind, name, parent, template)
-        if kind ~= "Frame" and kind ~= "Button" and kind ~= "CheckButton" then error("CreateFrame: " .. tostring(kind)) end
+        if kind ~= "Frame" and kind ~= "Button" and kind ~= "CheckButton" and kind ~= "Slider" then error("CreateFrame: " .. tostring(kind)) end
         if template and not name then error("a template's $parent names need a name") end
+        if template and UI.templateKind[template] and UI.templateKind[template] ~= kind then
+            error("CreateFrame: " .. tostring(template) .. " is a " .. UI.templateKind[template] .. ", not a " .. tostring(kind))
+        end
         if type(parent) == "string" then parent = env[parent] end
         local f = New(kind, name, parent)
+        if kind ~= "Frame" then f.mouse = true end              -- (the client's buttons and sliders take the mouse)
         world.creates = (world.creates or 0) + 1
         if template == "UIDropDownMenuTemplate" then UI.DropDownTemplate(f)
+        elseif template and UI.templates[template] then UI.templates[template](f)
         elseif template then error("no such template here: " .. tostring(template)) end
         return f
     end
+    if opts.noPack then world.missing = function(p) return string.find(string.lower(p), "^interface\\cinderload\\") ~= nil end end
     env.PlaySound = function(s) table.insert(world.sounds, s) end
     env.SetCVar = function(n, v)
         if world.cvars[n] == nil then error("Couldn't find CVar named '" .. tostring(n) .. "'") end
@@ -828,6 +926,28 @@ function UI.Run50(src, name)               -- a chunk as FrameScript_Execute run
     return pcall(fn)
 end
 function UI.World() return world end
+-- a slider dragged to v, as the client does it: held to its range, on its steps, then OnValueChanged
+function UI.Slide(s, v)
+    if not (s:IsVisible() and s.mouse) then return false end
+    local step = s.step or 0
+    if step > 0 then v = math.floor((v - s.min) / step + 0.5) * step + s.min end
+    s:SetValue(v)
+    return true
+end
+-- a frame dragged by dx, dy (screen units, y up): its OnDragStart, the move (only a movable frame being moved, as the
+-- client's StartMoving: then held at its new place by its top left), its OnDragStop
+function UI.Drag(f, dx, dy)
+    if not (f:IsVisible() and f.mouse and f.drag) then return false end
+    UI.Run(f, "OnDragStart", "LeftButton")
+    local m = world.moving
+    if m then
+        local l, _, _, t = UI.Rect(m)
+        local es = m:GetEffectiveScale()
+        m.points = { { p = "TOPLEFT", rel = world.screen, relp = "BOTTOMLEFT", x = (l + dx) / es, y = (t + dy) / es } }
+    end
+    UI.Run(f, "OnDragStop")
+    return m ~= nil
+end
 -- where a region is, in the world map box's units (its 1024 x 768, from its top left, y down), as the mock measures
 function UI.Box(f)
     local l, b, r, t = UI.Rect(f)

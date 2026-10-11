@@ -5,9 +5,14 @@
 --   exec <n>              n bytes of Lua follow: run as FrameScript_Execute runs a chunk (an error caught, as its handler does)
 --   fresh                 a new UI (a login or a /reload): the CVar kept, everything else gone
 --   openmap, closemap, minimize, maximize
---   pick <key> <value>    the drop-down's arrow clicked, then that choice in its list
+--   open, close           /cinderload alone (the window); the window shut
+--   pick <key> <value>    a radio of the window's clicked (map, bar, areas), or an effect's picture (effect heat)
+--   slide <key> <value>   a slider of the window's dragged (nearby, thick, width)
+--   tick <name>           a check box of the window's clicked (Whole, Colour, QualityLiquid ...)
+--   drag                  the window dragged by its title
 --   slash <words>         /cinderload <words>
---   text <key>            info: the drop-down's words, and whether it shows
+--   text <key>            info: what that control shows, and whether the window shows
+--   map                   info: anything of ours on the world map, anything of the game's changed
 --   errors                info: the UI's Lua errors so far
 --   lua5.1 tests/lua_bridge.lua [framexml=<dir>]
 local here = string.gsub(arg[0], "[^/]*$", "")
@@ -62,24 +67,53 @@ while true do
         elseif cmd == "maximize" then
             env.WorldMapFrame_Maximize()
             UI.Frame()
-        elseif cmd == "pick" then
+        elseif cmd == "open" then
+            if env.SlashCmdList.CINDERLOAD then env.SlashCmdList.CINDERLOAD("") end
+        elseif cmd == "close" then
+            if env.CinderLoadPanel then env.CinderLoadPanel:Hide() end
+        elseif cmd == "pick" then                                   -- a radio of the window's (or an effect's picture)
             local _, _, key, value = string.find(rest, "^(%S+) (%S+)$")
-            local arrow = env["CinderLoadMap" .. tostring(key) .. "DropDownButton"]
             local picked = false
-            if arrow and UI.Click(arrow) and env.DropDownList1:IsShown() then
-                for j = 1, env.DropDownList1.numButtons do
-                    local b = env["DropDownList1Button" .. j]
-                    if b.value == value then picked = UI.Click(b) end
-                end
+            local CL = env.CinderLoad
+            local r = env["CinderLoadPanel" .. tostring(key) .. tostring(value)]
+            if r then picked = UI.Click(r)
+            elseif CL and CL.ui then
+                for _, c in ipairs(CL.ui.cards) do if c.key == key and c.value == value then picked = UI.Click(c.button) end end
             end
             table.insert(info, picked and "picked" or "not picked")
+        elseif cmd == "slide" then                                  -- a slider of the window's to a value
+            local _, _, key, value = string.find(rest, "^(%S+) (%S+)$")
+            local sl = env["CinderLoadPanel" .. tostring(key) .. "Slider"]
+            table.insert(info, sl and UI.Slide(sl, tonumber(value)) and "slid" or "not slid")
+        elseif cmd == "tick" then                                   -- a check box of the window's clicked
+            local c = env["CinderLoadPanel" .. rest]
+            table.insert(info, c and UI.Click(c) and (c:GetChecked() and "ticked" or "unticked") or "not there")
+        elseif cmd == "drag" then
+            local t = env.CinderLoadPanelTitle
+            table.insert(info, t and UI.Drag(t, 40, -20) and "moved" or "not moved")
+        elseif cmd == "text" then                                   -- what a control of the window's shows, and whether it shows
+            local CL = env.CinderLoad
+            local p = env.CinderLoadPanel
+            local out
+            if CL and CL.ui and CL.ui.sliders[rest] then out = CL.ui.sliders[rest].value:GetText()
+            elseif CL and CL.ui then
+                for _, r in ipairs(CL.ui.radios) do
+                    if r.key == rest and r.button:GetChecked() then out = env[r.button:GetName() .. "Text"]:GetText() end
+                end
+            end
+            if out then table.insert(info, tostring(out) .. (p:IsVisible() and " shown" or " hidden")) end
         elseif cmd == "slash" then
             world.chat = {}
             if env.SlashCmdList.CINDERLOAD then env.SlashCmdList.CINDERLOAD(rest) end
             for _, t in ipairs(world.chat) do table.insert(info, t.text) end
-        elseif cmd == "text" then
-            local d = env["CinderLoadMap" .. rest .. "DropDown"]
-            if d then table.insert(info, tostring(env[d:GetName() .. "Text"]:GetText()) .. (d:IsVisible() and " shown" or " hidden")) end
+        elseif cmd == "map" then                                    -- the world map: anything of ours on it
+            local n = 0
+            for k in pairs(env) do if type(k) == "string" and string.find(k, "^CinderLoadMap") then n = n + 1 end end
+            for _, f in ipairs(world.made) do
+                local q = f.parent
+                while q do if q == env.WorldMapFrame and not f.blizzard then n = n + 1 end; q = q.parent end
+            end
+            table.insert(info, "ours on the map " .. n .. ", touched " .. table.getn(world.touched))
         elseif cmd == "errors" then
             table.insert(info, tostring(table.getn(world.errors)) .. " " .. table.concat(world.errors, " | "))
         else

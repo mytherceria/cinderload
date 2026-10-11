@@ -9078,14 +9078,19 @@ static void TestSwitchesLua(void)
     snprintf(dir, sizeof dir, "%s/lua", g_root);
     mkdir(dir, 0755);
     static char chunk[sizeof kSwitchesLua + 420];
-    const struct { const char *name; int map, bar, full; } kOut[3] = { { "setup.lua", 1, 1, 0 }, { "setup-satellite-neo.lua", 0, 0, 0 },
-                                                                        { "setup-full.lua", 1, 1, 1 } };
-    for (int i = 0; i < 3; i++) {
+    const struct { const char *name; int map, bar, full, look; } kOut[4] = { { "setup.lua", 1, 1, 0, 0 }, { "setup-satellite-neo.lua", 0, 0, 0, 0 },
+                                                                              { "setup-full.lua", 1, 1, 1, 0 }, { "setup-look.lua", 1, 1, 0, 1 } };
+    Look was = g_look, held = LOOK_DEFAULT, other = { 150, 60, 1, LOOK_BLADE, 1, (int)(SABER_LIQUID | SABER_UNSTABLE) };
+    int near = g_nearYd;
+    for (int i = 0; i < 4; i++) {                        /* (the look and the reach the DLL holds: the defaults, or another) */
+        g_look = kOut[i].look ? other : held;
+        g_nearYd = kOut[i].look ? 600 : PARCH_NEAR_YD;
         snprintf(p, sizeof p, "%s/%s", dir, kOut[i].name);
         f = fopen(p, "wb");
         int len = LuaChunk(chunk, (int)sizeof chunk, kOut[i].map, kOut[i].bar, kOut[i].full);
         if (f) { fwrite(chunk, 1, (size_t)len, f); fclose(f); }
     }
+    g_look = was; g_nearYd = near;
     snprintf(p, sizeof p, "%s/probe.lua", dir);
     f = fopen(p, "wb");
     if (f) { fputs(kLuaProbe, f); fclose(f); }
@@ -9132,7 +9137,7 @@ static void TestSwitchesLua(void)
         else printf("  lua: %s\n", line);
     }
     int st = r ? pclose(r) : -1;
-    Check(r && done && st == 0 && seen >= 60, "the switches' Lua ran whole under the stubbed UI");
+    Check(r && done && st == 0 && seen >= 90, "the switches' Lua ran whole under the stubbed UI");
 }
 
 /* ---- the whole path, run (the skeptic's finding, 11 Oct: it had never run anywhere): the DLL's start, its thread's
@@ -9232,15 +9237,21 @@ static void TestSwitchesPath(void)
     /* a login: the first message taken makes the CVar, finds no switches, makes them in the game's UI */
     DWORD now = 20000;
     Pump(now);
-    ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, "parchment retro discovered");
-    Bridge("openmap");
+    static const char kDef[] = " nearby 1200 thick 100 width own whole off effect heat colour class quality pulse raw";
+    char want[300];
+    snprintf(want, sizeof want, "parchment retro discovered%s", kDef);
+    ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, want);
+    Bridge("open");
     Bridge("text map");
     ok &= BridgeSaid("Parchment shown");
-    Check(ok, "the whole path, a login: the DLL starts (the style the defaults), its thread's message is taken on the game's thread, which makes the CVar and the switches in the game's UI: the world map's drop-down says Parchment");
+    Bridge("map");
+    ok &= BridgeSaid("ours on the map 0, touched 0");
+    Check(ok, "the whole path, a login: the DLL starts (the style the defaults), its thread's message is taken on the game's thread, which makes the CVar and the switches in the game's UI; /cinderload opens the window, which says Parchment; nothing of ours on the world map");
 
-    /* Satellite picked on the world map: the CVar says so; the next message (a quarter second) keeps it; the next screen */
+    /* Satellite picked in the window: the CVar says so; the next message (a quarter second) keeps it; the next screen */
     Bridge("pick map satellite");
-    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "satellite retro discovered") && g_parchAsked == 1;
+    snprintf(want, sizeof want, "satellite retro discovered%s", kDef);
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, want) && g_parchAsked == 1;
     now += LUA_POLL_MS;
     Pump(now);
     ok &= g_parchAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar retro");
@@ -9248,7 +9259,7 @@ static void TestSwitchesPath(void)
     GameStep(0.0f, now + 10);
     ViewOpenFirst(1920, 1080, now + 20);
     ok &= !g_parchOn && g_barVanilla && g_vbN == 0;
-    Check(ok, "the whole path: Satellite picked from the drop-down, the CVar says so, the game's next message keeps it in style.txt, and the next loading screen is the living map");
+    Check(ok, "the whole path: Satellite picked in the window, the CVar says so, the game's next message keeps it in style.txt, and the next loading screen is the living map");
 
     /* the parchment picked a moment before a loading screen, no message between: that screen the parchment */
     Bridge("pick map parchment");
@@ -9260,7 +9271,8 @@ static void TestSwitchesPath(void)
 
     /* /cinderload bar in the chat */
     Bridge("slash bar");
-    ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, "parchment neo discovered");
+    snprintf(want, sizeof want, "parchment neo discovered%s", kDef);
+    ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, want);
     now += LUA_POLL_MS;
     Pump(now);
     ok &= g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "bar neo");
@@ -9270,9 +9282,10 @@ static void TestSwitchesPath(void)
     ok &= g_parchOn && !g_barVanilla;
     Check(ok, "the whole path: /cinderload bar in the chat, kept the same way; the next screen the parchment with the blade");
 
-    /* the full map picked on the world map: the CVar, the next message keeps it, the next screen paints the whole map */
+    /* the full map picked in the window: the CVar, the next message keeps it, the next screen paints the whole map */
     Bridge("pick areas full");
-    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "parchment neo full") && !g_mapFull;
+    snprintf(want, sizeof want, "parchment neo full%s", kDef);
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, want) && !g_mapFull;
     now += LUA_POLL_MS;
     Pump(now);
     ok &= g_mapFull == 1 && (t = Get(STYLE_REL)) && strstr(t, "areas full") && !g_parchFullOn;
@@ -9283,36 +9296,84 @@ static void TestSwitchesPath(void)
     Bridge("text areas");
     ok &= BridgeSaid("Full map shown");
     Bridge("slash areas");                                                /* (and back with /cinderload) */
-    ok &= BridgeSaid("map areas Discovered") && !strcmp(g_fkVal, "parchment neo discovered");
+    snprintf(want, sizeof want, "parchment neo discovered%s", kDef);
+    ok &= BridgeSaid("map areas Discovered") && !strcmp(g_fkVal, want);
     now += LUA_POLL_MS;
     Pump(now);
     g_dispNew = 1;
     GameStep(0.0f, now + 10);
     ViewOpenFirst(1920, 1080, now + 20);
     ok &= !g_mapFull && !g_parchFullOn && (t = Get(STYLE_REL)) && strstr(t, "areas discovered");
-    Check(ok, "the whole path, the map's areas: Full map picked from its drop-down, the CVar says so, the game's next message keeps it in style.txt, the next loading screen paints the whole map; /cinderload areas back to what was discovered the same way");
+    Check(ok, "the whole path, the map's areas: Full map picked in the window, the CVar says so, the game's next message keeps it in style.txt, the next loading screen paints the whole map; /cinderload areas back to what was discovered the same way");
+
+    /* the bar's look in the window: each slider and check box, the CVar, the next message keeps it in style.txt and in
+     * the DLL's own (g_look, g_nearYd), the next screen takes Neo's qualities */
+    Bridge("slide thick 125");
+    ok = BridgeSaid("slid");
+    Bridge("slide width 50");
+    Bridge("slide nearby 600");
+    Bridge("tick Whole");
+    ok &= BridgeSaid("ticked");
+    Bridge("pick effect blade");
+    Bridge("tick Colour");
+    ok &= BridgeSaid("unticked");
+    Bridge("tick QualityLiquid");
+    Bridge("tick QualityPulse");
+    ok &= !strcmp(g_fkVal, "parchment neo discovered nearby 600 thick 125 width 50 whole on effect blade colour ember quality liquid raw");
+    now += LUA_POLL_MS;
+    Pump(now);
+    ok &= g_look.thick == 125 && g_look.width == 50 && g_look.whole == 1 && g_look.effect == LOOK_BLADE && g_look.ember == 1 &&
+          g_look.quality == (int)(SABER_LIQUID | SABER_RAW) && g_nearYd == 600 && (t = Get(STYLE_REL)) &&
+          strstr(t, "\r\nnearby 600\r\nthick 125\r\nwidth 50\r\nwhole on\r\neffect blade\r\ncolour ember\r\nquality liquid raw\r\n") &&
+          LogSays("style: the zones nearby out to 600 yards, the bar's look thick 125, width 50, whole on, effect blade, colour ember, quality liquid raw");
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= g_saberStyle == (SABER_LIQUID | SABER_RAW) && g_parchNearOn == 600 && LogSays("  the view: the blade's qualities liquid raw");
+    Check(ok, "the whole path, the bar's look: the thickness, width and reach slid, the whole width and the class's colour ticked, Blade light and Neo's qualities picked in the window; the CVar carries them, the next message keeps them in style.txt and in the DLL's own; the next screen takes Neo's qualities and the reach");
 
     /* a /reload: the UI made anew; the probe finds no switches; made again from the choice held, showing it */
     Bridge("fresh");
     int setups = g_fkSetups;
     now += LUA_TICK_MS;
     Pump(now);
-    Bridge("openmap");
+    Bridge("open");
     Bridge("text bar");
-    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo discovered") && BridgeSaid("Neo shown");
+    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo discovered nearby 600 thick 125 width 50 whole on effect blade colour ember quality liquid raw") &&
+         BridgeSaid("Neo shown");
+    Bridge("text thick");
+    ok &= BridgeSaid("125% shown");
+    Bridge("text width");
+    ok &= BridgeSaid("the whole screen shown");
+    Bridge("text nearby");
+    ok &= BridgeSaid("600 yards shown");
+    Bridge("drag");
+    ok &= BridgeSaid("moved");
+    Bridge("openmap");
     Bridge("minimize");
-    Bridge("text map");
-    ok &= BridgeSaid("hidden");
     Bridge("maximize");
     Bridge("text map");
     ok &= BridgeSaid("Parchment shown");
-    Check(ok, "the whole path: a /reload, the switches made again from what the DLL holds (the drop-downs say it); the map minimised, they hide with its own; maximised, back");
+    Bridge("map");
+    ok &= BridgeSaid("ours on the map 0, touched 0");
+    Bridge("closemap");
+    Bridge("tick Whole");                                                /* (back as they were, for what follows) */
+    Bridge("tick Colour");
+    Bridge("pick effect heat");
+    Bridge("tick QualityLiquid");
+    Bridge("tick QualityPulse");
+    Bridge("slide thick 100");
+    Bridge("slide nearby 1200");
+    now += LUA_POLL_MS;
+    Pump(now);
+    Check(ok, "the whole path: a /reload, the window made again from what the DLL holds (Neo, 125%, the whole screen, 600 yards: the look back from style.txt's own, through the chunk); dragged by its title; the world map minimised and maximised, nothing of ours on it");
 
     /* Retro picked in the game's last moment, then it quits: kept (its WM_QUIT) */
     Bridge("pick bar retro");
+    Bridge("slide width 70");
     MSG quit = { shim_game, WM_QUIT, 0, 0, 0, { 0, 0 } };
     shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
-    ok = (t = Get(STYLE_REL)) && strstr(t, "map parchment\r\nbar retro");
+    ok = (t = Get(STYLE_REL)) && strstr(t, "map parchment\r\nbar retro") && strstr(t, "\r\nwidth 70\r\n");
     Bridge("errors");
     ok &= BridgeSaid("0 ");
     BridgeClose();
@@ -9330,13 +9391,16 @@ static void TestSwitchesPath(void)
     g_luaExec = BridgeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
     now += 60000;
     Pump(now);
-    Bridge("openmap");
+    Bridge("open");
     Bridge("text map");
-    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && !strcmp(g_fkVal, "parchment retro discovered") && BridgeSaid("Parchment shown");
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && g_look.width == 70 && BridgeSaid("Parchment shown") &&
+          !strcmp(g_fkVal, "parchment retro discovered nearby 1200 thick 100 width 70 whole off effect heat colour class quality pulse raw");
     Bridge("text bar");
     ok &= BridgeSaid("Retro shown");
+    Bridge("text width");
+    ok &= BridgeSaid("70% of the screen shown");
     BridgeClose();
-    Check(ok, "the whole path, the next session: the style from style.txt at start, the switches made from it (an old value of the CVar in Config.wtf never counts), the drop-downs saying it");
+    Check(ok, "the whole path, the next session: the style from style.txt at start (the look with it), the switches made from it (an old value of the CVar in Config.wtf never counts), the window saying it");
 
     g_viewOn = 0; g_viewLive = 0; shim_wine = wine; g_pzN = pzN; g_map.ok = 0; g_driftOn = 0;
     g_parchOn = 0; g_barVanilla = 0; g_class = 0;

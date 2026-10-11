@@ -12827,10 +12827,9 @@ static void StylePick(void)
     }
 }
 
-/* ---- the world map's switches (his rule, 10 Oct 2026: on the world map, M, and as /cinderload; Blizzard's own look;
- * "if this breaks, the player still has the normal world map"; his form, 10 Oct night: drop-downs as the map's own
- * Continent and Zone, "Loading map" and "Loading bar", at the left end of its top bar; and a third the same way, "Map
- * areas", 11 Oct: "add the switch to 0.3.0 too") ----
+/* ---- the switches: the /cinderload window (his design, 11 Oct 2026, in place of the world map's drop-downs of 10 Oct:
+ * "you type that and a moveable vanilla-plus looking menu pops up on screen"; the world map is CinderMap's), the
+ * client's own art and templates, "if this breaks, the player still has" the game's own UI ----
  * The release is the DLL and its four packs, so there is no add-on: dll/switches.lua (switches_lua.h) is run inside the
  * game by the client's own FrameScript_Execute, the way its RunScript runs a line, only on the game's own thread, in its
  * message pump between frames (a WH_GETMESSAGE hook of that thread, sent a message of ours four times a second), only

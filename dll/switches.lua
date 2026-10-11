@@ -1,22 +1,21 @@
--- CinderLoad's three choices, on the world map (M) and as /cinderload (his decisions, 10 and 11 Oct 2026): the loading
--- screen's MAP (Parchment | Satellite), its BAR (Retro | Neo), and the parchment's MAP AREAS (Discovered | Full map: his
--- words, "we could have a switch that turns on the full map as though it were fully discovered, but it should default to
--- only what they've discovered"), each on its own. His form (C, picked from four drawn): drop-downs made exactly as the
--- world map's own Continent and Zone ones are (UIDropDownMenuTemplate, the client's own UIDropDownMenu functions), gold
--- labels "Loading map", "Loading bar" and "Map areas" over them, at the left end of the map's top bar, left of
--- Continent, covering nothing. Run inside the game by CinderLoad.dll, on the game's own thread while no Lua is running
--- (no add-on folder: the release is the DLL and its packs). The DLL puts one line before this text, the choice it
--- holds: local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered".
+-- CinderLoad's choices in game: /cinderload opens a window of its own (his design, 11 Oct 2026: "you type that and a
+-- moveable vanilla-plus looking menu pops up on screen"), the mockup he approved (PANEL-MOCKUP, 11 Oct): the loading
+-- screen's map (Parchment | Satellite) and the parchment's map areas (Discovered | Full map) and its zones nearby (a
+-- slider, in yards), the loading bar (Retro | Neo), its thickness and width (sliders) or the whole width of the screen,
+-- its texture / effect (Heat | Smooth | Blade light) in the class's colour or not, Neo's four qualities (Liquid, Pulse,
+-- Unstable, Raw: any of them), a still preview, Defaults and Close; dragged by its title. Nothing on the world map: the
+-- map belongs to CinderMap. /cinderload map, bar and areas (and their values) work as before.
+-- Run inside the game by CinderLoad.dll, on the game's own thread while no Lua is running (no add-on folder: the release
+-- is the DLL and its packs). The DLL puts two lines before this text, the choice it holds:
+--   local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"
+--   local CL_LOOK = "nearby 1200 thick 100 width own whole off effect heat colour class quality pulse raw"
 -- Written for the client's Lua 5.0: no #, no %, no ... in a body, no string methods, no string.match.
--- His rule for anything on the world map: if this breaks, the player still has the normal world map. So only frames of
--- its own are made, every handler runs inside pcall, a fault switches it all off (CL.broken, the CVar told "fault"),
--- and no function of Blizzard's is replaced or hooked and no frame of the map's moved. The one thing it sets on a frame
--- not its own: the shared drop-down list's scale, right after the client's ToggleDropDownMenu opened it for one of
--- these, to this map's (the client opens every list at the UI's scale but the Continent and Zone ones, at 1; it sets
--- the scale again each time any list opens).
--- The DLL hears a choice through one CVar of its own, CinderLoadStyle ("parchment retro discovered"), and keeps it in
--- Data\CinderLoad\style.txt: a DLL cannot give this client's Lua a function of its own (each C function's address is
--- checked against WoW.exe's code before it is called, 0x42A320 from luaD_precall 0x6F61A1).
+-- If this breaks, the game's own UI is unharmed: only frames of its own are made, every handler runs inside pcall, a
+-- fault switches it all off (CL.broken, the CVar told "fault"), no function of Blizzard's is replaced or hooked and no
+-- frame of the game's is changed (its one entry in UISpecialFrames lets Escape close it, as every panel's does).
+-- The DLL hears a choice through one CVar of its own, CinderLoadStyle ("parchment retro discovered nearby 1200 thick
+-- 100 ..."), and keeps it in Data\CinderLoad\style.txt: a DLL cannot give this client's Lua a function of its own (each
+-- C function's address is checked against WoW.exe's code before it is called, 0x42A320 from luaD_precall 0x6F61A1).
 local CL = CinderLoad
 if type(CL) ~= "table" then CL = {}; CinderLoad = CL end
 CL.up = 1
@@ -26,30 +25,61 @@ CL.areas = CL_AREAS
 CL.cvar = "CinderLoadStyle"
 CL.broken = nil
 CL.settings = {
-    { key = "map", label = "Loading map", name = "loading map",
-      options = {
-          { value = "parchment", text = "Parchment", tip = "The world as this map paints it, gliding to where you arrive." },
-          { value = "satellite", text = "Satellite", tip = "The living map of Azeroth: ships, currents and weather." } } },
-    { key = "bar", label = "Loading bar", name = "loading bar",
-      options = {
-          { value = "retro", text = "Retro", tip = "The game's own loading bar, filling in your class's colour." },
-          { value = "neo", text = "Neo", tip = "The blade of light in its metal frame, the RavenCraft logo on it." } } },
-    { key = "areas", label = "Map areas", name = "map areas", width = 78,
-      options = {
-          { value = "discovered", text = "Discovered", tip = "The parchment shows only the parts of each zone you have discovered, as this map does." },
-          { value = "full", text = "Full map", tip = "The parchment shows every part of each zone, as though you had discovered it all." } } },
+    { key = "map", name = "loading map",
+      options = { { value = "parchment", text = "Parchment" }, { value = "satellite", text = "Satellite" } } },
+    { key = "bar", name = "loading bar",
+      options = { { value = "retro", text = "Retro" }, { value = "neo", text = "Neo" } } },
+    { key = "areas", name = "map areas",
+      options = { { value = "discovered", text = "Discovered" }, { value = "full", text = "Full map" } } },
 }
--- Where they sit, in the world map's 1024 x 768 box (WorldMapPositioningGuide), from its top left: on the row of the
--- Continent drop-down (its TOP at the box's TOP, -80, -35: x 342 to 522), from x 32 (clear of the top bar's left
--- flourish), each the width WIDTH inside (its frame WIDTH + 50; the third its own, 78, room for "Discovered" with CL.WORDS),
--- each over the one before's right end by OVERLAP as Zone is over Continent's: x 32 to 378, the third's frame over
--- Continent's (from 342) by 36, three more than Zone's over Continent's.
--- The words in each are given the whole middle of its box, from the end of its left cap to where the template sets them
--- right (CL.WORDS: the width inside less 18, where UIDropDownMenu_SetWidth leaves it less 25): the client draws its
--- letters at whole pixels, so on a 5120 x 2160 screen "Discovered" is 55.5 wide, and in the template's 53 it showed
--- "Discover..." (seen on the map in a window at 0.85, 11 Oct 2026). Nothing moves: only the words' own width.
-CL.X, CL.Y, CL.WIDTH, CL.OVERLAP, CL.WORDS = 32, -35, 92, -33, -18
-CL.drops = {}
+CL.effects = { { value = "heat", text = "Heat" }, { value = "smooth", text = "Smooth" }, { value = "blade", text = "Blade light" } }
+CL.qualities = { { value = "liquid", text = "Liquid" }, { value = "pulse", text = "Pulse" }, { value = "unstable", text = "Unstable" },
+                 { value = "raw", text = "Raw" } }
+-- the sliders: least, most, step (the numbers are his to change); nearby is the DLL's (0 none, 4000 at most)
+CL.range = { nearby = { 0, 4000, 100 }, thick = { 50, 200, 5 }, width = { 20, 100, 5 } }
+CL.ART = "Interface\\CinderLoad\\"             -- the panel's pictures, in CinderLoad's pack (tools/make_panel_art.py)
+
+function CL.Defaults()
+    CL.map, CL.bar, CL.areas = "parchment", "retro", "discovered"
+    CL.nearby, CL.thick, CL.width, CL.whole, CL.effect, CL.ember = 1200, 100, 0, nil, "heat", nil
+    CL.quality = { pulse = 1, raw = 1 }
+end
+
+function CL.Clamp(v, key)
+    local r = CL.range[key]
+    v = math.floor((v - r[1]) / r[3] + 0.5) * r[3] + r[1]
+    if v < r[1] then v = r[1] end
+    if v > r[2] then v = r[2] end
+    return v
+end
+
+-- the look as the DLL sends it (CL_LOOK) or as the CVar carries it: "nearby 1200 thick 100 width own whole off effect
+-- heat colour class quality pulse raw"; a part missing or not ours: as it was
+function CL.ReadLook(s)
+    local w = {}
+    for t in string.gfind(s or "", "[^%s]+") do table.insert(w, t) end
+    local i, n = 1, table.getn(w)
+    while i <= n do
+        local k, v = w[i], w[i + 1]
+        local num = tonumber(v or "")
+        i = i + 1
+        if k == "nearby" and num then CL.nearby = CL.Clamp(num, "nearby"); i = i + 1
+        elseif k == "thick" and num then CL.thick = CL.Clamp(num, "thick"); i = i + 1
+        elseif k == "width" and num then CL.width = CL.Clamp(num, "width"); i = i + 1
+        elseif k == "width" and v == "own" then CL.width = 0; i = i + 1
+        elseif k == "whole" and (v == "on" or v == "off") then CL.whole = (v == "on") or nil; i = i + 1
+        elseif k == "effect" and CL.Find(CL.effects, v) then CL.effect = v; i = i + 1
+        elseif k == "colour" and (v == "class" or v == "ember") then CL.ember = (v == "ember") or nil; i = i + 1
+        elseif k == "quality" then
+            local q = {}
+            while w[i] and (CL.Find(CL.qualities, w[i]) or w[i] == "none") do
+                if w[i] ~= "none" then q[w[i]] = 1 end
+                i = i + 1
+            end
+            CL.quality = q
+        end
+    end
+end
 
 function CL.Say(text)
     local f = DEFAULT_CHAT_FRAME
@@ -57,20 +87,21 @@ function CL.Say(text)
     if f then f:AddMessage("CinderLoad: " .. text, 1, 1, 0) end      -- (a system message's yellow)
 end
 
+function CL.Find(list, value)
+    for _, o in ipairs(list) do
+        if o.value == value then return o end
+    end
+end
 function CL.Setting(key)
     for _, s in ipairs(CL.settings) do
         if s.key == key then return s end
     end
 end
-
 function CL.Option(s, value)
-    if not s then return end
-    for _, o in ipairs(s.options) do
-        if o.value == value then return o end
-    end
+    if s then return CL.Find(s.options, value) end
 end
 
--- "loading map Parchment, loading bar Retro"
+-- "loading map Parchment, loading bar Retro, map areas Discovered"
 function CL.Describe()
     local t = ""
     for _, s in ipairs(CL.settings) do
@@ -83,41 +114,34 @@ function CL.Describe()
     return t
 end
 
--- The choice to the DLL, through the CVar it reads (its fourth word: a fault, so it stops too).
+-- The CVar's value: the three, then the reach and the look, in the order the DLL reads them (StyleCvarTail)
+function CL.Value()
+    local q = ""
+    for _, o in ipairs(CL.qualities) do
+        if CL.quality[o.value] then
+            if q ~= "" then q = q .. " " end
+            q = q .. o.value
+        end
+    end
+    if q == "" then q = "none" end
+    local width = "own"
+    if CL.width ~= 0 then width = tostring(CL.width) end
+    return CL.map .. " " .. CL.bar .. " " .. CL.areas .. " nearby " .. tostring(CL.nearby) .. " thick " .. tostring(CL.thick) ..
+           " width " .. width .. " whole " .. (CL.whole and "on" or "off") .. " effect " .. CL.effect .. " colour " ..
+           (CL.ember and "ember" or "class") .. " quality " .. q
+end
+
+-- The choice to the DLL, through the CVar it reads (" fault" last: a fault, so it stops too).
 function CL.Save(fault)
-    local v = CL.map .. " " .. CL.bar .. " " .. CL.areas
+    local v = CL.Value()
     if fault then v = v .. " fault" end
     SetCVar(CL.cvar, v)
 end
 
--- The shared drop-down list is open, and for this drop-down.
-function CL.ListOpen(f)
-    return DropDownList1 and DropDownList1:IsShown() and UIDROPDOWNMENU_OPEN_MENU == f:GetName()
-end
-
--- Every drop-down shows the choice. Its own list open: the client's UIDropDownMenu_SetSelectedValue, which redraws
--- that list's checks; otherwise only the drop-down's own value (what UIDropDownMenu_SetSelectedValue sets before it
--- redraws the shared list, which may be showing another drop-down's choices).
-function CL.Refresh()
-    for _, d in ipairs(CL.drops) do
-        local o = CL.Option(d.setting, CL[d.setting.key])
-        if o then
-            local f = d.frame
-            if CL.ListOpen(f) then
-                UIDropDownMenu_SetSelectedValue(f, o.value)
-            else
-                f.selectedName = nil
-                f.selectedID = nil
-                f.selectedValue = o.value
-            end
-            UIDropDownMenu_SetText(o.text, f)
-        end
-    end
-end
-
 function CL.Set(key, value)
-    local s = CL.Setting(key)
-    if not CL.Option(s, value) then return end
+    if key == "map" or key == "bar" or key == "areas" then
+        if not CL.Option(CL.Setting(key), value) then return end
+    end
     CL[key] = value
     CL.Save()
     CL.Refresh()
@@ -129,12 +153,11 @@ function CL.Fault(where, err)
     CL.broken = 1
     if CL.panel then pcall(CL.panel.Hide, CL.panel) end
     pcall(CL.Save, 1)
-    CL.Say("its loading screen choices on the world map met an error and turned themselves off until the game starts "
-           .. "again; your world map is as it was. |cff9d9d9d(" .. tostring(where) .. ": " .. tostring(err) .. ")|r")
+    CL.Say("its loading screen window met an error and turned itself off until the game starts again; the game's own "
+           .. "windows are as they were. |cff9d9d9d(" .. tostring(where) .. ": " .. tostring(err) .. ")|r")
 end
 
--- fn inside pcall, as a script handler (1.12's handlers read this and arg1), a menu's function (its arg1) or the slash
--- command (its text).
+-- fn inside pcall, as a script handler (1.12's handlers read this and arg1) or the slash command (its text).
 function CL.Safe(where, fn)
     return function(a1)
         if CL.broken then return end
@@ -143,17 +166,18 @@ function CL.Safe(where, fn)
     end
 end
 
--- /cinderload: says the choice; /cinderload map (bar, areas) switches one; /cinderload map satellite sets one (the value
--- alone does too: /cinderload neo). Words only, at most two, nothing else: anything more or other changes nothing.
-CL.usage = "type /cinderload map, /cinderload bar or /cinderload areas to switch, or /cinderload map parchment, "
-           .. "/cinderload map satellite, /cinderload bar retro, /cinderload bar neo, /cinderload areas discovered or "
-           .. "/cinderload areas full."
+-- /cinderload alone opens the window; /cinderload map (bar, areas) switches one; /cinderload map satellite sets one
+-- (the value alone does too: /cinderload neo). Words only, at most two, nothing else: anything more or other changes
+-- nothing.
+CL.usage = "type /cinderload to open its window, or /cinderload map, /cinderload bar or /cinderload areas to switch, or "
+           .. "/cinderload map parchment, /cinderload map satellite, /cinderload bar retro, /cinderload bar neo, "
+           .. "/cinderload areas discovered or /cinderload areas full."
 function CL.Slash(msg)
     local words = {}
     for w in string.gfind(string.lower(msg or ""), "[^%s]+") do table.insert(words, w) end
     local n = table.getn(words)
     if n == 0 then
-        CL.Say(CL.Describe() .. ". Type /cinderload map, /cinderload bar or /cinderload areas to switch.")
+        CL.Open()
         return
     end
     local key, value
@@ -180,131 +204,382 @@ function CL.Slash(msg)
     CL.Say(CL.Describe() .. ", from your next loading screen.")
 end
 
--- One drop-down's menu (the client calls it as the list opens: UIDropDownMenu_Initialize from ToggleDropDownMenu): its
--- two choices, the one chosen checked (the client's UIDropDownMenu_AddButton checks the one of the drop-down's value);
--- each, picked, sets it. The tips show as the client shows a menu's tips (with its beginner's tips on).
-function CL.Menu(d)
-    return CL.Safe("menu", function()
-        for _, o in ipairs(d.setting.options) do
-            local info = {}
-            info.text = o.text
-            info.value = o.value
-            info.arg1 = o.value
-            info.func = d.pick
-            info.tooltipTitle = o.text
-            info.tooltipText = o.tip .. " From your next loading screen."
-            UIDropDownMenu_AddButton(info, 1)
-        end
-    end)
-end
-function CL.Pick(d)
-    return CL.Safe("pick", function(value)
-        if not CL.Option(d.setting, value) then return end
-        CL.Set(d.setting.key, value)
-    end)
-end
--- Its arrow clicked: what the template's own button does (ToggleDropDownMenu, its sound), inside pcall, then the list's
--- scale made this map's, as the client makes it for Continent and Zone (see the top).
-function CL.Open(d)
-    return CL.Safe("open", function()
-        ToggleDropDownMenu(1, nil, d.frame)
-        local list = DropDownList1
-        if list and CL.ListOpen(d.frame) then
-            local over = 1
-            local p = list:GetParent()
-            if p then over = p:GetEffectiveScale() end
-            local s = d.frame:GetEffectiveScale() / over
-            if math.abs(list:GetScale() - s) > 0.0001 then list:SetScale(s) end
-        end
-        PlaySound("igMainMenuOptionCheckBoxOn")
-    end)
-end
+-- ---- the window, in the mockup's units (760 x 608, from its top left, y down) ----
+CL.W, CL.H, CL.L, CL.R, CL.CW = 760, 608, 26, 394, 340
+CL.GOLD, CL.WHITE = { 1, 0.82, 0 }, { 1, 1, 1 }
+CL.FONT, CL.TITLEFONT = "Fonts\\FRIZQT__.TTF", "Fonts\\MORPHEUS.TTF"
+CL.TIP = { bgFile = "Interface\\Tooltips\\UI-Tooltip-Background", edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = 1,
+           tileSize = 16, edgeSize = 16, insets = { left = 4, right = 4, top = 4, bottom = 4 } }
+CL.FRAME8 = { edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 8, tile = 1, tileSize = 8,
+              insets = { left = 2, right = 2, top = 2, bottom = 2 } }
+CL.LINE = { edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 2, tile = 1, tileSize = 2,
+            insets = { left = 0, right = 0, top = 0, bottom = 0 } }
 
--- The map's own top bar is there: its Continent drop-down shown and not see-through (this client's small, windowed map
--- keeps it but sets it so, WorldMapFrame_Minimize, and hides the bar's art). Read from the drop-down as it is, not from
--- WORLDMAP_WINDOWED: minimising the open map shows it again before WORLDMAP_WINDOWED says so.
-function CL.OnTopBar()
-    local c = WorldMapContinentDropDown
-    if not c then return WORLDMAP_WINDOWED ~= 1 end
-    if not c:IsVisible() then return nil end
-    return c:GetAlpha() > 0.05
+function CL.At(r, x, y, w, h, point, rel, relPoint)
+    r:ClearAllPoints()
+    r:SetPoint(point or "TOPLEFT", rel or CL.panel, relPoint or "TOPLEFT", x, -y)
+    if w then r:SetWidth(w) end
+    if h then r:SetHeight(h) end
+    return r
 end
-
--- Shown on the full map's top bar, as Continent and Zone are; hidden with them on the windowed map.
-function CL.Place()
-    local on = CL.OnTopBar()
-    for _, d in ipairs(CL.drops) do
-        if on and not d.frame:IsShown() then d.frame:Show() end
-        if not on and d.frame:IsShown() then d.frame:Hide() end
+-- words: anchor as the mockup's: TOPLEFT (la), TOPRIGHT (ra), TOP (ma), LEFT (lm), BOTTOMLEFT (ld), BOTTOMRIGHT (rd), CENTER (mm)
+CL.ANCHOR = { la = "TOPLEFT", ra = "TOPRIGHT", ma = "TOP", lm = "LEFT", ld = "BOTTOMLEFT", rd = "BOTTOMRIGHT", mm = "CENTER" }
+function CL.Text(parent, x, y, s, size, gold, anchor, font)
+    local fs = parent:CreateFontString(nil, "OVERLAY", gold and "GameFontNormal" or "GameFontHighlight")
+    fs:SetFont(font or CL.FONT, size)
+    local c = gold and CL.GOLD or CL.WHITE
+    fs:SetTextColor(c[1], c[2], c[3])
+    fs:SetText(s)
+    local a = CL.ANCHOR[anchor or "la"]
+    if a == "LEFT" or a == "CENTER" then
+        fs:SetPoint(a, CL.panel, "TOPLEFT", x, -y)
+    else
+        CL.At(fs, x, y, nil, nil, a)
     end
+    if anchor == "ra" or anchor == "rd" then fs:SetJustifyH("RIGHT") elseif anchor == "ma" or anchor == "mm" then fs:SetJustifyH("CENTER")
+    else fs:SetJustifyH("LEFT") end
+    return fs
+end
+-- a picture from CinderLoad's pack; the pack older than the window: a dark plate instead
+function CL.Picture(t, name)
+    if not t:SetTexture(CL.ART .. name) then t:SetTexture(0.08, 0.08, 0.09, 1) end
+end
+-- a section's box (the tooltip's border, darker inside) and its gold title over it
+function CL.Box(x, y, w, h, title)
+    local b = CreateFrame("Frame", nil, CL.panel)
+    CL.At(b, x, y, w, h)
+    b:SetBackdrop(CL.TIP)
+    b:SetBackdropColor(0.11, 0.11, 0.118, 0.92)
+    b:SetBackdropBorderColor(0.8, 0.8, 0.8)
+    CL.Text(CL.panel, x + 6, y - 4, title, 14, 1, "ld")
+    return b
+end
+function CL.Line(x, y, w)
+    local l = CreateFrame("Frame", nil, CL.panel)
+    CL.At(l, x, y, w, 4)
+    l:SetBackdrop(CL.LINE)
+    l:SetBackdropBorderColor(0.5, 0.5, 0.5)
+end
+-- a picture in a thin frame, clicked to choose it; chosen, its frame gold (CL.Card's frame redrawn by CL.Refresh)
+function CL.Card(x, y, w, h, art, key, value)
+    local b = CreateFrame("Button", nil, CL.panel)
+    CL.At(b, x, y, w, h)
+    b:EnableMouse(1)
+    local t = b:CreateTexture(nil, "ARTWORK")
+    t:SetPoint("TOPLEFT", b, "TOPLEFT", 2, -2)
+    t:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -2, 2)
+    CL.Picture(t, art)
+    local f = CreateFrame("Frame", nil, b)
+    f:SetBackdrop(CL.FRAME8)
+    b:SetScript("OnClick", CL.Safe("card", function()
+        PlaySound("igMainMenuOptionCheckBoxOn")
+        CL.Set(key, value)
+    end))
+    local c = { button = b, picture = t, frame = f, key = key, value = value }
+    table.insert(CL.ui.cards, c)
+    return c
+end
+function CL.Radio(x, y, key, value, label)
+    local r = CreateFrame("CheckButton", "CinderLoadPanel" .. key .. value, CL.panel, "UIRadioButtonTemplate")
+    CL.At(r, x, y, 18, 18)
+    local fs = getglobal(r:GetName() .. "Text")
+    fs:SetFont(CL.FONT, 13)
+    fs:SetTextColor(1, 1, 1)
+    fs:SetText(label)
+    fs:ClearAllPoints()
+    fs:SetPoint("LEFT", r, "RIGHT", 6, 0)
+    r:SetScript("OnClick", CL.Safe("radio", function()
+        PlaySound("igMainMenuOptionCheckBoxOn")
+        CL.Set(key, value)
+    end))
+    table.insert(CL.ui.radios, { button = r, key = key, value = value })
+    return r
+end
+function CL.Check(x, y, size, name, label, fn)
+    local c = CreateFrame("CheckButton", "CinderLoadPanel" .. name, CL.panel, "UICheckButtonTemplate")
+    CL.At(c, x, y, size, size)
+    local fs = getglobal(c:GetName() .. "Text")
+    fs:SetFont(CL.FONT, 13)
+    fs:SetTextColor(1, 1, 1)
+    fs:SetText(label)
+    fs:ClearAllPoints()
+    fs:SetPoint("LEFT", c, "RIGHT", 4, 0)
+    c:SetScript("OnClick", CL.Safe("check " .. name, function()
+        if c:GetChecked() then PlaySound("igMainMenuOptionCheckBoxOn") else PlaySound("igMainMenuOptionCheckBoxOff") end
+        fn(c:GetChecked() and 1 or nil)
+    end))
+    return c
+end
+function CL.Slider(x, y, w, key, label, low, high)
+    local s = CreateFrame("Slider", "CinderLoadPanel" .. key .. "Slider", CL.panel, "OptionsSliderTemplate")
+    CL.At(s, x, y + 20, w, 17)
+    local r = CL.range[key]
+    s:SetMinMaxValues(r[1], r[2])
+    s:SetValueStep(r[3])
+    local n = s:GetName()
+    local t = getglobal(n .. "Text")
+    t:SetFont(CL.FONT, 13)
+    t:SetTextColor(1, 1, 1)
+    t:SetText(label)
+    t:ClearAllPoints()
+    t:SetPoint("TOPLEFT", s, "TOPLEFT", 0, 20)
+    for _, e in ipairs({ { "Low", low, "TOPLEFT", 2 }, { "High", high, "TOPRIGHT", -2 } }) do
+        local fs = getglobal(n .. e[1])
+        fs:SetFont(CL.FONT, 12)
+        fs:SetTextColor(1, 1, 1)
+        fs:SetText(e[2])
+        fs:ClearAllPoints()
+        fs:SetPoint(e[3], s, "BOTTOM" .. string.sub(e[3], 4), e[4], -4)
+    end
+    local v = s:CreateFontString(n .. "Value", "OVERLAY", "GameFontNormal")
+    v:SetFont(CL.FONT, 13)
+    v:SetTextColor(CL.GOLD[1], CL.GOLD[2], CL.GOLD[3])
+    v:SetJustifyH("RIGHT")
+    v:SetPoint("TOPRIGHT", s, "TOPRIGHT", 0, 20)
+    s:SetScript("OnValueChanged", CL.Safe("slider " .. key, function()
+        if CL.quiet then return end
+        local value = CL.Clamp(s:GetValue(), key)
+        if value ~= CL[key] then CL.Set(key, value) end
+    end))
+    CL.ui.sliders[key] = { slider = s, value = v }
+    return s
+end
+function CL.PanelButton(x, y, name, label, fn)
+    local b = CreateFrame("Button", "CinderLoadPanel" .. name, CL.panel, "UIPanelButtonTemplate")
+    CL.At(b, x, y, 120, 26)
+    b:SetText(label)
+    local fs = getglobal(b:GetName() .. "Text")
+    if fs then fs:SetFont(CL.FONT, 13) end
+    b:SetScript("OnClick", CL.Safe(name, fn))
+    return b
 end
 
 function CL.Build()
-    local guide = getglobal("WorldMapPositioningGuide")
-    if not guide then guide = WorldMapFrame end
-    local p = getglobal("CinderLoadMapPanel")
-    if not p then p = CreateFrame("Frame", "CinderLoadMapPanel", WorldMapFrame) end
+    local p = getglobal("CinderLoadPanel")
+    if p and CL.ui then CL.panel = p; return end
+    p = CreateFrame("Frame", "CinderLoadPanel", UIParent)
     CL.panel = p
-    p:ClearAllPoints()
-    p:SetPoint("TOPLEFT", guide, "TOPLEFT", CL.X, CL.Y)
-    local wide = 0
-    for i, s in ipairs(CL.settings) do
-        wide = wide + (s.width or CL.WIDTH) + 50
-        if i > 1 then wide = wide + CL.OVERLAP end
+    CL.ui = { cards = {}, radios = {}, sliders = {}, effects = {}, qualities = {} }
+    p:Hide()
+    p:SetWidth(CL.W)
+    p:SetHeight(CL.H)
+    p:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
+    p:SetFrameStrata("DIALOG")
+    p:SetToplevel(1)
+    p:EnableMouse(1)
+    p:SetMovable(1)
+    p:SetClampedToScreen(1)
+    p:SetBackdrop({ bgFile = "Interface\\Tooltips\\UI-Tooltip-Background", edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+                    tile = 1, tileSize = 32, edgeSize = 32, insets = { left = 11, right = 12, top = 12, bottom = 11 } })
+    p:SetBackdropColor(0, 0, 0, 0.88)            -- (the "plus": the dialog's black 88% opaque, not the art's 60%)
+    p:SetScript("OnHide", CL.Safe("hide", function() PlaySound("igMainMenuClose") end))
+    -- the title: the dialog's header, cut in three to fit its word, its plate darker (the "plus"), dragged to move it
+    local W, L, R, CW = CL.W, CL.L, CL.R, CL.CW
+    local head = CreateFrame("Frame", "CinderLoadPanelTitle", p)
+    CL.At(head, W / 2 - 100, -16, 200, 48)
+    head:EnableMouse(1)
+    head:RegisterForDrag("LeftButton")
+    head:SetScript("OnDragStart", CL.Safe("drag", function() p:StartMoving() end))
+    head:SetScript("OnDragStop", CL.Safe("drop", function() p:StopMovingOrSizing() end))
+    local u = { 59, 79, 176, 196 }
+    for i = 1, 3 do
+        local t = head:CreateTexture(nil, "ARTWORK")
+        t:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header")
+        t:SetTexCoord(u[i] / 256, u[i + 1] / 256, 0, 40 / 64)
+        local x, w = 0, 24
+        if i == 2 then x, w = 24, 152 elseif i == 3 then x, w = 176, 24 end
+        CL.At(t, x, 0, w, 48, nil, head)
     end
-    p:SetWidth(wide)
-    p:SetHeight(32)
-    CL.drops = {}
-    local prev
-    for _, s in ipairs(CL.settings) do
-        local name = "CinderLoadMap" .. s.key .. "DropDown"
-        local f = getglobal(name)
-        if not f then f = CreateFrame("Frame", name, p, "UIDropDownMenuTemplate") end
-        f:ClearAllPoints()
-        if prev then f:SetPoint("LEFT", prev, "RIGHT", CL.OVERLAP, 0) else f:SetPoint("TOPLEFT", p, "TOPLEFT", 0, 0) end
-        local label = getglobal(name .. "Label")
-        if not label then label = f:CreateFontString(name .. "Label", "OVERLAY", "GameFontNormalSmall") end
-        label:SetText(s.label)
-        label:ClearAllPoints()
-        label:SetPoint("TOPLEFT", f, "TOPLEFT", 20, 10)
-        local d = { setting = s, frame = f }
-        d.pick = CL.Pick(d)
-        UIDropDownMenu_SetWidth(s.width or CL.WIDTH, f)
-        getglobal(name .. "Text"):SetWidth((s.width or CL.WIDTH) + CL.WORDS)        -- (see CL.WORDS)
-        if DropDownList1 and DropDownList1:IsShown() then
-            f.initialize = CL.Menu(d)                 -- (a list open: the client's Initialize would empty it; it is set later)
-        else
-            UIDropDownMenu_Initialize(f, CL.Menu(d))
-        end
-        getglobal(name .. "Button"):SetScript("OnClick", CL.Open(d))
-        table.insert(CL.drops, d)
-        prev = f
+    local plate = head:CreateTexture(nil, "OVERLAY")
+    plate:SetTexture(0, 0, 0, 0.55)
+    CL.At(plate, 8.4, 10.8, 183.2, 26.4, nil, head)
+    CL.ui.title = CL.Text(p, W / 2, 8.5, "CinderLoad", 18, 1, "mm", CL.TITLEFONT)
+    local close = CreateFrame("Button", "CinderLoadPanelClose", p, "UIPanelCloseButton")
+    CL.At(close, W - 36, 4, 32, 32)
+    close:SetScript("OnClick", CL.Safe("close", function() p:Hide() end))
+    CL.Text(p, W / 2, 40, "Drag the title to move this window.  Each change shows from your next loading screen.", 12, nil, "ma")
+
+    -- Loading map, with Map areas and Nearby zones under it
+    CL.Box(L, 82, CW, 274, "Loading map")
+    CL.Card(L + 14, 96, 150, 80, "PanelParchment", "map", "parchment")
+    CL.Card(L + 176, 96, 150, 80, "PanelSatellite", "map", "satellite")
+    CL.Radio(L + 14, 184, "map", "parchment", "Parchment")
+    CL.Radio(L + 176, 184, "map", "satellite", "Satellite")
+    CL.Line(L + 10, 214, CW - 20)
+    CL.Text(p, L + 14, 226, "Map areas, on the parchment", 13, 1)
+    CL.Radio(L + 14, 250, "areas", "discovered", "Discovered")
+    CL.Radio(L + 176, 250, "areas", "full", "Full map")
+    CL.Line(L + 10, 278, CW - 20)
+    CL.Slider(L + 16, 288, CW - 32, "nearby", "Nearby zones, faded with distance", "Short", "Long")
+
+    -- Loading bar: Retro's words, or Neo's four qualities
+    CL.Box(L, 386, CW, 162, "Loading bar")
+    CL.Card(L + 14, 400, 150, 31, "PanelRetro", "bar", "retro")
+    CL.Card(L + 176, 400, 150, 31, "PanelNeo", "bar", "neo")
+    CL.Radio(L + 14, 440, "bar", "retro", "Retro")
+    CL.Radio(L + 176, 440, "bar", "neo", "Neo")
+    CL.ui.words = {
+        CL.Text(p, L + 14, 474, "Retro: the game's own bar, in your class's colour.", 12),
+        CL.Text(p, L + 14, 494, "Neo: a blade of light in a metal frame, edge to edge,", 12),
+        CL.Text(p, L + 14, 512, "the RavenCraft logo on it.", 12) }
+    CL.ui.neoTitle = CL.Text(p, L + 14, 470, "Neo's qualities, any of them", 13, 1)
+    for i, o in ipairs(CL.qualities) do
+        local value = o.value
+        local x, y = L + 14, 490
+        if i == 2 or i == 4 then x = L + 176 end
+        if i > 2 then y = 516 end
+        local c = CL.Check(x, y, 26, "Quality" .. o.text, o.text, function(on)
+            CL.quality[value] = on
+            CL.Save()
+            CL.Refresh()
+        end)
+        CL.ui.qualities[value] = c
     end
-    -- placed as the map shows, and once more on its first frame (whatever ran after its OnShow)
-    CL.again = CL.Safe("again", function()
-        this:SetScript("OnUpdate", nil)
-        CL.Place()
+
+    -- Bar size
+    CL.Box(R, 82, CW, 178, "Bar size")
+    CL.Slider(R + 16, 94, CW - 32, "thick", "Bar thickness", "Thin", "Thick")
+    CL.Slider(R + 16, 158, CW - 32, "width", "Bar width", "Narrow", "Wide")
+    CL.ui.whole = CL.Check(R + 14, 222, 28, "Whole", "Whole width of the screen", function(on) CL.Set("whole", on) end)
+
+    -- Texture / effect
+    CL.Box(R, 300, CW, 96, "Texture / effect")
+    for i, o in ipairs(CL.effects) do
+        local x = R + 16 + (i - 1) * 106
+        CL.ui.effects[o.value] = CL.Card(x, 312, 96, 24, "Panel" .. string.upper(string.sub(o.value, 1, 1)) .. string.sub(o.value, 2), "effect", o.value)
+        CL.Text(p, x + 48, 342, o.text, 12, nil, "ma")
+    end
+    CL.ui.colour = CL.Check(R + 14, 362, 28, "Colour", "In my class's colour", function(on) CL.Set("ember", not on or nil) end)
+
+    -- Preview: the bottom of the screen in miniature, the bar at the chosen thickness and width (a still for now)
+    CL.Box(R, 436, CW, 112, "Preview")
+    CL.Text(p, R + CW - 4, 432, "a still here; it moves in game", 12, nil, "rd")
+    local strip = CreateFrame("Frame", "CinderLoadPanelPreview", p)
+    CL.At(strip, R + 12, 448, CW - 24, 88)
+    local ground = strip:CreateTexture(nil, "BACKGROUND")
+    ground:SetAllPoints(strip)
+    CL.ui.preview = { strip = strip, ground = ground, bar = {} }
+    for i = 1, 3 do CL.ui.preview.bar[i] = strip:CreateTexture(nil, "ARTWORK") end
+    local edge = CreateFrame("Frame", nil, strip)
+    CL.At(edge, -2, -2, CW - 20, 92, nil, strip)
+    edge:SetBackdrop(CL.FRAME8)
+    edge:SetBackdropBorderColor(0.75, 0.75, 0.75)
+
+    CL.PanelButton(L + 4, CL.H - 40, "Defaults", "Defaults", function()
+        PlaySound("igMainMenuOptionCheckBoxOn")
+        CL.Defaults()
+        CL.Save()
+        CL.Refresh()
     end)
-    p:SetScript("OnShow", CL.Safe("show", function()
-        CL.Place()
-        this:SetScript("OnUpdate", CL.again)
-    end))
+    CL.PanelButton(W - 26 - 124, CL.H - 40, "CloseButton", "Close", function() p:Hide() end)
+    pcall(table.insert, UISpecialFrames, "CinderLoadPanel")         -- (Escape closes it, as it closes the game's own)
+end
+
+-- the Retro bar's own width on this screen, percent: 512 of its art's texels, a texel the screen's height over 768
+function CL.OwnWidth()
+    local w, h = GetScreenWidth(), GetScreenHeight()
+    if not w or not h or w <= 0 then return 28 end
+    return 51200 / 768 * h / w
+end
+
+-- the preview: the bottom of the screen at the strip's width (316 for the screen's whole width), the bar on it as the
+-- loading screen lays it (retro: 42 of 720 tall, centred 0.075 of the height up; neo: its frame band, 0.066 of the height,
+-- on the bottom), at the chosen thickness and width; its pictures cut from real loading screens
+function CL.Preview()
+    local v = CL.ui.preview
+    local sw, sh = 316, 88
+    local aspect = 0.4219
+    local w, h = GetScreenWidth(), GetScreenHeight()
+    if w and h and w > 0 then aspect = h / w end
+    local H = sw * aspect                                -- the screen's height at the strip's scale
+    CL.Picture(v.ground, CL.map == "parchment" and "PreviewParchment" or "PreviewSatellite")
+    local neo = CL.bar == "neo"
+    local bh, cy, cap, ucap, art = 42 / 720 * H, 0.075 * H, 34 / 42, 34 / 476, "PreviewRetro"
+    if neo then bh, cy, cap, ucap, art = 0.066 * H, 0.04 * H, 40 / 48, 40 / 1704, "PreviewNeo" end
+    bh = bh * CL.thick / 100
+    local bw = sw * CL.width / 100
+    if CL.whole then bw = sw
+    elseif CL.width == 0 then if neo then bw = sw else bw = sw * CL.OwnWidth() / 100 end end
+    local cw = bh * cap
+    if cw * 2 > bw then cw = bw / 2 end
+    local x0, top = (sw - bw) / 2, sh - cy - bh / 2
+    local parts = { { x0, cw, 0, ucap }, { x0 + cw, bw - 2 * cw, ucap, 1 - ucap }, { x0 + bw - cw, cw, 1 - ucap, 1 } }
+    for i, q in ipairs(parts) do
+        local t = v.bar[i]
+        CL.Picture(t, art)
+        t:SetTexCoord(q[3], q[4], 0, 1)
+        CL.At(t, q[1], top, q[2], bh, nil, v.strip)
+    end
+    v.size = { x0, top, bw, bh }
+end
+
+-- every control shows the choice
+function CL.Refresh()
+    if not CL.ui then return end
+    CL.quiet = 1
+    for _, c in ipairs(CL.ui.cards) do
+        local on = CL[c.key] == c.value
+        local g = 2
+        if on then g = 3 end
+        c.frame:ClearAllPoints()
+        c.frame:SetPoint("TOPLEFT", c.button, "TOPLEFT", -g, g)
+        c.frame:SetPoint("BOTTOMRIGHT", c.button, "BOTTOMRIGHT", g, -g)
+        if on then c.frame:SetBackdropBorderColor(1, 0.85, 0.15) else c.frame:SetBackdropBorderColor(0.6, 0.6, 0.6) end
+        c.on = on
+    end
+    for _, r in ipairs(CL.ui.radios) do r.button:SetChecked(CL[r.key] == r.value) end
+    for key, s in pairs(CL.ui.sliders) do
+        local value = CL[key]
+        local text
+        if key == "nearby" then
+            text = tostring(value) .. " yards"
+            if value == 0 then text = "off" end
+        elseif key == "thick" then
+            text = tostring(value) .. "%"
+        else
+            text = tostring(value) .. "% of the screen"
+            if value == 0 then value = CL.Clamp(CL.OwnWidth(), "width"); text = "each bar's own" end
+            if CL.whole then text = "the whole screen" end
+        end
+        s.slider:SetValue(value)
+        s.value:SetText(text)
+    end
+    CL.ui.whole:SetChecked(CL.whole)
+    CL.ui.colour:SetChecked(not CL.ember)
+    local neo = CL.bar == "neo"
+    for _, fs in ipairs(CL.ui.words) do if neo then fs:Hide() else fs:Show() end end
+    if neo then CL.ui.neoTitle:Show() else CL.ui.neoTitle:Hide() end
+    for value, c in pairs(CL.ui.qualities) do
+        c:SetChecked(CL.quality[value])
+        if neo then c:Show() else c:Hide() end
+    end
+    CL.Preview()
+    CL.quiet = nil
+end
+
+function CL.Open()
+    CL.Build()
     CL.Refresh()
-    CL.Place()
-    p:Show()
+    if not CL.panel:IsShown() then
+        CL.panel:Show()
+        PlaySound("igMainMenuOpen")
+    end
 end
 
 function CL.Setup()
+    CL.Defaults()
+    CL.map, CL.bar, CL.areas = CL_MAP, CL_BAR, CL_AREAS
+    CL.ReadLook(CL_LOOK)
     CL.Save()                                        -- (first: the DLL hears that this ran)
     SLASH_CINDERLOAD1 = "/cinderload"
     SlashCmdList["CINDERLOAD"] = function(msg)
         if CL.broken then
-            CL.Say("its loading screen choices are off until the game starts again (they met an error).")
+            CL.Say("its loading screen window is off until the game starts again (it met an error).")
             return
         end
         CL.Safe("slash", CL.Slash)(msg)
     end
-    if WorldMapFrame then CL.Build() end
+    if getglobal("CinderLoadPanel") and CL.ui then CL.panel = getglobal("CinderLoadPanel"); CL.Refresh() end
 end
 
 local ok, err = pcall(CL.Setup)
