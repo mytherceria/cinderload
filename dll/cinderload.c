@@ -10683,12 +10683,15 @@ static void ParchZoneMade(int z, int c, float fx, float fy, const char **why)
  * the whole sheet fades by distance from the arrival (ParchNearFade): whole out to half the reach, then smoothly to
  * nothing at the reach. It is drawn under the arrival's zone and over its continent, coming up with the zone; the
  * arrival's zone is drawn as before, on top, and never faded by it. Left out: the arrival's zone (and another page of
- * its area), a page wholly inside another zone's box (a city's or an entrance's page: the zone's own page shows it),
- * and a zone the arrival zone's own pieces already paint (Stormwind on Elwynn's map). Made on the parchment's worker
+ * its area), a capital's page (AreaTable's capital flag: its zone's own page paints it), an instance entrance's page
+ * (wholly inside another zone's box, its area not the open world's: AREA_OPEN; Mulgore, Moonglade and Hyjal lie inside
+ * others' boxes too, and are zones), and a zone the arrival zone's own pieces already paint (Stormwind on Elwynn's
+ * map). Made on the parchment's worker
  * after the arrival's zone is up, one neighbour's painting at a time (the sheet and one painting in memory at most). */
 #define PARCH_NEAR_MOST  4000         /* the reach at most, yards */
 #define PARCH_NEAR_MAX   6            /* neighbours at most, the nearest first */
 #define PARCH_NEAR_TEX   2048         /* the sheet's texels a side at most (and 256 at least) */
+#define AREA_OPEN        0x40         /* AreaTable flags: the open world (duels allowed there; an instance's areas have none) */
 /* The fade by distance d from the arrival (yards) for reach (yards): 1 out to half the reach, then smoothstep down to 0
  * at the reach and past it; 0 for no reach. */
 static float ParchNearFade(float d, float reach)
@@ -10711,6 +10714,13 @@ static int ParchInsideOther(int i)
             g_pz[i].b >= g_pz[j].b && g_pz[i].l <= g_pz[j].l && g_pz[i].r >= g_pz[j].r) return 1;
     return 0;
 }
+/* 1 when page i may be shown as a neighbour at all: not a capital's, nor an instance entrance's (inside another zone's
+ * box, its area not the open world's); an area with no row counts as the open world. */
+static int ParchNearPage(int i)
+{
+    int r = AreaRow(g_pz[i].area), f = r >= 0 ? g_atFlags[r] : AREA_OPEN;
+    return !(f & AREA_CAPITAL) && ((f & AREA_OPEN) || !ParchInsideOther(i));
+}
 /* 1 when a piece of zone z's own map names zone i's area (or one of its areas): z's painting already paints it. */
 static int ParchPaintedBy(int z, int i)
 {
@@ -10725,7 +10735,7 @@ static int ParchPaintedBy(int z, int i)
 static int ParchNearMay(int z, int i, float x, float y, float reach)
 {
     return i != z && g_pz[i].map == g_pz[z].map && g_pz[i].area > 0 && g_pz[i].area != g_pz[z].area && ParchBoxYd(i, x, y) < reach &&
-           !ParchInsideOther(i) && !ParchPaintedBy(z, i);
+           ParchNearPage(i) && !ParchPaintedBy(z, i);
 }
 /* Yards from x, y to the nearest chunk of L's land (to its square, not its middle); -1 when it has none. */
 static float LandNearYd(const ParchLand *L, float x, float y)

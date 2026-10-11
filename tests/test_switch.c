@@ -8018,7 +8018,8 @@ static void TestNearby(void)
         { "Entrance", 520, 0, 999, -1600, -1700, -9400, -9500 }, { "Durotar", 4, 1, 14, -1962, -7250, 1808, -1716 },
         { "Westfall", 39, 0, 40, 3017, -483, -9400, -11733 }, { "Elwynn2", 31, 0, 12, 1535, -1935, -7939, -10254 },
         { "Far", 37, 0, 33, 100, 0, -14000, -15000 }, { "Lake", 41, 0, 77, 1600, 1400, -9300, -9500 },
-        { "Kalimdor's", 42, 1, 15, -1571, -3742, -8575, -10023 } };
+        { "Kalimdor's", 42, 1, 15, -1571, -3742, -8575, -10023 }, { "Capital", 43, 0, 1600, -1950, -2000, -8200, -8300 },
+        { "Valley", 44, 0, 215, -1580, -1700, -9000, -9600 } };
     g_pzN = (int)(sizeof kz / sizeof kz[0]);
     for (int i = 0; i < g_pzN; i++) {
         snprintf(g_pz[i].name, sizeof g_pz[i].name, "%s", kz[i].n);
@@ -8029,16 +8030,26 @@ static void TestNearby(void)
     g_pp[0].zone = 30; g_pp[0].area[0] = 5000;                          /* (Elwynn's map paints a part of Stormwind's area, */
     g_pp[1].zone = 30; g_pp[1].area[1] = 77;                            /* and the lake's own) */
     g_ppN = 2;
-    g_atN = 2; g_atSorted = 1; g_atId[0] = 1519; g_atParent[0] = 0; g_atId[1] = 5000; g_atParent[1] = 1519;
-    int may[11];
-    for (int i = 0; i < 11; i++) may[i] = ParchNearMay(1, i, -9454, -1404, 1200);   /* (Eastvale) */
-    ok = !may[0] && !may[1] && may[2] && !may[4] && !may[5] && !may[7] && !may[8] && !may[9] && !may[10];   /* (10: the other map's,
-                                                                        * its box Redridge's) */
+    static const int kat[6][3] = { { 44, 0, 0x40 }, { 215, 0, 0x40 }, { 999, 0, 0 }, { 1519, 0, 0x138 }, { 1600, 0, 0x138 }, { 5000, 1519, 0 } };
+    g_atN = 6; g_atSorted = 1;                                          /* (the areas: Redridge's and a valley's the open world,
+                                                                         * the entrance's an instance's, two capitals) */
+    for (int i = 0; i < 6; i++) { g_atId[i] = kat[i][0]; g_atParent[i] = kat[i][1]; g_atFlags[i] = kat[i][2]; }
+    int may[13];
+    for (int i = 0; i < 13; i++) may[i] = ParchNearMay(1, i, -9454, -1404, 1200);   /* (Eastvale) */
+    ok = !may[0] && !may[1] && may[2] && !may[4] && !may[5] && !may[7] && !may[8] && !may[9] && !may[10] && may[12];
+    ok &= !ParchInsideOther(11) && !ParchNearMay(1, 11, -9454, -1404, 2000);
+    g_atFlags[4] = 0x40;                                                /* (the same page, its area no capital: it may) */
+    ok &= ParchNearMay(1, 11, -9454, -1404, 2000);
+                                                                        /* (10: the other map's, its box Redridge's; 11: a capital's
+                                                                         * page, inside no other box; 12: a valley's, inside
+                                                                         * Redridge's box as Mulgore is inside the Barrens', the
+                                                                         * open world's: a zone) */
     ok &= !ParchNearMay(1, 4, -9454, -1404, 50000) && ParchNearMay(1, 2, -9454, -1404, 168) && !ParchNearMay(1, 2, -9454, -1404, 166);
+    g_atFlags[3] = 0x40;                                                /* (Stormwind's area as no capital: only Elwynn's piece) */
     ok &= ParchNearMay(1, 6, -9464, 62, 1200) && !ParchNearMay(1, 3, -9464, 62, 1200) && ParchNearMay(2, 3, -9464, 62, 1200) &&
           ParchNearMay(3, 1, -9464, 62, 1200) && !ParchNearMay(1, 9, -9464, 62, 2000) && ParchNearMay(2, 9, -9464, 62, 2000);
     ok &= Near(ParchBoxYd(2, -9454, -1404), 167, 1e-3) && ParchBoxYd(1, -9454, -1404) == 0 && Near(ParchBoxYd(8, -13000, 50), 1000, 1e-3);
-    Check(ok, "the zones nearby may be: a zone of the arrival's map whose box comes within the reach, not a continent, the arrival's zone, another page of its area, a page wholly inside another zone's box (an entrance's), nor one whose area (or a part of it) the arrival zone's own pieces paint (Stormwind on Elwynn's map); from Stormwind, Elwynn may");
+    Check(ok, "the zones nearby may be: a zone of the arrival's map whose box comes within the reach, not a continent, the arrival's zone, another page of its area, a page wholly inside another zone's box (an entrance's), nor a capital's page, nor one whose area (or a part of it) the arrival zone's own pieces paint (Stormwind on Elwynn's map); a zone's page inside another's box (Mulgore in the Barrens') may; from Stormwind, Elwynn may");
     g_pzN = pzN; g_ppN = ppN; g_atN = atN; g_atSorted = atSorted;
 
     /* the land's distance: to the nearest chunk of its own land (its square), not its sea; none, -1 */
