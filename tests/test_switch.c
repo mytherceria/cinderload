@@ -5429,16 +5429,15 @@ static void TestVanillaBar(void)
     Check(blade, "vanilla's bar off (no bar-vanilla.txt, or its pictures never reached OpenGL): the blade as it was");
     g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 0; g_class = 0; g_vbFullAt = 0;
 
-    /* reading it: only when bar-vanilla.txt is there; each picture the client's newest copy, ours (patch-~) and a
-     * zero-length stub passed over, the base archive its last word; the log says where each came from */
+    /* reading it (whichever bar is chosen: it may be chosen in game at any time): each picture the client's newest copy,
+     * ours (patch-~) and a zero-length stub passed over, the base archive its last word; the log says where each came from */
     static const char *const names[2] = { VBAR_BORDER_PATH, VBAR_GLASS_PATH };
     unsigned char *vblp[VT_COUNT] = { 0 };
     unsigned vlen[VT_COUNT] = { 0 };
     Fresh("vanilla-bar");
     GameDir();
     VBarRead(vblp, vlen);
-    ok = !g_vbarAsked && !vblp[VT_VBORDER] && !vblp[VT_VGLASS];
-    Put("Data/CinderLoad/bar-vanilla.txt", "");
+    ok = !vblp[VT_VBORDER] && !vblp[VT_VGLASS] && LogSays("not read: in none of the client's archives");
     static const char *const inBase[2] = { "base-border", "base-glass" }, *const inFive[1] = { "patch5-border" };
     static const char *const ours[2] = { "ours-border", "ours-glass" }, *const stub[1] = { "" };
     MakeMpq("Data/interface.MPQ", 2, names, inBase, NULL);
@@ -5446,18 +5445,16 @@ static void TestVanillaBar(void)
     MakeMpq("Data/patch-~.MPQ", 2, names, ours, NULL);
     MakeMpq("Data/patch-9.MPQ", 1, names + 1, stub, NULL);
     VBarRead(vblp, vlen);
-    ok &= g_vbarAsked && vblp[VT_VBORDER] && vlen[VT_VBORDER] == 13 && !memcmp(vblp[VT_VBORDER], "patch5-border", 13) &&
+    ok &= vblp[VT_VBORDER] && vlen[VT_VBORDER] == 13 && !memcmp(vblp[VT_VBORDER], "patch5-border", 13) &&
           vblp[VT_VGLASS] && vlen[VT_VGLASS] == 10 && !memcmp(vblp[VT_VGLASS], "base-glass", 10) &&
           LogSays("Loading-BarBorder.blp read from patch-5.MPQ") && LogSays("Loading-BarGlass.blp read from interface.MPQ");
     for (int i = VT_VBORDER; i <= VT_VGLASS; i++) { if (vblp[i]) HeapFree(GetProcessHeap(), 0, vblp[i]); vblp[i] = NULL; }
     Fresh("vanilla-bar-ours-only");
     GameDir();
-    Put("Data/CinderLoad/bar-vanilla.txt", "");
     MakeMpq("Data/patch-~.MPQ", 2, names, ours, NULL);
     VBarRead(vblp, vlen);
-    ok &= g_vbarAsked && !vblp[VT_VBORDER] && !vblp[VT_VGLASS] && LogSays("not read: in none of the client's archives");
-    g_vbarAsked = 0;
-    Check(ok, "vanilla's bar read: only when Data/CinderLoad/bar-vanilla.txt is there; the client's newest copy of each picture (patch-5 over the base), ours and a zero-length stub passed over; none of the client's: not read, and the log says so");
+    ok &= !vblp[VT_VBORDER] && !vblp[VT_VGLASS] && LogSays("not read: in none of the client's archives");
+    Check(ok, "vanilla's bar read as the view starts, whichever bar is chosen (no switch file needed); the client's newest copy of each picture (patch-5 over the base), ours and a zero-length stub passed over; none of the client's: not read, and the log says so");
 }
 
 /* The parchment (his "fix it", 10 Oct 2026: he had seen only the living map under the new bar): the client's world map
@@ -5675,12 +5672,12 @@ static void TestParchment(void)
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
     if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
 
-    /* asked for: only by parchment.txt, which brings vanilla's bar too; the tables from the client's dbc archive */
+    /* read as the view starts, whichever map is chosen (it may be chosen in game at any time): the tables from the
+     * client's dbc archive */
     Fresh("parchment-asked");
     GameDir();
     ParchRead();
-    ok = !g_parchAsked;
-    Put("Data/CinderLoad/parchment.txt", "");
+    ok = g_pzN == 0;
     static const char *dn[2] = { "DBFilesClient\\WorldMapArea.dbc", "DBFilesClient\\WorldMapOverlay.dbc" };
     const char *dd[2] = { (const char *)wma, (const char *)wmo };
     unsigned dl[2] = { wn, on };
@@ -5689,9 +5686,9 @@ static void TestParchment(void)
     unsigned char *vb[VT_COUNT] = { 0 };
     unsigned vl[VT_COUNT] = { 0 };
     VBarRead(vb, vl);
-    ok &= g_parchAsked && g_pzN == 4 && g_ppN == 2 && LogSays("the parchment: 4 zones (WorldMapArea.dbc from dbc.MPQ)") && g_vbarAsked;
-    g_parchAsked = 0; g_vbarAsked = 0;
-    Check(ok, "the parchment asked for: only by Data/CinderLoad/parchment.txt (vanilla's bar with it); the client's world map tables read and logged");
+    ok &= g_pzN == 4 && g_ppN == 2 && LogSays("the parchment: 4 zones (WorldMapArea.dbc from dbc.MPQ)");
+    for (int i = VT_VBORDER; i <= VT_VGLASS; i++) if (vb[i]) HeapFree(GetProcessHeap(), 0, vb[i]);
+    Check(ok, "the parchment's tables read as the view starts, whichever map is chosen (no switch file needed), and logged");
 }
 
 /* no1600x1200's two display hooks made to take turns (his "fix the no1600x1200 crash", 10 Oct 2026): each hook's jump
@@ -5878,6 +5875,130 @@ static void TestExplore(void)
     munmap(low, 1 << 16);
 }
 
+/* ---- the style: the map and the bar, each the player's (his decision, 10 Oct 2026), and the world map's switches ---- */
+#define STYLE_REL "Data/CinderLoad/style.txt"
+static void TestStyle(void)
+{
+    int ok, map, bar;
+    map = bar = -1;
+    ok = StyleParse("map parchment\r\nbar retro\r\n", &map, &bar) == 2 && map == 1 && bar == 1;
+    map = bar = -1;
+    ok &= StyleParse("MAP Satellite\tbar NEO", &map, &bar) == 2 && map == 0 && bar == 0;
+    map = bar = 7;
+    ok &= StyleParse("# map: parchment or satellite, bar: retro or neo\nbar neo\n", &map, &bar) == 1 && map == 7 && bar == 0;
+    map = bar = 7;
+    ok &= StyleParse("?", &map, &bar) == 0 && StyleParse("parchments retroneo neon sat", &map, &bar) == 0 &&
+          StyleParse(NULL, &map, &bar) == 0 && map == 7 && bar == 7;
+    ok &= StyleParse("map=satellite,bar=neo fault", &map, &bar) == 2 && map == 0 && bar == 0;
+    char v[32];
+    StyleValue(v, 1, 0);
+    ok &= !strcmp(v, "parchment neo");
+    StyleValue(v, 0, 1);
+    ok &= !strcmp(v, "satellite retro");
+    Check(ok, "the style's words: parchment or satellite, retro or neo, in any case, whole words only, a note after '#' passed over; the CVar's value \"parchment neo\"");
+
+    Fresh("style-none"); GameDir();
+    StyleLoad();
+    ok = g_parchAsked == 1 && g_vbarAsked == 1 && LogSays("style: the map parchment, the bar retro, from the defaults");
+    Fresh("style-old-parchment"); GameDir();
+    Put("Data/CinderLoad/parchment.txt", "");
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && LogSays("from the old switch files");
+    Fresh("style-old-vanilla-bar"); GameDir();
+    Put("Data/CinderLoad/bar-vanilla.txt", "");
+    StyleLoad();
+    ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+    Fresh("style-file"); GameDir();
+    Put("Data/CinderLoad/parchment.txt", ""); Put("Data/CinderLoad/bar-vanilla.txt", "");
+    Put(STYLE_REL, "map satellite\r\nbar neo\r\n");
+    StyleLoad();
+    ok &= g_parchAsked == 0 && g_vbarAsked == 0 && LogSays("from Data\\CinderLoad\\style.txt (chosen in game)");
+    Fresh("style-half"); GameDir();
+    Put(STYLE_REL, "bar neo\n");
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    Fresh("style-garbage"); GameDir();
+    Put(STYLE_REL, "\x01\x02 zzz satellit");
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1;
+    Check(ok, "the style at start: Data/CinderLoad/style.txt, ahead of all; without it the old switch files (parchment.txt: the parchment and vanilla's bar; bar-vanilla.txt: vanilla's bar on the living map); neither: the parchment and retro; a word missing, its default");
+
+    Fresh("style-set"); GameDir();
+    StyleLoad();
+    const char *t;
+    ok = StyleSet(0, 1, "a test") == 1 && g_parchAsked == 0 && g_vbarAsked == 1 && (t = Get(STYLE_REL)) &&
+         strstr(t, "\r\nmap satellite\r\nbar retro\r\n") && t[0] == '#' && Gone("Data/CinderLoad/style.tmp") &&
+         LogSays("style: the map satellite, the bar retro (a test), from the next loading screen; kept in Data\\CinderLoad\\style.txt");
+    Put(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
+    ok &= StyleSet(0, 1, "the same") == 0 && Is(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
+    ok &= StyleSet(1, 0, "another") == 1;
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    {
+        char p[700];
+        snprintf(p, sizeof p, "%sData/CinderLoad", shim_gamedir);
+        chmod(p, 0555);
+        int changed = StyleSet(0, 0, "unwritable");
+        chmod(p, 0755);
+        ok &= changed && g_parchAsked == 0 && g_vbarAsked == 0 && LogSays("could NOT be written, so it holds only until the game closes");
+    }
+    Check(ok, "a choice made in game: kept in style.txt (written beside it, then moved over it), read back the same at the next start; the same choice again writes nothing; a file that cannot be written: it holds until the game closes, and the log says so");
+
+    /* each screen as the view opens it: the choice, as far as it can be */
+    int pzN = g_pzN;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    g_pzN = 4; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
+    g_parchAsked = 1; g_vbarAsked = 1;
+    StylePick();
+    ok = g_parchOn == 1 && g_barVanilla == 1 && LogSays("  the view: the parchment (each screen") && LogSays("vanilla's own bar (retro");
+    g_parchAsked = 0; g_vbarAsked = 0;
+    StylePick();
+    ok &= !g_parchOn && !g_barVanilla && LogSays("  the view: the living map (satellite), the blade for the bar (neo)");
+    g_parchAsked = 1; g_pzN = 0;
+    StylePick();
+    ok &= !g_parchOn && LogSays("gave no zones: the living map");
+    g_pzN = 4; g_vbarAsked = 1; g_viewTex[VT_VGLASS] = 0;
+    StylePick();
+    ok &= g_parchOn && !g_barVanilla && LogSays("did not reach OpenGL: the blade");
+    Check(ok, "each screen as the view opens: the parchment when chosen and the client's tables were read, else the living map; vanilla's bar when chosen and its pictures are on OpenGL, else the blade; logged as it changes");
+
+    /* the four, drawn: each map with each bar (neo: the blade in its frame, the logo on it; retro: vanilla's frame and
+     * glass); the first frame of a parchment screen with its bar empty */
+    static const char frameTxt[] = "sheet 1024 512\nleft 0 0 422 313\nrail 426 0 554 313\ncentre 558 0 598 313\nright 602 0 1024 313\n"
+                                   "band 223 313\nchannel 236 301\nends 0 422\nlips 0 422\n";
+    FrameParse(frameTxt, sizeof frameTxt - 1);
+    { const char *lg = "logo 1024 512 4 4 1020 484\n"; LogoParse(lg, (unsigned)strlen(lg)); }
+    static const float uv[8] = { 0.2f, 0.7f, 0.6f, 0.7f, 0.2f, 0.3f, 0.6f, 0.3f };
+    memcpy(g_bgUV, uv, sizeof uv);
+    ok = g_frame.ok && g_logo.ok;
+    int all = 1;
+    for (int c = 0; c < 4; c++) {
+        map = c >> 1; bar = c & 1;
+        for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+        g_viewTex[VT_MAP] = g_viewTex[VT_FRAME] = g_viewTex[VT_LOGO] = g_viewTex[VT_SPARK] = 1;
+        g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
+        g_ovOn = 0; g_frameOn = 1; g_logoOn = 1; g_class = 4; g_vbFullAt = 0; g_sbFullAt = 0;
+        g_pzN = 4; g_parchZone = -1; g_parchCont = -1;
+        g_parchAsked = map; g_vbarAsked = bar;
+        StylePick();
+        int n[VT_COUNT + 1] = { 0 };
+        ViewBuild(1920, 1080, 0.6f, 5000);
+        for (int b = 0; b < g_vbN; b++) n[g_vb[b].tex >= 0 ? g_vb[b].tex : VT_COUNT]++;
+        int one = map ? !n[VT_MAP] && n[VT_COUNT] : n[VT_MAP] == 1;
+        one &= bar ? n[VT_VBORDER] && n[VT_VGLASS] && !n[VT_FRAME] && !n[VT_LOGO] : n[VT_FRAME] && n[VT_LOGO] && !n[VT_VBORDER] && !n[VT_VGLASS];
+        for (int i = 0; i <= VT_COUNT; i++) n[i] = 0;
+        ViewFirstList(1920, 1080, 5000);
+        for (int b = 0; b < g_vbN; b++) n[g_vb[b].tex >= 0 ? g_vb[b].tex : VT_COUNT]++;
+        one &= !map ? g_vbN == 0 : bar ? n[VT_VBORDER] && !n[VT_FRAME] : n[VT_FRAME] && !n[VT_VBORDER];
+        if (!one) printf("  (the %s map with the %s bar is not as it should be)\n", StyleMapName(map), StyleBarName(bar));
+        all &= one;
+    }
+    Check(ok && all, "the four, drawn: the parchment or the living map, each with vanilla's bar (its frame and glass) or the blade (its frame, the logo on it); a parchment screen's first frame: the dark paper and its own bar, empty");
+    g_frame.ok = 0; g_logo.ok = 0; g_frameOn = 0; g_logoOn = 0; g_parchOn = 0; g_barVanilla = 0; g_class = 0;
+    g_parchAsked = 0; g_vbarAsked = 0; g_pzN = pzN;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -6049,6 +6170,7 @@ int main(int argc, char **argv)
     FireBarTests();
     LiveTests();
     ViewTests();
+    TestStyle();
     if (argc > 2) {
         FireBarRealClient(argv[2]);
         FireRealClient(argv[2]);

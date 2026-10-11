@@ -2426,6 +2426,8 @@ static DWORD StepNow(DWORD now)
 }
 
 static void ExploreAtLoad(void);                               /* (the parchment's, below) */
+static void StylePick(void);                                   /* (the style's: the map and the bar, chosen; below) */
+static void StyleLoad(void);
 /* The game's thread, each loading frame it draws: a new screen's start, and what only its own frames can tell (how many,
  * the pauses between them and where, the time to a full bar, the freeze at its end). */
 static void GameFacts(float p, DWORD now)
@@ -3728,7 +3730,7 @@ __attribute__((used)) unsigned g_blackCol[4];
 /* The whole screen black (his note, 10 Oct: the game's own world map showed for an eighth of a second before the
  * parchment, in his recording): with the parchment on, the game's own frames of a screen, the ones before the view takes
  * it over, show nothing of the living map's picture, so the screen goes black, then the dark paper. */
-static int g_parchAsked;                         /* (the parchment's, below: Data\\CinderLoad\\parchment.txt is there) */
+static int g_parchAsked;                         /* (the style's map, below: 1 the parchment, 0 the living map) */
 static void ParchBlackBuild(void)
 {
     static const float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, 1, 1 };
@@ -7460,7 +7462,8 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
  * toward the tip, dark where it is cool and the class's colour at full where it is hot, never whiter than it. Its
  * leading edge lit from within, a faint halo past it in the dark (his (b), 10 Oct); full, a last sweep runs the bar and
  * the metal flashes in the class's light. No spark, no pulse, no surges, no crackle (his calls). Until the parchment
- * map is built, Data\CinderLoad\bar-vanilla.txt puts it in place of the blade. */
+ * map is built, Data\CinderLoad\bar-vanilla.txt puts it in place of the blade. Since the style (10 Oct, his decision): the
+ * bar called "retro", on either map, the player's choice (g_vbarAsked; StyleLoad, StylePick). */
 #define VBAR_BORDER_PATH "Interface\\Glues\\LoadingBar\\Loading-BarBorder.blp"
 #define VBAR_GLASS_PATH  "Interface\\Glues\\LoadingBar\\Loading-BarGlass.blp"
 #define VBAR_TEX_W    512           /* the frame and the glass: 512 x 64 texels */
@@ -7484,7 +7487,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
 #define VBAR_FLASH_AT 0.5f          /* the metal flashes this long after it filled, */
 #define VBAR_FLASH_S  0.45f         /* fading in about this long, */
 #define VBAR_FLASH    1.8f          /* this bright (the frame added this many times over, at its first) */
-static int g_vbarAsked, g_barVanilla;   /* bar-vanilla.txt is there; and its pictures reached OpenGL: the view draws it */
+static int g_vbarAsked, g_barVanilla;   /* retro chosen (the style's bar); and its pictures on OpenGL: the view draws it */
 static DWORD g_vbFullAt;                /* the view's clock as it filled (0 while it is filling) */
 
 /* Where it sits in a W x H window: a texel's size (*s) and its top left (*x0, *y0). */
@@ -7609,14 +7612,11 @@ static int ClientPicture(const char *path, const char *base, unsigned char **out
     }
     return 0;
 }
-/* Vanilla's own bar asked for (Data\CinderLoad\bar-vanilla.txt, until the parchment style picks it): its frame and glass
- * read into the view's files (blp, len: by picture slot), each logged. */
+/* Vanilla's own bar (retro, the style's bar, either map): its frame and glass read into the view's files (blp, len: by
+ * picture slot) as the view starts, whichever bar is chosen (it may be chosen in game at any time), each logged. */
 static void VBarRead(unsigned char **blp, unsigned *len)
 {
-    char flag[MAX_PATH], m[300];
-    g_vbarAsked = (Join(flag, g_dir, "Data\\CinderLoad\\bar-vanilla.txt") && Exists(flag)) ||   /* (the parchment brings it too) */
-                  (Join(flag, g_dir, "Data\\CinderLoad\\parchment.txt") && Exists(flag));
-    if (!g_vbarAsked) return;
+    char m[300];
     static const struct { int slot; const char *path; } kPics[2] = { { VT_VBORDER, VBAR_BORDER_PATH }, { VT_VGLASS, VBAR_GLASS_PATH } };
     for (int i = 0; i < 2; i++) {
         const char *from;
@@ -8212,13 +8212,14 @@ static void ViewFirstList(float W, float H, DWORD now)
     if (!g_parchOn) return;
     ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);
     if (g_barVanilla) VBarBuild(W, H, 0, now);
+    else SaberBuild(W, H, 0, now);                               /* (neo: the blade's frame, empty) */
 }
-/* The parchment asked for (Data\\CinderLoad\\parchment.txt): the client's world map tables read (read only), logged. */
+/* The parchment (the style's map): the client's world map tables read (read only) as the view starts, whichever map is
+ * chosen (it may be chosen in game at any time), logged. */
 static void ParchRead(void)
 {
     char flag[MAX_PATH], m[300];
-    g_parchAsked = Join(flag, g_dir, "Data\\CinderLoad\\parchment.txt") && Exists(flag);
-    if (!g_parchAsked) return;
+    (void)flag;
     unsigned char *wma = NULL, *wmo = NULL;
     unsigned wn = 0, on = 0;
     const char *f1, *f2;
@@ -8255,7 +8256,7 @@ static void ViewBuild(float W, float H, float shown, DWORD now)
     ViewOverlayBuild(W, H, now);
     TodGrade(W, 0, g_vvN);                                      /* the world, lit by it */
     TodDiscBuild(W, H);                                         /* its sun or moon */
-    if (g_barVanilla) VBarBuild(W, H, shown, now);               /* vanilla's own bar (bar-vanilla.txt), */
+    if (g_barVanilla) VBarBuild(W, H, shown, now);               /* vanilla's own bar (retro), */
     else SaberBuild(W, H, shown, now);                          /* or the blade */
 }
 
@@ -8773,19 +8774,6 @@ static int ViewOpen(const char **why)
         Log(m);
         Log(ViewSparkUp() ? "  the view's blade: one bar for every class, in its colour; its spark given to OpenGL"
                           : "  the view's blade: its spark was not given to OpenGL; the blade has no tip, sparks or light on the logo");
-        g_parchOn = g_parchAsked && g_pzN > 0;
-        if (g_parchAsked)
-            Log(g_parchOn ? "  the view: the parchment in place of the living map (Data\\CinderLoad\\parchment.txt): each screen, the zone "
-                            "you arrive in as the client's own map paints it, by candlelight"
-                          : "  the view: Data\\CinderLoad\\parchment.txt asks for the parchment, but the client's WorldMapArea.dbc gave "
-                            "no zones; the living map instead");
-        if (g_vbarAsked) {
-            g_barVanilla = g_viewTex[VT_VBORDER] && g_viewTex[VT_VGLASS];
-            Log(g_barVanilla ? "  the view's bar: vanilla's own in place of the blade (Data\\CinderLoad\\bar-vanilla.txt): its frame and glass "
-                               "the client's, its fill the class's colour, dark where the heat is cool and full where it is hot"
-                             : "  the view's bar: Data\\CinderLoad\\bar-vanilla.txt asks for vanilla's own, but its frame or glass did not "
-                               "reach OpenGL; the blade instead");
-        }
         if (g_skyOn)
             Log(ViewSkyUp() ? "  the view's sky: its clouds' picture made with OpenGL, given anew about 30 times a second"
                             : "  the view's sky: OpenGL would not make its clouds' picture; the weather is left out");
@@ -8806,6 +8794,7 @@ static int ViewOpen(const char **why)
      * 10 Oct: "for a split second ... you get the previous screen") */
     if (layered) ViewAlpha(0);
     ShowWindow(g_view.win, SW_SHOWNOACTIVATE);
+    StylePick();                                         /* (the map and the bar this screen: the player's choice) */
     ViewFirstList((float)w, (float)h, ViewNow());
     ViewFrame(NULL, NULL);
     if (layered) ViewAlpha(255);
@@ -8920,8 +8909,8 @@ static DWORD WINAPI ViewThread(LPVOID arg)
     }
     if (g_todStyle & TOD_DISC)                          /* the client's own sun and moon, from its minimap (read only) */
         mpq_read(&kIo, "interface.MPQ", TOD_PATH, &g_view.blp[VT_TIME], &g_view.len[VT_TIME]);
-    VBarRead(g_view.blp, g_view.len);                   /* vanilla's own bar, when bar-vanilla.txt asks for it (read only) */
-    ParchRead();                                        /* the parchment's tables, when parchment.txt asks for it (read only) */
+    VBarRead(g_view.blp, g_view.len);                   /* vanilla's own bar, for retro (read only) */
+    ParchRead();                                        /* the parchment's tables, for the parchment (read only) */
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
     LONG seen = g_gameSeq, worldSeen = 0;
     DWORD fadeAt = 0, waitAt = 0;
@@ -9043,6 +9032,7 @@ static void ViewStart(void)
     int wine = RunsUnderWine();
     if (!Readable(base + FIRE_LAYER_RVA, 8)) { Log("view off: the loading screen's numbers could not be read"); return; }
     if (!g_map.ok || !g_driftOn) { Log("view off: it draws the world map's zoom, and that is not on"); return; }
+    StyleLoad();                                           /* the map and the bar chosen (style.txt) */
     InitializeCriticalSection(&g_stepLock);
     InterlockedExchange(&g_viewOn, 1);                     /* before any loading frame: the game's thread locks from now */
     InterlockedExchange(&g_viewLive, 1);
@@ -9333,6 +9323,132 @@ static void ModeTurnStart(void)
     Log(m);
 }
 #endif
+
+/* ---- the style: the player's two choices, the map and the bar (his decision, 10 Oct 2026) ----
+ * MAP TYPE: Satellite (the living map) | Parchment; LOADING BAR STYLE: Retro (vanilla's own bar) | Neo (the blade in its
+ * frame, the RavenCraft logo on it), each on its own, on both maps. Defaults: the parchment and retro. Chosen in game
+ * (the world map's switches and /cinderload, below) and kept in Data\CinderLoad\style.txt, written here, so it holds over
+ * restarts; a choice counts from the next loading screen. Until a choice is made in game (no style.txt), the old switch
+ * files still say what they said: parchment.txt the parchment with vanilla's bar, bar-vanilla.txt vanilla's bar on the
+ * living map; with neither, the defaults. style.txt wins over them; nothing removes them. g_parchAsked (1: the
+ * parchment) and g_vbarAsked (1: retro) hold the choice: the game's thread writes them (at start, the switches, a
+ * screen's start), the view's thread reads them as each screen opens (StylePick), when the game's thread is in that
+ * screen's loading and cannot change them. */
+#define STYLE_PATH     "Data\\CinderLoad\\style.txt"
+#define STYLE_TMP_PATH "Data\\CinderLoad\\style.tmp"
+static int StyleLetter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+/* The words of text that name a choice, as they come (case aside; '#' to the line's end is a note): parchment or satellite
+ * into *map (1, 0), retro or neo into *bar (1, 0); other words pass. The choices named. */
+static int StyleParse(const char *text, int *map, int *bar)
+{
+    static const struct { const char *word; int which, value; } kWords[4] = {
+        { "parchment", 0, 1 }, { "satellite", 0, 0 }, { "retro", 1, 1 }, { "neo", 1, 0 } };
+    int named = 0;
+    for (const char *s = text; s && *s;) {
+        if (*s == '#') { while (*s && *s != '\n') s++; continue; }
+        if (!StyleLetter(*s)) { s++; continue; }
+        const char *w = s;
+        while (StyleLetter(*s)) s++;
+        int n = (int)(s - w);
+        for (int k = 0; k < 4; k++) {
+            const char *p = kWords[k].word;
+            int i = 0;
+            while (i < n && p[i] && (w[i] | 0x20) == p[i]) i++;
+            if (i == n && !p[i]) { *(kWords[k].which ? bar : map) = kWords[k].value; named++; }
+        }
+    }
+    return named;
+}
+static const char *StyleMapName(int map) { return map ? "parchment" : "satellite"; }
+static const char *StyleBarName(int bar) { return bar ? "retro" : "neo"; }
+/* "parchment retro": the choice as the CVar below carries it. */
+__attribute__((unused)) static void StyleValue(char *out, int map, int bar)   /* (the switches, next) */
+{
+    lstrcpyA(out, StyleMapName(map));
+    lstrcatA(out, " ");
+    lstrcatA(out, StyleBarName(bar));
+}
+/* style.txt written whole (a file beside it, then moved over it): 1 when it was. */
+static int StyleSave(int map, int bar)
+{
+    char path[MAX_PATH], tmp[MAX_PATH], text[400];
+    if (!Join(path, g_dir, STYLE_PATH) || !Join(tmp, g_dir, STYLE_TMP_PATH)) return 0;
+    lstrcpyA(text, "# CinderLoad's loading screens, as chosen in game (on the world map, M, or with /cinderload); from the next "
+                   "loading screen.\r\n# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade).\r\nmap ");
+    lstrcatA(text, StyleMapName(map));
+    lstrcatA(text, "\r\nbar ");
+    lstrcatA(text, StyleBarName(bar));
+    lstrcatA(text, "\r\n");
+    HANDLE f = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    DWORD len = (DWORD)lstrlenA(text), wrote = 0;
+    BOOL ok = WriteFile(f, text, len, &wrote, NULL) && wrote == len;
+    CloseHandle(f);
+    if (ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) return 1;
+    DeleteFileA(tmp);
+    return 0;
+}
+/* At start: the choice from style.txt, else the old switch files, else the defaults; logged. */
+static void StyleLoad(void)
+{
+    char path[MAX_PATH], m[300];
+    int map = 1, bar = 1;
+    const char *from = "the defaults (no choice made in game yet)";
+    char *text = Join(path, g_dir, STYLE_PATH) ? ReadText(path, 4096) : NULL;
+    if (text) {
+        StyleParse(text, &map, &bar);
+        HeapFree(GetProcessHeap(), 0, text);
+        from = "Data\\CinderLoad\\style.txt (chosen in game)";
+    } else {
+        int parch = Join(path, g_dir, "Data\\CinderLoad\\parchment.txt") && Exists(path);
+        int vbar = Join(path, g_dir, "Data\\CinderLoad\\bar-vanilla.txt") && Exists(path);
+        if (parch || vbar) { map = parch; bar = 1; from = "the old switch files (parchment.txt, bar-vanilla.txt)"; }
+    }
+    *(volatile int *)&g_parchAsked = map;
+    *(volatile int *)&g_vbarAsked = bar;
+    wsprintfA(m, "style: the map %s, the bar %s, from %s; set in game on the world map (M) or with /cinderload", StyleMapName(map),
+              StyleBarName(bar), from);
+    Log(m);
+}
+/* The game's thread: the choice changed to map, bar (how: where it came from, for the log), kept in style.txt. 1 when it
+ * changed. */
+__attribute__((unused)) static int StyleSet(int map, int bar, const char *how)   /* (the switches, next) */
+{
+    if (map == *(volatile int *)&g_parchAsked && bar == *(volatile int *)&g_vbarAsked) return 0;
+    *(volatile int *)&g_parchAsked = map;
+    *(volatile int *)&g_vbarAsked = bar;
+    char m[300];
+    int saved = StyleSave(map, bar);
+    wsprintfA(m, "style: the map %s, the bar %s (%s), from the next loading screen; %s", StyleMapName(map), StyleBarName(bar), how,
+              saved ? "kept in Data\\CinderLoad\\style.txt" : "Data\\CinderLoad\\style.txt could NOT be written, so it holds only "
+                                                             "until the game closes");
+    Log(m);
+    return 1;
+}
+/* The view's thread, as each screen opens: what it draws, the choice as far as it can be (the parchment needs the client's
+ * world map tables; vanilla's bar its two pictures on OpenGL), logged when it changes. */
+static void StylePick(void)
+{
+    int map = *(volatile int *)&g_parchAsked, bar = *(volatile int *)&g_vbarAsked;
+    int parch = map && g_pzN > 0, retro = bar && g_viewTex[VT_VBORDER] && g_viewTex[VT_VGLASS];
+    static int said = -1;
+    int now = map << 3 | bar << 2 | parch << 1 | retro;
+    if (now != said) {
+        char m[400];
+        wsprintfA(m, "  the view: %s, %s", !map ? "the living map (satellite)"
+                                         : parch ? "the parchment (each screen, the zone you arrive in as the client's own map "
+                                                   "paints it, by candlelight)"
+                                         : "the parchment is chosen, but the client's WorldMapArea.dbc gave no zones: the living map",
+                  !bar ? "the blade for the bar (neo)"
+                  : retro ? "vanilla's own bar (retro: its frame and glass the client's, its fill the class's colour)"
+                  : "vanilla's bar is chosen, but its frame or glass did not reach OpenGL: the blade");
+        Log(m);
+        said = now;
+    }
+    g_parchOn = parch;
+    g_barVanilla = retro;
+}
+
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
