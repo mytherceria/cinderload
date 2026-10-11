@@ -607,12 +607,15 @@ static void Encrypt(unsigned *d, unsigned n, unsigned key)
 #define MPQ_FILES 32                                     /* (16 until the glow's pack needed more, 4 Oct 2026) */
 static void MakeMpq(const char *rel, int n, const char *const *names, const char *const *data, const unsigned *lens)
 {
-    static unsigned char out[1 << 20];
+    static unsigned char out[4 << 20];                       /* (4 MB: the zones nearby's test packs 25 tiles, 1.7 MB) */
     if (n > MPQ_FILES) { printf("FAIL: a test archive of %d files, more than MPQ_FILES\n", n); exit(1); }
     unsigned hash[64 * 4], block[MPQ_FILES * 4], at = 32;
     memset(hash, 0xFF, sizeof hash);
     for (int i = 0; i < n; i++) {
         unsigned len = lens ? lens[i] : (unsigned)strlen(data[i]);
+        if ((size_t)at + len + sizeof hash + (size_t)n * 16 > sizeof out) {
+            printf("FAIL: a test archive (%s) larger than MakeMpq's %u bytes\n", rel, (unsigned)sizeof out); exit(1);
+        }
         memcpy(out + at, data[i], len);
         block[4 * i] = at; block[4 * i + 1] = len; block[4 * i + 2] = len; block[4 * i + 3] = 0x80000000u;
         at += len;
