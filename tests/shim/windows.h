@@ -98,10 +98,26 @@ static SYSTEMTIME shim_utc;                                   /* UTC as GetSyste
 static void GetSystemTime(SYSTEMTIME *t) { *t = shim_utc; }
 static HANDLE GetProcessHeap(void) { return (HANDLE)1; }
 #define HEAP_ZERO_MEMORY 0x00000008
-static void *HeapAlloc(HANDLE h, DWORD f, size_t n) { (void)h; return (f & HEAP_ZERO_MEMORY) ? calloc(1, n) : malloc(n); }
+static size_t shim_refuse_size;                     /* HeapAlloc refuses the next shim_refuse_n asks for exactly */
+static int shim_refuse_n, shim_refuse_skip;         /* shim_refuse_size bytes (out of memory), after shim_refuse_skip given */
+static void *HeapAlloc(HANDLE h, DWORD f, size_t n)
+{
+    (void)h;
+    if (shim_refuse_n > 0 && n == shim_refuse_size && shim_refuse_skip-- <= 0) { shim_refuse_n--; return NULL; }
+    return (f & HEAP_ZERO_MEMORY) ? calloc(1, n) : malloc(n);
+}
 static BOOL HeapFree(HANDLE h, DWORD f, void *p) { (void)h; (void)f; free(p); return TRUE; }
 static int lstrlenA(const char *s) { return (int)strlen(s); }
 static char *lstrcpyA(char *d, const char *s) { return strcpy(d, s); }
+static int lstrcmpiA(const char *a, const char *b)
+{
+    for (;; a++, b++) {
+        int x = (unsigned char)*a, y = (unsigned char)*b;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y || !x) return x - y;
+    }
+}
 static char *lstrcatA(char *d, const char *s) { return strcat(d, s); }
 static int wsprintfA(char *out, const char *fmt, ...) { va_list a; va_start(a, fmt); int n = vsprintf(out, fmt, a); va_end(a); return n; }
 static int GetSystemMetrics(int i) { return i == SM_CXSCREEN ? shim_screen_w : shim_screen_h; }
@@ -124,12 +140,26 @@ extern int shim_wine;                                /* 1: ntdll exports wine_ge
 static FARPROC GetProcAddress(HMODULE h, const char *n)
 { (void)h; return shim_wine && n && !strcmp(n, "wine_get_version") ? (FARPROC)(size_t)1 : NULL; }
 typedef DWORD (*LPTHREAD_START_ROUTINE)(LPVOID);
+static LPTHREAD_START_ROUTINE shim_thread_fn;        /* the last thread asked for, never run: a test may run it */
+static LPVOID shim_thread_arg;
+static int shim_thread_prio, shim_events_set;
 static HANDLE CreateThread(void *sa, size_t st, LPTHREAD_START_ROUTINE f, LPVOID arg, DWORD fl, DWORD *id)
-{ (void)sa; (void)st; (void)f; (void)arg; (void)fl; (void)id; shim_threads++; return (HANDLE)(long)1000; }
+{ (void)sa; (void)st; (void)fl; (void)id; shim_threads++; shim_thread_fn = f; shim_thread_arg = arg; return (HANDLE)(long)1000; }
+#define THREAD_PRIORITY_BELOW_NORMAL (-1)
+static BOOL SetThreadPriority(HANDLE t, int p) { (void)t; shim_thread_prio = p; return TRUE; }
+static HANDLE CreateEventA(void *sa, BOOL manual, BOOL initial, const char *name)
+{ (void)sa; (void)manual; (void)initial; (void)name; return (HANDLE)(long)1000; }
+static BOOL SetEvent(HANDLE e) { (void)e; shim_events_set++; return TRUE; }
+static int shim_waits;                               /* WaitForSingleObject returns at once; as shim_waits runs out, */
+static volatile LONG *shim_wait_stop;                /* it sets *shim_wait_stop to 0 (a thread's loop told to end) */
+static DWORD WaitForSingleObject(HANDLE h, DWORD ms)
+{ (void)h; (void)ms; if (shim_waits > 0 && --shim_waits == 0 && shim_wait_stop) *shim_wait_stop = 0; return 0; }
 static void Sleep(DWORD ms) { (void)ms; }
-static DWORD GetTickCount(void) { return shim_ticks; }
+static void (*shim_tick_hook)(void);                /* called once by the next GetTickCount (then cleared) */
+static DWORD GetTickCount(void) { if (shim_tick_hook) { void (*h)(void) = shim_tick_hook; shim_tick_hook = NULL; h(); } return shim_ticks; }
 static LONG InterlockedExchange(volatile LONG *at, LONG v) { LONG old = *at; *at = v; return old; }
 static LONG InterlockedIncrement(volatile LONG *p) { return ++*p; }
+static LONG InterlockedCompareExchange(volatile LONG *at, LONG v, LONG cmp) { LONG old = *at; if (old == cmp) *at = v; return old; }
 /* The game's window and its thread's message hook, for the world map's switches (LuaPumpStep, LuaHook): one window,
  * shim_game, alive while shim_game_alive; a hook is recorded, never called by the shim (the test pumps it). */
 typedef void *HWND, *HHOOK;

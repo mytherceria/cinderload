@@ -28,9 +28,9 @@ local function ReadFile(p)
     return s
 end
 local probeSrc, setupSrc = ReadFile(dir .. "/probe.lua"), ReadFile(dir .. "/setup.lua")
-local setupSN = ReadFile(dir .. "/setup-satellite-neo.lua")
-Check(probeSrc and setupSrc and setupSN, "the DLL's probe and its switches' chunk written out")
-if not (probeSrc and setupSrc and setupSN) then print("done"); os.exit(1) end
+local setupSN, setupFull = ReadFile(dir .. "/setup-satellite-neo.lua"), ReadFile(dir .. "/setup-full.lua")
+Check(probeSrc and setupSrc and setupSN and setupFull, "the DLL's probe and its switches' chunk written out")
+if not (probeSrc and setupSrc and setupSN and setupFull) then print("done"); os.exit(1) end
 
 -- 5.1-only syntax (and 5.2+ tokens) the client's Lua 5.0 would not take: found outside strings and comments
 local function Lex50(src)
@@ -74,8 +74,9 @@ local function Lex50(src)
 end
 Check(Lex50(setupSrc) == nil, "the switches' chunk: Lua 5.0's syntax and 1.12's API only (" .. tostring(Lex50(setupSrc)) .. ")")
 Check(Lex50(probeSrc) == nil, "the probe: Lua 5.0's syntax only (" .. tostring(Lex50(probeSrc)) .. ")")
-Check(string.find(setupSrc, '^local CL_MAP, CL_BAR = "parchment", "retro"\n') ~= nil and
-      string.find(setupSN, '^local CL_MAP, CL_BAR = "satellite", "neo"\n') ~= nil, "the chunk begins with the choice the DLL holds")
+Check(string.find(setupSrc, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"\n') ~= nil and
+      string.find(setupSN, '^local CL_MAP, CL_BAR, CL_AREAS = "satellite", "neo", "discovered"\n') ~= nil and
+      string.find(setupFull, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "full"\n') ~= nil, "the chunk begins with the choice the DLL holds")
 
 -- string widths, as the client's font gives them (the look's measure, else about 5.5 a letter at 10)
 if opt.widths then
@@ -170,28 +171,32 @@ Run(probeSrc, "probe")
 Check(world.cvars.CinderLoadStyle == "?", "the probe: the switches not there (a login, a /reload), the CVar marked \"?\"")
 Fresh({ noMap = true })
 Run(probeSrc, "probe")
-Check(world.cvars.CinderLoadStyle == "parchment retro", "the probe: no world map frame (not in the world's UI), nothing marked")
+Check(world.cvars.CinderLoadStyle == "parchment retro discovered", "the probe: no world map frame (not in the world's UI), nothing marked")
 
 -- ---- made, at a login (the map closed) ----
 Fresh({ cvar = "?" })
 local fns, scripts = Functions(), Scripts()
 ok, err = Run(setupSrc)
 Check(ok and NoErrors(), "the switches' chunk runs whole (" .. tostring(err) .. table.concat(world.errors, "; ") .. ")")
-Check(world.cvars.CinderLoadStyle == "parchment retro", "made: the CVar told the choice held (the DLL hears that they ran)")
+Check(world.cvars.CinderLoadStyle == "parchment retro discovered", "made: the CVar told the choice held (the DLL hears that they ran)")
 Check(type(env.CinderLoad) == "table" and env.CinderLoad.up == 1 and not env.CinderLoad.broken, "made: CinderLoad.up, not broken")
 local panel = env.CinderLoadMapPanel
 Check(panel and panel.parent == env.WorldMapFrame and panel.kind == "Frame", "a frame of its own on the world map's (shown with it)")
-local m, b = D("map"), D("bar")
-Check(m and b and m.parent == panel and b.parent == panel and env[m.name .. "Left"] and env[m.name .. "Middle"] and env[m.name .. "Right"] and
-      env[m.name .. "Text"] and Arrow("map") and Arrow("bar"), "two drop-downs made from the client's own UIDropDownMenuTemplate")
-local ml, bl = env[m.name .. "Label"], env[b.name .. "Label"]
+local m, b, a = D("map"), D("bar"), D("areas")
+Check(m and b and a and m.parent == panel and b.parent == panel and a.parent == panel and env[m.name .. "Left"] and env[m.name .. "Middle"] and
+      env[m.name .. "Right"] and env[m.name .. "Text"] and Arrow("map") and Arrow("bar") and Arrow("areas"),
+      "three drop-downs made from the client's own UIDropDownMenuTemplate")
+local ml, bl, al = env[m.name .. "Label"], env[b.name .. "Label"], env[a.name .. "Label"]
 Check(ml and bl and ml.text == "Loading map" and bl.text == "Loading bar" and ml.font == "GameFontNormalSmall" and bl.font == "GameFontNormalSmall" and
       ml.layer == "OVERLAY" and ml.points[1].p == "TOPLEFT" and ml.points[1].rel == m and ml.points[1].x == 20 and ml.points[1].y == 10,
       "his labels, \"Loading map\" and \"Loading bar\", in gold over each (GameFontNormalSmall at the template's top left, 20, 10: as the map's \"Continent\" and \"Zone\")")
 Check(env[m.name .. "Middle"].w == 92 and m.w == 142 and env[m.name .. "Text"].w == 67 and b.w == 142 and m.noResize == 1,
-      "each 92 wide inside, as UIDropDownMenu_SetWidth makes it (its frame 142, its words 67)")
-Check(env[m.name .. "Text"].text == "Parchment" and env[b.name .. "Text"].text == "Retro" and m.selectedValue == "parchment" and
-      b.selectedValue == "retro", "the choice held shows: Parchment, Retro")
+      "the first two each 92 wide inside, as UIDropDownMenu_SetWidth makes it (its frame 142, its words 67)")
+Check(al and al.text == "Map areas" and al.font == "GameFontNormalSmall" and al.points[1].rel == a and al.points[1].x == 20 and
+      env[a.name .. "Middle"].w == 78 and a.w == 128 and env[a.name .. "Text"].w == 53,
+      "the third, \"Map areas\" in gold over it, 78 wide inside (its frame 128, its words 53: \"Discovered\" fits)")
+Check(env[m.name .. "Text"].text == "Parchment" and env[b.name .. "Text"].text == "Retro" and env[a.name .. "Text"].text == "Discovered" and
+      m.selectedValue == "parchment" and b.selectedValue == "retro" and a.selectedValue == "discovered", "the choice held shows: Parchment, Retro, Discovered")
 Check(env.SLASH_CINDERLOAD1 == "/cinderload" and type(env.SlashCmdList.CINDERLOAD) == "function", "/cinderload made")
 Check(table.getn(world.chat) == 0, "made quietly (nothing said in the chat)")
 Check(Touched() == "" and SameFunctions(fns) and SameScripts(scripts),
@@ -199,14 +204,18 @@ Check(Touched() == "" and SameFunctions(fns) and SameScripts(scripts),
 
 -- ---- the map opened: where they are ----
 OpenMap()
-Check(m:IsVisible() and b:IsVisible() and env.WorldMapContinentDropDown:IsVisible() and NoErrors(), "the map opened: both shown, as Continent and Zone")
-local mb, bb, cb, zb = Boxed(m), Boxed(b), Boxed(env.WorldMapContinentDropDown), Boxed(env.WorldMapZoneDropDown)
+Check(m:IsVisible() and b:IsVisible() and a:IsVisible() and env.WorldMapContinentDropDown:IsVisible() and NoErrors(), "the map opened: all three shown, as Continent and Zone")
+local mb, bb, ab, cb, zb = Boxed(m), Boxed(b), Boxed(a), Boxed(env.WorldMapContinentDropDown), Boxed(env.WorldMapZoneDropDown)
 local cl = Boxed(env.WorldMapContinentDropDown.label)
-local mlb, blb = Boxed(ml), Boxed(bl)
-Check(Near(mb.l, 32) and Near(mb.t, 35) and Near(bb.l, 141) and Near(bb.r, 283) and Near(mb.t, cb.t) and Near(bb.t, cb.t) and Near(mb.b, cb.b),
-      "on the top bar, on Continent's row, from x 32 (clear of the bar's flourish) to 283 of the map's 1024: the mock's place")
-Check(bb.r < cb.l - 50 and blb.r < cl.l and mlb.r < blb.l and Near(Boxed(env[m.name .. "Left"]).t, Boxed(env.WorldMapContinentDropDownLeft).t),
-      "covering nothing: the second ends 59 short of Continent, the labels apart, the art at Continent's height")
+local mlb, blb, alb = Boxed(ml), Boxed(bl), Boxed(al)
+Check(Near(mb.l, 32) and Near(mb.t, 35) and Near(bb.l, 141) and Near(bb.r, 283) and Near(ab.l, 250) and Near(ab.r, 378) and Near(mb.t, cb.t) and
+      Near(bb.t, cb.t) and Near(ab.t, cb.t) and Near(mb.b, cb.b),
+      "on the top bar, on Continent's row, from x 32 (clear of the bar's flourish): the first two to 283 of the map's 1024 as the mock's, the third from 250 to 378")
+Check(Near(Boxed(panel).l, 32) and Near(Boxed(panel).r, 378), "their own frame spans the three, from 32 to 378")
+local ar, cleft, zl, crt = Boxed(env[a.name .. "Right"]), Boxed(env.WorldMapContinentDropDownLeft), Boxed(env.WorldMapZoneDropDownLeft), Boxed(env.WorldMapContinentDropDownRight)
+Check(blb.r < alb.l and alb.r < cl.l and mlb.r < blb.l and Near(Boxed(env[m.name .. "Left"]).t, Boxed(env.WorldMapContinentDropDownLeft).t) and
+      ab.r - cb.l <= 36.01 and ab.r - cb.l > 33 and (crt.r - zl.l) <= 33.01,
+      "the third over Continent's frame by 36 (Zone over Continent's by 33: their art three closer than the map's own two), the labels apart, the art at Continent's height")
 if opt.layout then              -- for the look: each region of ours and the map's top row, in the map's box
     local f = io.open(opt.layout, "w")
     local function Out(state, r)
@@ -217,7 +226,7 @@ if opt.layout then              -- for the look: each region of ours and the map
                               r.texture or r.font or "", tc, r.text or "", r.justifyH or "", r.checked and "1" or ""))
     end
     local function All(state)
-        for _, d in ipairs({ m, b, env.WorldMapContinentDropDown, env.WorldMapZoneDropDown }) do
+        for _, d in ipairs({ m, b, a, env.WorldMapContinentDropDown, env.WorldMapZoneDropDown }) do
             for _, k in ipairs({ "Left", "Middle", "Right", "Text", "ButtonNormalTexture" }) do Out(state, env[d.name .. k]) end
             Out(state, d.label or env[d.name .. "Label"])
         end
@@ -233,11 +242,11 @@ if opt.layout then              -- for the look: each region of ours and the map
         end
     end
     All("closed")
-    UI.Click(Arrow("map"))
+    UI.Click(Arrow("areas"))
     UI.Enter(env.DropDownList1Button2)
     All("open")
     UI.Leave(env.DropDownList1Button2)
-    UI.Click(Arrow("map"))
+    UI.Click(Arrow("areas"))
     f:close()
     world.sounds = {}
     world.touched = {}
@@ -259,7 +268,7 @@ Check(tip.shown and tip.lines[1] == "Satellite" and string.find(tip.lines[2] or 
 UI.Leave(env.DropDownList1Button2)
 world.sounds = {}
 PickInList("Satellite")
-Check(world.cvars.CinderLoadStyle == "satellite retro" and not list:IsShown() and env[m.name .. "Text"].text == "Satellite" and
+Check(world.cvars.CinderLoadStyle == "satellite retro discovered" and not list:IsShown() and env[m.name .. "Text"].text == "Satellite" and
       m.selectedValue == "satellite" and env[b.name .. "Text"].text == "Retro" and world.sounds[1] == "UChatScrollButton" and NoErrors(),
       "Satellite picked: the CVar says so, the list closes, the drop-down says Satellite, the bar as it was, the list's sound")
 UI.Click(Arrow("map"))
@@ -269,8 +278,20 @@ Check(not list:IsShown(), "its arrow again: the list closes")
 UI.Click(Arrow("bar"))
 Check(ListSays("Retro*", "Neo") and env.UIDROPDOWNMENU_OPEN_MENU == b.name, "the bar's: Retro, Neo")
 PickInList("Neo")
-Check(world.cvars.CinderLoadStyle == "satellite neo" and env[b.name .. "Text"].text == "Neo" and env[m.name .. "Text"].text == "Satellite",
+Check(world.cvars.CinderLoadStyle == "satellite neo discovered" and env[b.name .. "Text"].text == "Neo" and env[m.name .. "Text"].text == "Satellite",
       "Neo picked: the bar on its own, the map as it was")
+UI.Click(Arrow("areas"))
+Check(ListSays("Discovered*", "Full map") and env.UIDROPDOWNMENU_OPEN_MENU == a.name and Near(list:GetScale(), 1), "the map areas': Discovered, Full map")
+UI.Enter(env.DropDownList1Button2)
+Check(tip.shown and tip.lines[1] == "Full map" and string.find(tip.lines[2] or "", "as though you had discovered it all", 1, true) and
+      string.find(tip.lines[2] or "", "From your next loading screen.", 1, true), "Full map pointed at: what it is (the parchment, every part as though discovered) and when it counts")
+UI.Leave(env.DropDownList1Button2)
+PickInList("Full map")
+Check(world.cvars.CinderLoadStyle == "satellite neo full" and env[a.name .. "Text"].text == "Full map" and env[m.name .. "Text"].text == "Satellite" and
+      env[b.name .. "Text"].text == "Neo" and NoErrors(), "Full map picked: the map's areas on their own, the map and the bar as they were")
+UI.Click(Arrow("areas"))
+PickInList("Discovered")
+Check(world.cvars.CinderLoadStyle == "satellite neo discovered" and env[a.name .. "Text"].text == "Discovered", "Discovered picked: back")
 
 -- ---- the shared list: Continent and Zone as ever ----
 world.touched = {}
@@ -298,7 +319,7 @@ for j = 1, 2 do
     local now = { bt:GetText(), env[bt.name .. "Check"]:IsShown(), bt.lockedHighlight, bt.w }
     for k = 1, 4 do if now[k] ~= snap[j][k] then same = false end end
 end
-Check(same and env[m.name .. "Text"].text == "Parchment" and world.cvars.CinderLoadStyle == "parchment neo",
+Check(same and env[m.name .. "Text"].text == "Parchment" and world.cvars.CinderLoadStyle == "parchment neo discovered",
       "a choice made with /cinderload while Continent's list is open: ours shows it, that list untouched (its words, check, highlight, width)")
 UI.Click(cArrow)
 UI.Click(zArrow)
@@ -323,7 +344,7 @@ CloseMap()
 OpenMap()
 Check(not m:IsShown() and not b:IsShown(), "the windowed map opened again: hidden")
 Slash("bar")
-Check(world.cvars.CinderLoadStyle == "parchment retro" and Said("loading bar Retro"), "/cinderload with the windowed map: still there")
+Check(world.cvars.CinderLoadStyle == "parchment retro discovered" and Said("loading bar Retro"), "/cinderload with the windowed map: still there")
 env.WorldMapFrame_Maximize()
 local mb2 = Boxed(m)
 Check(env.WORLDMAP_WINDOWED == 0 and m:IsVisible() and b:IsVisible() and Near(mb2.l, 32) and Near(mb2.t, 35) and
@@ -361,30 +382,41 @@ env.WorldMapFrame:SetAllPoints()
 -- ---- /cinderload ----
 Slash("")
 local said = world.chat[1]
-Check(said and said.text == "CinderLoad: loading map Parchment, loading bar Retro. Type /cinderload map or /cinderload bar to switch." and
+Check(said and said.text == "CinderLoad: loading map Parchment, loading bar Retro, map areas Discovered. Type /cinderload map, /cinderload bar or /cinderload areas to switch." and
       said.r == 1 and said.g == 1 and said.b == 0, "/cinderload: the choice, in the system's yellow, as the mock has it")
 Slash("map")
-Check(world.cvars.CinderLoadStyle == "satellite retro" and env[m.name .. "Text"].text == "Satellite" and
-      Said("CinderLoad: loading map Satellite, loading bar Retro, from your next loading screen."), "/cinderload map: switched; the drop-down follows")
+Check(world.cvars.CinderLoadStyle == "satellite retro discovered" and env[m.name .. "Text"].text == "Satellite" and
+      Said("CinderLoad: loading map Satellite, loading bar Retro, map areas Discovered, from your next loading screen."), "/cinderload map: switched; the drop-down follows")
 Slash("bar")
-Check(world.cvars.CinderLoadStyle == "satellite neo", "/cinderload bar: switched")
+Check(world.cvars.CinderLoadStyle == "satellite neo discovered", "/cinderload bar: switched")
 Slash("map")
 Slash("bar")
-Check(world.cvars.CinderLoadStyle == "parchment retro", "/cinderload map, bar: back")
+Check(world.cvars.CinderLoadStyle == "parchment retro discovered", "/cinderload map, bar: back")
 Slash("map satellite")
-Check(world.cvars.CinderLoadStyle == "satellite retro", "/cinderload map satellite: set")
+Check(world.cvars.CinderLoadStyle == "satellite retro discovered", "/cinderload map satellite: set")
 Slash("map satellite")
-Check(world.cvars.CinderLoadStyle == "satellite retro", "/cinderload map satellite again: still satellite (set, not switched)")
+Check(world.cvars.CinderLoadStyle == "satellite retro discovered", "/cinderload map satellite again: still satellite (set, not switched)")
 Slash("  BAR   Neo ")
-Check(world.cvars.CinderLoadStyle == "satellite neo", "/cinderload BAR Neo (any case, any spaces): set")
+Check(world.cvars.CinderLoadStyle == "satellite neo discovered", "/cinderload BAR Neo (any case, any spaces): set")
 Slash("parchment")
-Check(world.cvars.CinderLoadStyle == "parchment neo", "/cinderload parchment (the value alone): set")
+Check(world.cvars.CinderLoadStyle == "parchment neo discovered", "/cinderload parchment (the value alone): set")
+Slash("areas")
+Check(world.cvars.CinderLoadStyle == "parchment neo full" and env[a.name .. "Text"].text == "Full map" and
+      Said("CinderLoad: loading map Parchment, loading bar Neo, map areas Full map, from your next loading screen."), "/cinderload areas: switched; the drop-down follows")
+Slash("areas full")
+Check(world.cvars.CinderLoadStyle == "parchment neo full", "/cinderload areas full: set")
+Slash("discovered")
+Check(world.cvars.CinderLoadStyle == "parchment neo discovered", "/cinderload discovered (the value alone): set")
+Slash("full")
+Slash("Areas  Discovered")
+Check(world.cvars.CinderLoadStyle == "parchment neo discovered", "/cinderload Areas Discovered (any case, any spaces): set")
 local strict = true
 for _, bad in ipairs({ "map=satellite", "map: satellite", "map, satellite", "map 2", "map satellite now", "bar blue", "zoom", "neo retro",
-                       "map map", "help", "map=", "bar neo neo", "retro please" }) do
+                       "map map", "help", "map=", "bar neo neo", "retro please", "areas all", "areas full full", "full map", "map full",
+                       "areas=full", "discovered full" }) do
     Slash(bad)
-    local held = world.cvars.CinderLoadStyle == "parchment neo" and env.CinderLoad.map == "parchment" and env.CinderLoad.bar == "neo"
-    if not (held and Said("nothing changed:") and Said("/cinderload bar neo")) then strict = false; print("/cinderload " .. bad .. " was taken") end
+    local held = world.cvars.CinderLoadStyle == "parchment neo discovered" and env.CinderLoad.map == "parchment" and env.CinderLoad.bar == "neo"
+    if not (held and env.CinderLoad.areas == "discovered" and Said("nothing changed:") and Said("/cinderload areas full")) then strict = false; print("/cinderload " .. bad .. " was taken") end
 end
 Check(strict, "/cinderload strict: \"map=satellite\", \"map: satellite\", \"map, satellite\", \"map 2\", a word too many, a word not ours: nothing changed, how to say it")
 
@@ -398,13 +430,13 @@ end
 world.errors = {}
 UI.Click(Arrow("map"))
 env.UIDropDownMenu_AddButton = add
-Check(env.CinderLoad.broken and not panel:IsShown() and not m:IsVisible() and world.cvars.CinderLoadStyle == "parchment neo fault" and
+Check(env.CinderLoad.broken and not panel:IsShown() and not m:IsVisible() and world.cvars.CinderLoadStyle == "parchment neo discovered fault" and
       Said("turned themselves off") and Said("refused") and NoErrors(),
       "a fault in ours: off and hidden, the CVar says \"fault\", the chat says where; no error left to the game")
 UI.Run(Arrow("map"), "OnClick")                                       -- (clicked by something else while hidden: Button:Click())
 Check(not list:IsShown() and NoErrors(), "after a fault: its arrow clicked anyway (hidden, by something else) does nothing")
 Slash("map")
-Check(world.cvars.CinderLoadStyle == "parchment neo fault" and Said("off until the game starts again"), "after a fault: /cinderload says it is off")
+Check(world.cvars.CinderLoadStyle == "parchment neo discovered fault" and Said("off until the game starts again"), "after a fault: /cinderload says it is off")
 UI.Click(cArrow)
 Check(ListSays("Kalimdor*", "Eastern Kingdoms") and PickInList("Eastern Kingdoms") and world.map.c == 2 and NoErrors(),
       "after a fault: Continent's drop-down as ever")
@@ -421,7 +453,7 @@ env.ToggleDropDownMenu = function(level, value, frame, a, x, y)
 end
 UI.Click(Arrow("map"))
 env.ToggleDropDownMenu = toggle
-Check(env.CinderLoad.broken and not D("map"):IsVisible() and world.cvars.CinderLoadStyle == "parchment retro fault" and Said("the list broke") and
+Check(env.CinderLoad.broken and not D("map"):IsVisible() and world.cvars.CinderLoadStyle == "parchment retro discovered fault" and Said("the list broke") and
       NoErrors(), "a fault in the client's drop-down code as ours opens: caught, off, said; no error left to the game")
 CloseMap()
 
@@ -431,14 +463,19 @@ Run(setupSrc)
 local creates, m1, p1 = world.creates, D("map"), env.CinderLoadMapPanel
 Run(setupSrc)
 OpenMap()
-Check(world.creates == creates and table.getn(env.CinderLoad.drops) == 2 and env.CinderLoadMapPanel == p1 and m1 == D("map") and
-      world.cvars.CinderLoadStyle == "parchment retro" and D("map"):IsVisible() and NoErrors(),
-      "made again in the same UI: the same frames, two drop-downs, the choice the DLL sent")
+Check(world.creates == creates and table.getn(env.CinderLoad.drops) == 3 and env.CinderLoadMapPanel == p1 and m1 == D("map") and
+      world.cvars.CinderLoadStyle == "parchment retro discovered" and D("map"):IsVisible() and NoErrors(),
+      "made again in the same UI: the same frames, three drop-downs, the choice the DLL sent")
 Fresh({ cvar = "?" })
 Run(setupSN)
 OpenMap()
-Check(world.cvars.CinderLoadStyle == "satellite neo" and env[D("map").name .. "Text"].text == "Satellite" and env[D("bar").name .. "Text"].text == "Neo",
+Check(world.cvars.CinderLoadStyle == "satellite neo discovered" and env[D("map").name .. "Text"].text == "Satellite" and env[D("bar").name .. "Text"].text == "Neo",
       "a /reload after satellite and neo were chosen: made showing them")
+Fresh({ cvar = "?" })
+Run(setupFull)
+OpenMap()
+Check(world.cvars.CinderLoadStyle == "parchment retro full" and env[D("areas").name .. "Text"].text == "Full map" and NoErrors(),
+      "a /reload after the full map was chosen: made showing it")
 Fresh({ cvar = "?" })
 OpenMap()
 UI.Click(env.WorldMapContinentDropDownButton)
@@ -451,7 +488,7 @@ Check(ListSays("Parchment*", "Satellite"), "and ours opens after it")
 -- ---- without the world map's frame, or its guide; without the CVar ----
 Fresh({ cvar = "?", noMap = true })
 ok, err = Run(setupSrc)
-Check(ok and world.cvars.CinderLoadStyle == "parchment retro" and not env.CinderLoadMapPanel and type(env.SlashCmdList.CINDERLOAD) == "function",
+Check(ok and world.cvars.CinderLoadStyle == "parchment retro discovered" and not env.CinderLoadMapPanel and type(env.SlashCmdList.CINDERLOAD) == "function",
       "no world map frame (an add-on took it away): no drop-downs, /cinderload still")
 Fresh({ cvar = "?", noGuide = true })
 Run(setupSrc)

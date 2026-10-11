@@ -1410,6 +1410,7 @@ static int BarFamily(const BarTable *t)
 #define MAP_DEST_MAP_VA 0x88262C   /* int: the map SMSG_NEW_WORLD / LOGIN_VERIFY_WORLD put the player on (VA 0x401B00) */
 #define MAP_DEST_X_VA   0x88268C   /* float: x there, in yards */
 #define MAP_DEST_Y_VA   0x882690   /* float: y there */
+#define MAP_DEST_Z_VA   0x882694   /* float: its height there (read with them: VA 0x401B2B, written at 0x401E62) */
 #define MAP_TAU         0.15f      /* seconds: how smoothly the view follows, so a late position glides in */
 #define MAP_BAR_TAU     0.15f      /* seconds: how closely the zoom follows the bar (a quick load is over in a second) */
 /* Every screen after the session's first (his rule, 4 Oct 2026: "start halfway to the spot the character is loading to
@@ -2278,12 +2279,32 @@ static float MapLn(float x)
 #define CHAR_MAP        0x38
 #define CHAR_X          0x44
 #define CHAR_Y          0x48
+#define CHAR_Z          0x4C
 static unsigned g_destSnap[3];                                  /* the game's arrival as this screen began */
 static volatile LONG g_destEnd[3], g_destEndOk;                 /* the game's arrival as the last screen ended */
 static int g_destWay;                                           /* how MapDest knew it (the screen's log line) */
 static int g_destMap = -1;
 static int g_titleMapId = -1;                                   /* the screen's map (BAR_MAP_VA), as MapDest last read it */
-static float g_destWX, g_destWY;                                /* the arrival in world yards, once known */
+static float g_destWX, g_destWY, g_destWZ;                      /* the arrival in world yards, once known, */
+static int g_destZOk;                                           /* its height with it when the game wrote one */
+/* Where the game's arrival's height is read and written, as WoW.exe 1.12.1 does (11 Oct 2026): NEW_WORLD's handler
+ * reads map, x, y, height and facing into 0x88262C, 0x88268C, 0x882690, 0x882694, 0x882680 (VA 0x401B07..), and
+ * LOGIN_VERIFY_WORLD's writes them there (VA 0x401E4B..). The height is taken only where these bytes are as read. */
+static const struct { DWORD rva; int n; unsigned char bytes[6]; } kDestZCode[2] = {
+    { 0x001B2B, 5, { 0x68, 0x94, 0x26, 0x88, 0x00 } },             /* push 0x882694 (the packet's height read there) */
+    { 0x001E62, 6, { 0x89, 0x15, 0x94, 0x26, 0x88, 0x00 } } };      /* mov [0x882694], edx */
+static int g_destZSure = -1;                                    /* those bytes as read (-1: not looked at yet) */
+static int DestZHolds(void)
+{
+    if (g_destZSure < 0) {
+        g_destZSure = 1;
+        for (int i = 0; i < 2; i++) {
+            const unsigned char *at = ClientAt(0x400000u + kDestZCode[i].rva);
+            if (!at || !Readable(at, kDestZCode[i].n) || !Same(at, kDestZCode[i].bytes, kDestZCode[i].n)) g_destZSure = 0;
+        }
+    }
+    return g_destZSure;
+}
 static int g_classSure;                                         /* the character list's code is all there (below) */
 
 /* The game's arrival as it stands, into g_destSnap: called as a screen begins. */
@@ -2295,14 +2316,14 @@ static void ArrivalSnap(void)
 }
 
 /* World x, y on screen map id, on the picture: 1 with its u, v and the view's half size there. */
-static int MapPlace(unsigned id, float x, float y, float *du, float *dv, float *hEnd)
+static int MapPlace(unsigned id, float x, float y, float z, int zok, float *du, float *dv, float *hEnd)
 {
     if (!(x > -20000 && x < 20000 && y > -20000 && y < 20000) || (x == 0 && y == 0)) return 0;
     float u = g_map.m[id].au + g_map.m[id].bu * y, v = g_map.m[id].av + g_map.m[id].bv * x;
     float bv = g_map.m[id].bv < 0 ? -g_map.m[id].bv : g_map.m[id].bv, h = 0.5f * g_map.endYards * bv;
     if (!(u > 0 && u < 1 && v > 0 && v < 1 && h > 0.001f && h < 0.45f)) return 0;
     *du = u; *dv = v; *hEnd = h;
-    g_destMap = (int)id; g_destWX = x; g_destWY = y;
+    g_destMap = (int)id; g_destWX = x; g_destWY = y; g_destWZ = z; g_destZOk = zok;
     return 1;
 }
 
@@ -2320,25 +2341,27 @@ static unsigned CharEntry(void)
  * there and kept. Only the game's thread reads the list: the game frees it during a login's load, and a read from the
  * view's thread could meet that memory as it goes, so the view's thread (g_viewSteps: it is the one stepping) has what
  * the game's last frame read (GameFacts keeps it each frame while the view is on). */
-static volatile LONG g_charKept[4];                             /* 1 when kept, its map, x, y */
-static int CharRead(unsigned *m, unsigned *x, unsigned *y)
+static volatile LONG g_charKept[5];                             /* 1 when kept, its map, x, y, height */
+static int CharRead(unsigned *m, unsigned *x, unsigned *y, unsigned *z)
 {
     unsigned e = CharEntry();
     const unsigned char *pm = e ? ClientAt(e + CHAR_MAP) : 0, *px = e ? ClientAt(e + CHAR_X) : 0, *py = e ? ClientAt(e + CHAR_Y) : 0;
-    int ok = pm && px && py && Readable(pm, 4) && Readable(px, 4) && Readable(py, 4);
+    const unsigned char *pz = e ? ClientAt(e + CHAR_Z) : 0;
+    int ok = pm && px && py && pz && Readable(pm, 4) && Readable(px, 4) && Readable(py, 4) && Readable(pz, 4);
     if (ok) {
         *m = *(volatile const unsigned *)pm; *x = *(volatile const unsigned *)px; *y = *(volatile const unsigned *)py;
+        *z = *(volatile const unsigned *)pz;
         InterlockedExchange(&g_charKept[1], (LONG)*m); InterlockedExchange(&g_charKept[2], (LONG)*x);
-        InterlockedExchange(&g_charKept[3], (LONG)*y);
+        InterlockedExchange(&g_charKept[3], (LONG)*y); InterlockedExchange(&g_charKept[4], (LONG)*z);
     }
     InterlockedExchange(&g_charKept[0], ok);
     return ok;
 }
-static int CharPlace(unsigned *m, unsigned *x, unsigned *y)
+static int CharPlace(unsigned *m, unsigned *x, unsigned *y, unsigned *z)
 {
-    if (!g_viewSteps) return CharRead(m, x, y);
+    if (!g_viewSteps) return CharRead(m, x, y, z);
     if (!g_charKept[0]) return 0;
-    *m = (unsigned)g_charKept[1]; *x = (unsigned)g_charKept[2]; *y = (unsigned)g_charKept[3];
+    *m = (unsigned)g_charKept[1]; *x = (unsigned)g_charKept[2]; *y = (unsigned)g_charKept[3]; *z = (unsigned)g_charKept[4];
     return 1;
 }
 
@@ -2346,30 +2369,31 @@ static int CharPlace(unsigned *m, unsigned *x, unsigned *y)
  * known (see above). p: the bar so far. */
 static int MapDest(float *du, float *dv, float *hEnd, float p)
 {
-    unsigned id, dm, xb, yb, e, c, xb2, yb2;
+    unsigned id, dm, xb, yb, zb = 0, e, c, xb2, yb2, zb2;
     float ex, ey;
     if (!ClientWord(BAR_MAP_VA, &id)) return 0;
     g_titleMapId = (int)id;
     g_destWay = 1;
     if (id > 1)                                      /* a dungeon, raid or battleground: its entrance, from the start */
-        return MapEntrance(id, &c, &ex, &ey) && MapPlace(c, ex, ey, du, dv, hEnd);
+        return MapEntrance(id, &c, &ex, &ey) && MapPlace(c, ex, ey, 0, 0, du, dv, hEnd);   /* (its height not known) */
     if (!g_map.m[id].ok) return 0;
     int game = ClientWord(MAP_DEST_MAP_VA, &dm) && ClientWord(MAP_DEST_X_VA, &xb) && ClientWord(MAP_DEST_Y_VA, &yb);
+    int gz = game && DestZHolds() && ClientWord(MAP_DEST_Z_VA, &zb);   /* (its height, written with them) */
     int fresh = game && (dm != g_destSnap[0] || xb != g_destSnap[1] || yb != g_destSnap[2]);
     /* the game wrote it before this screen began: it differs from where the last screen left it (a later load's
      * NEW_WORLD; a login's stale place is still the last screen's, so it never counts this way) */
     int moved = game && g_destEndOk && (dm != (unsigned)g_destEnd[0] || xb != (unsigned)g_destEnd[1] ||
                                         yb != (unsigned)g_destEnd[2]);
-    if ((fresh || moved) && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd)) {
+    if ((fresh || moved) && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), MapBits(zb), gz, du, dv, hEnd)) {
         g_destWay = fresh ? 2 : 5;
         return 1;
     }
-    if (CharPlace(&e, &xb2, &yb2) && e == id && MapPlace(id, MapBits(xb2), MapBits(yb2), du, dv, hEnd)) {
+    if (CharPlace(&e, &xb2, &yb2, &zb2) && e == id && MapPlace(id, MapBits(xb2), MapBits(yb2), MapBits(zb2), 1, du, dv, hEnd)) {
         g_destWay = 3;                                               /* a login: the list's own place */
         return 1;
     }
     g_destWay = 4;
-    return game && p >= 0.5f && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), du, dv, hEnd);
+    return game && p >= 0.5f && dm == id && MapPlace(id, MapBits(xb), MapBits(yb), MapBits(zb), gz, du, dv, hEnd);
 }
 
 static float g_driftMax;                                        /* the bar's highest this screen */
@@ -2478,7 +2502,7 @@ static void GameFacts(float p, DWORD now)
         g_planEndAt = now + (DWORD)(plan > 300 ? plan : 300);
     }
     InterlockedExchange(&g_gameSeq, g_gameSeq + 1);                   /* the game thread is these counts' only writer */
-    if (g_viewOn) { unsigned m, x, y; CharRead(&m, &x, &y); }       /* the character list's place, for the view's */
+    if (g_viewOn) { unsigned m, x, y, z; CharRead(&m, &x, &y, &z); }       /* the character list's place, for the view's */
     g_loadFrame = 1;                                                  /* this frame is a loading screen's (the present) */
     if (p >= 0.999f && !g_fullMs)                                     /* the game's bar full: the time it took */
         InterlockedExchange(&g_fullMs, now - g_scrStartAt > 0 ? (LONG)(now - g_scrStartAt) : 1);
@@ -3536,7 +3560,8 @@ static const struct { DWORD rva; int n; unsigned char bytes[8]; const char *what
     { 0x1B4440, 6, { 0x8D, 0x4E, 0x44, 0x51, 0x8B, 0xCF }, "its x at +0x44" },
     { 0x1B444B, 6, { 0x8D, 0x56, 0x48, 0x52, 0x8B, 0xCF }, "its y at +0x48" },
     { 0x073308, 7, { 0x0F, 0xB6, 0x87, 0x00, 0x01, 0x00, 0x00 }, "GetCharacterInfo's race at +0x100" },
-    { 0x07337A, 7, { 0x0F, 0xB6, 0x87, 0x08, 0x01, 0x00, 0x00 }, "GetCharacterInfo's level at +0x108" } };
+    { 0x07337A, 7, { 0x0F, 0xB6, 0x87, 0x08, 0x01, 0x00, 0x00 }, "GetCharacterInfo's level at +0x108" },
+    { 0x1B4456, 6, { 0x8D, 0x46, 0x4C, 0x50, 0x8B, 0xCF }, "the character list's height at +0x4C" } };
 #define CLASS_CODE ((int)(sizeof kClassCode / sizeof kClassCode[0]))
 
 /* 1 when every place the class's addresses were read from holds the bytes it did in the client this was made for. */
@@ -3760,6 +3785,8 @@ __attribute__((used)) unsigned g_blackCol[4];
  * parchment, in his recording): with the parchment on, the game's own frames of a screen, the ones before the view takes
  * it over, show nothing of the living map's picture, so the screen goes black, then the dark paper. */
 static int g_parchAsked;                         /* (the style's map, below: 1 the parchment, 0 the living map) */
+static int g_mapFull;                             /* (the style's map areas: 1 the full map, 0 only what was discovered) */
+static int g_parchFullOn;                         /* (the view's, as this screen opened: StylePick) */
 static void ParchBlackBuild(void)
 {
     static const float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, 1, 1 };
@@ -5676,12 +5703,18 @@ static int TextHas(const char *list, const char *name)
  * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
-       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_PWORLD, VT_PCONTM, VT_PZONEM, VT_COUNT };
+       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_PWORLD, VT_PCONTM, VT_PZONEM, VT_PWORD0, VT_PWORD1, VT_PMARK,
+       VT_PGLOW, VT_PNOUT0, VT_PNOUT1, VT_COUNT };
                                                                 /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client;
                                                                  * VT_PARCH, VT_PARCH2, VT_PWORLD: the parchment's zone, its
                                                                  * continent and the world, painted here from the client's map;
                                                                  * VT_PCONTM, VT_PZONEM: with the fade C, the continent's and the
-                                                                 * zone's copies in the colours under them) */
+                                                                 * zone's copies in the colours under them; VT_PWORD0, 1:
+                                                                 * the world's names of the two continents, cut out of it;
+                                                                 * VT_PMARK, VT_PGLOW: the player's marker, the world map's
+                                                                 * own arrow and the candle's glow, read from the client;
+                                                                 * VT_PNOUT0, 1: the world's names painted out, laid over it
+                                                                 * as each fades) */
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -7628,22 +7661,30 @@ static void VBarBuild(float W, float H, float shown, DWORD now)
 
 /* One of the client's own pictures, read only: the newest copy across its archives, in the order the client lets them
  * win (patch-~, ours, passed over; a zero-length stub passed over), then base, its last word. 1, and where it came
- * from, when it was read; 0, and why not. */
-static int ClientPicture(const char *path, const char *base, unsigned char **out, unsigned *len, const char **from)
+ * from, when it was read; 0 when it is in none of them; -1 when the newest copy could not be read (out of memory, a read
+ * come back short, a damaged entry). ClientPicture: 1 read, else 0. */
+static int ClientFile(const char *path, const char *base, unsigned char **out, unsigned *len, const char **from)
 {
-    static const char kOrder[] = "ZYXWVUTSRQPONMLKJIHGFEDCBA98765432";
-    static char arch[16];
+    /* (the archives' names, each its own: the view's thread and the parchment's worker read at once) */
+    static const char *const kArch[35] = { "patch-Z.MPQ", "patch-Y.MPQ", "patch-X.MPQ", "patch-W.MPQ", "patch-V.MPQ", "patch-U.MPQ",
+        "patch-T.MPQ", "patch-S.MPQ", "patch-R.MPQ", "patch-Q.MPQ", "patch-P.MPQ", "patch-O.MPQ", "patch-N.MPQ", "patch-M.MPQ",
+        "patch-L.MPQ", "patch-K.MPQ", "patch-J.MPQ", "patch-I.MPQ", "patch-H.MPQ", "patch-G.MPQ", "patch-F.MPQ", "patch-E.MPQ",
+        "patch-D.MPQ", "patch-C.MPQ", "patch-B.MPQ", "patch-A.MPQ", "patch-9.MPQ", "patch-8.MPQ", "patch-7.MPQ", "patch-6.MPQ",
+        "patch-5.MPQ", "patch-4.MPQ", "patch-3.MPQ", "patch-2.MPQ", "patch.MPQ" };
     *from = "in none of the client's archives";
-    for (int a = 0; a <= (int)sizeof kOrder; a++) {
-        if (a < (int)sizeof kOrder - 1) { lstrcpyA(arch, "patch-?.MPQ"); arch[6] = kOrder[a]; }
-        else lstrcpyA(arch, a == (int)sizeof kOrder - 1 ? "patch.MPQ" : base);
+    for (int a = 0; a <= 35; a++) {
+        const char *arch = a < 35 ? kArch[a] : base;
         int r = mpq_read(&kIo, arch, path, out, len);
         if (r == MPQ_E_NOT_FOUND || r == MPQ_E_NO_ARCHIVE || r == MPQ_E_EMPTY) continue;
-        if (r != MPQ_OK) { *from = "unreadable"; return 0; }       /* (the newest copy decides) */
+        if (r != MPQ_OK) { *from = "unreadable"; return -1; }      /* (the newest copy decides) */
         *from = arch;
         return 1;
     }
     return 0;
+}
+static int ClientPicture(const char *path, const char *base, unsigned char **out, unsigned *len, const char **from)
+{
+    return ClientFile(path, base, out, len, from) > 0;
 }
 /* Vanilla's own bar (retro, the style's bar, either map): its frame and glass read into the view's files (blp, len: by
  * picture slot) as the view starts, whichever bar is chosen (it may be chosen in game at any time), each logged. */
@@ -7663,8 +7704,8 @@ static void VBarRead(unsigned char **blp, unsigned *len)
  * The zone you arrive in, painted as the client's own world map paints it (Interface\WorldMap\<zone>, read from its
  * archives: the HD patch's 512-px tiles where it is installed), every overlay piece laid on (the whole zone painted;
  * only the pieces this character has found is a later slice), the tiles' seams blended, by candlelight at all times,
- * the view gliding in toward where you arrive, vanilla's own bar under it. No names, no arrow, no ships, no weather (his
- * calls). The paintings are made on the view's thread, outside the step lock, one a frame: the world's once a session,
+ * the view gliding in toward where you arrive, vanilla's own bar under it. No names, no ships, no weather (his calls);
+ * the world map's own player arrow where you arrive (his pick, 11 Oct: ParchMarkDraw). The paintings are made on the view's thread, outside the step lock, one a frame: the world's once a session,
  * then each screen's arrival's continent and zone; until the world's is made the paper is dark.
  * Data\CinderLoad\parchment.txt asks for it, until it is the default. */
 #define PARCH_ZONES     256
@@ -7838,21 +7879,24 @@ static int PieceFound(const ParchPiece *p, const unsigned char *bits)
  * The client knows which area a place is in from its terrain: each map tile's file (World\Maps\<map's folder>\<folder>_
  * <x>_<y>.adt, x = 32 - y / 533 1/3, y = 32 - x / 533 1/3; the folder Map.dbc's field 1) holds 16 x 16 chunks (MCIN
  * lists them, MCNK each), and each chunk's header says its area (AreaTable.dbc's id, at +0x34); inside a building the
- * building's own (its WMO file's id, MOHD +0x20, and the name set its placement picks: its root row in WMOAreaTable.dbc,
- * group -1, field 10). An area's zone is its last parent (AreaTable field 2), and the world map's page for it the
- * WorldMapArea row with that zone (its field 2). Here: the terrain's chunk under the place; a capital the terrain does
- * not know (Ironforge, Undercity: their streets are inside their buildings) by its building's placement holding the
- * place (its bounds across, MODF +32: the arrival has no height, so only a capital's (AreaTable flag 0x100) is taken);
- * a zone with no page, its continent's (as the client's map shows). Read from the client's own files (terrain.MPQ,
- * wmo.MPQ and their patches, newest first; read only), once an arrival. Without the tile's file (a map with no folder,
- * no terrain read): the smallest box, as before. */
+ * building's own: the group of it whose floor is under the place (WMOAreaTable.dbc's row for its WMO file's id, MOHD
+ * +0x20, the name set its placement picks and the group's own id, MOGP +0x38; else its root row, group -1; field 10),
+ * unless the terrain lies between that floor and the place (the place on the ground over it, or within AREA_ABOVE of
+ * it). An area's zone is its last parent (AreaTable field 2), and the world map's page for it the WorldMapArea row with
+ * that zone (its field 2). Here: the building (AdtBuildingArea) by the arrival's height, which the game writes with its
+ * place (the skeptic's find, 11 Oct: the whole of a capital's box, with no height, took the open ground at its gates:
+ * the Gates of Ironforge, the Ruins of Lordaeron, outside Stormwind's and Orgrimmar's gates); else, or with no height
+ * (an instance's entrance), the terrain's chunk under the place; a zone with no page, its continent's (as the client's
+ * map shows). Read from the client's own files (terrain.MPQ, wmo.MPQ and their patches, newest first; read only), once
+ * an arrival. Without the tile's file (a map with no folder, no terrain read): the smallest box, as before. */
 #define MAP_DIRS        256
-#define WMO_AREAS       8192
+#define WMO_AREAS       16384
 #define AREA_CAPITAL    0x100         /* AreaTable flags: a main capital city */
 #define ADT_TILE_YD     533.333333    /* yards a map tile */
 static struct { int id; char dir[40]; } g_mapDir[MAP_DIRS];
 static int g_mapDirN;
-static int g_waN, g_waWmo[WMO_AREAS], g_waSet[WMO_AREAS], g_waArea[WMO_AREAS];   /* WMOAreaTable's root rows */
+static int g_waN, g_waWmo[WMO_AREAS], g_waSet[WMO_AREAS], g_waGroup[WMO_AREAS], g_waArea[WMO_AREAS];   /* WMOAreaTable's rows
+                                                                                       * with an area (a group's, or the root's: -1) */
 /* Map.dbc's folders (id, field 1), from the file's bytes. */
 static void ParchMaps(const unsigned char *d, unsigned n)
 {
@@ -7868,7 +7912,8 @@ static void ParchMaps(const unsigned char *d, unsigned n)
         if (g_mapDir[g_mapDirN].dir[0]) g_mapDirN++;
     }
 }
-/* WMOAreaTable.dbc's root rows (group -1): the building's id (field 1), its name set (2), its area (10). */
+/* WMOAreaTable.dbc's rows with an area: the building's id (field 1), its name set (2), its group (3: -1 the root), its
+ * area (10). */
 static void ParchWmoAreas(const unsigned char *d, unsigned n)
 {
     unsigned rows, fields, size, sl;
@@ -7878,10 +7923,17 @@ static void ParchWmoAreas(const unsigned char *d, unsigned n)
     if (!DbcTable(d, n, &rows, &fields, &size, &rec, &str, &sl) || fields < 11) return;
     for (unsigned i = 0; i < rows && g_waN < WMO_AREAS; i++) {
         const unsigned char *r = rec + i * size;
-        if ((int)Rd32(r + 12) != -1 || !Rd32(r + 40)) continue;
-        g_waWmo[g_waN] = (int)Rd32(r + 4); g_waSet[g_waN] = (int)Rd32(r + 8); g_waArea[g_waN] = (int)Rd32(r + 40);
+        if (!Rd32(r + 40)) continue;
+        g_waWmo[g_waN] = (int)Rd32(r + 4); g_waSet[g_waN] = (int)Rd32(r + 8); g_waGroup[g_waN] = (int)Rd32(r + 12);
+        g_waArea[g_waN] = (int)Rd32(r + 40);
         g_waN++;
     }
+}
+/* The area WMOAreaTable gives building wmo (its name set set) for group (-1 its root), or 0. */
+static int WmoArea(int wmo, int set, int group)
+{
+    for (int r = 0; r < g_waN; r++) if (g_waWmo[r] == wmo && g_waSet[r] == set && g_waGroup[r] == group) return g_waArea[r];
+    return 0;
 }
 /* Area id's zone (its last parent), or -1 when AreaTable has no such area. */
 static int AreaZone(int area)
@@ -7915,6 +7967,7 @@ static unsigned AdtChunk(const unsigned char *d, unsigned n, unsigned id, unsign
 }
 #define ADT_MCIN 0x4D43494Eu
 #define ADT_MCNK 0x4D434E4Bu
+#define ADT_MCVT 0x4D435654u
 #define ADT_MODF 0x4D4F4446u
 #define ADT_MWMO 0x4D574D4Fu
 #define ADT_MWID 0x4D574944u
@@ -7930,41 +7983,140 @@ static int AdtArea(const unsigned char *d, unsigned n, int cx, int cy)
     if (Rd32(h + 4) != (unsigned)cx || Rd32(h + 8) != (unsigned)cy) return -1;
     return (int)Rd32(h + 0x34);
 }
-/* A capital's page for world x, y on map, by a building of the tile's file placed over it (see above), or -1. */
-static int AdtCapital(const unsigned char *d, unsigned n, int map, float x, float y)
+#define WMO_MOGI 0x4D4F4749u
+#define WMO_MOGP 0x4D4F4750u
+#define WMO_MOVT 0x4D4F5654u
+#define WMO_MOVI 0x4D4F5649u
+#define WMO_MOPY 0x4D4F5059u
+#define WMO_GROUPS      1024          /* a building's groups at most */
+#define AREA_ABOVE      2.0f          /* the terrain counts over a building's floor when the place is above it, or within this */
+#define ADT_ZERO        17066.666f    /* the placements' own axes: 32 tiles less world y, world z, 32 tiles less world x */
+/* The terrain's height at world x, y in a tile's file (its chunk cx, cy's outer heights, between the four round it), or
+ * -1e30 when it cannot be read. */
+static float AdtHeight(const unsigned char *d, unsigned n, int cx, int cy, float x, float y)
+{
+    unsigned sz = 0, in = AdtChunk(d, n, ADT_MCIN, &sz);
+    if (!in || sz < 256 * 16) return -1e30f;
+    unsigned at = Rd32(d + in + 16 * (unsigned)(cy * 16 + cx));
+    if (at > n || n - at < 8 + 0x74) return -1e30f;
+    const unsigned char *h = d + at + 8;
+    unsigned oh = Rd32(h + 0x14);
+    if (oh > n - at || n - at - oh < 8 + 145 * 4 || Rd32(d + at + oh) != ADT_MCVT) return -1e30f;
+    const unsigned char *v = d + at + oh + 8;
+    float unit = (float)(ADT_TILE_YD / 128), r = FireClamp((DbcFloat(h + 0x68) - x) / unit, 0, 7.999f), c = FireClamp((DbcFloat(h + 0x6C) - y) / unit, 0, 7.999f);
+    int r0 = (int)r, c0 = (int)c;
+    float fr = r - (float)r0, fc = c - (float)c0;
+    #define ADT_HV(R, C) DbcFloat(v + 4 * (unsigned)((R) * 17 + (C)))
+    float top = ADT_HV(r0, c0) * (1 - fc) + ADT_HV(r0, c0 + 1) * fc, bot = ADT_HV(r0 + 1, c0) * (1 - fc) + ADT_HV(r0 + 1, c0 + 1) * fc;
+    #undef ADT_HV
+    return DbcFloat(h + 0x70) + top * (1 - fr) + bot * fr;
+}
+/* A placement's (e: its MODF entry) point p (its own axes) in its building's: the building's own axes (x, y across, z up),
+ * as the client turns it (its angles a, b, c in degrees: about z by -a, about y by b - 90, about x by c, the building's
+ * y and z swapped), back. */
+static void WmoLocal(const unsigned char *e, float px, float py, float pz, float *lx, float *ly, float *lz)
+{
+    float rad = 3.14159265f / 180, a = DbcFloat(e + 20) * rad, t = 1.5707963f - DbcFloat(e + 24) * rad, c = -DbcFloat(e + 28) * rad;
+    float qx = px, qy = py, qz = pz;
+    float ax = qx * SeaCos(t) + qz * SeaSin(t), az = -qx * SeaSin(t) + qz * SeaCos(t), ay = qy;      /* about y by 90 - b */
+    float bx = ax * SeaCos(a) - ay * SeaSin(a), by = ax * SeaSin(a) + ay * SeaCos(a), bz = az;      /* about z by a */
+    float gy = by * SeaCos(c) - bz * SeaSin(c), gz = by * SeaSin(c) + bz * SeaCos(c);               /* about x by -c */
+    *lx = bx; *ly = -gz; *lz = gy;
+}
+/* A ray from o along dir (the building's axes) against triangle a, b, c: its length to it, or -1. */
+static float WmoRay(const float *o, const float *dir, const float *a, const float *b, const float *c)
+{
+    float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] }, e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+    float p[3] = { dir[1] * e2[2] - dir[2] * e2[1], dir[2] * e2[0] - dir[0] * e2[2], dir[0] * e2[1] - dir[1] * e2[0] };
+    float det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+    if (det > -1e-8f && det < 1e-8f) return -1;
+    float inv = 1 / det, s[3] = { o[0] - a[0], o[1] - a[1], o[2] - a[2] };
+    float u = (s[0] * p[0] + s[1] * p[1] + s[2] * p[2]) * inv;
+    if (u < 0 || u > 1) return -1;
+    float q[3] = { s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0] };
+    float w = (dir[0] * q[0] + dir[1] * q[1] + dir[2] * q[2]) * inv;
+    if (w < 0 || u + w > 1) return -1;
+    float t = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv;
+    return t >= 0 ? t : -1;
+}
+/* The building a place (world x, y, z) is in, as the client finds it (his rule, 11 Oct: "the way the client does
+ * (height, and the building's own groups), not a wider box"; the skeptic's find: the whole of a capital's box took the
+ * open ground at its gates): of the tile's placements (d, n) whose bounds hold the place, each of its building's groups
+ * whose box holds it (MOGI), the nearest floor under it in the group's own faces (MOVT, MOVI; the faces that collide, MOPY:
+ * 0x08, or drawn (0x20) and not detail (0x04)), from a tenth of a yard above it straight down. The area WMOAreaTable gives
+ * that group (its MOGP's id; else the building's root row), and its floor's height in *floor; 0 when it is in none. */
+static int AdtBuildingArea(const unsigned char *d, unsigned n, float x, float y, float z, float *floor)
 {
     unsigned msz = 0, wsz = 0, isz = 0, mo = AdtChunk(d, n, ADT_MODF, &msz), mw = AdtChunk(d, n, ADT_MWMO, &wsz),
              mi = AdtChunk(d, n, ADT_MWID, &isz);
-    if (!mo || !mw || !mi) return -1;
-    float px = 17066.666f - y, pz = 17066.666f - x;               /* (the placements' own axes) */
+    if (!mo || !mw || !mi) return 0;
+    float px = ADT_ZERO - y, py = z, pz = ADT_ZERO - x, best = 1e30f;
+    int area = 0;
     for (unsigned k = 0; k < msz / 64; k++) {
         const unsigned char *e = d + mo + 64 * k;
-        if (!(px >= DbcFloat(e + 32) && px <= DbcFloat(e + 44) && pz >= DbcFloat(e + 40) && pz <= DbcFloat(e + 52))) continue;
+        if (!(px >= DbcFloat(e + 32) && px <= DbcFloat(e + 44) && py >= DbcFloat(e + 36) - 0.5f && py <= DbcFloat(e + 48) &&
+              pz >= DbcFloat(e + 40) && pz <= DbcFloat(e + 52))) continue;
         unsigned name = Rd32(e), set = Rd32(e + 60) & 0xFFFFu;
         if (name >= isz / 4 || Rd32(d + mi + 4 * name) >= wsz) continue;
-        char path[160];
-        unsigned at = Rd32(d + mi + 4 * name), i = 0;
-        while (at + i < wsz && d[mw + at + i] && i < sizeof path - 1) { path[i] = (char)d[mw + at + i]; i++; }
+        char path[168];
+        unsigned at = Rd32(d + mi + 4 * name), i = 0, dot = 0;
+        while (at + i < wsz && d[mw + at + i] && i < 159) { path[i] = (char)d[mw + at + i]; if (path[i] == '.') dot = i; i++; }
         path[i] = 0;
         unsigned char *w = NULL;
-        unsigned wl = 0, hs = 0;
+        unsigned wl = 0, hs = 0, gs = 0;
         const char *from;
-        if (!path[0] || !ClientPicture(path, "wmo.MPQ", &w, &wl, &from)) continue;
-        unsigned hd = AdtChunk(w, wl, WMO_MOHD, &hs);
+        if (!dot || !ClientPicture(path, "wmo.MPQ", &w, &wl, &from)) continue;
+        unsigned hd = AdtChunk(w, wl, WMO_MOHD, &hs), gi = AdtChunk(w, wl, WMO_MOGI, &gs);
         int wmo = hd && hs >= 0x24 ? (int)Rd32(w + hd + 0x20) : -1;
-        HeapFree(GetProcessHeap(), 0, w);
-        for (int r = 0; wmo >= 0 && r < g_waN; r++) {
-            if (g_waWmo[r] != wmo || g_waSet[r] != (int)set) continue;
-            int zone = AreaZone(g_waArea[r]), zr = zone > 0 ? AreaRow(zone) : -1, page = zone > 0 ? ParchPage(map, zone) : -1;
-            if (zr >= 0 && (g_atFlags[zr] & AREA_CAPITAL) && page >= 0) return page;
+        float o[3], dn[3], t0[3];
+        WmoLocal(e, px - DbcFloat(e + 8), py - DbcFloat(e + 12), pz - DbcFloat(e + 16), &o[0], &o[1], &o[2]);
+        WmoLocal(e, 0, -1, 0, &dn[0], &dn[1], &dn[2]);                      /* (down, in its axes) */
+        for (int c = 0; c < 3; c++) t0[c] = o[c] - 0.1f * dn[c];
+        for (unsigned g = 0; wmo >= 0 && gi && g < gs / 32 && g < WMO_GROUPS; g++) {
+            const unsigned char *q = w + gi + 32 * g;
+            if (!(o[0] >= DbcFloat(q + 4) && o[0] <= DbcFloat(q + 16) && o[1] >= DbcFloat(q + 8) && o[1] <= DbcFloat(q + 20) &&
+                  o[2] >= DbcFloat(q + 12) && o[2] <= DbcFloat(q + 24))) continue;
+            char gp[176];
+            for (unsigned j = 0; j < dot; j++) gp[j] = path[j];
+            wsprintfA(gp + dot, "_%03u.wmo", g);
+            unsigned char *gf = NULL;
+            unsigned gl = 0, ps = 0, ys = 0, is = 0, vs = 0;
+            if (!ClientPicture(gp, "wmo.MPQ", &gf, &gl, &from)) continue;
+            unsigned gpd = AdtChunk(gf, gl, WMO_MOGP, &ps);
+            if (gpd && ps >= 0x44) {
+                const unsigned char *sub = gf + gpd + 0x44;
+                unsigned sn = ps - 0x44, mp = AdtChunk(sub, sn, WMO_MOPY, &ys), mx = AdtChunk(sub, sn, WMO_MOVI, &is), mv = AdtChunk(sub, sn, WMO_MOVT, &vs);
+                unsigned tris = mx ? is / 6 : 0, verts = mv ? vs / 12 : 0;
+                for (unsigned t = 0; t < tris && mp && t < ys / 2; t++) {
+                    unsigned f = sub[mp + 2 * t];
+                    if (!((f & 0x08) || ((f & 0x20) && !(f & 0x04)))) continue;
+                    float P[3][3];
+                    unsigned bad = 0;
+                    for (int k2 = 0; k2 < 3; k2++) {
+                        unsigned vi = (unsigned)sub[mx + 6 * t + 2 * k2] | (unsigned)sub[mx + 6 * t + 2 * k2 + 1] << 8;
+                        if (vi >= verts) { bad = 1; break; }
+                        for (int c = 0; c < 3; c++) P[k2][c] = DbcFloat(sub + mv + 12 * vi + 4 * (unsigned)c);
+                    }
+                    float len = bad ? -1 : WmoRay(t0, dn, P[0], P[1], P[2]);
+                    if (len >= 0 && len - 0.1f < best) {
+                        best = len - 0.1f;
+                        int ga = WmoArea(wmo, (int)set, (int)Rd32(gf + gpd + 0x38));
+                        area = ga ? ga : WmoArea(wmo, (int)set, -1);
+                        if (!area) area = -1;                                  /* (in it, but it names no area) */
+                    }
+                }
+            }
+            HeapFree(GetProcessHeap(), 0, gf);
         }
+        HeapFree(GetProcessHeap(), 0, w);
     }
-    return -1;
+    *floor = z - best;
+    return best < 1e29f ? area : 0;
 }
-/* The arrival's page (a WorldMapArea row: its zone's, its continent's when its zone has none) for world x, y on map, as
- * the client finds it (above), and how (*way: 1 its terrain, 2 a capital's building, 3 its zone has no page, 0 the
- * boxes: no tile's file); -1 when neither. */
-static int ParchZoneAt(int map, float x, float y, int *way)
+/* The arrival's page (a WorldMapArea row: its zone's, its continent's when its zone has none) for world x, y on map, at
+ * height z (zok: known), as the client finds it (above), and how (*way: 1 its terrain, 2 a building's group over its
+ * floor, 3 its zone has no page, 0 the boxes: no tile's file); -1 when neither. */
+static int ParchZoneAt(int map, float x, float y, float z, int zok, int *way)
 {
     *way = 0;
     const char *dir = NULL;
@@ -7979,13 +8131,18 @@ static int ParchZoneAt(int map, float x, float y, int *way)
     const char *from;
     if (!ClientPicture(path, "terrain.MPQ", &d, &n, &from)) return ParchFind(map, x, y);
     int cx = (int)((fx - tx) * 16), cy = (int)((fy - ty) * 16);
-    int area = AdtArea(d, n, cx > 15 ? 15 : cx, cy > 15 ? 15 : cy), page = AdtCapital(d, n, map, x, y);
+    if (cx > 15) cx = 15;
+    if (cy > 15) cy = 15;
+    int area = AdtArea(d, n, cx, cy), in = 0;
+    if (zok) {                                                      /* a building's floor under it, the terrain not between */
+        float floor = 0, ground = AdtHeight(d, n, cx, cy, x, y);
+        int wa = AdtBuildingArea(d, n, x, y, z, &floor);
+        if (wa > 0 && !(z + AREA_ABOVE > ground && ground > floor)) { area = wa; in = 1; }
+    }
     HeapFree(GetProcessHeap(), 0, d);
-    if (page >= 0) { *way = 2; return page; }
     if (area < 0) return ParchFind(map, x, y);
-    int zone = AreaZone(area);
-    page = zone > 0 ? ParchPage(map, zone) : -1;
-    if (page >= 0) { *way = 1; return page; }
+    int zone = AreaZone(area), page = zone > 0 ? ParchPage(map, zone) : -1;
+    if (page >= 0) { *way = in ? 2 : 1; return page; }
     *way = 3;
     return ParchContinent(map);
 }
@@ -8193,7 +8350,9 @@ static unsigned char *ParchTile(const char *folder, const char *name, int n, uns
     HeapFree(GetProcessHeap(), 0, d);
     return out;
 }
-/* src (sw x sh RGBA) over the painting at x, y, as far as cw x ch of it, blended by its alpha (opaque when solid). */
+/* src (sw x sh RGBA) over the painting at x, y, as far as cw x ch of it, blended by its alpha (opaque when solid); an
+ * overlay piece's alpha kept too (g_pieceA, a byte a texel at the painting's stride: the most of any piece's there). */
+static unsigned char *g_pieceA;
 static void ParchPut(const unsigned char *src, unsigned sw, unsigned sh, int x, int y, int cw, int ch, int solid)
 {
     for (int j = 0; j < ch && j < (int)sh; j++) {
@@ -8207,6 +8366,8 @@ static void ParchPut(const unsigned char *src, unsigned sw, unsigned sh, int x, 
             unsigned a = solid ? 255u : s[3];
             for (int c = 0; c < 3; c++) o[c] = (unsigned char)((s[c] * a + o[c] * (255u - a) + 127u) / 255u);
             o[3] = 255;
+            unsigned char *pa = g_pieceA ? g_pieceA + (unsigned)py * (unsigned)g_parchTW + (unsigned)px : NULL;
+            if (!solid && pa && *pa < a) *pa = (unsigned char)a;
         }
     }
 }
@@ -8272,6 +8433,9 @@ static int ParchMakeNamed(const char *name, int id, int z, const char **why)
     }
     if (have < 12) { *why = "its twelve tiles are not all in the client's archives"; return 0; }
     ParchSeams(T, PARCH_MAP_W * g_parchK, PARCH_MAP_H * g_parchK);
+    if (g_pieceA) { HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL; }
+    if (z >= 0 && g_pz[z].area)                                    /* (a zone's: where its pieces lie, for its cut) */
+        g_pieceA = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)g_parchTW * (SIZE_T)g_parchTW);
     for (int p = 0; p < g_ppN; p++) {                             /* the overlay pieces, as the world map lays them */
         const ParchPiece *P = &g_pp[p];
         if (P->zone != id) continue;
@@ -8364,11 +8528,14 @@ static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, f
 #define PARCH_CLIP_F    1.0f          /* a continent's painting kept on the world's, soft this far inside its edges (map tiles) */
 #define PARCH_LP        128           /* C: a coarser painting's colours kept this many cells across */
 #define PARCH_LP_SOFT   6             /* and softened this many times (a three-wide box each way: about two cells) */
-#define PARCH_REF_H     2160.0f       /* the fades' pixels a texel are on a window this tall (his): the same framing on any other
-                                       * (the skeptic's find, 11 Oct: they came later on a smaller window) */
+#define PARCH_REF_H     1080.0f       /* the fades' pixels a texel are on a window this tall, the films he judged and approved
+                                       * (1080 tall): the same map scale, the same framing, on any other (the skeptic's find, 11
+                                       * Oct: they came later on a smaller window; and at 2160 the continent and the zone came up
+                                       * together, the continent-to-zone moment gone) */
 #define PARCH_LATE_MS   900           /* an arrival taken with less of the bar's time left than this glides on the clock, this long */
 #define PARCH_LATE_SPARE 100          /* (or less: landed this long before the screen goes, EVEN_EARLY_MS - VIEW_WORLD_GAP_MS after the
                                        * bar is full) */
+#define PARCH_NAME_FADE 2.0f          /* the continent's name fades out over this much more zoom once wider than the window */
 #define PARCH_REAIM_MAX 0.98f         /* an arrival changed past this much of the glide (or after it): a fresh glide from there */
 enum { PARCH_FADE_A, PARCH_FADE_B, PARCH_FADE_C, PARCH_FADE_D };
 static const unsigned char kParchFrame[20] = { 0x30, 0x37, 0xC4, 0x3C, 0x75, 0xCF, 0x82, 0x3C, 0x00, 0x00, 0xA7, 0x41,
@@ -8506,8 +8673,16 @@ typedef struct { int on; float x, y, r, edge; } ParchBloom;
  * the world map's frame) seen by camera v: a mesh over where it, the window, clip (when given: soft PARCH_CLIP_F inside its
  * edges) and the bloom's circle meet, lit by the candle at each corner, alpha a, soft within PARCH_FEATHER of its own
  * edges when feather, and inside the bloom (when on) whole within its radius less its edge, nothing past it. */
+static void ParchLayerT(int slot, float tw, float th, float pw, float ph, ParchRect r, ParchView v, float W, float H, float a,
+                        int feather, const ParchRect *clip, const ParchBloom *bl);
 static void ParchLayer(int slot, float tw, float pw, float ph, ParchRect r, ParchView v, float W, float H, float a, int feather,
                        const ParchRect *clip, const ParchBloom *bl)
+{
+    ParchLayerT(slot, tw, tw, pw, ph, r, v, W, H, a, feather, clip, bl);
+}
+/* (the same, its texture tw x th) */
+static void ParchLayerT(int slot, float tw, float th, float pw, float ph, ParchRect r, ParchView v, float W, float H, float a,
+                        int feather, const ParchRect *clip, const ParchBloom *bl)
 {
     if (!(a > 0)) return;
     float X0 = (float)((r.x0 - v.x) * v.s) + W / 2, X1 = (float)((r.x1 - v.x) * v.s) + W / 2;
@@ -8565,10 +8740,20 @@ static void ParchLayer(int slot, float tw, float pw, float ph, ParchRect r, Parc
                 float sx = x0 + (x1 - x0) * (float)(i + ci[k]) / PARCH_GX, sy = y0 + (y1 - y0) * (float)(j + cj[k]) / PARCH_GY;
                 float pu = (sx - X0) / (X1 - X0), pv = (sy - Y0) / (Y1 - Y0), L = ParchCandle(sx, sy, W, H);
                 float rgb[3] = { L, L * 0.84f, L * 0.62f };
-                ViewVertSet(q + k, sx, sy, pu * pw / tw, pv * ph / tw, SaberArgb(VBarRgb(rgb), al[(j + cj[k]) * (PARCH_GX + 1) + i + ci[k]]));
+                ViewVertSet(q + k, sx, sy, pu * pw / tw, pv * ph / th, SaberArgb(VBarRgb(rgb), al[(j + cj[k]) * (PARCH_GX + 1) + i + ci[k]]));
             }
         }
 }
+/* the world's names (a picture each: its box on the world's picture, its texels with the letters' alpha) and the world's
+ * painting around each continent's own name (its box on the world's picture, RGBA): see ParchWorldWords */
+typedef struct { int ok, w, h, x0, y0; unsigned char *px; } ParchPic;
+static ParchPic g_wordPic[2], g_wordUnder[2], g_wordOut[2];   /* (g_wordOut: each name painted out, laid over the world's as it fades) */
+static int g_wordUp[2];                       /* each name's picture on OpenGL (VT_PWORD0, VT_PWORD1), */
+static int g_wordTW[2], g_wordTH[2];          /* its texture's size */
+static int g_wordOutUp[2], g_wordOutTW[2], g_wordOutTH[2];   /* (and its painted-out picture's: VT_PNOUT0, VT_PNOUT1) */
+static int g_contWords = -1;                  /* the continent (row) whose own name was painted out as it was made */
+static int g_contCut, g_zoneCut;              /* the continent's and the zone's paintings as up: cut to their own areas */
+static float g_contShare, g_zoneShare;        /* (their own areas' share of their pictures) */
 static LONG g_parchScrSeen = -1;              /* the view's screen the paper last drew for, and when it began */
 static DWORD g_parchScrAt;
 /* This screen's glide (one segment of it): the arrival it is for (g_parchAt) on the view's screen, the view it starts
@@ -8612,6 +8797,76 @@ static void ParchGlideBegin(ParchView a, float shown, DWORD now, int c, int z)
         g_glide.clock = left < PARCH_LATE_MS || shown > 0.999f;
     }
     g_glide.at = g_parchAt; g_glide.screen = g_viewScreen; g_glide.c = c; g_glide.z = z;
+}
+/* ---- the player's marker (his pick, 11 Oct ~03:00, option 1 of the markers mocked, no ripple) ----
+ * Where the character is, the 1.12 world map's own player arrow (Interface\Minimap\MinimapArrow.blp, the picture of the
+ * model WorldMapFrame.lua's CreateWorldMapArrowFrame draws for the player; this client's from its patch-I: the silver
+ * arrow with the blue eye), pointing north (a loading screen does not know the facing), over a soft dark disc for
+ * contrast (the candle's glow picture laid dark), with the candle's warm amber glow (Interface\Glues\Models\UI_NightElf\
+ * GenericGlow2_32.blp, added, as its model blends it) breathing on PARCH_MARK_BREATH: sizes and colours as the mock
+ * (markers.py), in pixels of a window 1080 tall (twice on his 2160). It comes up with the finest painting under it (the
+ * zone's, at sea its continent's), at the character's spot as the glide draws it. Both pictures read from the client's
+ * archives, newest first, read only; the glow's alpha its brightness (it has none of its own). Parchment only. */
+#define PARCH_MARK_ARROW 88.0f        /* the arrow's picture (64 texels) drawn this big, */
+#define PARCH_MARK_LIFT  6.0f         /* its middle this far above the spot (the arrow's head is above its picture's middle) */
+#define PARCH_MARK_DISC  1.05f        /* the dark disc this much the arrow's size, */
+#define PARCH_MARK_DARK  0.62f        /* this dark at its middle */
+#define PARCH_MARK_GLOW  230.0f       /* the glow this big at its widest, */
+#define PARCH_MARK_BREATH 2000        /* breathing over this (ms): its size 0.94 to 1, its alpha 0.16 to 0.32 */
+#define PARCH_MARK_PATH  "Interface\\Minimap\\MinimapArrow.blp"
+#define PARCH_GLOW_PATH  "Interface\\Glues\\Models\\UI_NightElf\\GenericGlow2_32.blp"
+static void ParchPicFree(ParchPic *P);
+static ParchPic g_markPic[2];                  /* the arrow, the glow (RGBA) */
+static int g_markUp;                           /* both on OpenGL */
+static int g_markTW[2], g_markTH[2];
+/* The marker's two pictures read and decoded (the glow's alpha its brightness): 1 when both were. */
+static int ParchMarkRead(void)
+{
+    static const char *const kPath[2] = { PARCH_MARK_PATH, PARCH_GLOW_PATH };
+    int ok = 1;
+    for (int k = 0; k < 2; k++) {
+        ParchPicFree(&g_markPic[k]);
+        unsigned char *d = NULL;
+        unsigned n = 0;
+        const char *from;
+        BlpInfo b;
+        if (!ClientPicture(kPath[k], "interface.MPQ", &d, &n, &from)) { ok = 0; continue; }
+        ParchPic *P = &g_markPic[k];
+        if (BlpParse(d, n, &b) && b.w <= 256 && b.h <= 256 &&
+            (P->px = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)b.w * b.h * 4)) != NULL) {
+            if (b.dxt) DxtDecode(d + b.off[0], b.w, b.h, b.dxt, P->px);
+            else BlpPalDecode(d, &b, 0, b.w, b.h, P->px);
+            P->w = (int)b.w; P->h = (int)b.h; P->x0 = P->y0 = 0; P->ok = 1;
+            for (int i = 0; k == 1 && i < P->w * P->h; i++) {             /* (the glow: its alpha its brightness) */
+                unsigned char *q = P->px + 4 * i, m = q[0] > q[1] ? q[0] : q[1];
+                q[3] = m > q[2] ? m : q[2];
+            }
+        } else ok = 0;
+        HeapFree(GetProcessHeap(), 0, d);
+    }
+    return ok;
+}
+/* The marker at (x, y) on a W x H window, now, a its alpha (its painting's mix): the glow added, the dark disc, the arrow. */
+static void ParchMarkDraw(float x, float y, float W, float H, DWORD now, float a)
+{
+    (void)W;
+    if (!g_markUp || !(a > 0) || !g_viewTex[VT_PMARK] || !g_viewTex[VT_PGLOW]) return;
+    float u = H / PARCH_REF_H, ph = 6.2831853f * (float)(now % PARCH_MARK_BREATH) / PARCH_MARK_BREATH, k = 0.5f + 0.5f * SeaSin(ph);
+    static const float kWarm[3] = { 1.0f, 0.74f, 0.40f }, kDark[3] = { 0.06f, 0.04f, 0.02f };
+    for (int part = 0; part < 3; part++) {                           /* the glow, the disc, the arrow */
+        int slot = part == 2 ? VT_PMARK : VT_PGLOW, m = part == 2 ? 0 : 1;
+        float s = part == 0 ? PARCH_MARK_GLOW * (0.94f + 0.06f * k) : part == 1 ? PARCH_MARK_ARROW * PARCH_MARK_DISC : PARCH_MARK_ARROW;
+        float cy = part == 2 ? y - PARCH_MARK_LIFT * u : y, h = 0.5f * s * u;
+        float al = a * (part == 0 ? 0.16f + 0.16f * k : part == 1 ? PARCH_MARK_DARK : 1);
+        const float *t = part == 0 ? kWarm : part == 1 ? kDark : NULL;
+        float rgb[3] = { t ? t[0] : 1, t ? t[1] : 1, t ? t[2] : 1 };
+        ViewVert *q = ViewQuadMode(slot, part == 0);
+        if (!q) return;
+        DWORD c = SaberArgb(VBarRgb(rgb), al);
+        float u1 = (float)g_markPic[m].w / (float)g_markTW[m], v1 = (float)g_markPic[m].h / (float)g_markTH[m];
+        ViewVertSet(q, x - h, cy - h, 0, 0, c); ViewVertSet(q + 1, x + h, cy - h, u1, 0, c);
+        ViewVertSet(q + 2, x + h, cy + h, u1, v1, c); ViewVertSet(q + 3, x - h, cy + h, 0, v1, c);
+    }
 }
 /* This frame's paper: dark, the world's painting coming up over it as a screen begins, the camera on the opening until
  * the arrival is taken, then gliding (above) on the even bar as shown (shown: never back), the finer paintings coming up
@@ -8672,8 +8927,29 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
     float mk = blend ? g_glide.mk0 + (1 - g_glide.mk0) * ParchMix(e, cs0, cs1) : 1;
     g_pcam.mk = mk; g_pcam.mc = g_pcam.mz = 0;
     float reach = ParchSqrt(W * W + H * H);
+    /* the continent's name, the world's (its continent's own painted out of its painting), fading out once it is wider
+     * than the window (his answer, 11 Oct: "yes the continent name should fade out"): whole up to as wide as the window, as
+     * the opening shows it, gone at PARCH_NAME_FADE times that, and by the landing at the latest (the fade then over the
+     * glide's last PARCH_NAME_FADE of zoom); as it fades, the world's painting under it has it painted out (VT_PNOUT) */
+    int wc = arrive && map >= 0 && map <= 1 ? map : -1;
+    float named = 0, wup = ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt);
+    ParchRect nr = { 0, 0, 0, 0 };
+    float sxW = PARCH_WORLD_FW / (float)(PARCH_MAP_W * g_worldK), syW = PARCH_WORLD_FH / (float)(PARCH_MAP_H * g_worldK);
+    if (world && wc >= 0 && g_wordUp[wc] && g_viewTex[VT_PWORD0 + wc] && g_wordPic[wc].ok && (!contUp || g_contWords == c)) {
+        const ParchPic *P = &g_wordPic[wc];
+        nr.x0 = (float)P->x0 * sxW; nr.y0 = (float)P->y0 * syW; nr.x1 = (float)(P->x0 + P->w) * sxW; nr.y1 = (float)(P->y0 + P->h) * syW;
+        double full = W / ((double)P->w * sxW), s1 = full * PARCH_NAME_FADE < b.s ? full * PARCH_NAME_FADE : b.s;   /* (its zoom as wide as
+                                                                     * the window; gone: then twice that, or the landing's) */
+        float gone = (float)((ParchLn(v.s) - ParchLn(s1)) / ParchLn(PARCH_NAME_FADE)) + 1;
+        named = 1 - ParchSmooth(gone);
+    }
     if (world) ParchLayer(VT_PWORLD, (float)g_worldTW, (float)(PARCH_MAP_W * g_worldK), (float)(PARCH_MAP_H * g_worldK), wr, v, W, H,
-                          ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt), 0, NULL, NULL);
+                          wup, 0, NULL, NULL);
+    if (world && wc >= 0 && named < 1 && g_wordOutUp[wc] && g_viewTex[VT_PNOUT0 + wc] && g_wordOut[wc].ok && (!contUp || g_contWords == c)) {
+        const ParchPic *Q = &g_wordOut[wc];
+        ParchRect qr = { (float)Q->x0 * sxW, (float)Q->y0 * syW, (float)(Q->x0 + Q->w) * sxW, (float)(Q->y0 + Q->h) * syW };
+        ParchLayerT(VT_PNOUT0 + wc, (float)g_wordOutTW[wc], (float)g_wordOutTH[wc], (float)Q->w, (float)Q->h, qr, v, W, H, wup * (1 - named), 0, NULL, NULL);
+    }
     for (int layer = 0; layer < 2; layer++) {                      /* its continent's, then its zone's */
         int up = layer ? zoneUp : contUp, slot = layer ? VT_PARCH : VT_PARCH2, mslot = layer ? VT_PZONEM : VT_PCONTM;
         if (!up) continue;
@@ -8700,14 +8976,45 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         } else
             ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m, !base, clip, &bl);
     }
+    /* the continent's name, the world's, over them all at its own place, as it fades (above) */
+    if (named > 0) {
+        const ParchPic *P = &g_wordPic[wc];
+        ParchLayerT(VT_PWORD0 + wc, (float)g_wordTW[wc], (float)g_wordTH[wc], (float)P->w, (float)P->h, nr, v, W, H, wup * named, 0, NULL, NULL);
+    }
+    /* the player's marker over them all, coming up with the finest painting under it */
+    if (arrive) ParchMarkDraw(g_pcam.px, g_pcam.py, W, H, now, zoneUp ? g_pcam.mz : contUp && z < 0 ? g_pcam.mc : 0);
 }
 
 /* ---- the paintings' making, a frame at a time (the view's thread) ---- */
 static DWORD ViewNow(void);
+static int ParchUpBegin(int slot);
+static int ParchUpStep(SIZE_T budget);
+#if defined(__i386__) && !defined(PARCH_UP)
+#define PARCH_UP_BEGIN ParchUpBegin          /* (the 32-bit build: a painting goes up a strip a frame) */
+#define PARCH_UP_STEP ParchUpStep
+#else
 #ifndef PARCH_UP
 #define PARCH_UP ParchUp                     /* (the tests and the harness keep the painting instead of OpenGL) */
 #endif
 static int ParchUp(int slot);
+/* The tests' OpenGL, as much of the view's own (gl, g_view.maxTex) as a painting's upload uses: unset (no TexSubImage2D),
+ * a painting is kept whole at once (PARCH_UP); set by a test, it goes up a strip a frame through the 32-bit build's own
+ * ParchUpBegin and ParchUpStep. */
+static struct {
+    void (WINAPI *GenTextures)(int, unsigned *);
+    void (WINAPI *BindTexture)(unsigned, unsigned);
+    void (WINAPI *TexParameteri)(unsigned, unsigned, int);
+    void (WINAPI *TexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (WINAPI *TexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (WINAPI *PixelStorei)(unsigned, int);
+    unsigned (WINAPI *GetError)(void);
+} gl;
+static struct { int maxTex; } g_view;
+#ifndef PARCH_UP_BEGIN
+#define PARCH_UP_BEGIN(slot) (gl.TexSubImage2D ? ParchUpBegin(slot) : PARCH_UP(slot))
+#define PARCH_UP_STEP(budget) (gl.TexSubImage2D ? ParchUpStep(budget) : 1)
+#endif
+#endif
 static unsigned char *g_mipPx;               /* the painting's smaller copies, level after level (see ParchMips) */
 static int g_mipLevels;
 /* The painting made (g_parchPx, its picture at its top left) and its smaller copies down to one texel, for the glide
@@ -8749,8 +9056,47 @@ static int ParchMips(void)
 static void ParchFree(void)
 {
     if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
+    if (g_pieceA) { HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL; }
     if (g_mipPx) { HeapFree(GetProcessHeap(), 0, g_mipPx); g_mipPx = NULL; }
     g_mipLevels = 0;
+}
+/* The painting given to OpenGL a strip a frame (the brief, 11 Oct: the view's thread must not stall): at most
+ * ParchUpBudget's bytes a frame. ParchStrip: of a painting T texels a side, its levels 0 to L each half the last, from the cursor
+ * (*level, *y) on, the next strip: as many whole rows of that level as *budget bytes hold (one at least), never past its
+ * last; its level, first row and rows in *sl, *sy, *rows, the budget less them, the cursor after them. 0 when the budget
+ * is spent or all of it is up. ParchLevelPx: a level's texels (0 the painting's own, then its copies in g_mipPx). */
+#define PARCH_UP_BYTES  (2u << 20)
+/* The bytes a frame gives OpenGL, by the time since the last frame (the skeptic's find on 61c66db: at PARCH_UP_BYTES a
+ * frame an HD painting took 67 ms to go up at 165 Hz but 183 ms at 60 Hz, so a late arrival landed on its zone barely
+ * faded in): PARCH_UP_RATE a ms of it (PARCH_UP_BYTES in a 165 Hz frame's 6 ms), never less than PARCH_UP_BYTES (as
+ * before) nor more than PARCH_UP_MOST (a 60 Hz frame's 17 ms of it, so a long frame does not hold the next): an HD
+ * painting up in about 67 ms from 60 Hz up. */
+#define PARCH_UP_RATE   (PARCH_UP_BYTES / 6)
+#define PARCH_UP_MOST   (6u << 20)
+static SIZE_T ParchUpBudget(DWORD dt)
+{
+    unsigned b = (unsigned)(dt < 1000 ? dt : 1000) * (unsigned)PARCH_UP_RATE;   /* (32 bits: a long frame's held to 1 s) */
+    return b < PARCH_UP_BYTES ? PARCH_UP_BYTES : b > PARCH_UP_MOST ? PARCH_UP_MOST : b;
+}
+static int ParchStrip(int T, int L, int *level, int *y, SIZE_T *budget, int *sl, int *sy, int *rows)
+{
+    if (!*budget || *level > L) return 0;
+    int w = T >> *level, n = (int)(*budget / ((SIZE_T)w * 4));
+    if (n < 1) n = 1;
+    if (n > w - *y) n = w - *y;
+    *sl = *level; *sy = *y; *rows = n;
+    SIZE_T b = (SIZE_T)n * (SIZE_T)w * 4;
+    *budget = b < *budget ? *budget - b : 0;
+    *y += n;
+    if (*y >= w) { (*level)++; *y = 0; }
+    return 1;
+}
+static const unsigned char *ParchLevelPx(int level)
+{
+    if (!level) return g_parchPx;
+    const unsigned char *p = g_mipPx;
+    for (int i = 1; i < level; i++) p += (SIZE_T)(g_parchTW >> i) * (SIZE_T)(g_parchTW >> i) * 4;
+    return p;
 }
 /* C (the detail blend): a coarser painting's colours, kept as PARCH_LP cells across its picture (each its texels'
  * average, then softened), with its place on the world map's frame; and a finer painting's colours brought to them
@@ -8846,99 +9192,1753 @@ static int ParchMatch(const ParchLow *L, ParchRect rf)
     HeapFree(GetProcessHeap(), 0, g);
     return 1;
 }
+/* ---- a zone's land, as the client's terrain gives it (his rule, 11 Oct 2026: the cut must not "take away anything
+ * from inside the zone"; the skeptic's find: cut by its continent's lines alone it lost up to a quarter of its own map,
+ * the arrival's own town among it at Menethil and Theramore) ----
+ * Each map tile's file holds 16 x 16 chunks (33 1/3 yards each) and each chunk says its area (AdtArea): the zone's land
+ * is every chunk of its box whose area's zone (AreaZone) is the zone's own, but the sea: a chunk the terrain marks as
+ * ocean (its header's flag 0x8) and that lies wholly under the sea's level (its highest point at most 0) is the sea's,
+ * though its area is the coast's. On a grid of the map's chunks (gx = 16 x the tile's column and the chunk's in it, gy
+ * the same down: 1024 each way), over the zone's box and ParchLandMargin past it. Read once a zone from the client's
+ * own files (terrain.MPQ and its patches, newest first, read only) and kept in Data\CinderLoad\land-<zone>.bin, with a
+ * print of the archives (their sizes) and the box it was made for and its body's sum (LandSum); another print, another
+ * box, a body not its sum: made again. Never kept when a tile could not be read (out of memory, an I/O error): that
+ * screen's zone is cut as though it had no land, and its land is read again the next time. The zone's
+ * cut keeps every texel of its land whole (ParchLandCut), and the same grid, chunk for chunk, is each zone's share of the
+ * map: no chunk is two zones' land. */
+#define LAND_MAGIC      0x444E4C43u   /* "CLND" */
+#define LAND_VERSION    2             /* (2: its body's sum after the box; a version 1 file is made again) */
+#define LAND_HEAD       40            /* its header's bytes: magic, version, print, id, area, the box (4), its body's sum */
+#define LAND_CHUNKS     1024          /* the map's chunks across and down (64 tiles of 16) */
+#define ADT_OCEAN       0x8u          /* a chunk's header flags: ocean */
+typedef struct { int z, gx0, gy0, w, h, n, tiles, fromFile, unread; unsigned char *m; } ParchLand;   /* m: w x h, 1 the zone's own land,
+                                                       * 2 its own sea (its area's, under the sea); n: its land's chunks */
+static ParchLand g_land;                      /* the land of the zone last cut */
+static unsigned g_landPrint;                  /* the archives' print (their sizes), once a session; 0 not yet */
+/* The client's terrain archives' print: each archive the terrain may come from (as ClientPicture tries them) and its
+ * size, hashed; never 0. */
+static unsigned LandPrint(void)
+{
+    if (g_landPrint) return g_landPrint;
+    static const char kOrder[] = "ZYXWVUTSRQPONMLKJIHGFEDCBA98765432";
+    char arch[16];
+    unsigned h = 2166136261u;
+    for (int a = 0; a <= (int)sizeof kOrder + 1; a++) {
+        if (a < (int)sizeof kOrder - 1) { lstrcpyA(arch, "patch-?.MPQ"); arch[6] = kOrder[a]; }
+        else lstrcpyA(arch, a == (int)sizeof kOrder - 1 ? "patch.MPQ" : a == (int)sizeof kOrder ? "terrain.MPQ" : "dbc.MPQ");
+        void *f = IoOpen(NULL, arch);
+        unsigned long long n = f ? IoSize(NULL, f) : 0;
+        if (f) IoClose(NULL, f);
+        for (int i = 0; arch[i]; i++) h = (h ^ (unsigned char)arch[i]) * 16777619u;
+        for (int k = 0; k < 8; k++) h = (h ^ (unsigned)((n >> (8 * k)) & 0xFF)) * 16777619u;
+    }
+    g_landPrint = h ? h : 1;
+    return g_landPrint;
+}
+/* A tile's 256 chunks (t: World\Maps\<folder>\<folder>_<tx>_<ty>.adt): each one's area (0 none) and whether it is dry
+ * (not the sea, above): 1 when the tile was read, 0 when it is in no archive (no terrain there), -1 when it could not be
+ * read (out of memory, an I/O error: the skeptic's find on 61c66db, a land kept without it for good). */
+static int LandTile(const char *dir, int tx, int ty, int *area, unsigned char *dry)
+{
+    char path[160];
+    wsprintfA(path, "World\\Maps\\%s\\%s_%d_%d.adt", dir, dir, tx, ty);
+    unsigned char *d = NULL;
+    unsigned n = 0, sz = 0;
+    const char *from;
+    int r = ClientFile(path, "terrain.MPQ", &d, &n, &from);
+    if (r <= 0) return r;
+    unsigned in = AdtChunk(d, n, ADT_MCIN, &sz);
+    for (int c = 0; c < 256; c++) {
+        area[c] = AdtArea(d, n, c % 16, c / 16);
+        if (area[c] < 0) area[c] = 0;
+        dry[c] = 1;
+        unsigned at = in && sz >= 256 * 16 ? Rd32(d + in + 16 * (unsigned)c) : 0;
+        if (!at || at > n || n - at < 8 + 0x74) continue;
+        const unsigned char *h = d + at + 8;
+        unsigned oh = Rd32(h + 0x14);
+        if (!(Rd32(h) & ADT_OCEAN) || oh > n - at || n - at - oh < 8 + 145 * 4 || Rd32(d + at + oh) != ADT_MCVT) continue;
+        float base = DbcFloat(h + 0x70), top = -1e30f;
+        for (int k = 0; k < 145; k++) { float v = base + DbcFloat(d + at + oh + 8 + 4 * (unsigned)k); if (v > top) top = v; }
+        dry[c] = top > 0;
+    }
+    HeapFree(GetProcessHeap(), 0, d);
+    return 1;
+}
+/* The map's chunk grid at world x, y (yards): gx across (as the tiles' columns: from world y), gy down (from world x). */
+static void LandChunkAt(float x, float y, float *gx, float *gy)
+{
+    *gx = 16 * (PARCH_GRID_MID - y / PARCH_TILE_YD);
+    *gy = 16 * (PARCH_GRID_MID - x / PARCH_TILE_YD);
+}
+/* The world map's frame (map tiles) at the chunk grid's gx, gy on map (ParchSpot's place for it), and back. */
+static void LandFrame(int map, float gx, float gy, float *fx, float *fy)
+{
+    int ok = map >= 0 && map <= 1 && g_wmc[map].ok;
+    float s = ok ? g_wmc[map].s : 1, ox = ok ? g_wmc[map].ox : 0, oy = ok ? g_wmc[map].oy : 0;
+    *fx = (gx / 16 - PARCH_GRID_MID) * s + ox + PARCH_WORLD_FW / 2;
+    *fy = (gy / 16 - PARCH_GRID_MID) * s + oy + PARCH_WORLD_FH / 2;
+}
+static void FrameLand(int map, float fx, float fy, float *gx, float *gy)
+{
+    int ok = map >= 0 && map <= 1 && g_wmc[map].ok;
+    float s = ok ? g_wmc[map].s : 1, ox = ok ? g_wmc[map].ox : 0, oy = ok ? g_wmc[map].oy : 0;
+    *gx = 16 * ((fx - ox - PARCH_WORLD_FW / 2) / s + PARCH_GRID_MID);
+    *gy = 16 * ((fy - oy - PARCH_WORLD_FH / 2) / s + PARCH_GRID_MID);
+}
+/* 1 when chunk gx, gy (any int) is the land's. */
+static int LandOwn(const ParchLand *L, int gx, int gy)
+{
+    gx -= L->gx0; gy -= L->gy0;
+    return L->m && gx >= 0 && gy >= 0 && gx < L->w && gy < L->h && L->m[gy * L->w + gx] == 1;
+}
+static void ParchLandFree(ParchLand *L) { if (L->m) HeapFree(GetProcessHeap(), 0, L->m); L->m = NULL; L->n = 0; L->z = -1; }
+/* A file of the game's folder (rel under it) read whole into buf (cap bytes at most): its size, or -1. */
+static int FileGet(const char *rel, void *buf, unsigned cap)
+{
+    char path[MAX_PATH];
+    if (!Join(path, g_dir, rel)) return -1;
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return -1;
+    DWORD size = GetFileSize(f, NULL), got = 0;
+    int ok = size != INVALID_FILE_SIZE && size <= cap && ReadFile(f, buf, size, &got, NULL) && got == size;
+    CloseHandle(f);
+    return ok ? (int)size : -1;
+}
+/* Tile tx, ty's buildings whose WMOAreaTable rows (any group's, or the root's) name zone z's own area: the chunks of L
+ * whose middles their placements' bounds hold, marked. Those marked; the tile or a building that could not be read
+ * counted in *bad. */
+static int LandBuilding(const char *dir, int tx, int ty, int z, ParchLand *L, int *bad)
+{
+    char path[160];
+    wsprintfA(path, "World\\Maps\\%s\\%s_%d_%d.adt", dir, dir, tx, ty);
+    unsigned char *d = NULL;
+    unsigned n = 0, msz = 0, wsz = 0, isz = 0;
+    const char *from;
+    int r = ClientFile(path, "terrain.MPQ", &d, &n, &from);
+    if (r <= 0) { *bad += r < 0; return 0; }
+    unsigned mo = AdtChunk(d, n, ADT_MODF, &msz), mw = AdtChunk(d, n, ADT_MWMO, &wsz), mi = AdtChunk(d, n, ADT_MWID, &isz);
+    int got = 0;
+    for (unsigned k = 0; mo && mw && mi && k < msz / 64; k++) {
+        const unsigned char *e = d + mo + 64 * k;
+        unsigned name = Rd32(e), set = Rd32(e + 60) & 0xFFFFu;
+        if (name >= isz / 4 || Rd32(d + mi + 4 * name) >= wsz) continue;
+        char wp[160];
+        unsigned at = Rd32(d + mi + 4 * name), i = 0;
+        while (at + i < wsz && d[mw + at + i] && i < sizeof wp - 1) { wp[i] = (char)d[mw + at + i]; i++; }
+        wp[i] = 0;
+        unsigned char *w = NULL;
+        unsigned wl = 0, hs = 0;
+        int wr = wp[0] ? ClientFile(wp, "wmo.MPQ", &w, &wl, &from) : 0;
+        *bad += wr < 0;
+        if (wr <= 0) continue;
+        unsigned hd = AdtChunk(w, wl, WMO_MOHD, &hs);
+        int wmo = hd && hs >= 0x24 ? (int)Rd32(w + hd + 0x20) : -1, its = 0;
+        HeapFree(GetProcessHeap(), 0, w);
+        for (int r = 0; wmo >= 0 && r < g_waN && !its; r++) its = g_waWmo[r] == wmo && g_waSet[r] == (int)set && AreaZone(g_waArea[r]) == g_pz[z].area;
+        if (!its) continue;
+        for (int j = 0; j < L->h; j++)                                  /* (its bounds: x across from world y, z down from world x) */
+            for (int c = 0; c < L->w; c++) {
+                float wy = (PARCH_GRID_MID - ((float)(L->gx0 + c) + 0.5f) / 16) * PARCH_TILE_YD, wx = (PARCH_GRID_MID - ((float)(L->gy0 + j) + 0.5f) / 16) * PARCH_TILE_YD;
+                float px = ADT_ZERO - wy, pz = ADT_ZERO - wx;
+                if (L->m[j * L->w + c] == 1 || !(px >= DbcFloat(e + 32) && px <= DbcFloat(e + 44) && pz >= DbcFloat(e + 40) && pz <= DbcFloat(e + 52))) continue;
+                L->m[j * L->w + c] = 1;
+                got++;
+            }
+    }
+    HeapFree(GetProcessHeap(), 0, d);
+    return got;
+}
+/* A land file's body's sum (FNV-1a over its bytes), so a body changed under a header as made is not trusted. */
+static unsigned LandSum(const unsigned char *body, int bytes)
+{
+    unsigned h = 2166136261u;
+    for (int i = 0; i < bytes; i++) h = (h ^ body[i]) * 16777619u;
+    return h;
+}
+/* Zone z's land (its row) into L: from its file when it is there whole and holds this box, the archives' print and its
+ * body's sum, else from the tiles (and its file written when every tile was read): 1 when made (its land may be none: a
+ * city inside its building, an instance's map), 0 and why not (a tile that could not be read among them: none kept). */
+static int ParchLandMake(int z, ParchLand *L, const char **why)
+{
+    ParchLandFree(L);
+    L->tiles = 0; L->fromFile = 0; L->unread = 0;
+    const char *dir = NULL;
+    for (int i = 0; i < g_mapDirN; i++) if (g_mapDir[i].id == g_pz[z].map) dir = g_mapDir[i].dir;
+    if (!dir) { *why = "its map has no folder (Map.dbc)"; return 0; }
+    if (g_pz[z].area <= 0) { *why = "it is a continent"; return 0; }
+    float ax, ay, bx, by;
+    LandChunkAt(g_pz[z].t, g_pz[z].l, &ax, &ay);                  /* (its box's corners on the grid) */
+    LandChunkAt(g_pz[z].b, g_pz[z].r, &bx, &by);
+    int gx0 = (int)ax - 1, gy0 = (int)ay - 1, gx1 = (int)bx + 1, gy1 = (int)by + 1;
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 > LAND_CHUNKS - 1) gx1 = LAND_CHUNKS - 1;
+    if (gy1 > LAND_CHUNKS - 1) gy1 = LAND_CHUNKS - 1;
+    if (gx1 < gx0 || gy1 < gy0) { *why = "its box is off the map"; return 0; }
+    int w = gx1 - gx0 + 1, h = gy1 - gy0 + 1, bytes = (w * h + 3) / 4;
+    L->m = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)w * (SIZE_T)h);
+    unsigned char *file = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(LAND_HEAD + bytes));
+    if (!L->m || !file) { if (file) HeapFree(GetProcessHeap(), 0, file); ParchLandFree(L); *why = "no memory for it"; return 0; }
+    L->z = z; L->gx0 = gx0; L->gy0 = gy0; L->w = w; L->h = h;
+    unsigned head[10] = { LAND_MAGIC, LAND_VERSION, LandPrint(), (unsigned)g_pz[z].id, (unsigned)g_pz[z].area, (unsigned)gx0, (unsigned)gy0, (unsigned)w, (unsigned)h };
+    char rel[96];
+    wsprintfA(rel, "Data\\CinderLoad\\land-%s.bin", g_pz[z].name);
+    int got = FileGet(rel, file, (unsigned)(LAND_HEAD + bytes));
+    int same = got == LAND_HEAD + bytes;
+    for (int k = 0; same && k < 9; k++) same = Rd32(file + 4 * k) == head[k];
+    if (same && Rd32(file + 36) == LandSum(file + LAND_HEAD, bytes)) {   /* (as kept) */
+        for (int i = 0; i < w * h; i++) { L->m[i] = (file[LAND_HEAD + i / 4] >> (2 * (i % 4))) & 3; L->n += L->m[i] == 1; }
+        L->fromFile = 1;
+        HeapFree(GetProcessHeap(), 0, file);
+        return 1;
+    }
+    static int area[256];
+    static unsigned char dry[256];
+    int bad = 0;                                                    /* (tiles, or buildings, that could not be read) */
+    for (int ty = gy0 / 16; ty <= gy1 / 16; ty++)
+        for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) {
+            int r = LandTile(dir, tx, ty, area, dry);
+            bad += r < 0;
+            if (r <= 0) continue;
+            L->tiles++;
+            for (int c = 0; c < 256; c++) {
+                int gx = tx * 16 + c % 16, gy = ty * 16 + c / 16;
+                if (gx < gx0 || gx > gx1 || gy < gy0 || gy > gy1 || !area[c] || AreaZone(area[c]) != g_pz[z].area) continue;
+                L->m[(gy - gy0) * w + gx - gx0] = dry[c] ? 1 : 2;
+                L->n += dry[c];
+            }
+        }
+    for (int ty = gy0 / 16; !L->n && ty <= gy1 / 16; ty++)           /* none: a city inside its building (Ironforge, Undercity):
+                                                                     * the chunks its building's placement covers */
+        for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) L->n += LandBuilding(dir, tx, ty, z, L, &bad);
+    if (bad) {                                                      /* (not all of it: neither kept nor used) */
+        HeapFree(GetProcessHeap(), 0, file);
+        int tiles = L->tiles;
+        ParchLandFree(L);
+        L->tiles = tiles; L->unread = bad;
+        *why = "a tile of its terrain could not be read";
+        return 0;
+    }
+    for (int i = 0; i < w * h; i++) file[LAND_HEAD + i / 4] |= (unsigned char)((L->m[i] & 3) << (2 * (i % 4)));
+    head[9] = LandSum(file + LAND_HEAD, bytes);
+    for (int k = 0; k < 10; k++) { file[4 * k] = (unsigned char)head[k]; file[4 * k + 1] = (unsigned char)(head[k] >> 8); file[4 * k + 2] = (unsigned char)(head[k] >> 16); file[4 * k + 3] = (unsigned char)(head[k] >> 24); }
+    FilePut(rel, file, (unsigned)(LAND_HEAD + bytes));
+    HeapFree(GetProcessHeap(), 0, file);
+    return 1;
+}
+/* ---- the cut (his pick, 11 Oct ~01:10, after GRADIENT, CUT and COMBO were mocked on Elwynn: "go with the COMBO"; and on
+ * seeing it: "the blur starts too early and the gradient to transparency starts too early and the cut should maybe go
+ * ... 50 to 100 pixels bigger in every direction around the cut so that the blur doesn't take away anything from inside
+ * the zone that it's supposed to show") ----
+ * Each finer painting is cut to its own area as the coarser one under it draws it (a zone as its continent's painting
+ * draws it: the region inside that painting's own border lines; a continent as the world's draws it: its land inside the
+ * world's coast), that outline grown PARCH_CUT_GROW outward, and all the softening in that outer margin: inside its own
+ * border the painting is whole and sharp; past it, it fades to nothing at the grown line (over the last PARCH_CUT_BAND of
+ * the margin: all of it, so the fade begins at the border itself) and its colours soften toward it (by about
+ * PARCH_CUT_BLUR at the line). So the neighbours' borders, the coast and their names come from the coarser painting
+ * under it: no doubled coast, no page rectangle, no torn page edge. The outline: filled from a seed inside (the
+ * arrival's spot, then the zone's overlay pieces, then its box's middle), bounded by the coarser painting's dark lines
+ * (darker than PARCH_CUT_DARK, its one-texel gaps closed), the holes in it (towns, lakes, mountains drawn in ink) filled,
+ * grown into its border line by up to PARCH_CUT_REACH but never into the line's ink, then laid on the finer painting by
+ * the two paintings' WorldMapArea boxes. A fill that leaks out of the box's neighbourhood, or finds too little, is tried
+ * from the next seed; none holding, the plain fade band at the painting's edges (PARCH_FEATHER) instead, logged. Made once
+ * a painting, into its own alpha (the texture it already has: no more texture memory), the coarser painting kept
+ * meanwhile as a byte a texel (its lines). All from the client's own paintings, at run time. Lengths are in texels of
+ * an HD (512-px tiles) painting, half as many on a 256-px one. */
+#ifndef PARCH_CUT_GROW
+#define PARCH_CUT_GROW   75           /* the outline grown outward this far (his "50 to 100"; check frames at 50, 75 and 100) */
+#endif
+#ifndef PARCH_CUT_BAND
+#define PARCH_CUT_BAND   PARCH_CUT_GROW   /* the fade to nothing over the last this much of the margin (all of it: from the border) */
+#endif
+#define PARCH_CUT_BLUR   6            /* the margin's colours softened by about this much at the grown line (a gaussian's sigma) */
+#define PARCH_CUT_DARK   90           /* the coarser painting's lines: darker than this (0.30 R + 0.59 G + 0.11 B) */
+#define PARCH_CUT_INK    80           /* its ink (softened over three texels): darker than this, or brown (green under 0.66 of red, */
+#define PARCH_CUT_BROWN  130          /* red under this) */
+#define PARCH_CUT_REL    15           /* a continent's lines: also those darker than the painting round them by this much, */
+#define PARCH_CUT_MEAN   15           /* that over this far either way (its borders are lighter in places than PARCH_CUT_DARK) */
+#define PARCH_CUT_REACH  6            /* the region grown into its border line by at most this much of the coarser painting */
+#ifndef PARCH_CUT_GAP
+#define PARCH_CUT_GAP    3            /* a continent's lines: gaps up to twice this closed (texels of an HD painting) */
+#endif
+#define PARCH_CUT_COAST  3            /* the world's coasts (kept at half its HD size): gaps up to twice this closed (Kalimdor's east
+                                       * coast is drawn thin, and a fill of its land leaked into the sea through one) */
+#define PARCH_CUT_JOIN   4            /* its pieces joined across a line this thick (texels of the coarser HD painting), */
+#define PARCH_CUT_SEEDS  12           /* seeds tried at most */
+#define PARCH_CUT_FEW    0.08f        /* a region under this much of its box is not the zone (a lake, a town drawn in ink) */
+#ifndef PARCH_CUT_ROOM
+#define PARCH_CUT_ROOM   0.5f         /* the fill looked for this much of the box's size past its edges (reaching that: a leak) */
+#endif
+#define PARCH_CUT_MOST   1.6f         /* a region over this much of its box's area is not the zone alone (it leaked) */
+typedef struct { unsigned char *m; int w, h, K, row, gap; ParchRect r; } ParchLines;   /* a painting's lines: bit 0 dark, bit 1 ink;
+                                                       * the gaps in them closed: up to twice this many cells */
+static ParchLines g_linesWorld, g_linesCont;
+static int g_cutBoxed;                        /* the last cut leaked and was kept to its box */
+#define CUT_DARK 1
+#define CUT_INK  2
+#define CUT_WORD 4                    /* (a continent's own name's letters, painted out: an outline may take them back) */
+/* One row of the lines' source (RGB, w wide) softened across (1 2 1): R, G and luminance, four times. */
+static void LinesRow(const unsigned char *rgb, int w, int y, unsigned *o)
+{
+    const unsigned char *s = rgb + 3 * (unsigned)y * (unsigned)w;
+    for (int x = 0; x < w; x++) {
+        int xa = x > 0 ? x - 1 : 0, xb = x < w - 1 ? x + 1 : w - 1;
+        for (int c = 0; c < 2; c++) o[3 * x + c] = s[3 * xa + c] + 2u * s[3 * x + c] + s[3 * xb + c];
+        unsigned la = (77u * s[3 * xa] + 151u * s[3 * xa + 1] + 28u * s[3 * xa + 2]) >> 8, lm = (77u * s[3 * x] + 151u * s[3 * x + 1] + 28u * s[3 * x + 2]) >> 8;
+        unsigned lb = (77u * s[3 * xb] + 151u * s[3 * xb + 1] + 28u * s[3 * xb + 2]) >> 8;
+        o[3 * x + 2] = la + 2u * lm + lb;
+    }
+}
+/* The painting in g_parchPx (placed at r, row its WorldMapArea row, -2 the world) kept as its lines, at its own size or,
+ * shrink 2 (its tiles HD), at half (the world's: its continents' outlines need no more). */
+static void ParchLinesKeep(ParchLines *P, ParchRect r, int row, int shrink)
+{
+    if (P->m) HeapFree(GetProcessHeap(), 0, P->m);
+    P->m = NULL; P->row = -3;
+    int K = g_parchK, fw = PARCH_MAP_W * K, fh = PARCH_MAP_H * K, T = g_parchTW, s = shrink == 2 && K == 2 ? 2 : 1;
+    int w = fw / s, h = fh / s;
+    if (!g_parchPx || fw > T || fh > T) return;
+    unsigned char *rgb = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * (SIZE_T)h * 3);
+    unsigned *rows = (unsigned *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * 9 * sizeof(unsigned));
+    P->m = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)w * (SIZE_T)h);
+    if (!P->m || !rows || !rgb) {
+        if (P->m) HeapFree(GetProcessHeap(), 0, P->m);
+        if (rows) HeapFree(GetProcessHeap(), 0, rows);
+        if (rgb) HeapFree(GetProcessHeap(), 0, rgb);
+        P->m = NULL;
+        return;
+    }
+    for (int y = 0; y < h; y++)                                       /* (its texels, or each two by two's mean) */
+        for (int x = 0; x < w; x++)
+            for (int c = 0; c < 3; c++) {
+                unsigned v = 0;
+                for (int j = 0; j < s; j++)
+                    for (int i = 0; i < s; i++) v += g_parchPx[4 * ((unsigned)(y * s + j) * (unsigned)T + (unsigned)(x * s + i)) + c];
+                rgb[3 * ((unsigned)y * (unsigned)w + (unsigned)x) + c] = (unsigned char)(v / (unsigned)(s * s));
+            }
+    /* a continent's lines are also those darker than the painting round them by PARCH_CUT_REL (Kalimdor's borders are drawn
+     * lighter than PARCH_CUT_DARK): its local mean over 2 PARCH_CUT_MEAN + 1 texels (an HD painting's) each way, from sums
+     * down each column kept as the rows go by */
+    int rel = row >= 0, mr = PARCH_CUT_MEAN * K / 2 / s;
+    unsigned *col = rel ? (unsigned *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)w * sizeof(unsigned)) : NULL;
+    if (rel && !col) rel = 0;
+    for (int y = 0; rel && y < mr && y < h; y++)
+        for (int x = 0; x < w; x++) { const unsigned char *q = rgb + 3 * ((unsigned)y * (unsigned)w + (unsigned)x); col[x] += (77u * q[0] + 151u * q[1] + 28u * q[2]) >> 8; }
+    unsigned *ra = rows, *rm = rows + 3 * w, *rb = rows + 6 * w;
+    LinesRow(rgb, w, 0, ra); LinesRow(rgb, w, 0, rm); LinesRow(rgb, w, h > 1 ? 1 : 0, rb);
+    for (int y = 0; y < h; y++) {
+        const unsigned char *src = rgb + 3 * (unsigned)y * (unsigned)w;
+        unsigned char *out = P->m + (unsigned)y * (unsigned)w;
+        int rows0 = 0;
+        if (rel) {                                                    /* (the column sums now over rows y - mr .. y + mr) */
+            int add = y + mr, sub = y - mr - 1;
+            for (int x = 0; add < h && x < w; x++) { const unsigned char *q = rgb + 3 * ((unsigned)add * (unsigned)w + (unsigned)x); col[x] += (77u * q[0] + 151u * q[1] + 28u * q[2]) >> 8; }
+            for (int x = 0; sub >= 0 && x < w; x++) { const unsigned char *q = rgb + 3 * ((unsigned)sub * (unsigned)w + (unsigned)x); col[x] -= (77u * q[0] + 151u * q[1] + 28u * q[2]) >> 8; }
+            rows0 = (add < h ? add : h - 1) - (sub >= 0 ? sub + 1 : 0) + 1;
+        }
+        unsigned win = 0;
+        int x0w = 0, x1w = -1;
+        for (int x = 0; x < w; x++) {
+            unsigned L = (77u * src[3 * x] + 151u * src[3 * x + 1] + 28u * src[3 * x + 2]) >> 8;
+            unsigned R = ra[3 * x] + 2u * rm[3 * x] + rb[3 * x], G = ra[3 * x + 1] + 2u * rm[3 * x + 1] + rb[3 * x + 1],
+                     Ls = ra[3 * x + 2] + 2u * rm[3 * x + 2] + rb[3 * x + 2];   /* (sixteen times) */
+            unsigned char b = L < PARCH_CUT_DARK ? CUT_DARK : 0;
+            if ((100u * G < 66u * R && R < 16u * PARCH_CUT_BROWN) || Ls < 16u * PARCH_CUT_INK) b |= CUT_INK;
+            if (rel) {
+                while (x1w < x + mr && x1w < w - 1) win += col[++x1w];
+                while (x0w < x - mr) win -= col[x0w++];
+                int mean = (int)(win / (unsigned)((x1w - x0w + 1) * rows0));
+                if ((int)L < mean - PARCH_CUT_REL) b |= CUT_DARK;
+                if ((int)L < mean - 2 * PARCH_CUT_REL) b |= CUT_INK;
+            }
+            out[x] = b;
+        }
+        unsigned *t = ra; ra = rm; rm = rb; rb = t;                   /* (on a row) */
+        LinesRow(rgb, w, y + 2 < h ? y + 2 : h - 1, rb);
+    }
+    if (col) HeapFree(GetProcessHeap(), 0, col);
+    HeapFree(GetProcessHeap(), 0, rows);
+    HeapFree(GetProcessHeap(), 0, rgb);
+    P->w = w; P->h = h; P->K = K / s; P->r = r; P->row = row; P->gap = row == -2 ? PARCH_CUT_COAST : (PARCH_CUT_GAP * K + 1) / 2;
+}
+/* A crop's fill from start over its open cells, marking mark (q: room for every cell): the cells marked. */
+static int CutFill(unsigned char *mark, const unsigned char *open, int cw, int ch, int start, int *q)
+{
+    if (start < 0 || start >= cw * ch || !open[start] || mark[start]) return 0;
+    int head = 0, tail = 0;
+    mark[start] = 1; q[tail++] = start;
+    while (head < tail) {
+        int i = q[head++], x = i % cw;
+        if (x > 0 && open[i - 1] && !mark[i - 1]) { mark[i - 1] = 1; q[tail++] = i - 1; }
+        if (x < cw - 1 && open[i + 1] && !mark[i + 1]) { mark[i + 1] = 1; q[tail++] = i + 1; }
+        if (i >= cw && open[i - cw] && !mark[i - cw]) { mark[i - cw] = 1; q[tail++] = i - cw; }
+        if (i + cw < cw * ch && open[i + cw] && !mark[i + cw]) { mark[i + cw] = 1; q[tail++] = i + cw; }
+    }
+    return tail;
+}
+/* dst: src grown by a cell across and down (grow), or shrunk so (a cell kept only with all four neighbours; the crop's
+ * edge counts as the cell itself) */
+static void CutMorph(unsigned char *dst, const unsigned char *src, int cw, int ch, int grow)
+{
+    for (int y = 0; y < ch; y++)
+        for (int x = 0; x < cw; x++) {
+            int i = y * cw + x, c = src[i] != 0;
+            int l = x > 0 ? src[i - 1] != 0 : c, r = x < cw - 1 ? src[i + 1] != 0 : c;
+            int u = y > 0 ? src[i - cw] != 0 : c, d = y < ch - 1 ? src[i + cw] != 0 : c;
+            dst[i] = (unsigned char)(grow ? (c | l | r | u | d) : (c & l & r & u & d));
+        }
+}
+/* reg's holes filled: every cell the crop's edge cannot reach outside it (out, q: room). */
+static void CutHoles(unsigned char *reg, unsigned char *out, unsigned char *notReg, int cw, int ch, int *q)
+{
+    for (int i = 0; i < cw * ch; i++) { out[i] = 0; notReg[i] = !reg[i]; }
+    for (int x = 0; x < cw; x++) { CutFill(out, notReg, cw, ch, x, q); CutFill(out, notReg, cw, ch, (ch - 1) * cw + x, q); }
+    for (int y = 0; y < ch; y++) { CutFill(out, notReg, cw, ch, y * cw, q); CutFill(out, notReg, cw, ch, y * cw + cw - 1, q); }
+    for (int i = 0; i < cw * ch; i++) reg[i] = !out[i];
+}
+/* The crop cx0, cy0, cw x ch of P's lines into line (its bits) and open (1 where a fill may go: not on a dark line, its
+ * one-cell gaps closed; tmp: a crop's room). */
+static void CutOpen(const ParchLines *P, int cx0, int cy0, int cw, int ch, unsigned char *line, unsigned char *open, unsigned char *tmp)
+{
+    int n = cw * ch;
+    for (int y = 0; y < ch; y++)
+        for (int x = 0; x < cw; x++) {
+            int X = cx0 + x, Y = cy0 + y;
+            line[y * cw + x] = X >= 0 && Y >= 0 && X < P->w && Y < P->h ? P->m[Y * P->w + X] : 0;
+        }
+    for (int i = 0; i < n; i++) open[i] = line[i] & CUT_DARK;         /* the lines, their gaps closed */
+    for (int g = 0; g < P->gap; g++) { CutMorph(tmp, open, cw, ch, 1); for (int i = 0; i < n; i++) open[i] = tmp[i]; }
+    for (int g = 0; g < P->gap; g++) { CutMorph(tmp, open, cw, ch, 0); for (int i = 0; i < n; i++) open[i] = tmp[i]; }
+    for (int i = 0; i < n; i++) open[i] = !open[i];
+}
+/* A fill from the open cell nearest seed (sx, sy: crop cells, within three of P's HD texels) into reg (cleared first):
+ * its cells, 0 when there is none near or (unless leaks) it reached the crop's edge (a leak). */
+static int CutSeed(const unsigned char *open, int cw, int ch, int k, float sx, float sy, int leaks, unsigned char *reg, int *q)
+{
+    int n = cw * ch, x0 = (int)sx, y0 = (int)sy, win = 3 * k, start = -1, best = 1 << 30;
+    for (int dy = -win; dy <= win; dy++)
+        for (int dx = -win; dx <= win; dx++) {
+            int x = x0 + dx, y = y0 + dy, d = dx * dx + dy * dy;
+            if (x >= 0 && y >= 0 && x < cw && y < ch && open[y * cw + x] && d < best) { best = d; start = y * cw + x; }
+        }
+    for (int i = 0; i < n; i++) reg[i] = 0;
+    if (start < 0) return 0;
+    int got = CutFill(reg, open, cw, ch, start, q);
+    if (leaks) return got;
+    for (int x = 0; x < cw; x++) if (reg[x] || reg[(ch - 1) * cw + x]) return 0;    /* (it leaked) */
+    for (int y = 0; y < ch; y++) if (reg[y * cw] || reg[y * cw + cw - 1]) return 0;
+    return got;
+}
+/* A region (reg) made whole: its holes (towns, lakes, mountains in ink) filled, grown into its border line by up to
+ * PARCH_CUT_REACH but never into the ink, and into its continent's own name's letters (painted out: they hid its line)
+ * as far as their strokes, its stray threads off (an opening), its pieces joined across lines up to PARCH_CUT_JOIN thick
+ * (a closing: a lake's shore in ink), its holes filled again (a, b: crop rooms). Its cells. */
+static int CutWhole(const unsigned char *line, int cw, int ch, int k, unsigned char *reg, unsigned char *a, unsigned char *b, int *q)
+{
+    int n = cw * ch, got = 0;
+    CutHoles(reg, a, b, cw, ch, q);
+    for (int it = 0; it < (PARCH_CUT_REACH * k + 1) / 2; it++) {
+        CutMorph(a, reg, cw, ch, 1);
+        for (int i = 0; i < n; i++) if (a[i] && !(line[i] & CUT_INK)) reg[i] = 1;
+    }
+    for (int it = 0; it < 3 * k; it++) {
+        CutMorph(a, reg, cw, ch, 1);
+        for (int i = 0; i < n; i++) if (a[i] && (line[i] & CUT_WORD)) reg[i] = 1;
+    }
+    CutMorph(a, reg, cw, ch, 0);
+    CutMorph(reg, a, cw, ch, 1);
+    for (int it = 0; it < PARCH_CUT_JOIN * k / 2; it++) { CutMorph(a, reg, cw, ch, 1); for (int i = 0; i < n; i++) reg[i] = a[i]; }
+    for (int it = 0; it < PARCH_CUT_JOIN * k / 2; it++) { CutMorph(a, reg, cw, ch, 0); for (int i = 0; i < n; i++) reg[i] = a[i]; }
+    CutHoles(reg, a, b, cw, ch, q);                                   /* (its pieces joined across a thin line: a closing) */
+    for (int i = 0; i < n; i++) got += reg[i];
+    return got;
+}
+/* The finer painting's own area (pw x ph at rf on the frame) from the coarser's region (reg: the crop cx0, cy0, cw x ch of
+ * P), softened a little and laid on by the two places on the frame: inside (1 in it). sm: room for the crop in floats. */
+static void CutLay(const ParchLines *P, const unsigned char *reg, int cx0, int cy0, int cw, int ch, ParchRect rf, int pw, int ph,
+                   unsigned char *inside, float *sm)
+{
+    for (int y = 0; y < ch; y++)                                      /* (1 2 1 across, then down) */
+        for (int x = 0; x < cw; x++) {
+            int i = y * cw + x;
+            sm[i] = (float)((x > 0 ? reg[i - 1] : 0) + 2 * reg[i] + (x < cw - 1 ? reg[i + 1] : 0));
+        }
+    for (int x = 0; x < cw; x++) {
+        float prev = 0;
+        for (int y = 0; y < ch; y++) {
+            int i = y * cw + x;
+            float c = sm[i], nx = y < ch - 1 ? sm[i + cw] : 0;
+            sm[i] = (prev + 2 * c + nx) / 16;
+            prev = c;
+        }
+    }
+    float ku = (rf.x1 - rf.x0) / (P->r.x1 - P->r.x0) * (float)P->w / (float)pw, kv = (rf.y1 - rf.y0) / (P->r.y1 - P->r.y0) * (float)P->h / (float)ph;
+    float u0 = (rf.x0 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w - (float)cx0, v0 = (rf.y0 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h - (float)cy0;
+    for (int y = 0; y < ph; y++) {
+        float v = v0 + ((float)y + 0.5f) * kv - 0.5f;
+        int j = v < 0 ? -1 : (int)v;
+        float fy = v - (float)j;
+        for (int x = 0; x < pw; x++) {
+            float u = u0 + ((float)x + 0.5f) * ku - 0.5f;
+            int i = u < 0 ? -1 : (int)u;
+            float fx = u - (float)i, s = 0;
+            for (int dy = 0; dy < 2; dy++)
+                for (int dx = 0; dx < 2; dx++) {
+                    int X = i + dx, Y = j + dy;
+                    if (X >= 0 && Y >= 0 && X < cw && Y < ch) s += sm[Y * cw + X] * (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy);
+                }
+            inside[y * pw + x] = s > 0.5f;
+        }
+    }
+}
+/* The painting in g_parchPx given its cut (inside: its own area, pw x ph): whole inside; outside, d texels from it, alpha 1
+ * to PARCH_CUT_GROW - PARCH_CUT_BAND and smoothly to nothing at PARCH_CUT_GROW (scaled by K / 2), its colours toward a
+ * softened copy by smooth(d / grow). 1 when done. */
+static int CutApply(const unsigned char *inside, int pw, int ph, int K)
+{
+    int T = g_parchTW, grow = PARCH_CUT_GROW * K / 2, band = PARCH_CUT_BAND * K / 2;
+    if (band > grow) band = grow;
+    if (band < 1) band = 1;
+    int c = (int)((float)(PARCH_CUT_BLUR * K) / 3.0f + 0.5f), nw, nh;    /* the softened copy: cells of c texels, softened thrice */
+    if (c < 1) c = 1;
+    nw = (pw + c - 1) / c; nh = (ph + c - 1) / c;
+    unsigned short *d = (unsigned short *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * sizeof(unsigned short));
+    float *g = (float *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)nw * (SIZE_T)nh * 3 + (SIZE_T)(nw > nh ? nw : nh)) * sizeof(float));
+    if (!d || !g || !g_parchPx) { if (d) HeapFree(GetProcessHeap(), 0, d); if (g) HeapFree(GetProcessHeap(), 0, g); return 0; }
+    unsigned short dmax = (unsigned short)(3 * (grow + 2));
+    for (int i = 0; i < pw * ph; i++) d[i] = inside[i] ? 0 : dmax;    /* the distance to it (3 a step across, 4 corner to corner) */
+    for (int y = 0; y < ph; y++)
+        for (int x = 0; x < pw; x++) {
+            int i = y * pw + x, v = d[i];
+            if (!v) continue;
+            if (x > 0 && d[i - 1] + 3 < v) v = d[i - 1] + 3;
+            if (y > 0) {
+                if (d[i - pw] + 3 < v) v = d[i - pw] + 3;
+                if (x > 0 && d[i - pw - 1] + 4 < v) v = d[i - pw - 1] + 4;
+                if (x < pw - 1 && d[i - pw + 1] + 4 < v) v = d[i - pw + 1] + 4;
+            }
+            d[i] = (unsigned short)v;
+        }
+    for (int y = ph - 1; y >= 0; y--)
+        for (int x = pw - 1; x >= 0; x--) {
+            int i = y * pw + x, v = d[i];
+            if (!v) continue;
+            if (x < pw - 1 && d[i + 1] + 3 < v) v = d[i + 1] + 3;
+            if (y < ph - 1) {
+                if (d[i + pw] + 3 < v) v = d[i + pw] + 3;
+                if (x < pw - 1 && d[i + pw + 1] + 4 < v) v = d[i + pw + 1] + 4;
+                if (x > 0 && d[i + pw - 1] + 4 < v) v = d[i + pw - 1] + 4;
+            }
+            d[i] = (unsigned short)v;
+        }
+    for (int j = 0; j < nh; j++)                                      /* the softened copy's cells */
+        for (int i = 0; i < nw; i++) {
+            float s[3] = { 0, 0, 0 };
+            int n = 0;
+            for (int y = j * c; y < (j + 1) * c && y < ph; y++)
+                for (int x = i * c; x < (i + 1) * c && x < pw; x++, n++)
+                    for (int k = 0; k < 3; k++) s[k] += g_parchPx[4 * ((unsigned)y * (unsigned)T + (unsigned)x) + k];
+            for (int k = 0; k < 3; k++) g[3 * (j * nw + i) + k] = n ? s[k] / (float)n : 0;
+        }
+    ParchBlur(g, nw, nh, 3, g + nw * nh * 3);
+    for (int y = 0; y < ph; y++) {
+        float v = ((float)y + 0.5f) / (float)c - 0.5f;
+        int j0 = v < 0 ? 0 : (int)v, j1 = j0 + 1 < nh ? j0 + 1 : j0;
+        float fy = v < 0 ? 0 : v - (float)j0;
+        for (int x = 0; x < pw; x++) {
+            int i = y * pw + x;
+            if (!d[i]) continue;
+            if (d[i] >= 3 * grow) { g_parchPx[4 * ((unsigned)y * (unsigned)T + (unsigned)x) + 3] = 0; continue; }   /* (past the line: none) */
+            float dt = (float)d[i] / 3.0f, w = ParchSmooth(dt / (float)grow), al = 1 - ParchSmooth((dt - (float)(grow - band)) / (float)band);
+            float u = ((float)x + 0.5f) / (float)c - 0.5f;
+            int i0 = u < 0 ? 0 : (int)u, i1 = i0 + 1 < nw ? i0 + 1 : i0;
+            float fx = u < 0 ? 0 : u - (float)i0;
+            unsigned char *p = g_parchPx + 4 * ((unsigned)y * (unsigned)T + (unsigned)x);
+            for (int k = 0; k < 3; k++) {
+                float s = (g[3 * (j0 * nw + i0) + k] * (1 - fx) + g[3 * (j0 * nw + i1) + k] * fx) * (1 - fy) +
+                          (g[3 * (j1 * nw + i0) + k] * (1 - fx) + g[3 * (j1 * nw + i1) + k] * fx) * fy;
+                p[k] = (unsigned char)(int)FireClamp((float)p[k] * (1 - w) + s * w + 0.5f, 0, 255);
+            }
+            p[3] = (unsigned char)(int)(255 * FireClamp(al, 0, 1) + 0.5f);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, d);
+    HeapFree(GetProcessHeap(), 0, g);
+    return 1;
+}
+/* The painting in g_parchPx (placed at rf) cut to its own area as P (the coarser painting under it) draws it, from the
+ * first of seeds (n of them: P's texels) whose fill holds; with all (union), every seed's that holds. Its own share of its
+ * picture (inside) through *share; 0 and why when none holds (then it is left whole: the plain band at its edges). */
+static int ParchCut(const ParchLines *P, ParchRect rf, const float *seeds, int n, int all, float *share, const char **why)
+{
+    *why = "no lines of the painting under it";
+    if (!P->m || !g_parchPx || n < 1) return 0;
+    int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K;
+    float bx0 = (rf.x0 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w, bx1 = (rf.x1 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w;
+    float by0 = (rf.y0 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h, by1 = (rf.y1 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h;
+    float mx = PARCH_CUT_ROOM * (bx1 - bx0) + 4 * P->K, my = PARCH_CUT_ROOM * (by1 - by0) + 4 * P->K;
+    int cx0 = (int)(bx0 - mx), cy0 = (int)(by0 - my), cw = (int)(bx1 + mx) - cx0 + 1, ch = (int)(by1 + my) - cy0 + 1;
+    if (all) {                                                        /* (a continent: only its painting under it, no more) */
+        if (cx0 < 0) { cw += cx0; cx0 = 0; }
+        if (cy0 < 0) { ch += cy0; cy0 = 0; }
+        if (cx0 + cw > P->w) cw = P->w - cx0;
+        if (cy0 + ch > P->h) ch = P->h - cy0;
+    }
+    if (cw < 8 || ch < 8 || (double)cw * ch > 8e6) { *why = "its box on the painting under it is not usable"; return 0; }
+    SIZE_T cells = (SIZE_T)cw * (SIZE_T)ch;
+    unsigned char *reg = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, cells * 5);
+    int *q = (int *)HeapAlloc(GetProcessHeap(), 0, cells * sizeof(int));
+    unsigned char *inside = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph);
+    float *sm = (float *)HeapAlloc(GetProcessHeap(), 0, cells * sizeof(float));
+    int ok = 0;
+    *why = "no memory for it";
+    if (reg && q && inside && sm) {
+        unsigned char *line = reg + cells, *open = reg + 2 * cells, *a = reg + 3 * cells, *uni = reg + 4 * cells;
+        int few = (int)(PARCH_CUT_FEW * (bx1 - bx0) * (by1 - by0)), held = 0, k = P->K;
+        CutOpen(P, cx0, cy0, cw, ch, line, open, a);
+        for (SIZE_T i = 0; i < cells; i++) uni[i] = 0;
+        *why = "every fill leaked out of its box or found too little";
+        int total = 0;
+        for (int s = 0; s < n; s++) {                                 /* every seed's piece that holds (a zone's own lines, its
+                                                                       * rivers drawn in ink, may cut it in several) */
+            float sx = seeds[2 * s] - (float)cx0, sy = seeds[2 * s + 1] - (float)cy0;
+            int ix = (int)sx, iy = (int)sy;
+            if (ix >= 0 && iy >= 0 && ix < cw && iy < ch && uni[iy * cw + ix]) continue;   /* (in a piece already found) */
+            int got = CutSeed(open, cw, ch, k, sx, sy, 0, reg, q);
+            if (!got || (!all && (float)(total + got) > PARCH_CUT_MOST * (bx1 - bx0) * (by1 - by0))) continue;   /* (leaked: not this one) */
+            held++;
+            total += got;
+            for (SIZE_T i = 0; i < cells; i++) uni[i] |= reg[i];
+        }
+        if (held) {                                                   /* its pieces made whole together */
+            total = CutWhole(line, cw, ch, k, uni, a, reg, q);
+            int edge = 0;
+            for (int x = 0; x < cw; x++) edge |= uni[x] | uni[(ch - 1) * cw + x];
+            for (int y = 0; y < ch; y++) edge |= uni[y * cw] | uni[y * cw + cw - 1];
+            if (!all && (total < few || edge)) held = 0;
+        }
+        g_cutBoxed = 0;
+        if (!held && !all) {                                          /* every one leaked (a border the painting draws faint, a city
+                                                                       * inside its zone): its pieces kept to its own box */
+            CutOpen(P, cx0, cy0, cw, ch, line, open, a);
+            for (SIZE_T i = 0; i < cells; i++) uni[i] = 0;
+            int ix0 = (int)(bx0 - (float)cx0), iy0 = (int)(by0 - (float)cy0), ix1 = (int)(bx1 - (float)cx0) + 1, iy1 = (int)(by1 - (float)cy0) + 1;
+            for (int s = 0; s < n; s++) {
+                int ix = (int)(seeds[2 * s] - (float)cx0), iy = (int)(seeds[2 * s + 1] - (float)cy0);
+                if (ix >= 0 && iy >= 0 && ix < cw && iy < ch && uni[iy * cw + ix]) continue;
+                if (!CutSeed(open, cw, ch, k, seeds[2 * s] - (float)cx0, seeds[2 * s + 1] - (float)cy0, 1, reg, q)) continue;
+                for (int y = 0; y < ch; y++)
+                    for (int x = 0; x < cw; x++) if (reg[y * cw + x] && x >= ix0 && x < ix1 && y >= iy0 && y < iy1) uni[y * cw + x] = 1;
+            }
+            total = CutWhole(line, cw, ch, k, uni, a, reg, q);
+            for (int y = 0; y < ch; y++)
+                for (int x = 0; x < cw; x++) if (!(x >= ix0 && x < ix1 && y >= iy0 && y < iy1)) uni[y * cw + x] = 0;
+            if (total >= few) { held = 1; g_cutBoxed = 1; *why = "its outline leaked: kept to its own box"; }
+        }
+        if (held) {
+            CutLay(P, uni, cx0, cy0, cw, ch, rf, pw, ph, inside, sm);
+            int in = 0;
+            for (int i = 0; i < pw * ph; i++) in += inside[i];
+            *share = (float)in / (float)(pw * ph);
+            if (in && CutApply(inside, pw, ph, K)) ok = 1;
+            else *why = in ? "no memory for its margin" : "its area does not fall on its painting";
+        }
+    }
+    if (reg) HeapFree(GetProcessHeap(), 0, reg);
+    if (q) HeapFree(GetProcessHeap(), 0, q);
+    if (inside) HeapFree(GetProcessHeap(), 0, inside);
+    if (sm) HeapFree(GetProcessHeap(), 0, sm);
+    return ok;
+}
+/* A zone's seeds on P's texels: the arrival's spot (fx, fy on the frame, when its box holds it), the middles of its
+ * overlay pieces (id), its box's middle. Their count. */
+static int CutZoneSeeds(const ParchLines *P, ParchRect rz, int id, float fx, float fy, float *seeds)
+{
+    int n = 0;
+    float sx = (P->r.x1 - P->r.x0) / (float)P->w, sy = (P->r.y1 - P->r.y0) / (float)P->h;
+    if (fx >= rz.x0 && fx <= rz.x1 && fy >= rz.y0 && fy <= rz.y1) { seeds[0] = (fx - P->r.x0) / sx; seeds[1] = (fy - P->r.y0) / sy; n = 1; }
+    for (int p = 0; p < g_ppN && n < PARCH_CUT_SEEDS - 1; p++) {
+        if (g_pp[p].zone != id) continue;
+        float u = ((float)g_pp[p].ox + 0.5f * (float)g_pp[p].w) / PARCH_MAP_W, v = ((float)g_pp[p].oy + 0.5f * (float)g_pp[p].h) / PARCH_MAP_H;
+        seeds[2 * n] = (rz.x0 + u * (rz.x1 - rz.x0) - P->r.x0) / sx; seeds[2 * n + 1] = (rz.y0 + v * (rz.y1 - rz.y0) - P->r.y0) / sy;
+        n++;
+    }
+    seeds[2 * n] = (0.5f * (rz.x0 + rz.x1) - P->r.x0) / sx; seeds[2 * n + 1] = (0.5f * (rz.y0 + rz.y1) - P->r.y0) / sy;
+    return n + 1;
+}
+/* ---- the cut to the zone's land (the skeptic's finds, 11 Oct: a zone's own land cut away, the arrival's town among it;
+ * a cut run on past the zone's edge, its neighbours' names and its page's torn edges back) ----
+ * The zone's painting is kept whole on every texel of its land (ParchLand: the chunks its terrain gives it), and its
+ * continent's lines only refine that land's edge, never past PARCH_LAND_EDGE chunks of it: the region inside the zone's
+ * border line as its continent's painting draws it, filled from every chunk of its land (so the cut is the same whatever
+ * the arrival), each fill held only when it is the zone's (one that reaches the crop's edge, or has over PARCH_LAND_LEAK
+ * of its cells farther than PARCH_LAND_NEAR chunks from the land, ran through a gap into another zone's land: left out),
+ * those held made whole as the outline was (CutWhole), and none of it trusted when it covers under PARCH_LAND_FEW of the
+ * land (a lake or a town in ink, not the zone). inside = its land, the outline where it lies within PARCH_LAND_EDGE
+ * chunks of the land, and its overlay pieces as the client lays them (the map it shows for the zone: the skeptic's
+ * measure of its own art, each piece against none); then the grown margin outside it, fading and softened, as before
+ * (CutApply). A page with no land of its own (an instance's map) is cut to its outline as before (ParchCut). */
+#define PARCH_LAND_EDGE  1            /* the outline refines the land's edge this many chunks past it at most */
+#define PARCH_LAND_NEAR  3            /* a fill's cells farther than this many chunks from the land are another zone's, */
+#define PARCH_LAND_LEAK  0.2f         /* and over this share of its cells there: it ran through a gap (not held) */
+#define PARCH_LAND_PIECE 128          /* an overlay piece the client lays on the zone's map kept whole where its alpha is this */
+#define PARCH_LAND_FEW   0.3f         /* the fills held cover at least this share of the land (as the painting under it draws
+                                       * it), or none is trusted */
+/* L's land grown by r chunks (Chebyshev: a square of 2r + 1 about each chunk) into g, (L->w + 2r) x (L->h + 2r) from
+ * gx0 - r, gy0 - r. */
+static void LandGrow(const ParchLand *L, int r, unsigned char *g)
+{
+    int W = L->w + 2 * r, H = L->h + 2 * r;
+    for (int i = 0; i < W * H; i++) g[i] = 0;
+    for (int y = 0; y < L->h; y++)
+        for (int x = 0; x < L->w; x++) {
+            if (L->m[y * L->w + x] != 1) continue;
+            for (int dy = 0; dy <= 2 * r; dy++)
+                for (int dx = 0; dx <= 2 * r; dx++) g[(y + dy) * W + x + dx] = 1;
+        }
+}
+/* The painting in g_parchPx (zone row z, at rf on the frame, on map) cut to its land L, its edge refined by P's lines
+ * (above): its own share of its picture through *share, the outline's fills held through *held; 0 and why when its land
+ * has nothing on its painting or there is no memory (then it is left as it was). */
+static int ParchLandCut(const ParchLines *P, int map, ParchRect rf, const ParchLand *L, float *share, int *held, const char **why)
+{
+    int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, E = PARCH_LAND_EDGE, N = PARCH_LAND_NEAR;
+    int EW = L->w + 2 * E, EH = L->h + 2 * E, NW = L->w + 2 * N, NH = L->h + 2 * N;
+    *held = 0; *share = 0;
+    *why = "no memory for it";
+    if (!L->m || !g_parchPx) { *why = "no land"; return 0; }
+    unsigned char *inside = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * 2);
+    unsigned char *eg = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)EW * EH + (SIZE_T)NW * NH);
+    int *gcol = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(pw + ph) * sizeof(int));
+    if (!inside || !eg || !gcol) {
+        if (inside) HeapFree(GetProcessHeap(), 0, inside);
+        if (eg) HeapFree(GetProcessHeap(), 0, eg);
+        if (gcol) HeapFree(GetProcessHeap(), 0, gcol);
+        return 0;
+    }
+    unsigned char *outline = inside + (SIZE_T)pw * ph, *ng = eg + EW * EH;
+    int *grow = gcol + pw;
+    LandGrow(L, E, eg);
+    LandGrow(L, N, ng);
+    float gx, gy;
+    for (int x = 0; x < pw; x++) { FrameLand(map, rf.x0 + ((float)x + 0.5f) / (float)pw * (rf.x1 - rf.x0), rf.y0, &gx, &gy); gcol[x] = (int)gx - (gx < 0); }
+    for (int y = 0; y < ph; y++) { FrameLand(map, rf.x0, rf.y0 + ((float)y + 0.5f) / (float)ph * (rf.y1 - rf.y0), &gx, &gy); grow[y] = (int)gy - (gy < 0); }
+    int nT = 0;
+    for (int y = 0; y < ph; y++)                                       /* its land, whole */
+        for (int x = 0; x < pw; x++) { int o = LandOwn(L, gcol[x], grow[y]); inside[y * pw + x] = (unsigned char)o; nT += o; }
+    for (int y = 0; g_pieceA && y < ph; y++)                           /* and its overlay pieces as the client lays them, whole: the
+                                                                        * map it shows for the zone (a capital's piece on its zone's
+                                                                        * map too, Stormwind's on Elwynn's; a piece's art over its
+                                                                        * border, Northwind's northern hills) */
+        for (int x = 0; x < pw; x++) if (g_pieceA[(SIZE_T)y * (SIZE_T)g_parchTW + (SIZE_T)x] >= PARCH_LAND_PIECE) inside[y * pw + x] = 1;
+    if (!nT) {
+        HeapFree(GetProcessHeap(), 0, inside); HeapFree(GetProcessHeap(), 0, eg); HeapFree(GetProcessHeap(), 0, gcol);
+        *why = "its land does not fall on its painting";
+        return 0;
+    }
+    /* the outline, on P's crop about its box */
+    int ok = 1;
+    if (P->m) {
+        float bx0 = (rf.x0 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w, bx1 = (rf.x1 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w;
+        float by0 = (rf.y0 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h, by1 = (rf.y1 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h;
+        float mx = PARCH_CUT_ROOM * (bx1 - bx0) + 4 * P->K, my = PARCH_CUT_ROOM * (by1 - by0) + 4 * P->K;
+        int cx0 = (int)(bx0 - mx), cy0 = (int)(by0 - my), cw = (int)(bx1 + mx) - cx0 + 1, ch = (int)(by1 + my) - cy0 + 1;
+        SIZE_T cells = (SIZE_T)cw * (SIZE_T)ch;
+        unsigned char *reg = cw >= 8 && ch >= 8 && (double)cw * ch <= 8e6 ? (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cells * 5) : NULL;
+        int *q = reg ? (int *)HeapAlloc(GetProcessHeap(), 0, cells * sizeof(int) + (SIZE_T)(cw + ch) * 2 * sizeof(int)) : NULL;
+        float *sm = q ? (float *)HeapAlloc(GetProcessHeap(), 0, cells * sizeof(float)) : NULL;
+        if (sm) {
+            unsigned char *line = reg + cells, *open = reg + 2 * cells, *a = reg + 3 * cells, *mark = reg + 4 * cells;   /* mark: 1 held, 2 not */
+            int *ccol = q + cells, *crow = ccol + cw;                     /* (each crop column's and row's chunk; and as near) */
+            float sx = (P->r.x1 - P->r.x0) / (float)P->w, sy = (P->r.y1 - P->r.y0) / (float)P->h;
+            for (int x = 0; x < cw; x++) { FrameLand(map, P->r.x0 + ((float)(cx0 + x) + 0.5f) * sx, P->r.y0, &gx, &gy); ccol[x] = (int)gx - (gx < 0); }
+            for (int y = 0; y < ch; y++) { FrameLand(map, P->r.x0, P->r.y0 + ((float)(cy0 + y) + 0.5f) * sy, &gx, &gy); crow[y] = (int)gy - (gy < 0); }
+            CutOpen(P, cx0, cy0, cw, ch, line, open, a);
+            for (SIZE_T c = 0; c < cells; c++) a[c] = 0;                  /* (its room, each fill's marks) */
+            int k = P->K, landP = 0, total = 0;
+            for (int y = 0; y < ch; y++) for (int x = 0; x < cw; x++) landP += LandOwn(L, ccol[x], crow[y]);
+            for (int j = 0; j < L->h; j++)                                /* a fill from each chunk of its land */
+                for (int i = 0; i < L->w; i++) {
+                    if (L->m[j * L->w + i] != 1) continue;
+                    float fx, fy;
+                    LandFrame(map, (float)(L->gx0 + i) + 0.5f, (float)(L->gy0 + j) + 0.5f, &fx, &fy);
+                    int x0 = (int)((fx - P->r.x0) / sx) - cx0, y0 = (int)((fy - P->r.y0) / sy) - cy0, win = 3 * k, start = -1, best = 1 << 30;
+                    if (x0 >= 0 && y0 >= 0 && x0 < cw && y0 < ch && mark[y0 * cw + x0]) continue;   /* (in a fill already) */
+                    for (int dy = -win; dy <= win; dy++)
+                        for (int dx = -win; dx <= win; dx++) {
+                            int xx = x0 + dx, yy = y0 + dy, d = dx * dx + dy * dy;
+                            if (xx >= 0 && yy >= 0 && xx < cw && yy < ch && open[yy * cw + xx] && !mark[yy * cw + xx] && d < best) { best = d; start = yy * cw + xx; }
+                        }
+                    if (start < 0) continue;
+                    int n = CutFill(a, open, cw, ch, start, q), edge = 0, away = 0;
+                    for (int t = 0; t < n; t++) {
+                        int c = q[t], xx = c % cw, yy = c / cw, nx = ccol[xx] - L->gx0 + N, ny = crow[yy] - L->gy0 + N;
+                        edge |= xx == 0 || yy == 0 || xx == cw - 1 || yy == ch - 1;
+                        away += !(nx >= 0 && ny >= 0 && nx < NW && ny < NH && ng[ny * NW + nx]);
+                    }
+                    int good = !edge && (float)away <= PARCH_LAND_LEAK * (float)n;
+                    for (int t = 0; t < n; t++) { mark[q[t]] = (unsigned char)(good ? 1 : 2); a[q[t]] = 0; }
+                    if (good) { (*held)++; total += n; }
+                }
+            for (SIZE_T c = 0; c < cells; c++) mark[c] = mark[c] == 1;
+            if (*held && (float)total < PARCH_LAND_FEW * (float)landP) *held = 0;   /* (a lake or a town found, not the zone) */
+            if (*held) {
+                CutWhole(line, cw, ch, k, mark, a, reg, q);
+                CutLay(P, mark, cx0, cy0, cw, ch, rf, pw, ph, outline, sm);
+                for (int y = 0; y < ph; y++)                              /* within PARCH_LAND_EDGE chunks of its land */
+                    for (int x = 0; x < pw; x++) {
+                        int ex = gcol[x] - L->gx0 + E, ey = grow[y] - L->gy0 + E;
+                        if (outline[y * pw + x] && ex >= 0 && ey >= 0 && ex < EW && ey < EH && eg[ey * EW + ex]) inside[y * pw + x] = 1;
+                    }
+            }
+        } else ok = 0;
+        if (reg) HeapFree(GetProcessHeap(), 0, reg);
+        if (q) HeapFree(GetProcessHeap(), 0, q);
+        if (sm) HeapFree(GetProcessHeap(), 0, sm);
+    }
+    int in = 0;
+    for (int i = 0; i < pw * ph; i++) in += inside[i];
+    *share = (float)in / (float)(pw * ph);
+    if (ok && !CutApply(inside, pw, ph, K)) ok = 0;
+    HeapFree(GetProcessHeap(), 0, inside); HeapFree(GetProcessHeap(), 0, eg); HeapFree(GetProcessHeap(), 0, gcol);
+    if (!ok) *why = "no memory for its outline or its margin";
+    return ok;
+}
+/* ---- the continent's name, one label in one place (his note, 11 Oct: "the words Eastern Kingdom move slightly, they
+ * disappear, and then they reappear slightly different spot than they were. It would be better to just have it in one
+ * location and not move it"; and for Kalimdor and every zone near either name) ----
+ * The client paints each continent's name twice: on the world's painting (Interface\WorldMap\World) and, larger and a
+ * little elsewhere, on the continent's own (Azeroth, Kalimdor). Kept: the world's, where the opening shows it. As the
+ * world's painting is made (once a session), its two names are cut out of it as pictures of their own (the painting's
+ * own texels, their alpha the letters: what stands out from the painting's local mean by PARCH_WORD_EDGE either way, its
+ * gaps closed, grown a little and softened), each painted out on a picture of its own as well (ParchPaintOut: the paper
+ * round them, its grain mirrored on through them; laid over the world's painting as the name fades), and the painting
+ * around each continent's own name kept a while, its name painted out. As a
+ * continent's painting is made, its own name is painted out of it from the client's files: inside its letters (found
+ * the same way), the world's painting there (its name painted out of it too), laid on by the two places on the frame
+ * and given this painting's own colours (its local mean outside the letters), so no name is left in any painting. The
+ * world's name is then drawn over every painting, the zones' too, at its place on the frame, fading out once it is wider
+ * than the window (his answer, 11 Oct: "yes the continent name should fade out"): one name, never moved, never doubled,
+ * scaling with the zoom, and none once it has faded. Where the names are on each painting: kWords (measured on the
+ * client's paintings, the same in its 256-px and HD tiles: texels of its 1002 x 668 picture), each checked as made (its
+ * letters must be there: a share of its box between PARCH_WORD_FEW and PARCH_WORD_MANY); not found as measured, that
+ * continent's two names are left as the client paints them, and the log says so. Without the world's painting (the
+ * client's world map frame not as read) the glide opens on the continent's painting, its own name the only one. */
+#define PARCH_WORD_EDGE  18           /* a letter: this much darker or lighter than its painting's local mean (0..255) */
+#define PARCH_WORD_MEAN  20           /* that mean over this far either way (texels of an HD painting) */
+#define PARCH_WORD_FEW   0.12f        /* a word's letters this share of its box at least, */
+#define PARCH_WORD_MANY  0.75f        /* and at most */
+#define PARCH_WORD_WORLD 8            /* the world's painting around a continent's name kept this far past it (HD texels) */
+typedef struct { int cont; const char *folder; float x0, y0, x1, y1; } ParchWord;   /* (cont: the world's names' continent) */
+static const ParchWord kWords[] = {
+    { 0, "World", 658, 363, 815, 386 },        /* EASTERN   (the world's, its two lines) */
+    { 0, "World", 633, 384, 827, 404 },        /* KINGDOMS */
+    { 1, "World", 105, 302, 343, 333 },        /* KALIMDOR */
+    { 0, "Azeroth", 350, 367, 546, 399 },      /* EASTERN   (the continents' own) */
+    { 0, "Azeroth", 410, 394, 659, 429 },      /* KINGDOMS */
+    { 1, "Kalimdor", 355, 325, 643, 359 },     /* KALIMDOR */
+};
+#define PARCH_WORDS (int)(sizeof kWords / sizeof kWords[0])
+/* The letters in a box of a painting (px, stride T, its picture pw x ph; the box x0..x1, y0..y1 in its texels, K its
+ * tiles over 256), as the client paints its names: each stroke dark (PARCH_WORD_DARK under the painting's local mean)
+ * between two light rims (PARCH_WORD_RIM over it, within PARCH_WORD_SPAN either side, across or down), where the sea's
+ * hatching, the coasts and the mountains have none. sure: only the strokes that make letters (pieces as tall as a fifth
+ * of the box at least, no taller than it and no wider than two and a half of it: the sprite's alpha); else every
+ * stroke and more round them (all that is to be painted over). Their soft mask (0..255) into m (the box's size); the
+ * share of the box they cover. */
+#define PARCH_WORD_DARK  12
+#define PARCH_WORD_RIM   10
+#define PARCH_WORD_SPAN  6
+static float ParchLetters(const unsigned char *px, int T, int pw, int ph, int x0, int y0, int x1, int y1, int K, int sure, unsigned char *m)
+{
+    int bw = x1 - x0, bh = y1 - y0, r = PARCH_WORD_MEAN * K / 2, span = PARCH_WORD_SPAN * K / 2, n = bw * bh;
+    int ax = x0 - r, ay = y0 - r, aw = bw + 2 * r + 1, ah = bh + 2 * r + 1;   /* (the mean's room around it) */
+    if (bw < 4 || bh < 4 || span < 1) return 0;
+    unsigned *I = (unsigned *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(aw + 1) * (SIZE_T)(ah + 1) * sizeof(unsigned));
+    signed char *d = (signed char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n);
+    unsigned char *a = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n * 3);
+    int *q = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n * sizeof(int));
+    if (!I || !d || !a || !q) {
+        if (I) HeapFree(GetProcessHeap(), 0, I);
+        if (d) HeapFree(GetProcessHeap(), 0, d);
+        if (a) HeapFree(GetProcessHeap(), 0, a);
+        if (q) HeapFree(GetProcessHeap(), 0, q);
+        return 0;
+    }
+    for (int y = 0; y <= ah; y++) I[y * (aw + 1)] = 0;                 /* the luminance's running sums */
+    for (int x = 0; x <= aw; x++) I[x] = 0;
+    for (int y = 1; y <= ah; y++)
+        for (int x = 1; x <= aw; x++) {
+            int X = ax + x - 1, Y = ay + y - 1;
+            X = X < 0 ? 0 : X >= pw ? pw - 1 : X; Y = Y < 0 ? 0 : Y >= ph ? ph - 1 : Y;
+            const unsigned char *p = px + 4 * ((unsigned)Y * (unsigned)T + (unsigned)X);
+            unsigned L = (77u * p[0] + 151u * p[1] + 28u * p[2]) >> 8;
+            I[y * (aw + 1) + x] = L + I[(y - 1) * (aw + 1) + x] + I[y * (aw + 1) + x - 1] - I[(y - 1) * (aw + 1) + x - 1];
+        }
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            int cx = x + r, cy = y + r;
+            unsigned sm = I[(cy + r + 1) * (aw + 1) + cx + r + 1] - I[(cy - r) * (aw + 1) + cx + r + 1] - I[(cy + r + 1) * (aw + 1) + cx - r] + I[(cy - r) * (aw + 1) + cx - r];
+            int mean = (int)(sm / (unsigned)((2 * r + 1) * (2 * r + 1)));
+            const unsigned char *p = px + 4 * ((unsigned)(y0 + y) * (unsigned)T + (unsigned)(x0 + x));
+            int L = (int)((77u * p[0] + 151u * p[1] + 28u * p[2]) >> 8), v = L - mean;
+            d[y * bw + x] = (signed char)(v < -127 ? -127 : v > 127 ? 127 : v);
+        }
+    unsigned char *core = a, *b = a + n, *c = a + 2 * n;
+    for (int i = 0; i < n; i++) core[i] = 0;
+    for (int dir = 0; dir < 2; dir++)                                 /* a dark stroke between two rims: across, then down */
+        for (int l = 0; l < (dir ? bw : bh); l++) {
+            int len = dir ? bh : bw, last = -100000;
+            for (int i = 0; i < len; i++) {                            /* (b: a rim within span before it) */
+                int at = dir ? i * bw + l : l * bw + i;
+                if (d[at] > PARCH_WORD_RIM) last = i;
+                b[at] = i - last <= span;
+            }
+            last = 100000;
+            for (int i = len - 1; i >= 0; i--) {                       /* (and one after it) */
+                int at = dir ? i * bw + l : l * bw + i;
+                if (d[at] > PARCH_WORD_RIM) last = i;
+                if (d[at] < -PARCH_WORD_DARK && b[at] && last - i <= span) core[at] = 1;
+            }
+        }
+    int few = 12 * K * K / 4, kept = 0;
+    for (int round = 0; round < 3; round++) {                         /* its pieces (8 ways), kept or not; then the ones too wide
+                                                                       * or tall (a letter run into the sea's hatching), a texel
+                                                                       * thinner, twice at most */
+        for (int i = 0; i < n; i++) b[i] = 0;
+        for (int s0 = 0; s0 < n; s0++) {
+            if (core[s0] != 1 || b[s0]) continue;
+            int head = 0, tail = 0, mx0 = bw, mx1 = -1, my0 = bh, my1 = -1;
+            b[s0] = 1; q[tail++] = s0;
+            while (head < tail) {
+                int i = q[head++], x = i % bw, y = i / bw;
+                if (x < mx0) mx0 = x;
+                if (x > mx1) mx1 = x;
+                if (y < my0) my0 = y;
+                if (y > my1) my1 = y;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int X = x + dx, Y = y + dy, j = Y * bw + X;
+                        if (X >= 0 && Y >= 0 && X < bw && Y < bh && core[j] == 1 && !b[j]) { b[j] = 1; q[tail++] = j; }
+                    }
+            }
+            int h = my1 - my0 + 1, w = mx1 - mx0 + 1, keep = sure ? 5 * h >= bh && h * 4 <= bh * 5 && 2 * w <= 5 * bh : tail >= few;
+            int wide = sure && round < 2 && !keep && 5 * h >= bh && (2 * w > 5 * bh || h * 4 > bh * 5);
+            for (int k = 0; k < tail; k++) core[q[k]] = keep ? 2 : wide ? 3 : 0;
+            kept += keep;
+        }
+        if (!sure) break;
+        for (int i = 0; i < n; i++) c[i] = core[i] == 3;              /* (the wide ones, a texel thinner) */
+        CutMorph(b, c, bw, bh, 0);
+        for (int i = 0; i < n; i++) if (core[i] == 3) core[i] = b[i] ? 1 : 0;
+    }
+    for (int i = 0; i < n; i++) c[i] = core[i] == 2;
+    for (int g = 0; g < 2; g++) {                                     /* on into its weaker edges, two texels */
+        CutMorph(b, c, bw, bh, 1);
+        for (int i = 0; i < n; i++) if (b[i] && (d[i] < -PARCH_WORD_DARK / 2 || d[i] > PARCH_WORD_RIM / 2)) c[i] = 1;
+    }
+    CutMorph(b, c, bw, bh, 1); CutMorph(c, b, bw, bh, 0);              /* its gaps closed */
+    for (int g = 0; g < (sure ? 1 : 3) * K / 2; g++) { CutMorph(b, c, bw, bh, 1); for (int i = 0; i < n; i++) c[i] = b[i]; }
+    int on = 0;
+    for (int i = 0; i < n; i++) { m[i] = c[i] ? 255 : 0; on += c[i]; }
+    for (int pass = 0; pass < 2; pass++)                              /* softened (1 2 1, twice each way) */
+        for (int dir = 0; dir < 2; dir++)
+            for (int l = 0; l < (dir ? bw : bh); l++) {
+                int len = dir ? bh : bw, prev = -1;
+                for (int i = 0; i < len; i++) {
+                    int at = dir ? i * bw + l : l * bw + i, nx = i < len - 1 ? m[dir ? (i + 1) * bw + l : l * bw + i + 1] : m[at];
+                    int cc = m[at], pv = prev < 0 ? cc : prev;
+                    m[at] = (unsigned char)((pv + 2 * cc + nx + 2) / 4);
+                    prev = cc;
+                }
+            }
+    HeapFree(GetProcessHeap(), 0, I); HeapFree(GetProcessHeap(), 0, d); HeapFree(GetProcessHeap(), 0, a); HeapFree(GetProcessHeap(), 0, q);
+    return kept ? (float)on / (float)n : 0;
+}
+/* A word's box (kWords[i]) in a K painting's texels; 0 when it does not fit pw x ph. */
+static int WordBox(int i, int K, int pw, int ph, int *x0, int *y0, int *x1, int *y1)
+{
+    *x0 = (int)(kWords[i].x0 * (float)K); *y0 = (int)(kWords[i].y0 * (float)K);
+    *x1 = (int)(kWords[i].x1 * (float)K + 0.999f); *y1 = (int)(kWords[i].y1 * (float)K + 0.999f);
+    return *x0 >= 0 && *y0 >= 0 && *x1 <= pw && *y1 <= ph && *x1 > *x0 + 4 && *y1 > *y0 + 4;
+}
+static void ParchPicFree(ParchPic *P) { if (P->px) HeapFree(GetProcessHeap(), 0, P->px); P->px = NULL; P->ok = 0; }
+/* A mask (w x h, 0..255) grown by r texels (each its largest within r across, then down); softened at its edges (a
+ * three-wide box along its rows, then its columns, passes times). */
+#define PARCH_OUT_GROW  2             /* the name's letters painted out this far past their rims (HD texels) */
+static void ParchMaskGrow(unsigned char *M, int w, int h, int r)
+{
+    unsigned char *row = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(w > h ? w : h));
+    if (!row) return;
+    for (int dir = 0; dir < 2; dir++) {
+        int n = dir ? h : w, lines = dir ? w : h;
+        for (int l = 0; l < lines; l++) {
+            for (int i = 0; i < n; i++) row[i] = M[dir ? i * w + l : l * w + i];
+            for (int i = 0; i < n; i++) {
+                unsigned char v = 0;
+                for (int j = i - r; j <= i + r; j++) if (j >= 0 && j < n && row[j] > v) v = row[j];
+                M[dir ? i * w + l : l * w + i] = v;
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, row);
+}
+static void ParchMaskSoft(unsigned char *M, int w, int h, int passes)
+{
+    unsigned char *row = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(w > h ? w : h));
+    if (!row) return;
+    for (int p = 0; p < passes; p++)
+        for (int dir = 0; dir < 2; dir++) {
+            int n = dir ? h : w, lines = dir ? w : h;
+            for (int l = 0; l < lines; l++) {
+                for (int i = 0; i < n; i++) row[i] = M[dir ? i * w + l : l * w + i];
+                for (int i = 0; i < n; i++)
+                    M[dir ? i * w + l : l * w + i] = (unsigned char)((row[i > 0 ? i - 1 : 0] + row[i] + row[i < n - 1 ? i + 1 : n - 1] + 1) / 3);
+            }
+        }
+    HeapFree(GetProcessHeap(), 0, row);
+}
+/* A mask's holes filled (w x h: what its marks at half or more close round, out of reach of its edge, marked whole). */
+static void ParchMaskHoles(unsigned char *M, int w, int h)
+{
+    int n = w * h, *q = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)n * sizeof(int)), head = 0, tail = 0;
+    unsigned char *out = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)n);
+    if (q && out) {
+        for (int i = 0; i < n; i++) {
+            int x = i % w, y = i / w;
+            if ((x == 0 || y == 0 || x == w - 1 || y == h - 1) && M[i] < 128) { out[i] = 1; q[tail++] = i; }
+        }
+        while (head < tail) {
+            int i = q[head++], x = i % w, y = i / w;
+            int nb[4] = { x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1 };
+            for (int k = 0; k < 4; k++)
+                if (nb[k] >= 0 && !out[nb[k]] && M[nb[k]] < 128) { out[nb[k]] = 1; q[tail++] = nb[k]; }
+        }
+        for (int i = 0; i < n; i++) if (!out[i]) M[i] = 255;
+    }
+    if (q) HeapFree(GetProcessHeap(), 0, q);
+    if (out) HeapFree(GetProcessHeap(), 0, out);
+}
+/* A name painted out of a painting (px, stride T, its picture pw x ph; the box x0, y0, w x h on it, M its mask there,
+ * 0..255: how much of each texel goes): each texel of it becomes the paper round it, its colour the local one (the mean
+ * outside the letters in cells of PARCH_OUT_CELL HD texels, softened, a cell with none its neighbours'), its grain the
+ * nearest paper's past the letters, mirrored across their edge (so the paper's grain and the sea's hatching run on
+ * through it), laid over the texel by its mask. */
+#define PARCH_OUT_CELL  8
+#define PARCH_OUT_DOWN  4.0f          /* the paper's grain taken across rather than down unless down is this much nearer */
+#define PARCH_OUT_GRAIN 0.35f         /* its grain this strong (the mirrored copy's lines softened) */
+static void ParchPaintOut(unsigned char *px, int T, int pw, int ph, int x0, int y0, int w, int h, const unsigned char *M, int K)
+{
+    int cs = PARCH_OUT_CELL * K, nw = (w + cs - 1) / cs, nh = (h + cs - 1) / cs, reach = 2 * PARCH_WORD_MEAN * K;
+    if (w <= 0 || h <= 0) return;
+    float *g = (float *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)nw * (SIZE_T)nh * 4 + (SIZE_T)(nw > nh ? nw : nh)) * sizeof(float));
+    if (!g) return;
+    float *cnt = g + 3 * nw * nh;
+    for (int j = 0; j < nh; j++)                                     /* each cell's paper: its mean outside the letters */
+        for (int i = 0; i < nw; i++) {
+            float sum[3] = { 0, 0, 0 };
+            int n = 0;
+            for (int y = j * cs; y < (j + 1) * cs && y < h; y++)
+                for (int x = i * cs; x < (i + 1) * cs && x < w; x++) {
+                    if (M[y * w + x] > 24) continue;
+                    const unsigned char *q = px + 4 * ((unsigned)(y0 + y) * (unsigned)T + (unsigned)(x0 + x));
+                    for (int ch = 0; ch < 3; ch++) sum[ch] += q[ch];
+                    n++;
+                }
+            for (int ch = 0; ch < 3; ch++) g[3 * (j * nw + i) + ch] = n ? sum[ch] / (float)n : 0;
+            cnt[j * nw + i] = (float)n;
+        }
+    for (int pass = 0; pass < nw + nh; pass++) {                      /* cells with none: their neighbours' */
+        int empty = 0;
+        for (int j = 0; j < nh; j++)
+            for (int i = 0; i < nw; i++) {
+                if (cnt[j * nw + i] > 0) continue;
+                static const int di[4] = { -1, 1, 0, 0 }, dj[4] = { 0, 0, -1, 1 };
+                float d[3] = { 0, 0, 0 };
+                int n = 0;
+                for (int k = 0; k < 4; k++) {
+                    int I = i + di[k], J = j + dj[k];
+                    if (I < 0 || J < 0 || I >= nw || J >= nh || !(cnt[J * nw + I] > 0)) continue;
+                    for (int ch = 0; ch < 3; ch++) d[ch] += g[3 * (J * nw + I) + ch];
+                    n++;
+                }
+                if (!n) { empty++; continue; }
+                for (int ch = 0; ch < 3; ch++) g[3 * (j * nw + i) + ch] = d[ch] / (float)n;
+                cnt[j * nw + i] = 0.5f;
+            }
+        if (!empty) break;
+    }
+    ParchBlur(g, nw, nh, 2, cnt);
+    static const int dx8[8] = { 1, -1, 0, 0, 1, 1, -1, -1 }, dy8[8] = { 0, 0, 1, -1, 1, -1, 1, -1 };
+    static const float kWay8[8] = { 1, 1, PARCH_OUT_DOWN, PARCH_OUT_DOWN, 1.414f * PARCH_OUT_DOWN, 1.414f * PARCH_OUT_DOWN,
+                                    1.414f * PARCH_OUT_DOWN, 1.414f * PARCH_OUT_DOWN };
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int a = M[y * w + x];
+            if (!a) continue;
+            int best = -1, bd = 0;                                    /* the nearest paper past the letters, 8 ways */
+            float bdist = 1e30f;
+            for (int k = 0; k < 8; k++)                               /* (across first: the sea's hatching runs across) */
+                for (int d = 1; d <= reach && (float)d * kWay8[k] < bdist; d++) {
+                    int X = x + dx8[k] * d, Y = y + dy8[k] * d;
+                    if (x0 + X < 0 || y0 + Y < 0 || x0 + X >= pw || y0 + Y >= ph) break;
+                    if (X < 0 || Y < 0 || X >= w || Y >= h || !M[Y * w + X]) { best = k; bd = d; bdist = (float)d * kWay8[k]; break; }
+                }
+            float c[2][3];                                            /* the paper's colour here, and at its grain's source */
+            int sx = x, sy = y;
+            if (best >= 0) {
+                for (int s2 = 2 * bd; s2 >= bd; s2--) {               /* (mirrored across the edge, as far as the paper goes) */
+                    int X = x + dx8[best] * s2, Y = y + dy8[best] * s2;
+                    if (x0 + X < 0 || y0 + Y < 0 || x0 + X >= pw || y0 + Y >= ph) continue;
+                    if (X < 0 || Y < 0 || X >= w || Y >= h || !M[Y * w + X]) { sx = X; sy = Y; break; }
+                }
+            }
+            for (int t = 0; t < 2; t++) {
+                float u = ((float)(t ? sx : x) + 0.5f) / (float)cs - 0.5f, v = ((float)(t ? sy : y) + 0.5f) / (float)cs - 0.5f;
+                if (u < 0) u = 0;
+                if (v < 0) v = 0;
+                if (u > (float)(nw - 1)) u = (float)(nw - 1);
+                if (v > (float)(nh - 1)) v = (float)(nh - 1);
+                int i0 = (int)u, j0 = (int)v, i1 = i0 + 1 < nw ? i0 + 1 : i0, j1 = j0 + 1 < nh ? j0 + 1 : j0;
+                float fx = u - (float)i0, fy = v - (float)j0;
+                for (int ch = 0; ch < 3; ch++)
+                    c[t][ch] = (g[3 * (j0 * nw + i0) + ch] * (1 - fx) + g[3 * (j0 * nw + i1) + ch] * fx) * (1 - fy) +
+                               (g[3 * (j1 * nw + i0) + ch] * (1 - fx) + g[3 * (j1 * nw + i1) + ch] * fx) * fy;
+            }
+            unsigned char *o = px + 4 * ((unsigned)(y0 + y) * (unsigned)T + (unsigned)(x0 + x));
+            const unsigned char *q = px + 4 * ((unsigned)(y0 + sy) * (unsigned)T + (unsigned)(x0 + sx));
+            float k = (float)a / 255;
+            for (int ch = 0; ch < 3; ch++) {
+                float grain = sx == x && sy == y ? 0 : PARCH_OUT_GRAIN * ((float)q[ch] - c[1][ch]);
+                o[ch] = (unsigned char)(int)FireClamp((float)o[ch] * (1 - k) + (c[0][ch] + grain) * k + 0.5f, 0, 255);
+            }
+        }
+    HeapFree(GetProcessHeap(), 0, g);
+}
+/* The world's painting just made (g_parchPx): each continent's name cut out as a picture of its own, and the painting
+ * around each continent's own name (on the world's picture, by the continent's box on the frame) kept. The continents'
+ * boxes: their WorldMapArea rows (cont[0], cont[1]; -1 none). */
+static void ParchWorldWords(const int *cont)
+{
+    int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, T = g_parchTW;
+    char m[200];
+    for (int c = 0; c < 2; c++) {
+        ParchPicFree(&g_wordPic[c]); ParchPicFree(&g_wordUnder[c]); ParchPicFree(&g_wordOut[c]);
+        int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1, good = 1, words = 0;
+        for (int i = 0; i < PARCH_WORDS; i++) {                       /* the name's lines, each checked */
+            int x0, y0, x1, y1;
+            if (kWords[i].cont != c || lstrcmpiA(kWords[i].folder, "World")) continue;
+            if (!WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) { good = 0; continue; }
+            unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+            float share = mm ? ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 1, mm) : 0;
+            if (mm) HeapFree(GetProcessHeap(), 0, mm);
+            if (!(share >= PARCH_WORD_FEW && share <= PARCH_WORD_MANY)) good = 0;
+            words++;
+            if (x0 < bx0) bx0 = x0;
+            if (y0 < by0) by0 = y0;
+            if (x1 > bx1) bx1 = x1;
+            if (y1 > by1) by1 = y1;
+        }
+        if (!words || !good) {
+            wsprintfA(m, "  the parchment: the world's name for continent %d is not where it was measured; its two names left as the client paints them", c);
+            Log(m);
+            continue;
+        }
+        ParchPic *P = &g_wordPic[c];                                  /* its picture: the painting's texels, the letters' alpha */
+        P->x0 = bx0; P->y0 = by0; P->w = bx1 - bx0; P->h = by1 - by0;
+        P->px = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)P->w * (SIZE_T)P->h * 4);
+        if (!P->px) continue;
+        for (int y = 0; y < P->h; y++)
+            for (int x = 0; x < P->w; x++) {
+                const unsigned char *s = g_parchPx + 4 * ((unsigned)(by0 + y) * (unsigned)T + (unsigned)(bx0 + x));
+                unsigned char *o = P->px + 4 * ((unsigned)y * (unsigned)P->w + (unsigned)x);
+                o[0] = s[0]; o[1] = s[1]; o[2] = s[2]; o[3] = 0;
+            }
+        for (int i = 0; i < PARCH_WORDS; i++) {
+            int x0, y0, x1, y1;
+            if (kWords[i].cont != c || lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) continue;
+            unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+            if (!mm) continue;
+            ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 1, mm);
+            for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++) {
+                    unsigned char *o = P->px + 4 * ((unsigned)(y - by0) * (unsigned)P->w + (unsigned)(x - bx0)) + 3;
+                    if (mm[(y - y0) * (x1 - x0) + (x - x0)] > *o) *o = mm[(y - y0) * (x1 - x0) + (x - x0)];
+                }
+            HeapFree(GetProcessHeap(), 0, mm);
+        }
+        P->ok = 1;
+        /* the name painted out (his answer, 11 Oct: "yes the continent name should fade out"): its letters, their rims and
+         * round them (grown PARCH_OUT_GROW, an O's middle too, softened), the paper round them with its grain run on through
+         * them (ParchPaintOut), as a picture of its own (g_wordOut) laid over the world's painting as the name fades, and
+         * in the painting kept round the continent's own name (U), so none of it is laid on a continent's painting. The
+         * world's painting itself keeps both names: the opening shows them. */
+        int E = (PARCH_OUT_GROW + 2) * K;                             /* (room round the boxes for their rims' last light) */
+        int ox0 = bx0 > E ? bx0 - E : 0, oy0 = by0 > E ? by0 - E : 0, ox1 = bx1 + E < pw ? bx1 + E : pw, oy1 = by1 + E < ph ? by1 + E : ph;
+        int ow = ox1 - ox0, oh = oy1 - oy0;
+        unsigned char *M = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)ow * (SIZE_T)oh);
+        unsigned char *keep = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)ow * (SIZE_T)oh * 4);
+        ParchPic *Q = &g_wordOut[c];
+        if (M && keep) {
+            for (int i = 0; i < PARCH_WORDS; i++) {
+                int x0, y0, x1, y1;
+                if (kWords[i].cont != c || lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) continue;
+                unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+                if (!mm) continue;
+                ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 0, mm);
+                for (int y = y0; y < y1; y++)
+                    for (int x = x0; x < x1; x++) {
+                        unsigned char *o = M + (y - oy0) * ow + (x - ox0);
+                        if (mm[(y - y0) * (x1 - x0) + (x - x0)] > *o) *o = mm[(y - y0) * (x1 - x0) + (x - x0)];
+                    }
+                HeapFree(GetProcessHeap(), 0, mm);
+            }
+            ParchMaskGrow(M, ow, oh, PARCH_OUT_GROW * K);
+            ParchMaskHoles(M, ow, oh);
+            ParchMaskSoft(M, ow, oh, K);
+            for (int y = 0; y < oh; y++)                              /* (painted out here a while, then put back) */
+                for (int x = 0; x < ow; x++)
+                    ((unsigned *)(void *)keep)[y * ow + x] = ((const unsigned *)(const void *)g_parchPx)[(unsigned)(oy0 + y) * (unsigned)T + (unsigned)(ox0 + x)];
+            ParchPaintOut(g_parchPx, T, pw, ph, ox0, oy0, ow, oh, M, K);
+            Q->x0 = ox0; Q->y0 = oy0; Q->w = ow; Q->h = oh;
+            Q->px = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)ow * (SIZE_T)oh * 4);
+            if (Q->px) {
+                for (int y = 0; y < oh; y++)
+                    for (int x = 0; x < ow; x++) {
+                        const unsigned char *s = g_parchPx + 4 * ((unsigned)(oy0 + y) * (unsigned)T + (unsigned)(ox0 + x));
+                        unsigned char *o = Q->px + 4 * ((unsigned)y * (unsigned)ow + (unsigned)x);
+                        o[0] = s[0]; o[1] = s[1]; o[2] = s[2]; o[3] = M[y * ow + x];
+                    }
+                Q->ok = 1;
+            }
+        }
+        if (cont[c] >= 0) {                                           /* the painting around the continent's own name */
+            ParchRect rc = ParchBox(cont[c]);
+            int ux0 = 1 << 30, uy0 = 1 << 30, ux1 = -1, uy1 = -1;
+            for (int i = 0; i < PARCH_WORDS; i++) {
+                if (kWords[i].cont != c || !lstrcmpiA(kWords[i].folder, "World")) continue;
+                float fx0 = rc.x0 + kWords[i].x0 / PARCH_MAP_W * (rc.x1 - rc.x0), fx1 = rc.x0 + kWords[i].x1 / PARCH_MAP_W * (rc.x1 - rc.x0);
+                float fy0 = rc.y0 + kWords[i].y0 / PARCH_MAP_H * (rc.y1 - rc.y0), fy1 = rc.y0 + kWords[i].y1 / PARCH_MAP_H * (rc.y1 - rc.y0);
+                int wx0 = (int)(fx0 / PARCH_WORLD_FW * (float)pw), wx1 = (int)(fx1 / PARCH_WORLD_FW * (float)pw) + 1;
+                int wy0 = (int)(fy0 / PARCH_WORLD_FH * (float)ph), wy1 = (int)(fy1 / PARCH_WORLD_FH * (float)ph) + 1;
+                if (wx0 < ux0) ux0 = wx0;
+                if (wy0 < uy0) uy0 = wy0;
+                if (wx1 > ux1) ux1 = wx1;
+                if (wy1 > uy1) uy1 = wy1;
+            }
+            if (bx0 < ux0) ux0 = bx0;                                 /* (and the world's own name's place) */
+            if (by0 < uy0) uy0 = by0;
+            if (bx1 > ux1) ux1 = bx1;
+            if (by1 > uy1) uy1 = by1;
+            int e = PARCH_WORD_WORLD * K / 2 + 2;
+            ux0 -= e; uy0 -= e; ux1 += e; uy1 += e;
+            if (ux0 < 0) ux0 = 0;
+            if (uy0 < 0) uy0 = 0;
+            if (ux1 > pw) ux1 = pw;
+            if (uy1 > ph) uy1 = ph;
+            ParchPic *U = &g_wordUnder[c];
+            if (ux1 > ux0 && uy1 > uy0) {
+                U->x0 = ux0; U->y0 = uy0; U->w = ux1 - ux0; U->h = uy1 - uy0;
+                U->px = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)U->w * (SIZE_T)U->h * 4);
+                if (U->px) {
+                    for (int y = 0; y < U->h; y++)                    /* (its name painted out; its alpha where it was) */
+                        for (int x = 0; x < U->w; x++) {
+                            *(unsigned *)(void *)(U->px + 4 * ((unsigned)y * (unsigned)U->w + (unsigned)x)) =
+                                *(const unsigned *)(const void *)(g_parchPx + 4 * ((unsigned)(uy0 + y) * (unsigned)T + (unsigned)(ux0 + x)));
+                            int X = ux0 + x - ox0, Y = uy0 + y - oy0;
+                            U->px[4 * ((unsigned)y * (unsigned)U->w + (unsigned)x) + 3] = M && keep && X >= 0 && Y >= 0 && X < ow && Y < oh ? M[Y * ow + X] : 0;
+                        }
+                    U->ok = 1;
+                }
+            }
+        }
+        if (M && keep)                                                /* (the world's painting as it was) */
+            for (int y = 0; y < oh; y++)
+                for (int x = 0; x < ow; x++)
+                    ((unsigned *)(void *)g_parchPx)[(unsigned)(oy0 + y) * (unsigned)T + (unsigned)(ox0 + x)] = ((const unsigned *)(const void *)keep)[y * ow + x];
+        if (M) HeapFree(GetProcessHeap(), 0, M);
+        if (keep) HeapFree(GetProcessHeap(), 0, keep);
+    }
+}
+
+/* The continent's painting just made (g_parchPx; c its row, on map's continent) with its own name painted out (see
+ * above), the letters marked in its lines (Lc, kept from it just before) so a zone's outline may take them back: 1 when
+ * done, 0 (and the log says why) when it is left as the client paints it. */
+static int ParchContWords(int c, ParchLines *Lc)
+{
+    int map = g_pz[c].map, K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, T = g_parchTW;
+    char m[260];
+    if (map < 0 || map > 1 || !g_wordPic[map].ok || !g_wordUnder[map].ok) return 0;
+    const ParchPic *P = &g_wordPic[map], *U = &g_wordUnder[map];
+    ParchRect rc = ParchBox(c);
+    int Kw = g_worldK, ww = PARCH_MAP_W * Kw, wh = PARCH_MAP_H * Kw;
+    /* the world's texels for this painting's texel x, y: wx = ax + bx x, wy = ay + by y (on the kept piece U) */
+    float bx = (rc.x1 - rc.x0) / (float)pw / PARCH_WORLD_FW * (float)ww, ax = (rc.x0 + 0.5f * (rc.x1 - rc.x0) / (float)pw) / PARCH_WORLD_FW * (float)ww - 0.5f - (float)U->x0;
+    float by = (rc.y1 - rc.y0) / (float)ph / PARCH_WORLD_FH * (float)wh, ay = (rc.y0 + 0.5f * (rc.y1 - rc.y0) / (float)ph) / PARCH_WORLD_FH * (float)wh - 0.5f - (float)U->y0;
+    int rx0 = 1 << 30, ry0 = 1 << 30, rx1 = -1, ry1 = -1, words = 0;
+    for (int i = 0; i < PARCH_WORDS; i++) {                           /* the region: its own name's lines, the world's name's place */
+        int x0, y0, x1, y1;
+        if (lstrcmpiA(kWords[i].folder, g_pz[c].name)) continue;
+        if (!WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) { wsprintfA(m, "  the parchment: %s's own name does not fit its painting; left as the client paints it", g_pz[c].name); Log(m); return 0; }
+        words++;
+        if (x0 < rx0) rx0 = x0;
+        if (y0 < ry0) ry0 = y0;
+        if (x1 > rx1) rx1 = x1;
+        if (y1 > ry1) ry1 = y1;
+    }
+    if (!words) return 0;
+    {
+        int px0 = (int)(((float)(P->x0 - U->x0) - ax) / bx) - 1, py0 = (int)(((float)(P->y0 - U->y0) - ay) / by) - 1;   /* (the world's name) */
+        int px1 = (int)(((float)(P->x0 + P->w - U->x0) - ax) / bx) + 2, py1 = (int)(((float)(P->y0 + P->h - U->y0) - ay) / by) + 2;
+        if (px0 < rx0) rx0 = px0;
+        if (py0 < ry0) ry0 = py0;
+        if (px1 > rx1) rx1 = px1;
+        if (py1 > ry1) ry1 = py1;
+    }
+    int e = 3 * PARCH_WORD_MEAN * K / 2;
+    rx0 -= e; ry0 -= e; rx1 += e; ry1 += e;
+    if (rx0 < 0) rx0 = 0;
+    if (ry0 < 0) ry0 = 0;
+    if (rx1 > pw) rx1 = pw;
+    if (ry1 > ph) ry1 = ph;
+    int rw = rx1 - rx0, rh = ry1 - ry0;
+    unsigned char *A = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)rw * (SIZE_T)rh);
+    float *F = (float *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)rw * (SIZE_T)rh * 3 * sizeof(float));
+    if (!A || !F) { if (A) HeapFree(GetProcessHeap(), 0, A); if (F) HeapFree(GetProcessHeap(), 0, F); return 0; }
+    int good = 1;
+    for (int i = 0; i < PARCH_WORDS && good; i++) {                   /* its own letters */
+        int x0, y0, x1, y1;
+        if (lstrcmpiA(kWords[i].folder, g_pz[c].name) || !WordBox(i, K, pw, ph, &x0, &y0, &x1, &y1)) continue;
+        unsigned char *mm = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(x1 - x0) * (SIZE_T)(y1 - y0));
+        float share = mm ? ParchLetters(g_parchPx, T, pw, ph, x0, y0, x1, y1, K, 0, mm) : 0;
+        if (!(share >= PARCH_WORD_FEW && share <= PARCH_WORD_MANY)) good = 0;
+        for (int y = y0; mm && y < y1; y++)
+            for (int x = x0; x < x1; x++) {
+                unsigned char v = mm[(y - y0) * (x1 - x0) + (x - x0)], *o = A + (y - ry0) * rw + (x - rx0);
+                if (v > *o) *o = v;
+            }
+        if (mm) HeapFree(GetProcessHeap(), 0, mm);
+    }
+    if (!good) {
+        wsprintfA(m, "  the parchment: %s's own name is not where it was measured; it and the world's are left as the client paints them", g_pz[c].name);
+        Log(m);
+        HeapFree(GetProcessHeap(), 0, A); HeapFree(GetProcessHeap(), 0, F);
+        return 0;
+    }
+    ParchMaskGrow(A, rw, rh, PARCH_OUT_GROW * K);                    /* (its rims' last light too, an O's middle; softened) */
+    ParchMaskHoles(A, rw, rh);
+    ParchMaskSoft(A, rw, rh, K);
+    for (int y = 0; y < rh; y++)                                      /* the world's painting there (its own name painted out of it) */
+        for (int x = 0; x < rw; x++) {
+            float wx = ax + bx * (float)(rx0 + x), wy = ay + by * (float)(ry0 + y), s[4] = { 0, 0, 0, 0 };
+            int ix = wx < 0 ? -1 : (int)wx, iy = wy < 0 ? -1 : (int)wy;
+            float fx = wx - (float)ix, fy = wy - (float)iy;
+            for (int dy = 0; dy < 2; dy++)
+                for (int dx = 0; dx < 2; dx++) {
+                    int X = ix + dx, Y = iy + dy;
+                    X = X < 0 ? 0 : X >= U->w ? U->w - 1 : X; Y = Y < 0 ? 0 : Y >= U->h ? U->h - 1 : Y;
+                    const unsigned char *q = U->px + 4 * ((unsigned)Y * (unsigned)U->w + (unsigned)X);
+                    float k = (dx ? fx : 1 - fx) * (dy ? fy : 1 - fy);
+                    for (int ch = 0; ch < 4; ch++) s[ch] += k * q[ch];
+                }
+            for (int ch = 0; ch < 3; ch++) F[3 * (y * rw + x) + ch] = s[ch];
+        }
+    /* its own colours: each cell's mean of this painting and of the world's, where there are no letters, the difference
+     * softened between the cells and added to the world's */
+    int cs = 8 * K, nw = (rw + cs - 1) / cs, nh = (rh + cs - 1) / cs;
+    float *g = (float *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)nw * (SIZE_T)nh * 4 + (SIZE_T)(nw > nh ? nw : nh)) * sizeof(float));
+    if (!g) { HeapFree(GetProcessHeap(), 0, A); HeapFree(GetProcessHeap(), 0, F); return 0; }
+    for (int j = 0; j < nh; j++)
+        for (int i = 0; i < nw; i++) {
+            float d[3] = { 0, 0, 0 };
+            int n = 0;
+            for (int y = j * cs; y < (j + 1) * cs && y < rh; y++)
+                for (int x = i * cs; x < (i + 1) * cs && x < rw; x++) {
+                    if (A[y * rw + x] > 24) continue;
+                    const unsigned char *p = g_parchPx + 4 * ((unsigned)(ry0 + y) * (unsigned)T + (unsigned)(rx0 + x));
+                    for (int ch = 0; ch < 3; ch++) d[ch] += (float)p[ch] - F[3 * (y * rw + x) + ch];
+                    n++;
+                }
+            for (int ch = 0; ch < 3; ch++) g[3 * (j * nw + i) + ch] = n ? d[ch] / (float)n : 0;
+            g[3 * nw * nh + j * nw + i] = (float)n;
+        }
+    for (int pass = 0; pass < nw + nh; pass++) {                      /* cells with no samples: their neighbours' */
+        int empty = 0;
+        for (int j = 0; j < nh; j++)
+            for (int i = 0; i < nw; i++) {
+                if (g[3 * nw * nh + j * nw + i] > 0) continue;
+                float d[3] = { 0, 0, 0 };
+                int n = 0;
+                static const int di[4] = { -1, 1, 0, 0 }, dj[4] = { 0, 0, -1, 1 };
+                for (int k = 0; k < 4; k++) {
+                    int I = i + di[k], J = j + dj[k];
+                    if (I < 0 || J < 0 || I >= nw || J >= nh || !(g[3 * nw * nh + J * nw + I] > 0)) continue;
+                    for (int ch = 0; ch < 3; ch++) d[ch] += g[3 * (J * nw + I) + ch];
+                    n++;
+                }
+                if (!n) { empty++; continue; }
+                for (int ch = 0; ch < 3; ch++) g[3 * (j * nw + i) + ch] = d[ch] / (float)n;
+                g[3 * nw * nh + j * nw + i] = 0.5f;
+            }
+        if (!empty) break;
+    }
+    ParchBlur(g, nw, nh, 2, g + 3 * nw * nh);
+    for (int y = 0; y < rh; y++) {
+        float v = ((float)y + 0.5f) / (float)cs - 0.5f;
+        int j0 = v < 0 ? 0 : (int)v, j1 = j0 + 1 < nh ? j0 + 1 : j0;
+        float fy = v < 0 ? 0 : v - (float)j0;
+        for (int x = 0; x < rw; x++) {
+            int a = A[y * rw + x];
+            if (!a) continue;
+            float u = ((float)x + 0.5f) / (float)cs - 0.5f;
+            int i0 = u < 0 ? 0 : (int)u, i1 = i0 + 1 < nw ? i0 + 1 : i0;
+            float fx = u < 0 ? 0 : u - (float)i0, k = (float)a / 255;
+            unsigned char *p = g_parchPx + 4 * ((unsigned)(ry0 + y) * (unsigned)T + (unsigned)(rx0 + x));
+            for (int ch = 0; ch < 3; ch++) {
+                float d = (g[3 * (j0 * nw + i0) + ch] * (1 - fx) + g[3 * (j0 * nw + i1) + ch] * fx) * (1 - fy) +
+                          (g[3 * (j1 * nw + i0) + ch] * (1 - fx) + g[3 * (j1 * nw + i1) + ch] * fx) * fy;
+                p[ch] = (unsigned char)(int)FireClamp((float)p[ch] * (1 - k) + (F[3 * (y * rw + x) + ch] + d) * k + 0.5f, 0, 255);
+            }
+            if (Lc && Lc->m && Lc->w == pw && a > 64) Lc->m[(ry0 + y) * pw + rx0 + x] |= CUT_WORD;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, g); HeapFree(GetProcessHeap(), 0, A); HeapFree(GetProcessHeap(), 0, F);
+    return 1;
+}
+#ifndef PARCH_UPPIC
+#define PARCH_UPPIC ParchUpPic                /* (the tests and the harness keep the picture instead of OpenGL) */
+#endif
+static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th);
+/* The continent's painting just made (g_parchPx, row c): its own lines kept (for its zones' outlines), its own name
+ * painted out (the world's the one), and it cut to its land as the world's painting draws it (seeds: its zones' boxes'
+ * middles; the plain band at its edges when none holds, and why). 1 when its name was painted out. */
+static int ParchContMade(int c, const char **why)
+{
+    ParchLinesKeep(&g_linesCont, ParchBox(c), c, 1);
+    int words = g_worldUp && ParchContWords(c, &g_linesCont);
+    g_contWords = words ? c : -1;
+    static float cseeds[2 * PARCH_ZONES];
+    int cn = 0;
+    for (int i = 0; g_linesWorld.m && i < g_pzN && cn < PARCH_ZONES; i++) {
+        if (g_pz[i].map != g_pz[c].map || !g_pz[i].area) continue;
+        ParchRect b = ParchBox(i);
+        cseeds[2 * cn] = 0.5f * (b.x0 + b.x1) / PARCH_WORLD_FW * (float)g_linesWorld.w;
+        cseeds[2 * cn + 1] = 0.5f * (b.y0 + b.y1) / PARCH_WORLD_FH * (float)g_linesWorld.h;
+        cn++;
+    }
+    *why = "no world's painting under it";
+    g_contShare = 0;
+    g_contCut = g_worldUp && cn && ParchCut(&g_linesWorld, ParchBox(c), cseeds, cn, 1, &g_contShare, why);
+    return words;
+}
+/* The zone's painting just made (g_parchPx, row z on continent row c; the arrival's spot fx, fy on the frame): cut to its
+ * own area as its continent's painting draws it (g_zoneCut; the plain band at its edges when none holds, and why). */
+static int g_cutLand, g_cutHeld;               /* the last zone's cut: to its land (ParchLandCut); its outline's fills held */
+static void ParchZoneMade(int z, int c, float fx, float fy, const char **why)
+{
+    const char *lwhy = "";
+    g_zoneShare = 0; g_cutLand = 0; g_cutHeld = 0; g_cutBoxed = 0;
+    if (ParchLandMake(z, &g_land, &lwhy) && g_land.n) {             /* its land, as its terrain gives it */
+        static const ParchLines none;
+        g_cutLand = ParchLandCut(g_linesCont.m && g_linesCont.row == c ? &g_linesCont : &none, g_pz[z].map, ParchBox(z), &g_land,
+                                 &g_zoneShare, &g_cutHeld, why);
+        if (g_cutLand) { g_zoneCut = 1; return; }
+    }
+    float zseeds[2 * PARCH_CUT_SEEDS];                                /* (none: a city inside its building, an instance's map) */
+    int zn = g_linesCont.m && g_linesCont.row == c ? CutZoneSeeds(&g_linesCont, ParchBox(z), g_pz[z].id, fx, fy, zseeds) : 0;
+    *why = "its continent's painting is not under it";
+    g_zoneCut = zn && ParchCut(&g_linesCont, ParchBox(z), zseeds, zn, 0, &g_zoneShare, why);
+}
 static struct { int world, cont, zone; } g_ptry;     /* tried (once a session; this arrival's), so a failure is not tried again */
 static unsigned char g_pbits[EXPLORED_BYTES], g_pmadeBits[EXPLORED_BYTES];
 static LONG g_pbitsSeq = -1, g_pmadeKnown = -1;
-/* The view's thread, each frame of a screen, outside the step lock: this screen's arrival taken for the glide as soon as
- * it is known, and one painting a frame made and given to OpenGL, the first needed first: the world's (once a session),
- * the arrival's continent's, its zone's (only the pieces this character has found), each with C its colour-matched copy. */
-static void ParchWork(DWORD now)
+static int g_pmadeFull = -1;                         /* the map's areas the zone's painting up was made for */
+/* ---- the paintings made off the view's thread (the brief, 11 Oct: "the view thread must not stall": a painting and its
+ * cut took 40 to 130 ms on the view's thread, a frame each, its land read from the terrain up to 1.6 s the first time) ----
+ * Each step is a job: the arrival's zone found (as the client finds it), the world's painting, its continent's, its
+ * zone's, C's colour-matched copies. The parchment's worker, a thread of its own (the 32-bit build's: ParchWorkerStart),
+ * runs it (the tiles read and laid, the seams, the lines, the cut, the land, the smaller copies) while the view's thread
+ * draws on; done, the view's thread gives the painting to OpenGL a strip a frame (ParchUpBudget's bytes at most: PARCH_UP_BEGIN,
+ * PARCH_UP_STEP), then takes the next. The painting is the worker's from a job's post until it is done, the view's from
+ * then until it is up and freed: never both at once. Without a worker (the tests' build, the harness) a job runs at once
+ * in the call that posts it and its painting goes up whole: one painting a call, as before. */
+enum { PJ_NONE, PJ_WORLD, PJ_FIND, PJ_CONT, PJ_ZONE, PJ_MATCH };
+static struct {
+    volatile LONG state;                                  /* 0 none, 1 posted (the worker's), 2 done (the view's), 3 stale
+                                                           * (the worker's still: freed as it is done, never up) */
+    int kind, slot, C;                                    /* (PJ_MATCH: its copy's slot, VT_PCONTM or VT_PZONEM) */
+    int map, zok, z, c, known, full;                      /* what it is for */
+    float x, y, h, fx, fy;
+    LONG screen;
+    unsigned char bits[EXPLORED_BYTES];
+    int ok, way, want, wantCont, words, pieces, all;      /* what it made */
+    const char *why, *cwhy;
+    DWORD posted, ran;                                    /* (the view's clock as it was posted; the job's ms, GetTickCount's) */
+} g_pj;
+static volatile LONG g_pjWorker;                          /* a worker runs the jobs (once started), */
+static HANDLE g_pjEvent;                                  /* woken by this as each is posted */
+static int g_pjUp = -1;                                   /* the slot going up to OpenGL a strip a frame (-1: none) */
+static void ParchWorkerStart(void);
+/* The job posted, run (the worker's thread, or at once without one), timed on its own clock: GetTickCount, never the
+ * view's ViewNow, whose statics are the view's thread's alone (the skeptic's find on 61c66db: called from both threads
+ * unlocked, its clock could be pushed 15 ms ahead and held, a frame hitched). */
+static void ParchJobRun(void)
 {
-    if (!g_parchOn) return;
-    int held = StepLock(), map = g_destMap;
-    float x = g_destWX, y = g_destWY;
-    LONG seq = g_scrSeq, known = g_scrKnown, screen = g_viewScreen;   /* (this screen's character's explored areas, as it began) */
-    if (seq != g_pbitsSeq) { g_pbitsSeq = seq; for (int i = 0; i < EXPLORED_BYTES; i++) g_pbits[i] = g_scrBits[i]; }
-    StepUnlock(held);
-    char m[300];
+    DWORD t0 = GetTickCount();
     const char *why = "";
-    DWORD t0 = ViewNow();
+    g_pj.cwhy = "";
+    switch (g_pj.kind) {
+    case PJ_WORLD:                                                /* the world's painting, its coasts, its two names, the marker */
+        g_pj.ok = ParchMakeNamed("World", -1, -2, &why);
+        if (g_pj.ok) {
+            ParchLinesKeep(&g_linesWorld, ParchWorldRect(), -2, 2);
+            int conts[2] = { ParchContinent(0), ParchContinent(1) };
+            ParchWorldWords(conts);
+            if (g_pj.C) ParchLowKeep(&g_lpWorld, ParchWorldRect(), -2);
+            g_pj.words = ParchMarkRead();
+            ParchMips();
+        }
+        break;
+    case PJ_FIND:                                                 /* the arrival's zone, as the client finds it */
+        g_pj.want = ParchZoneAt(g_pj.map, g_pj.x, g_pj.y, g_pj.h, g_pj.zok, &g_pj.way);
+        g_pj.wantCont = ParchContinent(g_pj.map);
+        g_pj.ok = 1;
+        break;
+    case PJ_CONT:                                                 /* its continent's: its lines, its own name painted out, its cut */
+        g_pj.ok = ParchMake(g_pj.c, &why);
+        if (g_pj.ok) {
+            g_pj.words = ParchContMade(g_pj.c, &g_pj.cwhy);
+            if (g_pj.C && !g_worldUp) ParchLowKeep(&g_lpCont, ParchBox(g_pj.c), g_pj.c);   /* (the zone's colours: the world's, else its continent's) */
+            ParchMips();
+        }
+        break;
+    case PJ_ZONE:                                                 /* its zone's: the pieces found (or the full map), its cut */
+        g_makeBits = g_pj.known && !g_pj.full ? g_pj.bits : NULL;
+        g_pj.ok = ParchMake(g_pj.z, &why);
+        g_makeBits = NULL;
+        if (g_pj.ok) {
+            g_pj.pieces = g_parchPieces; g_pj.all = g_parchAll;
+            ParchZoneMade(g_pj.z, g_pj.c, g_pj.fx, g_pj.fy, &g_pj.cwhy);
+            ParchMips();
+        }
+        break;
+    case PJ_MATCH: {                                              /* C: the painting just up, in the colours under it */
+        const ParchLow *L = g_pj.slot == VT_PCONTM ? (g_lpWorld.ok ? &g_lpWorld : NULL)
+                          : g_worldUp && g_lpWorld.ok ? &g_lpWorld : g_lpCont.ok && g_lpCont.z == g_pj.c ? &g_lpCont : NULL;
+        g_pj.ok = L && ParchMatch(L, ParchBox(g_pj.slot == VT_PCONTM ? g_pj.c : g_pj.z)) && ParchMips();
+        break; }
+    }
+    g_pj.why = why;
+    g_pj.ran += GetTickCount() - t0;
+}
+/* A job posted (its inputs in g_pj already): the worker's from now, or run at once without one. */
+static void ParchJobPost(int kind, DWORD now)
+{
+    g_pj.kind = kind;
+    if (kind != PJ_MATCH) { g_pj.posted = now; g_pj.ran = 0; }
+    InterlockedExchange(&g_pj.state, 1);
+    if (!g_pjWorker) { ParchJobRun(); InterlockedExchange(&g_pj.state, 2); }
+    else SetEvent(g_pjEvent);
+}
+/* The next job, the first needed first (the view's thread, nothing posted or going up): 1 when one was posted. */
+static int ParchJobNext(DWORD now, int map, float x, float y, float h, int zok, LONG known, LONG screen)
+{
     int C = g_parchFade == PARCH_FADE_C || g_parchFade == PARCH_FADE_D;   /* (with C and D, the colour-matched copies too) */
     if (!g_ptry.world) {                                           /* the world's painting, once a session: the opening */
         g_ptry.world = 1;
-        if (!g_worldFrameOk) Log("  the parchment: the client's world map frame is not as read (WoW.exe 0x806524), so each glide opens on its continent's painting");
-        else if (!ParchMakeNamed("World", -1, -2, &why)) {
-            wsprintfA(m, "  the parchment: the world could not be painted (%s); each glide opens on its continent's painting", why); Log(m);
-        } else {
-            g_worldTW = g_parchTW; g_worldK = g_parchK;
-            if (C) ParchLowKeep(&g_lpWorld, ParchWorldRect(), -2);
-            if (PARCH_UP(VT_PWORLD)) {
-                g_worldUp = 1; g_worldAt = now;
-                wsprintfA(m, "  the parchment: the world painted from the client's map (%d-px tiles) in %lu ms, the opening over the Maelstrom",
-                          256 * g_worldK, (unsigned long)(ViewNow() - t0)); Log(m);
-            } else Log("  the parchment: OpenGL would not take the world's painting; each glide opens on its continent's painting");
+        if (!g_worldFrameOk) {
+            Log("  the parchment: the client's world map frame is not as read (WoW.exe 0x806524), so each glide opens on its continent's painting");
+            return 0;
         }
-        ParchFree();
-        return;
+        g_pj.C = C;
+        ParchJobPost(PJ_WORLD, now);
+        return 1;
     }
-    if (map < 0) return;
+    if (map < 0) return 0;
     if (screen != g_parchForScreen || map != g_parchForMap || x != g_parchForX || y != g_parchForY) {   /* the glide's end */
-        int way = 0;
-        g_parchWant = ParchZoneAt(map, x, y, &way); g_parchWantCont = ParchContinent(map);
+        g_pj.map = map; g_pj.x = x; g_pj.y = y; g_pj.h = h; g_pj.zok = zok; g_pj.screen = screen;
+        ParchJobPost(PJ_FIND, now);
+        return 1;
+    }
+    int z = g_parchWant, c = g_parchWantCont;
+    if (z < 0) return 0;
+    if (c >= 0 && c != g_parchCont && !g_ptry.cont) {               /* its continent's painting */
+        g_ptry.cont = 1;
+        g_parchCont = -1; g_contMatch = -1;
+        g_pj.c = c; g_pj.C = C;
+        ParchJobPost(PJ_CONT, now);
+        return 1;
+    }
+    int full = g_parchFullOn;                                        /* (the map's areas, as this screen opened) */
+    if (g_pz[z].area && !g_ptry.zone && (z != g_parchZone || known != g_pmadeKnown || full != g_pmadeFull ||
+                                         (known && !full && !Same(g_pbits, g_pmadeBits, EXPLORED_BYTES)))) {
+        g_ptry.zone = 1;                                             /* its zone's (another zone, other areas found, the other areas' choice) */
+        g_parchZone = -1; g_zoneMatch = -1;
+        g_pj.z = z; g_pj.c = c; g_pj.C = C; g_pj.known = known; g_pj.full = full;
+        for (int i = 0; i < EXPLORED_BYTES; i++) g_pj.bits[i] = g_pbits[i];
+        ParchSpot(map, x, y, &g_pj.fx, &g_pj.fy);
+        ParchJobPost(PJ_ZONE, now);
+        return 1;
+    }
+    return 0;
+}
+static int ParchUpDone(DWORD now, int slot, int up);
+/* A job done (the view's thread): the arrival taken, or the painting's upload begun. 1 when work goes on in this call
+ * (an upload begun, or the next job to take), 0 when this call is done. */
+static int ParchJobDone(DWORD now, int map, float x, float y, LONG screen)
+{
+    char m[300];
+    int slot = g_pj.kind == PJ_WORLD ? VT_PWORLD : g_pj.kind == PJ_CONT ? VT_PARCH2 : g_pj.kind == PJ_ZONE ? VT_PARCH :
+               g_pj.kind == PJ_MATCH ? g_pj.slot : -1;
+    if (g_pj.kind == PJ_FIND) {
+        if (g_pj.map != map || g_pj.x != x || g_pj.y != y || g_pj.screen != screen) return 1;   /* (moved meanwhile: found again) */
+        g_parchWant = g_pj.want; g_parchWantCont = g_pj.wantCont;
         g_parchForMap = map; g_parchForX = x; g_parchForY = y; g_parchForScreen = screen; g_parchAt = now;
         g_ptry.cont = g_ptry.zone = 0;
         if (g_parchWant < 0) { wsprintfA(m, "  the parchment: no zone or continent painting for map %d; the opening stays", map); Log(m); }
         else {
             static const char *const kWay[4] = { "the smallest box holding it (no terrain file to read)", "its terrain's area, as the client",
-                                                 "the capital's building over it", "its terrain's zone has no page: its continent's" };
-            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d) is in %s, by %s", map, (int)x, (int)y, g_pz[g_parchWant].name, kWay[way]);
+                                                 "the building's floor under it, as the client", "its terrain's zone has no page: its continent's" };
+            char hb[24] = "";
+            if (g_pj.zok) wsprintfA(hb, ", %d high", (int)g_pj.h);
+            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d%s) is in %s, by %s", map, (int)x, (int)y, hb, g_pz[g_parchWant].name, kWay[g_pj.way]);
             Log(m);
         }
+        return 1;
     }
-    int z = g_parchWant, c = g_parchWantCont;
-    if (z < 0) return;
-    if (c >= 0 && c != g_parchCont && !g_ptry.cont) {               /* its continent's painting */
-        g_ptry.cont = 1;
-        g_parchCont = -1; g_contMatch = -1;
-        if (!ParchMake(c, &why)) { wsprintfA(m, "  the parchment: %s could not be painted (%s); the glide goes on without it", g_pz[c].name, why); Log(m); }
-        else {
-            g_contTW = g_parchTW; g_contK = g_parchK;
-            if (C && !g_worldUp) ParchLowKeep(&g_lpCont, ParchBox(c), c);   /* (the zone's colours: the world's, else its continent's) */
-            if (PARCH_UP(VT_PARCH2)) {
-                g_parchCont = c; g_contAt = now;
-                if (C && g_lpWorld.ok && ParchMatch(&g_lpWorld, ParchBox(c)) && PARCH_UP(VT_PCONTM)) { g_contMatch = c; g_contMAt = now; }
-                wsprintfA(m, "  the parchment: %s painted (%d-px tiles) in %lu ms%s", g_pz[c].name, 256 * g_contK, (unsigned long)(ViewNow() - t0),
-                          C ? (g_contMatch == c ? ", and its copy in the world's colours" : ", but not its copy in the world's colours") : "");
-                Log(m);
-            } else Log("  the parchment: OpenGL would not take the continent's painting; the glide goes on without it");
-        }
+    if (!g_pj.ok) {                                              /* not made */
+        if (g_pj.kind == PJ_WORLD) { wsprintfA(m, "  the parchment: the world could not be painted (%s); each glide opens on its continent's painting", g_pj.why); Log(m); }
+        else if (g_pj.kind == PJ_CONT) { wsprintfA(m, "  the parchment: %s could not be painted (%s); the glide goes on without it", g_pz[g_pj.c].name, g_pj.why); Log(m); }
+        else if (g_pj.kind == PJ_ZONE) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the glide ends on its continent's painting", g_pz[g_pj.z].name, g_pj.why); Log(m); }
+        else ParchUpDone(now, g_pj.slot, 0);                     /* (a copy not made: its painting's line, without it) */
         ParchFree();
-        return;
+        return 0;
     }
-    if (g_pz[z].area && !g_ptry.zone && (z != g_parchZone || known != g_pmadeKnown || (known && !Same(g_pbits, g_pmadeBits, EXPLORED_BYTES)))) {
-        g_ptry.zone = 1;                                             /* its zone's (another zone, or other areas found) */
-        g_parchZone = -1; g_zoneMatch = -1;
-        g_makeBits = known ? g_pbits : NULL;                         /* the pieces this character has not found left blank */
-        int made = ParchMake(z, &why);
-        g_makeBits = NULL;
-        if (!made) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the glide ends on its continent's painting", g_pz[z].name, why); Log(m); }
-        else {
-            int pieces = g_parchPieces, all = g_parchAll;
-            g_zoneTW = g_parchTW; g_zoneK = g_parchK;
-            if (PARCH_UP(VT_PARCH)) {
-                g_parchZone = z; g_zoneAt = now; g_pmadeKnown = known;
-                for (int i = 0; i < EXPLORED_BYTES; i++) g_pmadeBits[i] = g_pbits[i];
-                const ParchLow *L = g_worldUp && g_lpWorld.ok ? &g_lpWorld : g_lpCont.ok && g_lpCont.z == c ? &g_lpCont : NULL;
-                if (C && L && ParchMatch(L, ParchBox(z)) && PARCH_UP(VT_PZONEM)) { g_zoneMatch = z; g_zoneMAt = now; }
-                wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d of its %d overlay pieces%s) in %lu ms%s",
-                          g_pz[z].name, 256 * g_zoneK, pieces, all, known ? ", the rest not found by this character" : ", its explored areas not known",
-                          (unsigned long)(ViewNow() - t0), C ? (g_zoneMatch == z ? ", and its copy in the colours under it" : ", but not its copy in the colours under it") : "");
-                Log(m);
-            } else Log("  the parchment: OpenGL would not take the zone's painting; the glide ends on its continent's painting");
+    if (g_pj.kind == PJ_WORLD) { g_worldTW = g_parchTW; g_worldK = g_parchK; }
+    if (g_pj.kind == PJ_CONT) { g_contTW = g_parchTW; g_contK = g_parchK; }
+    if (g_pj.kind == PJ_ZONE) { g_zoneTW = g_parchTW; g_zoneK = g_parchK; }
+    if (!PARCH_UP_BEGIN(slot)) { ParchUpDone(now, slot, 0); ParchFree(); return 0; }
+    g_pjUp = slot;
+    return 1;
+}
+/* The painting up (the view's thread; up 0: OpenGL would not take it): it drawn from now, logged; C's copy next, or done.
+ * 1 when a job follows in this call. */
+static int ParchUpDone(DWORD now, int slot, int up)
+{
+    char m[400];
+    DWORD ms = g_pj.ran;
+    if (slot == VT_PWORLD) {
+        if (!up) { Log("  the parchment: OpenGL would not take the world's painting; each glide opens on its continent's painting"); return 0; }
+        g_worldUp = 1; g_worldAt = now;
+        for (int k = 0; k < 2; k++) {
+            g_wordUp[k] = g_wordPic[k].ok && PARCH_UPPIC(VT_PWORD0 + k, &g_wordPic[k], &g_wordTW[k], &g_wordTH[k]);
+            g_wordOutUp[k] = g_wordOut[k].ok && PARCH_UPPIC(VT_PNOUT0 + k, &g_wordOut[k], &g_wordOutTW[k], &g_wordOutTH[k]);
         }
-        ParchFree();
-        return;
+        g_markUp = g_pj.words && PARCH_UPPIC(VT_PMARK, &g_markPic[0], &g_markTW[0], &g_markTH[0]) &&
+                   PARCH_UPPIC(VT_PGLOW, &g_markPic[1], &g_markTW[1], &g_markTH[1]);
+        Log(g_markUp ? "  the parchment: the player's marker, the world map's own arrow (MinimapArrow.blp) and the candle's glow (GenericGlow2_32.blp), read from the client"
+                     : "  the parchment: the player's marker could not be read from the client (MinimapArrow.blp, GenericGlow2_32.blp): none drawn");
+        wsprintfA(m, "  the parchment: the world painted from the client's map (%d-px tiles) in %lu ms (up %lu ms after), the opening over the Maelstrom; "
+                  "its names cut out to stay put: Eastern Kingdoms %s, Kalimdor %s", 256 * g_worldK, (unsigned long)ms,
+                  (unsigned long)(now - g_pj.posted), g_wordUp[0] ? "yes" : "no", g_wordUp[1] ? "yes" : "no"); Log(m);
+        return 0;
     }
+    int cont = slot == VT_PARCH2 || slot == VT_PCONTM, c = g_pj.c, z = g_pj.z;
+    if (slot == VT_PARCH2 || slot == VT_PARCH) {
+        if (!up) {
+            Log(cont ? "  the parchment: OpenGL would not take the continent's painting; the glide goes on without it"
+                     : "  the parchment: OpenGL would not take the zone's painting; the glide ends on its continent's painting");
+            return 0;
+        }
+        if (cont) { g_parchCont = c; g_contAt = now; }
+        else {
+            g_parchZone = z; g_zoneAt = now; g_pmadeKnown = g_pj.known; g_pmadeFull = g_pj.full;
+            for (int i = 0; i < EXPLORED_BYTES; i++) g_pmadeBits[i] = g_pj.bits[i];
+        }
+        if (g_pj.C) { g_pj.slot = cont ? VT_PCONTM : VT_PZONEM; ParchJobPost(PJ_MATCH, now); return 1; }   /* (C: its copy next) */
+    } else if (up) {                                             /* its copy up */
+        if (cont) { g_contMatch = c; g_contMAt = now; } else { g_zoneMatch = z; g_zoneMAt = now; }
+    }
+    if (cont) {
+        wsprintfA(m, "  the parchment: %s painted (%d-px tiles) in %lu ms (up %lu ms after)%s; its own name %s; %s", g_pz[c].name, 256 * g_contK,
+                  (unsigned long)ms, (unsigned long)(now - g_pj.posted),
+                  g_pj.C ? (g_contMatch == c ? ", and its copy in the world's colours" : ", but not its copy in the world's colours") : "",
+                  g_pj.words ? "painted out (the world's stays, in its place)" : "left as painted", g_contCut ? "cut to its land as the world's painting draws it" : "its edges the plain band");
+        Log(m);
+        if (!g_contCut) { wsprintfA(m, "  the parchment: %s not cut to its land: %s", g_pz[c].name, g_pj.cwhy); Log(m); }
+        return 0;
+    }
+    if (g_land.unread) { wsprintfA(m, "  the parchment: %s's land not kept: %d of its terrain's files could not be read (%d were); cut as though it had none, read again next time",
+                                   g_pz[z].name, g_land.unread, g_land.tiles); Log(m); }
+    if (g_zoneCut && g_cutLand) {
+        wsprintfA(m, "  the parchment: %s cut to its land as its terrain gives it (%d chunks, %s), its edge %s (%d%% of its painting), grown %d texels",
+                  g_pz[z].name, g_land.n, g_land.fromFile ? "kept from before" : "read from the client's terrain",
+                  g_cutHeld ? "as its continent's painting draws it" : "its terrain's (its outline not held)", (int)(100 * g_zoneShare + 0.5f),
+                  PARCH_CUT_GROW * g_zoneK / 2); Log(m);
+        if (!g_land.fromFile) { wsprintfA(m, "  the parchment: %s's land read from %d tiles and kept in Data\\CinderLoad\\land-%s.bin", g_pz[z].name, g_land.tiles, g_pz[z].name); Log(m); }
+    } else if (g_zoneCut) { wsprintfA(m, "  the parchment: %s cut to its own area as %s's painting draws it (%d%% of its painting%s), grown %d texels", g_pz[z].name,
+                               c >= 0 ? g_pz[c].name : "its continent", (int)(100 * g_zoneShare + 0.5f), g_cutBoxed ? "; its outline leaked, kept to its own box" : "",
+                               PARCH_CUT_GROW * g_zoneK / 2); Log(m); }
+    else { wsprintfA(m, "  the parchment: %s not cut to its own area (%s): the plain band at its edges", g_pz[z].name, g_pj.cwhy); Log(m); }
+    wsprintfA(m, "  the parchment: %s painted from the client's map (%d-px tiles, %d of its %d overlay pieces%s) in %lu ms (up %lu ms after)%s",
+              g_pz[z].name, 256 * g_zoneK, g_pj.pieces, g_pj.all, g_pj.full ? ", the full map chosen" : g_pj.known ? ", the rest not found by this character" : ", its explored areas not known",
+              (unsigned long)ms, (unsigned long)(now - g_pj.posted), g_pj.C ? (g_zoneMatch == z ? ", and its copy in the colours under it" : ", but not its copy in the colours under it") : "");
+    Log(m);
+    return 0;
+}
+/* The view's thread, each frame of a screen, outside the step lock: this screen's arrival taken for the glide as soon as it
+ * is known (its zone found), and the paintings made and given to OpenGL, the first needed first: the world's (once a
+ * session), the arrival's continent's, its zone's (only the pieces this character has found, unless the full map is
+ * chosen), each with C its colour-matched copy; one job at a time, off this thread when the worker runs (above). */
+static DWORD g_pworkAt;                                  /* the last frame's ParchWork (its clock) */
+static void ParchWork(DWORD now)
+{
+    if (!g_parchOn) return;
+    DWORD dt = now - g_pworkAt;                                  /* (the frame's time: the upload's budget) */
+    g_pworkAt = now;
+    int held = StepLock(), map = g_destMap, zok = g_destZOk;
+    float x = g_destWX, y = g_destWY, h = g_destWZ;
+    LONG seq = g_scrSeq, known = g_scrKnown, screen = g_viewScreen;   /* (this screen's character's explored areas, as it began) */
+    if (seq != g_pbitsSeq) { g_pbitsSeq = seq; for (int i = 0; i < EXPLORED_BYTES; i++) g_pbits[i] = g_scrBits[i]; }
+    StepUnlock(held);
+    for (int steps = 0; steps < 8; steps++) {
+        if (g_pjUp >= 0) {                                       /* a painting going up, a strip a frame */
+            int r = PARCH_UP_STEP(ParchUpBudget(dt));
+            if (!r) return;
+            int slot = g_pjUp;
+            g_pjUp = -1;
+            int more = ParchUpDone(now, slot, r > 0);
+            if (!more) { ParchFree(); return; }                  /* (one painting a call) */
+        }
+        if (g_pj.state == 1 || g_pj.state == 3) return;          /* (the worker's: done on a later frame) */
+        if (g_pj.state == 2) {
+            InterlockedExchange(&g_pj.state, 0);
+            if (!ParchJobDone(now, map, x, y, screen)) return;
+            continue;
+        }
+        if (!ParchJobNext(now, map, x, y, h, zok, known, screen)) return;
+    }
+}
+/* The screen gone, or the view off (the view's thread; the skeptic's find on 61c66db: a job still running as a screen
+ * ended kept its painting, 22 to 36 MB, on the DLL's heap through the game, and the next screen gave that painting to
+ * OpenGL before it looked for its own arrival): a job still the worker's is stale, its painting freed by the worker as
+ * soon as it is done and never given to OpenGL; one done, or going up, freed now. What it was for is made again when
+ * next wanted (the world's on the next screen; a copy's painting with it). */
+static void ParchScreenEnd(void)
+{
+    int kind = g_pj.kind, slot = g_pjUp;
+    LONG was = InterlockedCompareExchange(&g_pj.state, 3, 1);
+    if (was == 0 && slot < 0) return;                           /* (nothing in hand) */
+    if (was == 2) { InterlockedExchange(&g_pj.state, 0); ParchFree(); }
+    if (slot >= 0) { g_pjUp = -1; ParchFree(); }
+    if (kind == PJ_WORLD) g_ptry.world = 0;
+    if (kind == PJ_MATCH) { if (g_pj.slot == VT_PCONTM) g_parchCont = -1; else g_parchZone = -1; }
+}
+/* The view off for the session: its job stale (above) and the worker's loop ended after it. */
+static void ParchStop(void)
+{
+    ParchScreenEnd();
+    InterlockedExchange(&g_pjWorker, 0);
 }
 /* A screen's first frame, made at once as the view opens (before its first step can be: his note, 10 Oct, "for a split
  * second ... you get the previous screen"): the dark paper and vanilla's bar empty, for the parchment; for the living map,
@@ -9156,13 +11156,7 @@ static void ViewOpenFirst(float w, float h, DWORD now)
     ViewFirstList(w, h, now);
 }
 
-#ifdef __i386__
-#include <d3d9.h>
-/* ITS DRAWING IS OPENGL, NOT DIRECT3D (4 Oct 2026, 22:23, his first launch of the proof: a critical error). Mods such as
- * comfyfog hook Direct3D 9 by patching the device's function table, and that table is shared by every device the
- * game's d3d9.dll makes, ours included: our device's calls ran through comfyfog's hooks, and the game's next frame
- * called a null pointer inside comfyfog. OpenGL (opengl32.dll, GDI's pixel formats) is a different library that no
- * Direct3D mod touches; it is loaded by name at run time, so the DLL's own imports stay kernel32 and user32. */
+/* OpenGL's names, by number (the view's drawing; the paintings' upload the tests drive too, ParchUpBegin) */
 #define GL_COLOR_BUFFER_BIT_     0x4000
 #define GL_QUADS_                0x0007
 #define GL_PROJECTION_           0x1701
@@ -9195,6 +11189,13 @@ static void ViewOpenFirst(float w, float h, DWORD now)
 #define GL_SRC_ALPHA_            0x0302
 #define GL_ONE_MINUS_SRC_ALPHA_  0x0303
 #define GL_ONE_                  1
+#ifdef __i386__
+#include <d3d9.h>
+/* ITS DRAWING IS OPENGL, NOT DIRECT3D (4 Oct 2026, 22:23, his first launch of the proof: a critical error). Mods such as
+ * comfyfog hook Direct3D 9 by patching the device's function table, and that table is shared by every device the
+ * game's d3d9.dll makes, ours included: our device's calls ran through comfyfog's hooks, and the game's next frame
+ * called a null pointer inside comfyfog. OpenGL (opengl32.dll, GDI's pixel formats) is a different library that no
+ * Direct3D mod touches; it is loaded by name at run time, so the DLL's own imports stay kernel32 and user32. */
 static struct {
     HMODULE lib, gdi;
     HGLRC (WINAPI *CreateContext)(HDC);
@@ -9372,27 +11373,49 @@ static int ViewSparkUp(void)
     return g_viewTex[VT_SPARK] != 0;
 }
 
-/* The painting made (g_parchPx) and its smaller copies (ParchMips) given to OpenGL in slot (its name made once, its
- * pictures replaced each time), drawn smoothly between them: 1 when it took them. g_parchPx stays the caller's. */
-static int ParchUp(int slot)
+
+/* A picture (P: w x h RGBA) given to OpenGL in slot, on a texture as many texels as the powers of two holding it (its
+ * last column and row carried on to its edges), with its smaller copies: 1 when it took it, its size in *tw, *th. */
+static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th)
 {
-    if (!g_parchPx || g_parchTW <= 0 || g_parchTW > g_view.maxTex || !ParchMips()) return 0;
+    int W = 1, H = 1;
+    while (W < P->w) W <<= 1;
+    while (H < P->h) H <<= 1;
+    if (!P->ok || !P->px || W > g_view.maxTex || H > g_view.maxTex) return 0;
+    unsigned *buf = (unsigned *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)W * (SIZE_T)H * 4 * 2);
+    if (!buf) return 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            buf[y * W + x] = *(const unsigned *)(const void *)(P->px + 4 * ((unsigned)(y < P->h ? y : P->h - 1) * (unsigned)P->w + (unsigned)(x < P->w ? x : P->w - 1)));
     while (gl.GetError()) {}
     if (!g_viewTex[slot]) gl.GenTextures(1, &g_viewTex[slot]);
     gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
     gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
-    gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA8_, g_parchTW, g_parchTW, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, g_parchPx);
-    const unsigned char *p = g_mipPx;
-    int w = g_parchTW / 2;
-    for (int i = 1; i <= g_mipLevels; i++, w /= 2) {
-        gl.TexImage2D(GL_TEXTURE_2D_, i, GL_RGBA8_, w, w, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, p);
-        p += (SIZE_T)w * (SIZE_T)w * 4;
+    int w = W, h = H, level = 0;
+    unsigned *cur = buf, *next = buf + W * H;
+    for (;;) {
+        gl.TexImage2D(GL_TEXTURE_2D_, level, GL_RGBA8_, w, h, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, cur);
+        if (w == 1 && h == 1) break;
+        int nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
+        for (int y = 0; y < nh; y++)
+            for (int x = 0; x < nw; x++) {
+                const unsigned char *a = (const unsigned char *)(cur + (2 * y < h ? 2 * y : h - 1) * w + (2 * x < w ? 2 * x : w - 1));
+                const unsigned char *b = (const unsigned char *)(cur + (2 * y < h ? 2 * y : h - 1) * w + (2 * x + 1 < w ? 2 * x + 1 : w - 1));
+                const unsigned char *c = (const unsigned char *)(cur + (2 * y + 1 < h ? 2 * y + 1 : h - 1) * w + (2 * x < w ? 2 * x : w - 1));
+                const unsigned char *d = (const unsigned char *)(cur + (2 * y + 1 < h ? 2 * y + 1 : h - 1) * w + (2 * x + 1 < w ? 2 * x + 1 : w - 1));
+                unsigned char *o = (unsigned char *)(next + y * nw + x);
+                for (int k = 0; k < 4; k++) o[k] = (unsigned char)((a[k] + b[k] + c[k] + d[k] + 2) / 4);
+            }
+        unsigned *t = cur; cur = next; next = t;
+        w = nw; h = nh; level++;
     }
-    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, g_mipLevels);
+    HeapFree(GetProcessHeap(), 0, buf);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, level);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_MIPMAP_LINEAR_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    *tw = W; *th = H;
     return !gl.GetError();
 }
 
@@ -9632,6 +11655,7 @@ static DWORD ViewOff(const char *why)
     InterlockedExchange(&g_viewSteps, 0);
     StepUnlock(held);
     InterlockedExchange(&g_viewLive, 0);                    /* (the game's frames draw all their own again) */
+    ParchStop();                                            /* (the parchment's job and its painting freed) */
     if (g_view.win) ShowWindow(g_view.win, SW_HIDE);
     for (int i = 0; i < VT_COUNT; i++)
         if (g_view.blp[i]) { HeapFree(GetProcessHeap(), 0, g_view.blp[i]); g_view.blp[i] = NULL; }
@@ -9661,6 +11685,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         mpq_read(&kIo, "interface.MPQ", TOD_PATH, &g_view.blp[VT_TIME], &g_view.len[VT_TIME]);
     VBarRead(g_view.blp, g_view.len);                   /* vanilla's own bar, for retro (read only) */
     ParchRead();                                        /* the parchment's tables, for the parchment (read only) */
+    ParchWorkerStart();                                 /* (its paintings made off this thread) */
     int showing = 0, built = 0, skip = 0, skips = 0, fadeOk = 1;
     LONG seen = g_gameSeq, worldSeen = 0;
     DWORD fadeAt = 0, waitAt = 0;
@@ -9749,6 +11774,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             int held = StepLock();
             InterlockedExchange(&g_viewSteps, 0);
             StepUnlock(held);
+            ParchScreenEnd();                               /* (its job's painting never kept into the game) */
             showing = 0;
             waitAt = now ? now : 1;                         /* it fades once the world shows (above) */
             worldSeen = g_worldFrames;
@@ -9785,9 +11811,83 @@ static void ViewStart(void)
 }
 #else
 static void ViewStart(void) {}
-static DWORD ViewNow(void) { return GetTickCount(); }
+static int g_viewNowCalls;                                   /* (the tests: the view's clock asked, by whichever thread) */
+static DWORD ViewNow(void) { g_viewNowCalls++; return GetTickCount(); }
 static int ParchUp(int slot) { (void)slot; return 0; }      /* (no OpenGL here: the tests' PARCH_UP keeps the painting) */
+static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th) { (void)slot; (void)P; *tw = *th = 0; return 0; }
 #endif
+/* The painting made (g_parchPx) and its smaller copies (ParchMips) given to OpenGL in slot (its name made once, its
+ * pictures replaced each time), drawn smoothly between them, a strip a frame so the view's frame never waits on it (the
+ * brief, 11 Oct): ParchUpBegin makes room for every level (1 when OpenGL took it), ParchUpStep gives it the next budget
+ * bytes (ParchUpBudget's, by the frame's time; ParchStrip; 1 when all of it is up, 0 more to come, -1 refused). g_parchPx and its copies stay the
+ * caller's until it is up. */
+static struct { int slot, level, y; } g_pul;
+static int ParchUpBegin(int slot)
+{
+    if (!g_parchPx || g_parchTW <= 0 || g_parchTW > g_view.maxTex || (!g_mipLevels && !ParchMips())) return 0;
+    while (gl.GetError()) {}
+    if (!g_viewTex[slot]) gl.GenTextures(1, &g_viewTex[slot]);
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    int w = g_parchTW;
+    for (int i = 0; i <= g_mipLevels; i++, w /= 2) gl.TexImage2D(GL_TEXTURE_2D_, i, GL_RGBA8_, w, w, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, NULL);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, g_mipLevels);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_MIPMAP_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    g_pul.slot = slot; g_pul.level = 0; g_pul.y = 0;
+    return !gl.GetError();
+}
+static int ParchUpStep(SIZE_T budget)
+{
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[g_pul.slot]);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    int lv, y0, rows;
+    while (ParchStrip(g_parchTW, g_mipLevels, &g_pul.level, &g_pul.y, &budget, &lv, &y0, &rows)) {
+        int w = g_parchTW >> lv;
+        gl.TexSubImage2D(GL_TEXTURE_2D_, lv, 0, y0, w, rows, GL_RGBA_, GL_UNSIGNED_BYTE_, ParchLevelPx(lv) + 4 * (SIZE_T)y0 * (SIZE_T)w);
+    }
+    if (gl.GetError()) return -1;
+    return g_pul.level > g_mipLevels;
+}
+/* The parchment's worker (above, the jobs): a thread of its own, at a lower priority than the view's, that runs each job
+ * posted (woken by g_pjEvent) and says it is done (ParchWorkerTurn, a pass of its loop); never touching OpenGL. Started
+ * with the view, once the parchment's tables are read; the tests run its loop by hand between frames (their shim's
+ * thread is never run). */
+static int ParchWorkerTurn(void)
+{
+    LONG s = g_pj.state;
+    if (s == 3) { ParchFree(); InterlockedExchange(&g_pj.state, 0); return 1; }   /* (stale before it ran) */
+    if (s != 1) return 0;
+    ParchJobRun();
+    if (InterlockedCompareExchange(&g_pj.state, 2, 1) == 3) { ParchFree(); InterlockedExchange(&g_pj.state, 0); }   /* (stale as it ran) */
+    return 1;
+}
+static DWORD WINAPI ParchWorker(LPVOID arg)
+{
+    (void)arg;
+    while (g_pjWorker) {
+        WaitForSingleObject(g_pjEvent, 100);
+        ParchWorkerTurn();
+    }
+    return 0;
+}
+static void ParchWorkerStart(void)
+{
+    if (!g_parchTablesOk || g_pjWorker) return;
+    g_pjEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    InterlockedExchange(&g_pjWorker, 1);                  /* (before it runs: its loop's) */
+    HANDLE t = g_pjEvent ? CreateThread(NULL, 0, ParchWorker, NULL, 0, NULL) : NULL;
+    if (!t) {
+        InterlockedExchange(&g_pjWorker, 0);
+        Log("  the parchment: its worker's thread could not be started; its paintings are made on the view's thread");
+        return;
+    }
+    SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL);
+    CloseHandle(t);
+    Log("  the parchment: its paintings made by a worker thread of their own, given to OpenGL a strip a frame");
+}
 
 /* ---- the ending's drawing, on the game's own device (see BLUR_MS) ----
  * The present's six bytes at VA 0x5A19FD go to PresentStub, which hands the game's device object (esi) to PrePresent and
@@ -10062,25 +12162,29 @@ static void ModeTurnStart(void)
 }
 #endif
 
-/* ---- the style: the player's two choices, the map and the bar (his decision, 10 Oct 2026) ----
+/* ---- the style: the player's three choices, the map, the bar and the map's areas (his decisions, 10 and 11 Oct 2026) ----
  * MAP TYPE: Satellite (the living map) | Parchment; LOADING BAR STYLE: Retro (vanilla's own bar) | Neo (the blade in its
- * frame, the RavenCraft logo on it), each on its own, on both maps. Defaults: the parchment and retro. Chosen in game
+ * frame, the RavenCraft logo on it), each on its own, on both maps; MAP AREAS, the parchment's: Discovered (only the
+ * overlay pieces this character has found, as the client's world map shows them) | Full map (every piece, as though all
+ * were found: his words, 11 Oct, "we could have a switch that turns on the full map as though it were fully discovered,
+ * but it should default to only what they've discovered"). Defaults: the parchment, retro, discovered. Chosen in game
  * (the world map's switches and /cinderload, below) and kept in Data\CinderLoad\style.txt, written here, so it holds over
  * restarts; a choice counts from the next loading screen. Until a choice is made in game (no style.txt), the old switch
  * files still say what they said: parchment.txt the parchment with vanilla's bar, bar-vanilla.txt vanilla's bar on the
  * living map; with neither, the defaults. style.txt wins over them; nothing removes them. g_parchAsked (1: the
- * parchment) and g_vbarAsked (1: retro) hold the choice: the game's thread writes them (at start, the switches, a
- * screen's start), the view's thread reads them as each screen opens (StylePick), when the game's thread is in that
- * screen's loading and cannot change them. */
+ * parchment), g_vbarAsked (1: retro) and g_mapFull (1: the full map) hold the choice: the game's thread writes them (at
+ * start, the switches, a screen's start), the view's thread reads them as each screen opens (StylePick), when the game's
+ * thread is in that screen's loading and cannot change them. */
 #define STYLE_PATH     "Data\\CinderLoad\\style.txt"
 #define STYLE_TMP_PATH "Data\\CinderLoad\\style.tmp"
 static int StyleLetter(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 /* The words of text that name a choice, as they come (case aside; '#' to the line's end is a note): parchment or satellite
- * into *map (1, 0), retro or neo into *bar (1, 0); other words pass. The choices named. */
-static int StyleParse(const char *text, int *map, int *bar)
+ * into *map (1, 0), retro or neo into *bar (1, 0), discovered or full into *full (0, 1); other words pass. The choices
+ * named. */
+static int StyleParse(const char *text, int *map, int *bar, int *full)
 {
-    static const struct { const char *word; int which, value; } kWords[4] = {
-        { "parchment", 0, 1 }, { "satellite", 0, 0 }, { "retro", 1, 1 }, { "neo", 1, 0 } };
+    static const struct { const char *word; int which, value; } kWords[6] = {
+        { "parchment", 0, 1 }, { "satellite", 0, 0 }, { "retro", 1, 1 }, { "neo", 1, 0 }, { "discovered", 2, 0 }, { "full", 2, 1 } };
     int named = 0;
     for (const char *s = text; s && *s;) {
         if (*s == '#') { while (*s && *s != '\n') s++; continue; }
@@ -10088,34 +12192,40 @@ static int StyleParse(const char *text, int *map, int *bar)
         const char *w = s;
         while (StyleLetter(*s)) s++;
         int n = (int)(s - w);
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < 6; k++) {
             const char *p = kWords[k].word;
             int i = 0;
             while (i < n && p[i] && (w[i] | 0x20) == p[i]) i++;
-            if (i == n && !p[i]) { *(kWords[k].which ? bar : map) = kWords[k].value; named++; }
+            if (i == n && !p[i]) { *(kWords[k].which == 2 ? full : kWords[k].which ? bar : map) = kWords[k].value; named++; }
         }
     }
     return named;
 }
 static const char *StyleMapName(int map) { return map ? "parchment" : "satellite"; }
 static const char *StyleBarName(int bar) { return bar ? "retro" : "neo"; }
-/* "parchment retro": the choice as the CVar below carries it. */
-static void StyleValue(char *out, int map, int bar)
+static const char *StyleAreasName(int full) { return full ? "full" : "discovered"; }
+/* "parchment retro discovered": the choice as the CVar below carries it. */
+static void StyleValue(char *out, int map, int bar, int full)
 {
     lstrcpyA(out, StyleMapName(map));
     lstrcatA(out, " ");
     lstrcatA(out, StyleBarName(bar));
+    lstrcatA(out, " ");
+    lstrcatA(out, StyleAreasName(full));
 }
 /* style.txt written whole (a file beside it, then moved over it): 1 when it was. */
-static int StyleSave(int map, int bar)
+static int StyleSave(int map, int bar, int full)
 {
-    char path[MAX_PATH], tmp[MAX_PATH], text[400];
+    char path[MAX_PATH], tmp[MAX_PATH], text[500];
     if (!Join(path, g_dir, STYLE_PATH) || !Join(tmp, g_dir, STYLE_TMP_PATH)) return 0;
     lstrcpyA(text, "# CinderLoad's loading screens, as chosen in game (on the world map, M, or with /cinderload); from the next "
-                   "loading screen.\r\n# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade).\r\nmap ");
+                   "loading screen.\r\n# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade). areas: "
+                   "discovered (the parchment shows only what you have discovered) or full (all of it).\r\nmap ");
     lstrcatA(text, StyleMapName(map));
     lstrcatA(text, "\r\nbar ");
     lstrcatA(text, StyleBarName(bar));
+    lstrcatA(text, "\r\nareas ");
+    lstrcatA(text, StyleAreasName(full));
     lstrcatA(text, "\r\n");
     HANDLE f = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
@@ -10146,12 +12256,12 @@ static char *StyleText(char *text, DWORD n)
 static void StyleLoad(void)
 {
     char path[MAX_PATH], m[300];
-    int map = 1, bar = 1;
+    int map = 1, bar = 1, full = 0;
     const char *from = "the defaults (no choice made in game yet)";
     DWORD n = 0;
     char *text = Join(path, g_dir, STYLE_PATH) ? ReadTextN(path, 4096, &n) : NULL;
     if (text) {
-        StyleParse(StyleText(text, n), &map, &bar);
+        StyleParse(StyleText(text, n), &map, &bar, &full);
         HeapFree(GetProcessHeap(), 0, text);
         from = "Data\\CinderLoad\\style.txt (chosen in game)";
     } else {
@@ -10161,20 +12271,23 @@ static void StyleLoad(void)
     }
     *(volatile int *)&g_parchAsked = map;
     *(volatile int *)&g_vbarAsked = bar;
-    wsprintfA(m, "style: the map %s, the bar %s, from %s; set in game on the world map (M) or with /cinderload", StyleMapName(map),
-              StyleBarName(bar), from);
+    *(volatile int *)&g_mapFull = full;
+    wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game on the world map (M) or with /cinderload",
+              StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
     Log(m);
 }
-/* The game's thread: the choice changed to map, bar (how: where it came from, for the log), kept in style.txt. 1 when it
- * changed. */
-static int StyleSet(int map, int bar, const char *how)
+/* The game's thread: the choice changed to map, bar, full (how: where it came from, for the log), kept in style.txt. 1
+ * when it changed. */
+static int StyleSet(int map, int bar, int full, const char *how)
 {
-    if (map == *(volatile int *)&g_parchAsked && bar == *(volatile int *)&g_vbarAsked) return 0;
+    if (map == *(volatile int *)&g_parchAsked && bar == *(volatile int *)&g_vbarAsked && full == *(volatile int *)&g_mapFull) return 0;
     *(volatile int *)&g_parchAsked = map;
     *(volatile int *)&g_vbarAsked = bar;
+    *(volatile int *)&g_mapFull = full;
     char m[300];
-    int saved = StyleSave(map, bar);
-    wsprintfA(m, "style: the map %s, the bar %s (%s), from the next loading screen; %s", StyleMapName(map), StyleBarName(bar), how,
+    int saved = StyleSave(map, bar, full);
+    wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s (%s), from the next loading screen; %s", StyleMapName(map),
+              StyleBarName(bar), StyleAreasName(full), how,
               saved ? "kept in Data\\CinderLoad\\style.txt" : "Data\\CinderLoad\\style.txt could NOT be written, so it holds only "
                                                              "until the game closes");
     Log(m);
@@ -10209,11 +12322,18 @@ static void StylePick(void)
     }
     g_parchOn = parch;
     g_barVanilla = retro;
+    int full = *(volatile int *)&g_mapFull;
+    if (full != g_parchFullOn) {
+        Log(full ? "  the view: the parchment's map areas full (every part of each zone, as though all were discovered)"
+                 : "  the view: the parchment's map areas as discovered (only the parts of each zone this character has found)");
+        g_parchFullOn = full;
+    }
 }
 
 /* ---- the world map's switches (his rule, 10 Oct 2026: on the world map, M, and as /cinderload; Blizzard's own look;
- * "if this breaks, the player still has the normal world map"; his form, 10 Oct night: two drop-downs as the map's own
- * Continent and Zone, "Loading map" and "Loading bar", at the left end of its top bar) ----
+ * "if this breaks, the player still has the normal world map"; his form, 10 Oct night: drop-downs as the map's own
+ * Continent and Zone, "Loading map" and "Loading bar", at the left end of its top bar; and a third the same way, "Map
+ * areas", 11 Oct: "add the switch to 0.3.0 too") ----
  * The release is the DLL and its four packs, so there is no add-on: dll/switches.lua (switches_lua.h) is run inside the
  * game by the client's own FrameScript_Execute, the way its RunScript runs a line, only on the game's own thread, in its
  * message pump between frames (a WH_GETMESSAGE hook of that thread, sent a message of ours four times a second), only
@@ -10223,8 +12343,8 @@ static void StylePick(void)
  * and the thread's loop are the 32-bit build's alone), and the whole path runs there against a stubbed UI.
  * The client checks every C function's address against its own code before Lua may call it (0x42A320, from luaD_precall
  * at 0x6F61A1: "Invalid function pointer"), so a DLL cannot give its Lua a function. The switches tell the DLL through a
- * CVar of its own instead, CinderLoadStyle ("parchment retro"), made here as the client's own RegisterCVar makes one
- * (0x488B8A: CVar::Register) and read here (CVar::Lookup, its value at +0x20, as GetCVar reads it); its third word
+ * CVar of its own instead, CinderLoadStyle ("parchment retro discovered"), made here as the client's own RegisterCVar
+ * makes one (0x488B8A: CVar::Register) and read here (CVar::Lookup, its value at +0x20, as GetCVar reads it); its fourth word
  * "fault" says the switches met an error (they turn themselves off; so does this, for the session). The CVar is only the
  * messenger: style.txt holds the choice, and the switches start from it (nothing depends on Config.wtf keeping a CVar).
  * Each tick: a choice made in game taken (StyleSet: style.txt, so it is kept within a quarter of a second, and again as the
@@ -10335,15 +12455,15 @@ static int CvText(const void *cv, char *out, int size)
     if (size > 0) out[size - 1] = 0;
     return v != NULL;
 }
-/* The CVar's value as the switches set it (CL.Save): exactly "<map> <bar>", or "<map> <bar> fault" when they met an
- * error, each word as StyleMapName and StyleBarName spell it. Anything else (the probe's "?", a value from Config.wtf, a
- * value cut short or run on) is not theirs: 0. */
-static int StyleCvarParse(const char *v, int *map, int *bar, int *fault)
+/* The CVar's value as the switches set it (CL.Save): exactly "<map> <bar> <areas>", or that and " fault" when they met
+ * an error, each word as StyleMapName, StyleBarName and StyleAreasName spell it. Anything else (the probe's "?", a value
+ * from Config.wtf, an older two-word one, a value cut short or run on) is not theirs: 0. */
+static int StyleCvarParse(const char *v, int *map, int *bar, int *full, int *fault)
 {
     for (int m = 0; m < 2; m++)
-        for (int b = 0; b < 2; b++) {
-            char want[40];
-            StyleValue(want, m, b);
+        for (int b = 0; b < 4; b++) {
+            char want[48];
+            StyleValue(want, m, b & 1, b >> 1);
             int i = 0;
             while (want[i] && v[i] == want[i]) i++;
             if (want[i]) continue;
@@ -10351,7 +12471,7 @@ static int StyleCvarParse(const char *v, int *map, int *bar, int *fault)
             int f = 0;
             while (kFault[f] && v[i + f] == kFault[f]) f++;
             if (v[i] && (kFault[f] || v[i + f])) continue;
-            *map = m; *bar = b; *fault = v[i] != 0;
+            *map = m; *bar = b & 1; *full = b >> 1; *fault = v[i] != 0;
             return 1;
         }
     return 0;
@@ -10361,9 +12481,9 @@ static int StyleCvarParse(const char *v, int *map, int *bar, int *fault)
 static int StyleFromCvar(const void *cv, const char *how)
 {
     char v[64];
-    int map, bar, fault;
-    if (!g_luaSynced || !CvText(cv, v, (int)sizeof v) || !StyleCvarParse(v, &map, &bar, &fault)) return 0;
-    int changed = StyleSet(map, bar, how);
+    int map, bar, full, fault;
+    if (!g_luaSynced || !CvText(cv, v, (int)sizeof v) || !StyleCvarParse(v, &map, &bar, &full, &fault)) return 0;
+    int changed = StyleSet(map, bar, full, how);
     return fault ? -1 : changed;
 }
 /* The switches off for the rest of the session, and why (the world map, the game: as they were). */
@@ -10376,15 +12496,17 @@ static void LuaBreak(const char *why)
     Log(m);
 }
 /* The chunk the switches are made by: the choice held, then dll/switches.lua. Its length, or 0 when out is too small. */
-static int LuaChunk(char *out, int size, int map, int bar)
+static int LuaChunk(char *out, int size, int map, int bar, int full)
 {
-    static const char head[] = "local CL_MAP, CL_BAR = \"";
-    int need = (int)sizeof head + 32 + (int)sizeof kSwitchesLua;
+    static const char head[] = "local CL_MAP, CL_BAR, CL_AREAS = \"";
+    int need = (int)sizeof head + 48 + (int)sizeof kSwitchesLua;
     if (size < need) return 0;
     lstrcpyA(out, head);
     lstrcatA(out, StyleMapName(map));
     lstrcatA(out, "\", \"");
     lstrcatA(out, StyleBarName(bar));
+    lstrcatA(out, "\", \"");
+    lstrcatA(out, StyleAreasName(full));
     lstrcatA(out, "\"\n");
     lstrcatA(out, kSwitchesLua);
     return lstrlenA(out);
@@ -10398,8 +12520,8 @@ static void LuaTick(DWORD now)
     char m[300], v[64];
     void *cv = g_cvLookup(CV_NAME);
     if (!cv) {                                                     /* our messenger, made as RegisterCVar makes one */
-        static char def[32];
-        StyleValue(def, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked);
+        static char def[48];
+        StyleValue(def, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked, *(volatile int *)&g_mapFull);
         cv = g_cvRegister(CV_NAME, NULL, 0, def, NULL, CV_CATEGORY, 0, NULL);
         if (!cv || g_cvLookup(CV_NAME) != cv) { LuaBreak("the client would not make its CVar (" CV_NAME ")"); g_luaBusy = 0; return; }
         Log("the world map's switches: their CVar " CV_NAME " made, as the client's own RegisterCVar makes one");
@@ -10414,9 +12536,9 @@ static void LuaTick(DWORD now)
     g_luaProbeAt = now ? now : 1;
     g_luaExec(kLuaProbe, "CinderLoad");
     if (CvText(cv, v, (int)sizeof v) && v[0] == '?' && !v[1]) {    /* not there: made, from the choice held */
-        static char chunk[sizeof kSwitchesLua + 128];
+        static char chunk[sizeof kSwitchesLua + 160];
         char mark[MAX_PATH];
-        int len = LuaChunk(chunk, (int)sizeof chunk, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked);
+        int len = LuaChunk(chunk, (int)sizeof chunk, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked, *(volatile int *)&g_mapFull);
         int marked = len && Join(mark, g_dir, LUA_SETUP_MARK);
         if (marked) WriteText(mark, "CinderLoad was making its world map switches (deleted once they are made)\r\n");
         if (len) g_luaExec(chunk, "CinderLoad");

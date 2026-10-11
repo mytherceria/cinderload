@@ -1137,8 +1137,15 @@ static void FireBarRealClient(const char *client)
                  !memcmp(got, kGlueStop, sizeof kGlueStop);
         if (!match) printf("FAIL: VA 0x%X (the glue music's stop) differs in %s\n", GLUE_STOP_VA, exe);
     }
+    for (int i = 0; x && match && i < 2; i++) {                       /* the arrival's height: read and written as taken */
+        unsigned char got[8];
+        long off = ExeOffset(x, kDestZCode[i].rva);
+        match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, (size_t)kDestZCode[i].n, x) == (size_t)kDestZCode[i].n &&
+                 !memcmp(got, kDestZCode[i].bytes, (size_t)kDestZCode[i].n);
+        if (!match) printf("FAIL: RVA 0x%lX (the arrival's height) differs in %s\n", (unsigned long)kDestZCode[i].rva, exe);
+    }
     if (x) fclose(x);
-    Check(match, "a real client: all eight places hold the bytes the fire bar and the drift expect, in its WoW.exe");
+    Check(match, "a real client: all eight places hold the bytes the fire bar and the drift expect, in its WoW.exe (and the arrival's height is read and written where it is taken)");
 }
 
 /* The mock's timeline (render_frames.py KEYS) through the sound built from a real client's files, polled as the game
@@ -2457,7 +2464,8 @@ static void LiveTests(void)
         bd &= at[0] == CHAR_COUNT_VA && at[1] == CHAR_LIST_VA && at[2] == CHAR_PICKED_VA && at[3] == CHAR_ENTERED_VA &&
               (kClassCode[3].bytes[3] | kClassCode[3].bytes[4] << 8) == CHAR_CLASS && 9 * (1 << kClassCode[2].bytes[5]) == CHAR_SIZE &&
               (kClassCode[9].bytes[3] | kClassCode[9].bytes[4] << 8) == CHAR_RACE &&
-              (kClassCode[10].bytes[3] | kClassCode[10].bytes[4] << 8) == CHAR_LEVEL;
+              (kClassCode[10].bytes[3] | kClassCode[10].bytes[4] << 8) == CHAR_LEVEL &&
+              kClassCode[6].bytes[2] == CHAR_MAP && kClassCode[7].bytes[2] == CHAR_X && kClassCode[8].bytes[2] == CHAR_Y && kClassCode[11].bytes[2] == CHAR_Z;
         g_race = g_level = 0;
         Check(bd, "the badge: the class from the list (a bad byte never taken, kept when the list goes), its race and level with it; shadow, icon, ring at the arrival; the ring alone without; off when the code moved");
     }
@@ -2475,13 +2483,13 @@ static void LiveTests(void)
         Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, 0); PutFloat(MAP_DEST_Y_VA, 0);   /* nothing written yet */
         Poke(CHAR_COUNT_VA, 2); Poke(CHAR_LIST_VA, 0x8B0000); Poke(CHAR_PICKED_VA, 1);
         unsigned e = 0x8B0000 + 0x120;                                  /* the list's own layout, read from its parser */
-        Poke(e + 0x38, 0); PutFloat(e + 0x44, -5000); PutFloat(e + 0x48, 10000);
+        Poke(e + 0x38, 0); PutFloat(e + 0x44, -5000); PutFloat(e + 0x48, 10000); PutFloat(e + 0x4C, 501.5f);
         int ar = g_classSure;
         g_drift = 0; g_driftAt = 0; g_zoomScreens = 0; g_driftNew = 1;
         DWORD at = 900000;
         DriftStep(0, at);
         ar &= g_destOk && fabsf(g_destU - 0.3f) < 1e-4f && fabsf(g_destV - 0.6f) < 1e-4f && g_destMap == 0 &&
-              g_destWX == -5000 && g_destWY == 10000;                    /* a login: the list's place, at once */
+              g_destWX == -5000 && g_destWY == 10000 && g_destZOk && g_destWZ == 501.5f;   /* a login: the list's place, at once, its height */
         /* a teleport: no list; the old place (the last screen's) is not taken, the new one is the moment it lands */
         Poke(CHAR_COUNT_VA, 0);
         PutFloat(MAP_DEST_X_VA, -5000); PutFloat(MAP_DEST_Y_VA, 10000);  /* where the last screen arrived */
@@ -2491,8 +2499,19 @@ static void LiveTests(void)
         at += 20; DriftStep(0.2f, at);
         ar &= !g_destOk;
         PutFloat(MAP_DEST_X_VA, -2500); PutFloat(MAP_DEST_Y_VA, 5000);   /* the game writes the new place */
+        PutFloat(MAP_DEST_Z_VA, -52.25f);
         at += 20; DriftStep(0.2f, at);
-        ar &= g_destOk && fabsf(g_destU - 0.4f) < 1e-4f && fabsf(g_destV - 0.55f) < 1e-4f;
+        ar &= g_destOk && fabsf(g_destU - 0.4f) < 1e-4f && fabsf(g_destV - 0.55f) < 1e-4f && !g_destZOk;   /* (its height's code not as read) */
+        for (int i = 0; i < 2; i++) memcpy(shim_module + kDestZCode[i].rva, kDestZCode[i].bytes, (size_t)kDestZCode[i].n);
+        g_destZSure = -1;
+        at += 20; DriftStep(0.25f, at);
+        ar &= g_destOk && g_destZOk && g_destWZ == -52.25f;               /* (as read: its height with it) */
+        shim_module[kDestZCode[1].rva + 2] ^= 0x01;                       /* (written somewhere else: not taken) */
+        g_destZSure = -1;
+        at += 20; DriftStep(0.26f, at);
+        ar &= g_destOk && !g_destZOk;
+        shim_module[kDestZCode[1].rva + 2] ^= 0x01;
+        g_destZSure = -1;
         /* the same place again (a hearth to where you stand): taken from half the bar */
         g_driftNew = 1;
         at += 20; DriftStep(0.3f, at);
@@ -2528,7 +2547,7 @@ static void LiveTests(void)
         at += 20; DriftStep(0.1f, at);
         ar &= g_destOk;                                                  /* (and with it as read, taken) */
         Poke(CHAR_COUNT_VA, 0); g_mapShown = 0; g_destOk = 0;
-        Check(ar, "the arrival: a login's from the character list at once; a teleport's only once the game writes it (or from half the bar); never 0, 0");
+        Check(ar, "the arrival: a login's from the character list at once; a teleport's only once the game writes it (or from half the bar); never 0, 0; its height with it (the list's +0x4C, the game's 0x882694), the game's only where WoW.exe reads and writes it as in the client this was made for");
     }
 
     /* the arrival's glow: on with its sheet, table and grid (a grid a byte short: off); its subzone found from the arrival's
@@ -5519,6 +5538,7 @@ static void TestGlideState(void)
     g_destMap = -1;
     g_ptry.world = g_ptry.cont = g_ptry.zone = 0; g_pbitsSeq = -1; g_pmadeKnown = -1;
     g_lpWorld.ok = g_lpCont.ok = 0;
+    g_pj.state = 0; g_pjUp = -1;
 }
 /* this screen's arrival taken (zone want, its continent cont; want a continent's row: at sea), both painted and up */
 static void TestGlideArrive(int map, int want, int cont, float x, float y, DWORD at)
@@ -5551,6 +5571,81 @@ static float TestTauFor(float e)
     return 0.5f * (lo + hi);
 }
 static void TestHoldStub(void) {}
+/* the parchment's worker's own loop (ParchWorker, as ParchWorkerStart asked the shim for its thread), run by hand for
+ * one pass between the view's frames */
+static LPTHREAD_START_ROUTINE g_testWorker;
+static LPVOID g_testWorkerArg;
+static int g_testTicked;
+static void TestTicked(void) { g_testTicked = 1; }
+static int g_testWorkerClock;                                          /* (the view's clock asked by the worker's passes) */
+static void TestWorker(void)
+{
+    shim_waits = 1; shim_wait_stop = &g_pjWorker;                       /* (its loop told to end after this pass) */
+    int vn = g_viewNowCalls;
+    if (g_testWorker) g_testWorker(g_testWorkerArg);
+    g_testWorkerClock += g_viewNowCalls - vn;
+    InterlockedExchange(&g_pjWorker, 1);
+}
+/* the tests' OpenGL for a painting's upload (gl, as the 32-bit build's): each texture's levels kept as given */
+static struct { int levels, w[16]; unsigned char *lv[16]; } g_tgl[VT_COUNT];
+static unsigned g_tglBound, g_tglNames, g_tglErr;
+static long g_tglBytes;                                                /* (given by TexSubImage2D since last zeroed) */
+static int TglSlot(void) { for (int i = 0; i < VT_COUNT; i++) if (g_viewTex[i] && g_viewTex[i] == g_tglBound) return i; return -1; }
+static void TglGen(int n, unsigned *names) { for (int i = 0; i < n; i++) names[i] = 100 + ++g_tglNames; }
+static void TglBind(unsigned target, unsigned name) { (void)target; g_tglBound = name; }
+static void TglParam(unsigned t, unsigned p, int v) { (void)t; (void)p; (void)v; }
+static void TglStore(unsigned p, int v) { (void)p; (void)v; }
+static unsigned TglError(void) { unsigned e = g_tglErr; g_tglErr = 0; return e; }
+static void TglImage(unsigned t, int level, int ifmt, int w, int h, int b, unsigned f, unsigned ty, const void *px)
+{
+    (void)t; (void)ifmt; (void)b; (void)f; (void)ty; (void)px;
+    int s = TglSlot();
+    if (s < 0 || level < 0 || level > 15 || w != h) { g_tglErr = 1; return; }
+    free(g_tgl[s].lv[level]);
+    g_tgl[s].lv[level] = malloc((size_t)w * (size_t)h * 4);
+    memset(g_tgl[s].lv[level], 0xCD, (size_t)w * (size_t)h * 4);
+    g_tgl[s].w[level] = w;
+    if (level + 1 > g_tgl[s].levels) g_tgl[s].levels = level + 1;
+}
+static void TglSub(unsigned t, int level, int x, int y, int w, int h, unsigned f, unsigned ty, const void *px)
+{
+    (void)t; (void)f; (void)ty;
+    int s = TglSlot();
+    if (s < 0 || level >= g_tgl[s].levels || x || w != g_tgl[s].w[level] || y < 0 || y + h > w) { g_tglErr = 1; return; }
+    memcpy(g_tgl[s].lv[level] + 4 * (size_t)y * (size_t)w, px, 4 * (size_t)w * (size_t)h);
+    g_tglBytes += 4L * w * h;
+}
+static void TestGl(int on)
+{
+    gl.GenTextures = on ? TglGen : NULL; gl.BindTexture = on ? TglBind : NULL; gl.TexParameteri = on ? TglParam : NULL;
+    gl.TexImage2D = on ? TglImage : NULL; gl.TexSubImage2D = on ? TglSub : NULL; gl.PixelStorei = on ? TglStore : NULL;
+    gl.GetError = on ? TglError : NULL;
+    g_view.maxTex = 4096;
+    for (int i = 0; i < VT_COUNT; i++) { for (int k = 0; k < 16; k++) { free(g_tgl[i].lv[k]); g_tgl[i].lv[k] = NULL; } g_tgl[i].levels = 0; }
+}
+/* the painting made and its smaller copies, kept to compare with what went up */
+static unsigned char *g_tkeep;
+static int g_tkeepTW, g_tkeepL;
+static void TestKeepPainting(void)
+{
+    SIZE_T n = (SIZE_T)g_parchTW * (SIZE_T)g_parchTW * 4, m = 0;
+    for (int w = g_parchTW / 2; w >= 1; w /= 2) m += (SIZE_T)w * (SIZE_T)w * 4;
+    free(g_tkeep);
+    g_tkeep = malloc(n + m);
+    memcpy(g_tkeep, g_parchPx, n);
+    if (g_mipPx) memcpy(g_tkeep + n, g_mipPx, m);
+    g_tkeepTW = g_parchTW; g_tkeepL = g_mipLevels;
+}
+static int TestUpAsKept(int slot)
+{
+    if (!g_tkeep || g_tgl[slot].levels != g_tkeepL + 1) return 0;
+    const unsigned char *p = g_tkeep;
+    for (int i = 0, w = g_tkeepTW; i <= g_tkeepL; i++, w /= 2) {
+        if (g_tgl[slot].w[i] != w || memcmp(g_tgl[slot].lv[i], p, 4 * (size_t)w * (size_t)w)) return 0;
+        p += 4 * (size_t)w * (size_t)w;
+    }
+    return 1;
+}
 static int g_upOrder[16], g_upN, g_upFail;
 static int TestParchUp(int slot)
 {
@@ -5628,6 +5723,36 @@ static void TestParchment(void)
     g_makeBits = NULL;
     ok &= ParchMake(1, &why) && g_parchPieces == 1 && g_parchAll == 1 && TestPx(110, 60)[1] == 255;
     Check(ok, "the parchment's painting: the pieces this screen's character has not found left blank, every piece when its explored areas are not known");
+    /* the map's areas (his words, 11 Oct: "a switch that turns on the full map as though it were fully discovered, but it
+     * should default to only what they've discovered"): the work paints the zone as the choice stood as its screen opened */
+    {
+        int dirs = g_mapDirN;
+        g_mapDirN = 0; g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_parchCont = 0; g_parchZone = -1; g_pmadeKnown = -1; g_pmadeFull = -1;
+        g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_destZOk = 0;
+        memset(g_scrBits, 0, EXPLORED_BYTES); g_scrKnown = 1; g_scrSeq++;
+        g_upN = 0; g_upFail = 0;
+        g_parchFullOn = 0; g_viewScreen = 40;
+        ParchWork(1000);
+        ok = g_parchZone == 1 && g_upN == 1 && g_parchPieces == 0 && LogSays("0 of its 1 overlay pieces, the rest not found by this character");
+        g_parchFullOn = 1; g_viewScreen = 41;                           /* (the next screen, the full map chosen) */
+        ParchWork(2000);
+        ok &= g_parchZone == 1 && g_upN == 2 && LogSays("1 of its 1 overlay pieces, the full map chosen");
+        g_viewScreen = 42;                                               /* (the same choice: nothing painted again) */
+        ParchWork(3000);
+        ok &= g_upN == 2;
+        g_parchFullOn = 0; g_viewScreen = 43;                           /* (back to what was discovered) */
+        ParchWork(4000);
+        ok &= g_upN == 3 && g_parchZone == 1;
+        memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[3] = 0x24; g_scrSeq++; g_viewScreen = 44;   /* (more found: painted again) */
+        g_zoneTW = g_zoneK = 0;
+        ParchWork(5000);
+        ok &= g_upN == 4 && g_parchZone == 1 && Same(g_pmadeBits, g_scrBits, EXPLORED_BYTES) && g_zoneTW == 1024 && g_zoneK == 1;
+        g_viewScreen = 45;                                               /* (the same found: not painted again) */
+        ParchWork(6000);
+        ok &= g_upN == 4;
+        g_scrKnown = 0; g_scrSeq++; g_mapDirN = dirs; g_parchOn = 0; g_destMap = -1; g_parchCont = -1; g_parchZone = -1;
+        Check(ok, "the map's areas (his switch): discovered, the zone painted with only the pieces this character has found; the full map, every piece as though found; the zone painted again when the choice changes, not when it stays");
+    }
     for (int i = 0; i < 12; i++) free((void *)tdata[i]);
     for (int i = 0; i < 2; i++) free((void *)pdata[i]);
 
@@ -5679,7 +5804,8 @@ static void TestParchment(void)
     ViewBuild(1920, 1080, 0.0f, 2000);
     float e0, e1, z0, z1;
     ParchView va = ParchStart(1920, 1080, 1, ParchBox(0)), vz = ParchEnd(1920, 1080, zr, PARCH_ZOOM, fx, fy);
-    float px = 1080 / PARCH_REF_H;                                      /* (the fades on a window PARCH_REF_H tall) */
+    float px = 1;                                                       /* (the fades as on the films he approved: a window
+                                                                         * 1080 tall, its own pixels) */
     ParchSpan(&va, &vz, px * 2004.0f / PARCH_WORLD_FW, PARCH_MAG0, PARCH_MAG1, &e0, &e1);
     ParchRect cr0 = ParchBox(0);
     ParchSpan(&va, &vz, px * 2004.0f / (cr0.x1 - cr0.x0), PARCH_MAG0, PARCH_MAG1, &z0, &z1);
@@ -5695,6 +5821,17 @@ static void TestParchment(void)
     cb = TestBatch(VT_PARCH2);
     cm = cb >= 0 ? TestVertNear(cb, g_pcam.px, g_pcam.py) : NULL;
     ok &= cm && abs(cm->c[3] - half1080) <= 2;
+    /* the continent-to-zone moment (his films, 1080 tall: the continent comes up, then the zone over it; at 2160 they came
+     * up together): as the continent is halfway up the zone has barely begun, on any window */
+    ok &= e0 > 0.03f && z0 > e0 + 0.05f && 0.5f * (z0 + z1) > 0.5f * (e0 + e1) + 0.05f;
+    for (int big = 0; big < 2; big++) {
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+        ViewBuild(big ? 3840 : 1920, big ? 2160 : 1080, 0.0f, 2000);
+        ViewBuild(big ? 3840 : 1920, big ? 2160 : 1080, tm, 3000);
+        int zb2 = TestBatch(VT_PARCH), cb2 = TestBatch(VT_PARCH2);
+        const ViewVert *zm = zb2 >= 0 ? TestVertNear(zb2, g_pcam.px, g_pcam.py) : NULL, *cm2 = cb2 >= 0 ? TestVertNear(cb2, g_pcam.px, g_pcam.py) : NULL;
+        ok &= cm2 && abs(cm2->c[3] - half1080) <= 2 && (!zm || zm->c[3] < 26);
+    }
     TestGlideArrive(0, 1, 0, -9464, 62, 2000);
     ViewBuild(1920, 1080, 0.0f, 2000);
     ViewBuild(1920, 1080, 0.999f, 3100);
@@ -5707,7 +5844,70 @@ static void TestParchment(void)
     int lateZ = TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3];
     g_zoneAt = 0;
     ok &= lateZ > 50 && lateZ < 80;
-    Check(ok, "the fade A: each finer painting comes up over the coarser one as the coarser one is drawn larger than its own texels (halfway where, on a window PARCH_REF_H tall, it would be drawn 1.3 pixels a texel: the same framing on any window), the continent's over the world's before the zone's over the continent's, the zone's whole well before the end");
+    Check(ok, "the fade A: each finer painting comes up over the coarser one as the coarser one is drawn larger than its own texels (halfway where, on a window 1080 tall as his approved films, it would be drawn 1.3 pixels a texel: the same map scale and framing on any window, 1920 x 1080 or 3840 x 2160), the zone barely begun over it as the continent is halfway up over the world's, the zone's whole well before the end");
+    /* the player's marker (his pick, 11 Oct, option 1, no ripple): the world map's own arrow pointing north over a dark disc,
+     * the candle's amber glow breathing over 2 s, over everything, coming up with the zone's painting */
+    {
+        static const char *mn[2] = { PARCH_MARK_PATH, PARCH_GLOW_PATH };
+        unsigned ml[2];
+        const char *md[2] = { (const char *)TestPalBlp(64, 64, 0xC0C0D0, 8, &ml[0]), (const char *)TestPalBlp(32, 32, 0x203080, 0, &ml[1]) };
+        MakeMpq("Data/patch-I.MPQ", 2, mn, md, ml);
+        int rd = ParchMarkRead();
+        ok = rd && g_markPic[0].w == 64 && g_markPic[1].w == 32 && g_markPic[1].px[3] == 0x80 && g_markPic[0].px[3] == 255;   /* (the glow's alpha its brightness) */
+        for (int k = 0; k < 2; k++) { g_markTW[k] = g_markTH[k] = g_markPic[k].w; g_viewTex[VT_PMARK + k] = 1; }
+        g_markUp = 1;
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+        ViewBuild(1920, 1080, 0.0f, 2000);
+        ok &= TestBatch(VT_PMARK) < 0 && TestBatch(VT_PGLOW) < 0;      /* (the zone not up yet: no marker) */
+        ViewBuild(1920, 1080, 1.0f, 9500);                             /* (landed: the zone whole, the marker on the spot) */
+        int gb = -1, db = -1, ab = TestBatch(VT_PMARK);
+        for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_PGLOW) { if (g_vb[b].add) gb = b; else db = b; }
+        int last = 1;
+        for (int b = 0; b < g_vbN; b++) if (b > ab && (g_vb[b].tex == VT_PARCH || g_vb[b].tex == VT_PWORD0 || g_vb[b].tex == VT_PARCH2)) last = 0;
+        float k = 0.5f + 0.5f * sinf(6.2831853f * 9500 / 2000);      /* (his 2 s breath; the mock's sizes: markers.py) */
+        const ViewVert *gv = gb >= 0 ? &g_vv[g_vb[gb].first] : NULL, *dv = db >= 0 ? &g_vv[g_vb[db].first] : NULL, *av = ab >= 0 ? &g_vv[g_vb[ab].first] : NULL;
+        ok &= gv && dv && av && gb < db && db < ab && last && g_vb[gb].count == 4 && g_vb[ab].count == 4 &&
+              Near(gv[2].x - gv[0].x, 230 * (0.94f + 0.06f * k), 0.01) && Near(0.5f * (gv[0].x + gv[2].x), 960, 0.01) && Near(0.5f * (gv[0].y + gv[2].y), 540, 0.01) &&
+              Near(dv[2].x - dv[0].x, 88 * 1.05f, 0.01) && Near(av[2].x - av[0].x, 88, 0.01) &&
+              Near(0.5f * (av[0].y + av[2].y), 540 - 6, 0.01) && av[0].c[3] == 255 && av[0].c[0] == 255 &&
+              abs(gv[0].c[3] - (int)(255 * (0.16f + 0.16f * k) + 0.5f)) <= 1 && gv[0].c[0] == 255 && abs(gv[0].c[1] - 189) <= 1 && abs(gv[0].c[2] - 102) <= 1 &&
+              abs(dv[0].c[3] - (int)(255 * 0.62f + 0.5f)) <= 1 && dv[0].c[0] < 20 && av[0].v == 0 && av[2].v == 1;   /* (north: its picture upright) */
+        float g0 = gv ? gv[2].x - gv[0].x : 0;
+        ViewBuild(1920, 1080, 1.0f, 10500);                            /* (a second later: the breath's other half) */
+        gb = -1;
+        for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_PGLOW && g_vb[b].add) gb = b;
+        float g1 = gb >= 0 ? g_vv[g_vb[gb].first + 2].x - g_vv[g_vb[gb].first].x : 0, k1 = 1 - k;
+        ok &= Near(g1, 230 * (0.94f + 0.06f * k1), 0.01);
+        ViewBuild(1920, 1080, 1.0f, 11500);                            /* (two seconds on: as it was) */
+        for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_PGLOW && g_vb[b].add) gb = b;
+        ok &= Near(g_vv[g_vb[gb].first + 2].x - g_vv[g_vb[gb].first].x, g0, 0.01) && fabsf(g0 - g1) > 10;
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (his window, twice as tall: twice as big) */
+        ViewBuild(3840, 2160, 0.0f, 2000);
+        ViewBuild(3840, 2160, 1.0f, 9000);
+        ab = TestBatch(VT_PMARK);
+        ok &= ab >= 0 && Near(g_vv[g_vb[ab].first + 2].x - g_vv[g_vb[ab].first].x, 2 * 88, 0.01) &&
+              Near(0.5f * (g_vv[g_vb[ab].first].y + g_vv[g_vb[ab].first + 2].y), 1080 - 12, 0.01);
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (21:9, as tall: the same size, by the height) */
+        ViewBuild(2560, 1080, 0.0f, 2000);
+        ViewBuild(2560, 1080, 1.0f, 9000);
+        ab = TestBatch(VT_PMARK);
+        ok &= ab >= 0 && Near(g_vv[g_vb[ab].first + 2].x - g_vv[g_vb[ab].first].x, 88, 0.01);
+        TestGlideArrive(0, 0, 0, -500, 500, 2000);                     /* (at sea: with its continent's painting) */
+        ViewBuild(1920, 1080, 0.0f, 2000);
+        ViewBuild(1920, 1080, 0.6f, 2500);
+        ab = TestBatch(VT_PMARK);
+        ok &= ab >= 0 && g_pcam.mc > 0.05f && abs(g_vv[g_vb[ab].first].c[3] - (int)(255 * g_pcam.mc + 0.5f)) <= 1;
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (halfway up with the zone's painting) */
+        ViewBuild(1920, 1080, 0.0f, 2000);
+        ViewBuild(1920, 1080, TestTauFor(0.5f * (z0 + z1)), 3000);
+        ab = TestBatch(VT_PMARK);
+        ok &= ab >= 0 && abs(g_vv[g_vb[ab].first].c[3] - (int)(255 * g_pcam.mz + 0.5f)) <= 1 && g_pcam.mz > 0.3f && g_pcam.mz < 0.7f;
+        g_markUp = 0;                                                  /* (not read from the client: none) */
+        ViewBuild(1920, 1080, 1.0f, 9000);
+        ok &= TestBatch(VT_PMARK) < 0 && TestBatch(VT_PGLOW) < 0;
+        for (int k2 = 0; k2 < 2; k2++) { ParchPicFree(&g_markPic[k2]); g_viewTex[VT_PMARK + k2] = 0; free((void *)md[k2]); }
+        Check(ok, "the player's marker (his pick, option 1): the world map's own arrow (MinimapArrow.blp) pointing north over a dark disc, the candle's amber glow (GenericGlow2_32.blp, its alpha its brightness) added round it breathing over 2 s, centred on the character's spot over everything, sized for a window 1080 tall (twice on 2160), coming up with the zone's painting; none before it, none without its pictures");
+    }
     TestGlideArrive(0, 1, 0, -9464, 62, 4000);                         /* (taken late, the bar 40% along: the glide starts there) */
     ViewBuild(1920, 1080, 0.4f, 4000);
     ok = g_pcam.e == 0 && Near(g_pcam.v.s, s0, 1e-6);
@@ -5718,6 +5918,8 @@ static void TestParchment(void)
     g_viewScreen = 8;
     ViewBuild(1920, 1080, 0.5f, 20000);
     ok = TestBatch(VT_PARCH) < 0 && TestBatch(VT_PARCH2) < 0 && Near(g_pcam.v.s, s0, 1e-6) && g_pcam.e == 0;
+    ViewBuild(1920, 1080, 0.9f, 20500);                                /* (and on: never toward the last screen's arrival) */
+    ok &= TestBatch(VT_PARCH) < 0 && Near(g_pcam.v.s, s0, 1e-6) && g_pcam.e == 0;
     Check(ok, "the parchment's glide: a new screen, until its own arrival is taken, on the opening, never the last arrival's end (no flash of it)");
     g_viewScreen = 7;                                                   /* (on its own screen, the game's arrival written anew: until it is
                                                                         * taken, the glide goes on to the one taken, no frame of the opening) */
@@ -5951,7 +6153,12 @@ static int TestGlideGood(float W, float H, float *dev, float *jump)
 }
 /* The arrival's zone as the client finds it (the skeptic's find, 11 Oct 2026): its terrain chunk's area, walked up to
  * its zone, that zone's page; a capital the terrain does not know by its building; the boxes only without a tile's file */
-static unsigned char g_adt[2][24 * 1024];
+static unsigned char g_adt[2][256 * 1024];
+static float g_testGround = -1e30f;                                    /* (above -1e29: every chunk flat at this height, its MCVT) */
+static int g_testTile[2], g_testOcean;                                 /* (the tile's column and row, for the chunks' places; their
+                                                                        * flags: ocean) */
+static const unsigned *g_testAreas;                                    /* (each chunk's area, 16 x 16, when given) */
+static const unsigned char *g_testSea;                                 /* (each chunk the sea's: ocean, 5 under its level) */
 static unsigned TestAdt(unsigned char *out, int cx, int cy, unsigned area, unsigned others, const unsigned char *modf, unsigned nModf,
                         const char *wmoName)
 {
@@ -5966,13 +6173,27 @@ static unsigned TestAdt(unsigned char *out, int cx, int cy, unsigned area, unsig
         memcpy(out + at, h2, 8); memcpy(out + at + 8, &zero, 4); at += 12;
         memcpy(out + at, h3, 8); memcpy(out + at + 8, modf, 64 * nModf); at += 8 + 64 * nModf;
     }
+    int hv = g_testGround > -1e29f;
+    unsigned hs = hv ? 0x80 : 0x38;                                    /* (its header: with heights, all of it) */
     for (int j = 0; j < 16; j++)
         for (int i = 0; i < 16; i++) {                                 /* every chunk: its header, its place, its area */
-            unsigned h[2] = { ADT_MCNK, 0x38 + 8 }, head[16] = { 0 };
-            head[1] = (unsigned)i; head[2] = (unsigned)j; head[13] = i == cx && j == cy ? area : others;
-            unsigned ent[4] = { at, 8 + 0x38 + 8, 0, 0 };
+            unsigned size = hs + 8 + (hv ? 8 + 145 * 4 : 0), h[2] = { ADT_MCNK, size }, head[32] = { 0 };
+            int sea = g_testSea && g_testSea[j * 16 + i];
+            head[0] = g_testOcean || sea ? 0x8 : 0;
+            head[1] = (unsigned)i; head[2] = (unsigned)j; head[13] = g_testAreas ? g_testAreas[j * 16 + i] : i == cx && j == cy ? area : others;
+            if (hv) {
+                float px = (32 - g_testTile[1]) * 533.33333f - j * 33.333333f, py = (32 - g_testTile[0]) * 533.33333f - i * 33.333333f;
+                float hz = sea ? -5.0f : g_testGround;
+                head[5] = 8 + hs + 8;                                  /* (its heights, from the chunk's start) */
+                memcpy(&head[26], &px, 4); memcpy(&head[27], &py, 4); memcpy(&head[28], &hz, 4);
+            }
+            unsigned ent[4] = { at, 8 + size, 0, 0 };
             memcpy(out + mcin + 16 * (j * 16 + i), ent, 16);
-            memcpy(out + at, h, 8); memcpy(out + at + 8, head, 0x38); memset(out + at + 8 + 0x38, 0, 8); at += 8 + 0x38 + 8;
+            memcpy(out + at, h, 8); memcpy(out + at + 8, head, hs); memset(out + at + 8 + hs, 0, 8); at += 8 + hs + 8;
+            if (hv) {
+                unsigned mh[2] = { ADT_MCVT, 145 * 4 };
+                memcpy(out + at, mh, 8); memset(out + at + 8, 0, 145 * 4); at += 8 + 145 * 4;
+            }
         }
     return at;
 }
@@ -5983,6 +6204,29 @@ static void TestModf(unsigned char *e, float x0, float y0, float x1, float y1, u
     memcpy(e + 32, lo, 12); memcpy(e + 44, hi, 12);
     unsigned s = set;
     memcpy(e + 60, &s, 4);
+}
+/* City.wmo: its root (MOHD: id 208; MOGI: one group, over world x -4950..-4850, y -950..-850 at a placement of no
+ * offset or turn, 90 to 200 high) and its group (its MOGP id group, a floor of two faces at 100 high, their MOPY flags) */
+static unsigned char g_wmoRoot[160], g_wmoGroup[256];
+static void TestWmo(unsigned group, unsigned char flags, unsigned *len)
+{
+    unsigned char *r = g_wmoRoot, *g = g_wmoGroup;
+    unsigned wh[3] = { 0x4D564552u, 4, 17 }, mh[2] = { WMO_MOHD, 64 }, gh[2] = { WMO_MOGI, 32 }, id = 208, gf = 0x2000;
+    float lx0 = 17066.666f + 4850, lx1 = 17066.666f + 4950, ly0 = 17066.666f + 850, ly1 = 17066.666f + 950;   /* (its own axes) */
+    float box[6] = { lx0, ly0, 90, lx1, ly1, 200 };
+    memset(r, 0, sizeof g_wmoRoot);
+    memcpy(r, wh, 12); memcpy(r + 12, mh, 8); memcpy(r + 20 + 0x20, &id, 4); memcpy(r + 84, gh, 8); memcpy(r + 92, &gf, 4); memcpy(r + 96, box, 24);
+    len[0] = 92 + 32;
+    memset(g, 0, sizeof g_wmoGroup);
+    unsigned ph[2] = { WMO_MOGP, 0x44 + 8 + 4 + 8 + 12 + 8 + 48 }, yh[2] = { WMO_MOPY, 4 }, ih[2] = { WMO_MOVI, 12 }, vh[2] = { WMO_MOVT, 48 };
+    memcpy(g, wh, 12); memcpy(g + 12, ph, 8); memcpy(g + 20 + 0x38, &group, 4);
+    unsigned at = 20 + 0x44;
+    memcpy(g + at, yh, 8); g[at + 8] = flags; g[at + 10] = flags; at += 8 + 4;
+    unsigned short idx[6] = { 0, 1, 2, 0, 2, 3 };
+    memcpy(g + at, ih, 8); memcpy(g + at + 8, idx, 12); at += 8 + 12;
+    float v[12] = { lx0, ly0, 100, lx1, ly0, 100, lx1, ly1, 100, lx0, ly1, 100 };
+    memcpy(g + at, vh, 8); memcpy(g + at + 8, v, 48); at += 8 + 48;
+    len[1] = at;
 }
 static void TestZoneRule(void)
 {
@@ -6019,10 +6263,11 @@ static void TestZoneRule(void)
     static unsigned char wat[512];
     unsigned wtn = TestWdbc(wat, 4, 11, wav, "\0", 1);
     ParchWmoAreas(wat, wtn);
-    int ok = g_mapDirN == 2 && !strcmp(g_mapDir[1].dir, "Kalimdor") && g_waN == 2 && g_waArea[0] == 1537 && g_waSet[1] == 1 &&
+    int ok = g_mapDirN == 2 && !strcmp(g_mapDir[1].dir, "Kalimdor") && g_waN == 3 && g_waArea[0] == 1537 && g_waGroup[1] == 3 && g_waSet[2] == 1 &&
+             WmoArea(208, 0, -1) == 1537 && WmoArea(208, 0, 3) == 77 && WmoArea(208, 1, -1) == 2101 && WmoArea(208, 0, 4) == 0 && WmoArea(500, 0, -1) == 0 &&
              g_atParent[AreaRow(87)] == 12 && g_atFlags[AreaRow(1537)] == 0x138 && AreaZone(87) == 12 && AreaZone(2101) == 77 && AreaZone(131) == 1 &&
              AreaZone(12) == 12 && AreaZone(5555) == -1;
-    Check(ok, "the arrival's zone, its tables: Map.dbc's folders, WMOAreaTable.dbc's buildings' own areas (only their root rows), AreaTable's parents and flags; an area's zone its last parent");
+    Check(ok, "the arrival's zone, its tables: Map.dbc's folders, WMOAreaTable.dbc's buildings' areas (each group's and the root's, those naming an area), AreaTable's parents and flags; an area's zone its last parent");
 
     /* Goldshire (-9464, 62): tile 31_49, chunk 14 across, 11 down; that chunk Goldshire's, the rest of the tile Westfall's;
      * a smaller box (Inner) holds it too */
@@ -6036,21 +6281,19 @@ static void TestZoneRule(void)
         memcpy(both, modf[0], 64); memcpy(both + 64, modf[1], 64);
         n1 = TestAdt(g_adt[1], 0, 0, 1, 1, both, 2, "World\\wmo\\Test\\City.wmo");
     }
-    static unsigned char wmo[96];
-    unsigned wh[2] = { 0x4D564552u, 4 }, wver = 17, mh[2] = { WMO_MOHD, 64 }, id = 208;
-    memcpy(wmo, wh, 8); memcpy(wmo + 8, &wver, 4); memcpy(wmo + 12, mh, 8); memset(wmo + 20, 0, 64); memcpy(wmo + 20 + 0x20, &id, 4);
+    unsigned wl[2];
+    TestWmo(7, 0x20, wl);
     static const char *tn[2] = { "World\\Maps\\Azeroth\\Azeroth_31_49.adt", "World\\Maps\\Azeroth\\Azeroth_33_41.adt" };
     const char *td[2] = { (const char *)g_adt[0], (const char *)g_adt[1] };
     unsigned tl[2] = { n0, n1 };
     MakeMpq("Data/terrain.MPQ", 2, tn, td, tl);
-    static const char *wn2[1] = { "World\\wmo\\Test\\City.wmo" };
-    const char *wd[1] = { (const char *)wmo };
-    unsigned wl[1] = { 84 };
-    MakeMpq("Data/patch-3.MPQ", 1, wn2, wd, wl);
+    static const char *wn2[2] = { "World\\wmo\\Test\\City.wmo", "World\\wmo\\Test\\City_000.wmo" };
+    const char *wd[2] = { (const char *)g_wmoRoot, (const char *)g_wmoGroup };
+    MakeMpq("Data/patch-3.MPQ", 2, wn2, wd, wl);
     int way = -1;
-    int z = ParchZoneAt(0, -9464, 62, &way), old = ParchFind(0, -9464, 62);
+    int z = ParchZoneAt(0, -9464, 62, 0, 0, &way), old = ParchFind(0, -9464, 62);
     ok = z == 1 && way == 1 && old == 2;
-    z = ParchZoneAt(0, -9464 - 34, 62, &way);                          /* (the next chunk down: the rest of the tile) */
+    z = ParchZoneAt(0, -9464 - 34, 62, 0, 0, &way);                          /* (the next chunk down: the rest of the tile) */
     ok &= z == 3 && way == 1;
     unsigned char *tmpAdt = malloc(n0);                                /* (a list that points at another chunk: not believed) */
     memcpy(tmpAdt, g_adt[0], n0);
@@ -6059,42 +6302,785 @@ static void TestZoneRule(void)
     free(tmpAdt);
     Check(ok, "the arrival's zone as the client finds it: its terrain chunk's area (Goldshire), walked up to its zone (Elwynn), that zone's page; not the smaller box that also holds it; the chunk beside it its own; a chunk list pointing at another chunk not believed");
     g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0;                    /* the parchment's work takes the arrival so, and says how */
-    g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 21;
+    g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_destZOk = 0; g_viewScreen = 21;
     ParchWork(5000);
     ok = g_parchWant == 1 && g_parchWantCont == 0 && LogSays("the arrival (map 0, -9464, 62) is in Elwynn, by its terrain's area, as the client");
     Check(ok, "the parchment's work: the arrival's zone found as the client finds it, and logged");
     TestGlideState();
-    z = ParchZoneAt(0, -4900, -900, &way);                             /* (the capital's building over the place) */
+    /* the building (City.wmo, its one group over world x -4950..-4850, y -950..-850, from 90 to 200 high, its floor at
+     * 100): in it as the client finds it, by the place's height and the group's own faces */
+    z = ParchZoneAt(0, -4900, -900, 150, 1, &way);                     /* (over its floor, in its group: its root's area) */
     ok = z == 4 && way == 2;
-    z = ParchZoneAt(0, -5200, -700, &way);                             /* (an inn's building, its area another zone's with a page:
-                                                                        * not a capital, the terrain's zone) */
+    z = ParchZoneAt(0, -4900, -900, 150, 0, &way);                     /* (its height not known: the terrain's) */
     ok &= z == 5 && way == 1;
-    z = ParchZoneAt(0, -5100, -1000, &way);                            /* (no building over it: the terrain's) */
+    z = ParchZoneAt(0, -4900, -900, 80, 1, &way);                      /* (under its group: the terrain's) */
     ok &= z == 5 && way == 1;
-    Check(ok, "the arrival's zone: inside a capital the terrain does not know (Ironforge, Undercity), the capital, by its building's placement holding the place and its root row in WMOAreaTable; another building's area (an inn's) leaves the terrain's zone");
+    z = ParchZoneAt(0, -4900, -900, 250, 1, &way);                     /* (over its group, on the roof: the terrain's) */
+    ok &= z == 5 && way == 1;
+    z = ParchZoneAt(0, -4980, -980, 150, 1, &way);                     /* (in the placement's bounds, not its group's: its gate) */
+    ok &= z == 5 && way == 1;
+    z = ParchZoneAt(0, -5200, -700, 150, 1, &way);                     /* (the other placement, the place not in its group) */
+    ok &= z == 5 && way == 1;
+    z = ParchZoneAt(0, -5100, -1000, 150, 1, &way);                    /* (no building over it: the terrain's) */
+    ok &= z == 5 && way == 1;
+    g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0;                    /* (the work takes the arrival's height, and says so) */
+    g_destMap = 0; g_destWX = -4900; g_destWY = -900; g_destWZ = 150; g_destZOk = 1; g_viewScreen = 22;
+    ParchWork(6000);
+    ok &= g_parchWant == 4 && LogSays("the arrival (map 0, -4900, -900, 150 high) is in Ironforge, by the building's floor under it, as the client");
+    g_destZOk = 0;
+    TestGlideState();
+    Check(ok, "the arrival's zone (his rule, 11 Oct: \"the way the client does (height, and the building's own groups), not a wider box\"): in a building only over a floor of its own group's faces, inside the group's box; under it, over it, beside it in its placement's bounds (a city's gate), or its height not known: the terrain's");
+    g_testTile[0] = 33; g_testTile[1] = 41;                            /* (the terrain with heights: over the floor, or under it) */
+    g_testGround = 120;
+    { static unsigned char both[128]; memcpy(both, modf[0], 64); memcpy(both + 64, modf[1], 64);
+      n1 = TestAdt(g_adt[1], 0, 0, 1, 1, both, 2, "World\\wmo\\Test\\City.wmo"); tl[1] = n1; MakeMpq("Data/terrain.MPQ", 2, tn, td, tl); }
+    z = ParchZoneAt(0, -4900, -900, 150, 1, &way);                     /* (the ground between it and the floor: on the ground) */
+    ok = z == 5 && way == 1;
+    z = ParchZoneAt(0, -4900, -900, 119, 1, &way);                     /* (within AREA_ABOVE of the ground over the floor: the ground) */
+    ok &= z == 5 && way == 1;
+    g_testGround = 160;
+    { static unsigned char both[128]; memcpy(both, modf[0], 64); memcpy(both + 64, modf[1], 64);
+      n1 = TestAdt(g_adt[1], 0, 0, 1, 1, both, 2, "World\\wmo\\Test\\City.wmo"); tl[1] = n1; MakeMpq("Data/terrain.MPQ", 2, tn, td, tl); }
+    z = ParchZoneAt(0, -4900, -900, 150, 1, &way);                     /* (the ground over it: a city under its mountain) */
+    ok &= z == 4 && way == 2;
+    g_testGround = -1e30f;
+    TestWmo(3, 0x20, wl);                                               /* (its group's own row: that area's zone) */
+    MakeMpq("Data/patch-3.MPQ", 2, wn2, wd, wl);
+    z = ParchZoneAt(0, -4900, -900, 150, 1, &way);
+    ok &= z == 2 && way == 2;
+    TestWmo(3, 0x04, wl);                                               /* (faces that do not collide: no floor) */
+    MakeMpq("Data/patch-3.MPQ", 2, wn2, wd, wl);
+    z = ParchZoneAt(0, -4900, -900, 150, 1, &way);
+    ok &= z == 5 && way == 1;
+    TestWmo(3, 0x08, wl);                                               /* (collision-only faces: a floor) */
+    MakeMpq("Data/patch-3.MPQ", 2, wn2, wd, wl);
+    z = ParchZoneAt(0, -4900, -900, 150, 1, &way);
+    ok &= z == 2 && way == 2;
+    { static unsigned char both[128]; memcpy(both, modf[0], 64); memcpy(both + 64, modf[1], 64);
+      n1 = TestAdt(g_adt[1], 0, 0, 1, 1, both, 2, "World\\wmo\\Test\\City.wmo"); tl[1] = n1; MakeMpq("Data/terrain.MPQ", 2, tn, td, tl); }
+    Check(ok, "the arrival's zone: the terrain over a building's floor and under the place (or within 2 yards over it) puts it on the ground, the terrain's; the ground over the place (a city under its mountain), the building's; a group's own WMOAreaTable row before its root's; only faces that collide are floors");
     TestModf(modf[0], -5000, -1000, -4800, -800, 3);                  /* (the placement's name set has no row: the terrain's) */
     { static unsigned char both[128]; memcpy(both, modf[0], 64); memcpy(both + 64, modf[1], 64);
       n1 = TestAdt(g_adt[1], 0, 0, 1, 1, both, 2, "World\\wmo\\Test\\City.wmo"); tl[1] = n1; MakeMpq("Data/terrain.MPQ", 2, tn, td, tl); }
-    z = ParchZoneAt(0, -4900, -900, &way);
+    z = ParchZoneAt(0, -4900, -900, 150, 1, &way);
     ok = z == 5 && way == 1;
     n0 = TestAdt(g_adt[0], 14, 11, 600, 600, NULL, 0, NULL);           /* (a zone with no page: its continent's) */
     tl[0] = n0;
     MakeMpq("Data/terrain.MPQ", 2, tn, td, tl);
-    z = ParchZoneAt(0, -9464, 62, &way);
+    z = ParchZoneAt(0, -9464, 62, 0, 0, &way);
     ok &= z == 0 && way == 3;
     MakeMpq("Data/terrain.MPQ", 1, tn + 1, td + 1, tl + 1);            /* (no tile's file: the boxes, as before) */
-    z = ParchZoneAt(0, -9464, 62, &way);
+    z = ParchZoneAt(0, -9464, 62, 0, 0, &way);
     ok &= z == 2 && way == 0;
-    z = ParchZoneAt(1, -9464, 62, &way);                               /* (Kalimdor's: no such tile) */
+    z = ParchZoneAt(1, -9464, 62, 0, 0, &way);                               /* (Kalimdor's: no such tile) */
     ok &= z == -1 && way == 0;
     g_mapDirN = 0;                                                     /* (no folder for the map: the boxes) */
-    ok &= ParchZoneAt(0, -9464, 62, &way) == 2 && way == 0;
+    ok &= ParchZoneAt(0, -9464, 62, 0, 0, &way) == 2 && way == 0;
     g_mapDirN = 2;
     unsigned char bad[64];                                             /* a tile's file that is not one: the boxes */
     memset(bad, 0x41, sizeof bad);
     ok &= AdtArea(bad, sizeof bad, 14, 11) == -1 && AdtArea(g_adt[1], n1, 16, 0) == -1;
-    Check(ok, "the arrival's zone: a building whose name set has no row leaves the terrain's; a zone with no page, its continent's (as the client's map shows); no tile's file, no folder for the map, or a file that is not one: the smallest box, as before");
+    Check(ok, "the arrival's zone: a building whose name set has no row (its group's nor its root's) leaves the terrain's; a zone with no page, its continent's (as the client's map shows); no tile's file, no folder for the map, or a file that is not one: the smallest box, as before");
     g_mapDirN = 0; g_waN = 0;
+}
+/* The cut (his pick, 11 Oct: "go with the COMBO", grown so "the blur doesn't take away anything from inside the zone"):
+ * a painting cut to its own area as the coarser one under it draws it, whole and sharp inside, fading and softening only
+ * in the grown margin past its border */
+static void TestPaintNew(int K)
+{
+    if (g_parchPx) HeapFree(GetProcessHeap(), 0, g_parchPx);
+    g_parchK = K; g_parchTW = 1024 * K;
+    g_parchPx = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)g_parchTW * g_parchTW * 4);
+}
+static void TestPaintFill(int x0, int y0, int x1, int y1, unsigned rgb)
+{
+    for (int y = y0; y < y1; y++) for (int x = x0; x < x1; x++) {
+        unsigned char *p = g_parchPx + 4 * ((size_t)y * g_parchTW + x);
+        p[0] = (unsigned char)(rgb >> 16); p[1] = (unsigned char)(rgb >> 8); p[2] = (unsigned char)rgb; p[3] = 255;
+    }
+}
+static const unsigned char *TestPaintAt(int x, int y) { return g_parchPx + 4 * ((size_t)y * g_parchTW + x); }
+static void TestCut(void)
+{
+    /* the coarser painting (a continent's, 256-px tiles): parchment, a zone outlined in dark ink (a gap of one texel in its
+     * border, closed), a lake inside drawn in ink, a neighbour beside it */
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(300, 200, 600, 400, 0x302010);                     /* (the zone's border: a 4-texel line) */
+    TestPaintFill(304, 204, 596, 396, 0xC0A070);
+    TestPaintFill(450, 200, 451, 204, 0xC8A060);                      /* (a one-texel gap in it) */
+    TestPaintFill(400, 280, 440, 320, 0x302010);                      /* (a lake in ink: a hole) */
+    TestPaintFill(404, 284, 436, 316, 0x6080A0);
+    ParchRect rc = { 0, 0, 10.02f, 6.68f };                           /* (a texel a hundredth of a tile) */
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    int ok = g_linesCont.m && g_linesCont.w == 1002 && g_linesCont.h == 668 && g_linesCont.row == 0 &&
+             (g_linesCont.m[201 * 1002 + 350] & CUT_DARK) && !(g_linesCont.m[300 * 1002 + 350] & CUT_DARK) && (g_linesCont.m[300 * 1002 + 350] & CUT_INK) == 0;
+    TestPaintFill(700, 100, 900, 104, 0x908060);                      /* (a border drawn lighter, darker only than round it) */
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    ok &= (g_linesCont.m[102 * 1002 + 800] & CUT_DARK) && !(g_linesCont.m[120 * 1002 + 800] & CUT_DARK);
+    Check(ok, "the cut: the coarser painting kept as its lines (dark, or darker than round them by PARCH_CUT_REL; ink), a byte a texel");
+    TestPaintFill(700, 100, 900, 104, 0xC8A060);
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    /* the finer painting (the zone's, 256-px tiles): its box on the frame 2.5 .. 6.5 x 1.5 .. 4.5 tiles: the outline
+     * (3.0..6.0 x 2.0..4.0) maps to its texels 125..877 x 148..519 */
+    ParchRect rz = { 2.5f, 1.5f, 6.5f, 4.5f };
+    TestPaintNew(1);
+    for (int y = 0; y < 668; y++) for (int x = 0; x < 1002; x++) {   /* (a fine checker: its detail) */
+        unsigned char *p = g_parchPx + 4 * ((size_t)y * g_parchTW + x);
+        int v = ((x / 3 + y / 3) & 1) ? 200 : 60;
+        p[0] = (unsigned char)v; p[1] = (unsigned char)(255 - v); p[2] = 90; p[3] = 255;
+    }
+    static unsigned char before[1002 * 668 * 4];
+    for (int y = 0; y < 668; y++) memcpy(before + 4 * (size_t)y * 1002, g_parchPx + 4 * (size_t)y * g_parchTW, 1002 * 4);
+    float seeds[4] = { 420, 260, 330, 230 }, share = 0;               /* (the first in the lake: its hole filled anyway) */
+    const char *why = "";
+    ok = ParchCut(&g_linesCont, rz, seeds, 2, 0, &share, &why) && !g_cutBoxed;
+    int grow = PARCH_CUT_GROW / 2;                                    /* (a 256-px painting: half an HD one's) */
+    int sharpIn = 1, wholeIn = 1;
+    for (int y = 160; y < 505; y += 7) for (int x = 140; x < 862; x += 7) {   /* inside its border: whole, untouched */
+        const unsigned char *p = TestPaintAt(x, y), *b = before + 4 * ((size_t)y * 1002 + x);
+        if (p[3] != 255) wholeIn = 0;
+        if (p[0] != b[0] || p[1] != b[1]) sharpIn = 0;
+    }
+    int lake = TestPaintAt(426, 334)[3] == 255 && TestPaintAt(500, 333)[3] == 255;   /* (the lake's place inside) */
+    int xb = 135;                                                     /* (its border, inside the ink: 3.04 tiles, (3.04 - 2.5) / 4 of 1002) */
+    float aEdge = TestPaintAt(xb - 2, 300)[3] / 255.0f, aMid = TestPaintAt(xb - grow / 2, 300)[3] / 255.0f, aOut = TestPaintAt(xb - grow - 3, 300)[3] / 255.0f;
+    float bEdge = (float)abs((int)TestPaintAt(xb - 2, 300)[0] - (int)before[4 * (300 * 1002 + xb - 2)]);
+    float bOut = (float)abs((int)TestPaintAt(xb - grow + 4, 300)[0] - (int)before[4 * (300 * 1002 + xb - grow + 4)]);
+    ok &= sharpIn && wholeIn && lake && aEdge > 0.97f && aMid > 0.35f && aMid < 0.65f && aOut == 0 && bEdge < 20 && bOut > 30 &&
+          share > 0.3f && share < 0.5f;
+    printf("  the cut: alpha just past its border %.3f, halfway out %.3f, past the grown line %.3f; its colours softened by %.0f just past it, %.0f near the line\n",
+           aEdge, aMid, aOut, bEdge, bOut);
+    Check(ok, "the cut: inside the zone's own border (as its continent draws it, its lake's hole filled) the painting is whole and untouched; past it, it fades from whole at the border to nothing at the outline grown PARCH_CUT_GROW, its colours softened only out there, more toward the line");
+    /* a border the painting draws open: every fill leaks; kept to its own box */
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(300, 200, 600, 400, 0x302010);
+    TestPaintFill(304, 204, 596, 396, 0xC0A070);
+    TestPaintFill(440, 200, 470, 204, 0xC8A060);                      /* (a gap of thirty texels: open) */
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x80C040);
+    ok = ParchCut(&g_linesCont, rz, seeds + 2, 1, 0, &share, &why) && g_cutBoxed && strstr(why, "own box");
+    TestPaintNew(1);                                                  /* (no lines at all: nothing, and why) */
+    ParchLines none = { 0 };
+    ok &= !ParchCut(&none, rz, seeds, 2, 0, &share, &why) && strstr(why, "no lines");
+    Check(ok, "the cut: a zone whose border the painting under it draws open is kept to its own box (and the log says so); with no painting under it, none");
+    /* a continent over the world: every seed's piece of land that holds, together; a seed at sea leaks and is left out */
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x707060);                         /* (the sea) */
+    TestPaintFill(100, 100, 300, 300, 0x302010); TestPaintFill(105, 105, 295, 295, 0xC8A060);   /* (two islands, their coasts) */
+    TestPaintFill(400, 150, 600, 450, 0x302010); TestPaintFill(405, 155, 595, 445, 0xC8A060);
+    ParchRect rw = { 0, 0, 10.02f, 6.68f };
+    ParchLinesKeep(&g_linesWorld, rw, -2, 1);
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x40A040);
+    float cs[6] = { 200, 200, 500, 300, 800, 600 };
+    ok = ParchCut(&g_linesWorld, rw, cs, 3, 1, &share, &why) && TestPaintAt(200, 200)[3] == 255 && TestPaintAt(500, 300)[3] == 255 &&
+         TestPaintAt(800, 600)[3] == 0 && TestPaintAt(350, 200)[3] == 0 && share > 0.1f && share < 0.2f;
+    Check(ok, "the cut, a continent over the world: every piece of its land a seed finds (two islands here), the sea a seed leaks into left out");
+    /* the outline's own checks (a page with no land of its own, an instance's map, is still cut so; the skeptic's three
+     * mutants on 89d75cf): the box 250..650 x 150..450 of the painting under it, its crop 46..854 x -4..604 */
+    float one[2] = { 450, 300 };
+    TestPaintNew(1);                                                  /* (a region far bigger than its box: not the zone alone) */
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(60, 20, 840, 580, 0x302010); TestPaintFill(64, 24, 836, 576, 0xC8A060);
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    TestPaintNew(1); TestPaintFill(0, 0, 1002, 668, 0x80C040);
+    ok = ParchCut(&g_linesCont, rz, one, 1, 0, &share, &why) && g_cutBoxed;
+    TestPaintNew(1);                                                  /* (only a lake found: too little to be the zone) */
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(400, 280, 440, 320, 0x302010); TestPaintFill(404, 284, 436, 316, 0xC8A060);
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    TestPaintNew(1); TestPaintFill(0, 0, 1002, 668, 0x80C040);
+    float pond[2] = { 420, 300 };
+    ok &= !ParchCut(&g_linesCont, rz, pond, 1, 0, &share, &why) && strstr(why, "too little");
+    TestPaintNew(1);                                                  /* (its region grown into a faint border line out to the crop's
+                                                                       * edge: not trusted) */
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(47, 150, 400, 452, 0x585850); TestPaintFill(49, 152, 398, 450, 0xC8A060);
+    ParchLinesKeep(&g_linesCont, rc, -1, 1);
+    TestPaintNew(1); TestPaintFill(0, 0, 1002, 668, 0x80C040);
+    float west[2] = { 300, 300 };
+    ok &= ParchCut(&g_linesCont, rz, west, 1, 0, &share, &why) && g_cutBoxed;
+    Check(ok, "the outline (a page with no land of its own): a fill far bigger than its box, one too small to be the zone, or a region grown out to the crop's edge is not trusted: kept to its box, or none");
+    if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
+    if (g_linesWorld.m) HeapFree(GetProcessHeap(), 0, g_linesWorld.m);
+    g_linesCont.m = g_linesWorld.m = NULL;
+    ParchFree();
+}
+/* A zone's land as its terrain gives it, and the cut to it (his rule, 11 Oct: the cut must not "take away anything from
+ * inside the zone"; the skeptic's finds: its own town cut away, a cut run on past its edge). One tile (31_50) is the
+ * zone's box: its chunks 62.6 texels across and 41.75 down on its 256-px painting, 20.9 x 13.9 on its continent's (a
+ * painting three tiles each way, the zone's in the middle). */
+static const unsigned *TestLandAreas(void)
+{
+    static unsigned a[256];
+    for (int j = 0; j < 16; j++)
+        for (int i = 0; i < 16; i++) {
+            unsigned v = 40;                                           /* (its neighbour's) */
+            if (i >= 2 && i < 8 && j >= 2 && j < 14) v = 87;           /* (its land: a town's area, its zone Elwynn's) */
+            if (i >= 2 && i < 8 && j == 14) v = 12;                    /* (its own sea) */
+            if (i >= 11 && i < 13 && j >= 3 && j < 5) v = 12;          /* (an island of its own) */
+            a[j * 16 + i] = v;
+        }
+    return a;
+}
+/* the continent's painting (1002 x 668 over 3 x 3 tiles): parchment, the zone's border a 4-texel line in ink 0.4 of a
+ * chunk past its land (P x 368..512, y 244..426); what: 0 closed, a river across its land; 1 a 20-texel gap on the right
+ * into a neighbour closed off inside the crop; 2 a 6-texel gap into a corridor running out past the crop; 3 its region all
+ * ink but a pocket at its left edge */
+static void TestLandCont(int what)
+{
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    if (what == 3) {
+        TestPaintFill(350, 232, 524, 440, 0x302010);
+        TestPaintFill(362, 296, 388, 316, 0xC8A060);
+    } else {
+        TestPaintFill(368, 244, 512, 426, 0x302010);
+        TestPaintFill(372, 248, 508, 422, 0xC8A060);
+        if (what == 0) TestPaintFill(440, 248, 443, 422, 0x302010);
+        if (what == 1) {
+            TestPaintFill(508, 230, 704, 440, 0x302010); TestPaintFill(512, 234, 700, 436, 0xC8A060);
+            TestPaintFill(508, 320, 512, 340, 0xC8A060);
+        }
+        if (what == 2) {
+            TestPaintFill(508, 316, 1002, 331, 0x302010); TestPaintFill(508, 320, 1002, 327, 0xC8A060);
+        }
+        if (what == 4) {                                               /* (its right border two chunks past its land) */
+            TestPaintFill(508, 248, 512, 422, 0xC8A060);
+            TestPaintFill(512, 244, 547, 248, 0x302010); TestPaintFill(512, 422, 547, 426, 0x302010); TestPaintFill(543, 244, 547, 426, 0x302010);
+        }
+    }
+    ParchRect rc = { 29.3125f, 37.875f, 32.3125f, 40.875f };
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+}
+/* another archive (a patch with one small file of its own: the archives' print differs) */
+/* A file of the game's folder, bytes: read (its size, -1 none), written (n bytes), removed. */
+static int TestBytes(const char *rel, unsigned char *buf, int cap)
+{
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    FILE *f = fopen(p, "rb");
+    if (!f) return -1;
+    int n = (int)fread(buf, 1, (size_t)cap, f);
+    fclose(f);
+    return n;
+}
+static void TestBytesPut(const char *rel, const unsigned char *buf, int n)
+{
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    FILE *f = fopen(p, "wb");
+    fwrite(buf, 1, (size_t)n, f);
+    fclose(f);
+}
+static void TestBytesGone(const char *rel)
+{
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    remove(p);
+}
+static void TestLandPatch(const char *rel, const char *text)
+{
+    static const char *nm[1] = { "Interface\\Test\\x.txt" };
+    const char *d[1] = { text };
+    unsigned l[1] = { (unsigned)strlen(text) };
+    MakeMpq(rel, 1, nm, d, l);
+    g_landPrint = 0;
+}
+static void TestLandPaint(void)
+{
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x80C040);
+}
+static void TestLand(void)
+{
+    Fresh("land");
+    GameDir();
+    TestGlideState();
+    g_wmc[0].ok = 0;                                                   /* (the frame: map tiles, no continent's offset) */
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Ironforge\0";
+    unsigned wv[3 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+                           30, 0, 12, 9, TestF(533.33333f), TestF(0), TestF(-9600), TestF(-10133.333f),
+                           341, 0, 1537, 17, TestF(533.33333f), TestF(0), TestF(-9600), TestF(-10133.333f) };
+    static unsigned char wma[256];
+    unsigned wn = TestWdbc(wma, 3, 8, wv, wstr, sizeof wstr);
+    ParchTables(wma, wn, NULL, 0);
+    unsigned av[5 * 11] = { 0 };
+    static const unsigned arow[5][5] = { { 12, 0, 0, 1, 0x40 }, { 40, 0, 0, 2, 0x40 }, { 87, 0, 12, 3, 0x40 }, { 1537, 0, 0, 4, 0x138 }, { 9, 0, 1537, 5, 0 } };
+    for (int i = 0; i < 5; i++) memcpy(av + 11 * i, arow[i], sizeof arow[i]);
+    static unsigned char atb[512];
+    unsigned an = TestWdbc(atb, 5, 11, av, "\0", 1);
+    ParchAreas(atb, an);
+    static const char mstr[] = "\0Azeroth\0";
+    unsigned mv[3] = { 0, 1, 0 };
+    static unsigned char mpd[64];
+    ParchMaps(mpd, TestWdbc(mpd, 1, 3, mv, mstr, sizeof mstr));
+    unsigned wav[11] = { 1, 208, 0, 0xFFFFFFFFu, 0, 0, 0, 0, 0, 0, 1537 };
+    static unsigned char wat[128];
+    ParchWmoAreas(wat, TestWdbc(wat, 1, 11, wav, "\0", 1));
+    g_testAreas = TestLandAreas();
+    static unsigned char sea[256];
+    for (int i = 2; i < 8; i++) sea[14 * 16 + i] = 1;
+    g_testSea = sea; g_testGround = 10; g_testTile[0] = 31; g_testTile[1] = 50;
+    unsigned n0 = TestAdt(g_adt[0], 0, 0, 0, 0, NULL, 0, NULL);
+    static const char *tn[1] = { "World\\Maps\\Azeroth\\Azeroth_31_50.adt" };
+    const char *td[1] = { (const char *)g_adt[0] };
+    unsigned tl[1] = { n0 };
+    MakeMpq("Data/terrain.MPQ", 1, tn, td, tl);
+    g_landPrint = 0;
+
+    /* its land: the chunks of its box whose area's zone is its own, the sea not; kept in its file, read back from it */
+    ParchLand L = { 0 };
+    const char *why = "";
+    int ok = ParchLandMake(1, &L, &why) && L.n == 6 * 12 + 2 * 2 && L.tiles == 1 && !L.fromFile && L.gx0 == 495 && L.gy0 == 799 &&
+             LandOwn(&L, 496 + 2, 800 + 2) && LandOwn(&L, 496 + 7, 800 + 13) && !LandOwn(&L, 496 + 8, 800 + 2) && !LandOwn(&L, 496 + 1, 800 + 2) &&
+             LandOwn(&L, 496 + 11, 800 + 3) && !LandOwn(&L, 496 + 3, 800 + 14) && L.m[(800 + 14 - 799) * L.w + 496 + 3 - 495] == 2 &&
+             Get("Data/CinderLoad/land-Elwynn.bin") != NULL;
+    ParchLand L2 = { 0 };
+    ok &= ParchLandMake(1, &L2, &why) && L2.fromFile && L2.n == L.n && L2.tiles == 0 && !memcmp(L2.m, L.m, (size_t)L.w * L.h);
+    TestLandPatch("Data/patch-2.MPQ", "x");                            /* (another archive: the print differs, made again) */
+    ok &= ParchLandMake(1, &L2, &why) && !L2.fromFile && L2.n == L.n;
+    g_pz[1].t = -9500;                                                 /* (another box: made again) */
+    ok &= ParchLandMake(1, &L2, &why) && !L2.fromFile && L2.n == L.n;
+    g_pz[1].t = -9600;
+    ok &= ParchLandMake(1, &L2, &why) && !L2.fromFile;
+    ok &= ParchLandMake(1, &L2, &why) && L2.fromFile;
+    Check(ok, "a zone's land as its terrain gives it: every chunk of its box whose area's zone is its own (a town's, an island's), not the sea under its own coast's area; made once and kept in Data/CinderLoad/land-<zone>.bin, read back from it while the client's archives and its box are as they were, made again when either changes");
+    /* its file trusted only whole and as made: its body's sum, its exact size, its box (the skeptic's finds on 61c66db) */
+    {
+        static const char lrel[] = "Data/CinderLoad/land-Elwynn.bin";
+        static unsigned char lf[4096], lf2[4096];
+        int n = TestBytes(lrel, lf, sizeof lf), bytes = (L.w * L.h + 3) / 4;
+        ParchLand L3 = { 0 };
+        int okf = n == LAND_HEAD + bytes && Rd32(lf + 4) == LAND_VERSION && Rd32(lf + 36) == LandSum(lf + LAND_HEAD, bytes) && lf[n - 1] == 0;
+        memcpy(lf2, lf, (size_t)n); lf2[LAND_HEAD + 20] ^= 0x04;          /* (a chunk's bits changed under the header as made) */
+        TestBytesPut(lrel, lf2, n);
+        okf &= ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && L3.n == L.n && TestBytes(lrel, lf2, sizeof lf2) == n && !memcmp(lf2, lf, (size_t)n);
+        okf &= ParchLandMake(1, &L3, &why) && L3.fromFile && L3.n == L.n;
+        Check(okf, "a zone's land file whose body is not its sum (changed under a header as made) is not trusted: made again from the terrain and kept as made");
+        TestBytesPut(lrel, lf, n - 1);                                   /* (cut short by a byte that was 0: its sum the same) */
+        okf = ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && TestBytes(lrel, lf2, sizeof lf2) == n;
+        memcpy(lf2, lf, (size_t)n); lf2[20]++;                             /* (its box moved a chunk, its size the same) */
+        TestBytesPut(lrel, lf2, n);
+        okf &= ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && TestBytes(lrel, lf2, sizeof lf2) == n && !memcmp(lf2, lf, (size_t)n);
+        memcpy(lf2, lf, 36); lf2[4] = 1; memcpy(lf2 + 36, lf + LAND_HEAD, (size_t)bytes);   /* (a version 1 file, no sum) */
+        TestBytesPut(lrel, lf2, 36 + bytes);
+        okf &= ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && TestBytes(lrel, lf2, sizeof lf2) == n;
+        memcpy(lf2, lf, (size_t)n); lf2[4] = 99;                           /* (another version's, whole, its sum held) */
+        TestBytesPut(lrel, lf2, n);
+        okf &= ParchLandMake(1, &L3, &why) && !L3.fromFile && L3.tiles == 1 && TestBytes(lrel, lf2, sizeof lf2) == n && !memcmp(lf2, lf, (size_t)n);
+        Check(okf, "a zone's land file cut short (even where its sum holds), or for another box of the same size, or of the version before the sum or another, is not trusted: made again");
+        /* two tiles, the first not read (its memory refused): no file, no land, the screen's cut as though it had none */
+        g_testTile[0] = 32;
+        unsigned nb = TestAdt(g_adt[1], 0, 0, 0, 0, NULL, 0, NULL);
+        g_testTile[0] = 31;
+        static const char *tn2[2] = { "World\\Maps\\Azeroth\\Azeroth_31_50.adt", "World\\Maps\\Azeroth\\Azeroth_32_50.adt" };
+        const char *td2[2] = { (const char *)g_adt[0], (const char *)g_adt[1] };
+        unsigned tl2[2] = { n0, nb };
+        MakeMpq("Data/terrain.MPQ", 2, tn2, td2, tl2);
+        g_landPrint = 0;
+        TestBytesGone(lrel);
+        shim_refuse_size = n0; shim_refuse_n = 1;
+        okf = nb == n0 && !ParchLandMake(1, &L3, &why) && shim_refuse_n == 0 && L3.unread == 1 && L3.tiles == 1 && !L3.m && !L3.n &&
+              strstr(why, "could not be read") && TestBytes(lrel, lf2, sizeof lf2) < 0;
+        Check(okf, "a zone's land with one of its tiles not read (out of memory, an I/O error) is neither kept in its file nor used: no land, and why");
+        shim_refuse_size = n0; shim_refuse_n = 2;                          /* (every tile not read) */
+        okf = !ParchLandMake(1, &L3, &why) && shim_refuse_n == 0 && L3.unread == 2 && L3.tiles == 0 && !L3.m && TestBytes(lrel, lf2, sizeof lf2) < 0;
+        okf &= ParchLandMake(1, &L3, &why) && L3.tiles == 2 && !L3.unread && !L3.fromFile && L3.n >= L.n && TestBytes(lrel, lf2, sizeof lf2) > 0;
+        okf &= ParchLandMake(1, &L3, &why) && L3.fromFile && L3.tiles == 0;
+        Check(okf, "a zone's land with none of its tiles read is not kept either (no file of no land); once they read, it is made and kept");
+        shim_refuse_n = 0;
+        ParchLandFree(&L3);
+    }
+    /* a city inside its building: its placement's chunks */
+    static unsigned char modf[64];
+    TestModf(modf, -9900, 200, -9800, 300, 0);
+    g_testAreas = NULL; g_testSea = NULL;
+    unsigned n1 = TestAdt(g_adt[1], 0, 0, 40, 40, modf, 1, "World\\wmo\\Test\\City.wmo");
+    unsigned wl[2];
+    TestWmo(7, 0x20, wl);
+    static const char *wn2[3] = { "World\\Maps\\Azeroth\\Azeroth_31_50.adt", "World\\wmo\\Test\\City.wmo", "World\\wmo\\Test\\City_000.wmo" };
+    const char *wd[3] = { (const char *)g_adt[1], (const char *)g_wmoRoot, (const char *)g_wmoGroup };
+    unsigned wl3[3] = { n1, wl[0], wl[1] };
+    MakeMpq("Data/terrain.MPQ", 1, wn2, wd, wl3);
+    MakeMpq("Data/wmo.MPQ", 2, wn2 + 1, wd + 1, wl3 + 1);
+    g_landPrint = 0;
+    ParchLand Lc = { 0 };
+    float gx, gy;
+    LandChunkAt(-9850, 250, &gx, &gy);
+    ok = ParchLandMake(2, &Lc, &why) && Lc.n >= 9 && Lc.n <= 16 && LandOwn(&Lc, (int)gx, (int)gy) && !LandOwn(&Lc, (int)gx + 5, (int)gy);
+    {                                                                  /* its tile or its building not read: no file, no land */
+        char crel[96];
+        snprintf(crel, sizeof crel, "Data/CinderLoad/land-%s.bin", g_pz[2].name);
+        TestBytesGone(crel);
+        shim_refuse_size = n1; shim_refuse_skip = 1; shim_refuse_n = 1;  /* (its tile read, then not as its buildings are looked for) */
+        int okc = !ParchLandMake(2, &Lc, &why) && !shim_refuse_n && Lc.unread == 1 && Lc.tiles == 1 && !Lc.n && Gone(crel);
+        TestBytesGone(crel);
+        shim_refuse_size = wl[0]; shim_refuse_skip = 0; shim_refuse_n = 1;   /* (its building's root not read) */
+        okc &= !ParchLandMake(2, &Lc, &why) && !shim_refuse_n && Lc.unread == 1 && !Lc.n && Gone(crel);
+        okc &= ParchLandMake(2, &Lc, &why) && Lc.n >= 9 && !Lc.fromFile && !Gone(crel);
+        shim_refuse_n = shim_refuse_skip = 0;
+        Check(okc, "a city's land inside its building with its tile or its building not read (out of memory) is neither kept in its file nor used");
+    }
+    g_waArea[0] = 40;                                                  /* (its building another zone's: none) */
+    TestLandPatch("Data/patch-3.MPQ", "xy");
+    ok &= ParchLandMake(2, &Lc, &why) && Lc.n == 0;
+    g_waArea[0] = 1537;
+    Check(ok, "a city inside its building (Ironforge, Undercity: no terrain of its own): its land the chunks its building's placement covers, when the building's WMOAreaTable rows name the city's area");
+    ParchLandFree(&Lc); ParchLandFree(&L2);
+    MakeMpq("Data/terrain.MPQ", 1, tn, td, tl);
+    TestLandPatch("Data/patch-3.MPQ", "xyz");
+    g_testAreas = TestLandAreas(); g_testSea = sea;
+    ParchLandMake(1, &L, &why);
+
+    /* the cut to it: its land whole, the outline refining its edge within a chunk, nothing far past it */
+    ParchRect rz = ParchBox(1);
+    float share = 0;
+    int held = 0;
+    TestLandCont(0);
+    TestLandPaint();
+    ok = ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held >= 2;
+    int whole = 1;
+    for (int y = 84; y < 584; y += 9) for (int x = 126; x < 500; x += 9) if (TestPaintAt(x, y)[3] != 255) whole = 0;   /* (its land: whole, the river too) */
+    for (int y = 126; y < 208; y += 9) for (int x = 690; x < 813; x += 9) if (TestPaintAt(x, y)[3] != 255) whole = 0;   /* (its island, no outline round it) */
+    ok &= whole && TestPaintAt(118, 300)[3] == 255 && TestPaintAt(100, 300)[3] < 255 && TestPaintAt(60, 300)[3] == 0 &&   /* (its outline 11 texels past its land) */
+          TestPaintAt(300, 595)[3] == 255 && TestPaintAt(300, 625)[3] < 255 && TestPaintAt(900, 350)[3] == 0 && share > 0.25f && share < 0.4f;
+    TestLandCont(4);                                                   /* (an outline drawn two chunks past its land: a chunk of it) */
+    TestLandPaint();
+    ok &= ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held >= 1 && TestPaintAt(540, 300)[3] == 255 && TestPaintAt(600, 300)[3] < 128;
+    Check(ok, "the cut to its land: every texel of the zone's land whole (crossed by a river in ink, an island with no outline round it); past it, the outline its continent's painting draws refines its edge within a chunk, never further; its own sea and its neighbour's land past the grown margin, nothing");
+    /* a fill that runs through a gap into a neighbour (closed off inside the crop) is not the zone's: its land alone */
+    TestLandCont(1);
+    TestLandPaint();
+    ok = ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held == 0;
+    ok &= TestPaintAt(118, 300)[3] < 255 && TestPaintAt(140, 300)[3] == 255 && TestPaintAt(540, 300)[3] < 128;
+    /* one that runs on out of the crop (a corridor, little of it far): not the zone's either */
+    TestLandCont(2);
+    TestLandPaint();
+    ok &= ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held == 0 && TestPaintAt(118, 300)[3] < 255 && TestPaintAt(140, 300)[3] == 255;
+    /* a fill that finds only a pocket (a lake, a town in ink): too little of the land to trust */
+    TestLandCont(3);
+    TestLandPaint();
+    ok &= ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held == 0 && TestPaintAt(110, 250)[3] < 255 && TestPaintAt(140, 250)[3] == 255;
+    Check(ok, "the cut stops at the zone's edge: a fill that runs through a gap in its border into a neighbour (much of it more than three chunks from its land), or on out past the crop, or that finds only a pocket of it is not trusted: its land alone, whole, the rest in the margin");
+    /* its overlay pieces as the client lays them, whole wherever they lie (a capital's piece on its zone's map) */
+    TestLandCont(0);
+    TestLandPaint();
+    g_pieceA = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)g_parchTW * g_parchTW);
+    for (int y = 280; y < 320; y++) for (int x = 880; x < 940; x++) g_pieceA[y * g_parchTW + x] = 200;
+    for (int y = 280; y < 320; y++) for (int x = 950; x < 960; x++) g_pieceA[y * g_parchTW + x] = 100;
+    ok = ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && TestPaintAt(910, 300)[3] == 255 && TestPaintAt(955, 300)[3] < 255 &&
+         TestPaintAt(900, 450)[3] == 0;
+    HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL;
+    Check(ok, "the cut to its land keeps the zone's overlay pieces whole where the client lays them (their alpha half or more): the map it shows for the zone, a capital's piece on its zone's map too");
+    /* the work: a zone with land cut to it (and logged), one with none the outline as before */
+    g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_destZOk = 0;
+    TestLandCont(0);
+    ParchZoneMade(1, 0, 30.8f, 39.3f, &why);
+    ok = g_zoneCut && g_cutLand && g_land.n == L.n;
+    g_testAreas = NULL; g_testSea = NULL;
+    n0 = TestAdt(g_adt[0], 0, 0, 40, 40, NULL, 0, NULL);
+    tl[0] = n0;
+    MakeMpq("Data/terrain.MPQ", 1, tn, td, tl);
+    TestLandPatch("Data/patch-3.MPQ", "xyzw");
+    TestLandPaint();
+    ParchZoneMade(1, 0, 30.8f, 39.3f, &why);
+    ok &= !g_cutLand && g_land.n == 0;
+    Check(ok, "the zone's cut: to its land when its terrain gives it some; none (an instance's map), the outline as before");
+    ParchLandFree(&L); ParchLandFree(&g_land);
+    g_testGround = -1e30f; g_testTile[0] = g_testTile[1] = 0;
+    if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
+    g_linesCont.m = NULL;
+    ParchFree();
+    g_mapDirN = 0; g_waN = 0;
+    TestGlideState();
+}
+/* The continent's name, one label in one place (his note, 11 Oct): the world's kept, cut out of its painting; the
+ * continent's own painted out of its painting with the world's painting there */
+static void TestWordLetters(int x0, int y0, int x1, int y1, int K)
+{
+    /* a word's letters as the client paints them: dark strokes, each between light rims; stems three of K wide */
+    for (int x = x0 + 6 * K; x + 8 * K < x1; x += 14 * K) {
+        TestPaintFill(x - 2 * K, y0 + 3 * K, x + 5 * K, y1 - 3 * K, 0xF0E0C0);   /* (its rim) */
+        TestPaintFill(x, y0 + 5 * K, x + 3 * K, y1 - 5 * K, 0x302010);           /* (its stroke) */
+    }
+}
+/* an O as the client paints its names' (a dark ring between light rims, its middle a lighter paper), over the last
+ * letters of a word's box (x1, y0..y1) on paper */
+static void TestWordO(int x1, int y0, int y1, unsigned paper, unsigned mid)
+{
+    float cx = (float)x1 - 18, cy = (float)(y0 + y1) / 2;
+    TestPaintFill(x1 - 54, y0, x1, y1, paper);
+    for (int y = y0; y < y1; y++)
+        for (int x = x1 - 54; x < x1; x++) {
+            float d = sqrtf((x - cx) * (x - cx) + (y - cy) * (y - cy));
+            if (d <= 12.5f) TestPaintFill(x, y, x + 1, y + 1, d > 10 || (d > 5 && d <= 7) ? 0xF0E0C0 : d > 7 ? 0x302010 : mid);
+        }
+}
+static void TestWords(void)
+{
+    /* the letters: strokes between rims found; the sea's hatching (dark lines, no rims) not */
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x908060);
+    int x0 = 650, y0 = 360, x1 = 820, y1 = 388;                       /* (a word's box) */
+    for (int y = y0 - 30; y < y1 + 30; y += 5) TestPaintFill(x0 - 60, y, x0 - 5, y + 2, 0x403020);   /* (hatching beside it) */
+    TestWordLetters(x0, y0, x1, y1, 1);
+    static unsigned char m[400 * 100];
+    float sh = ParchLetters(g_parchPx, g_parchTW, 1002, 668, x0, y0, x1, y1, 1, 1, m);
+    int bw = x1 - x0, onStroke = m[(14 - y0 + y0) * bw + 7] > 200, offStroke = m[(14) * bw + 13] < 60;
+    float hs = ParchLetters(g_parchPx, g_parchTW, 1002, 668, x0 - 60, y0, x0 - 5, y1, 1, 1, m);
+    int ok = sh > 0.12f && sh < 0.75f && onStroke && offStroke && hs == 0;
+    Check(ok, "the names' letters: each stroke dark between two light rims, as the client paints its names, found; the sea's hatching (dark, no rims) not");
+    /* the world's names cut out, the continent's own painted out with the world's painting there, and the name drawn over
+     * every painting at the world's place */
+    TestGlideState();
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Kalimdor\0";
+    unsigned wv[3 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+                           30, 0, 12, 9, TestF(1535), TestF(-1935), TestF(-7939), TestF(-10254),
+                           13, 1, 0, 23, TestF(17066), TestF(-19733), TestF(12799), TestF(-11733) };
+    static unsigned char wma[256];
+    unsigned wmn = TestWdbc(wma, 3, 8, wv, wstr, sizeof wstr);
+    ParchTables(wma, wmn, NULL, 0);
+    TestPaintNew(1);                                                  /* the world's painting: its two names */
+    TestPaintFill(0, 0, 1002, 668, 0x908060);
+    for (int i = 0; i < PARCH_WORDS; i++) {
+        int a0, b0, a1, b1;
+        if (lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, 1, 1002, 668, &a0, &b0, &a1, &b1)) continue;
+        TestWordLetters(a0, b0, a1, b1, 1);
+        if (i == 2) TestWordO(a1, b0, b1, 0x908060, 0xA89070);        /* (KALIMDOR's O) */
+    }
+    static unsigned char world[1002 * 668 * 4];
+    for (int y = 0; y < 668; y++) memcpy(world + 4 * (size_t)y * 1002, g_parchPx + 4 * (size_t)y * g_parchTW, 1002 * 4);
+    int conts[2] = { 0, 2 };
+    g_worldK = 1;
+    ParchWorldWords(conts);
+    ok = g_wordPic[0].ok && g_wordPic[1].ok && g_wordUnder[0].ok && g_wordPic[0].x0 <= 658 && g_wordPic[0].x0 + g_wordPic[0].w >= 815;
+    int sx = 658 + 6 + 1 - g_wordPic[0].x0, sy = 375 - g_wordPic[0].y0;   /* (a stroke of EASTERN) */
+    ok &= g_wordPic[0].px[4 * (sy * g_wordPic[0].w + sx) + 3] > 200 && g_wordPic[0].px[4 * (sy * g_wordPic[0].w + sx)] == 0x30;
+    Check(ok, "the world's names, cut out of its painting: each a picture of the painting's own texels, its alpha the letters");
+    /* and painted out (his answer, 11 Oct: "yes the continent name should fade out"): each a picture of its own, the
+     * letters, their rims and round them gone, laid over the world's painting as the name fades (so no name is left once
+     * it has), and in the painting kept round the continent's own name; the world's painting itself as it was (the
+     * opening shows both names) */
+    {
+        int kept = 1, gone = 1, covers = 1, under = 1;
+        for (int y = 0; y < 668; y++) if (memcmp(g_parchPx + 4 * (size_t)y * g_parchTW, world + 4 * (size_t)y * 1002, 1002 * 4)) kept = 0;
+        for (int i = 0; i < PARCH_WORDS; i++) {
+            int a0, b0, a1, b1;
+            if (lstrcmpiA(kWords[i].folder, "World") || !WordBox(i, 1, 1002, 668, &a0, &b0, &a1, &b1)) continue;
+            const ParchPic *Q = &g_wordOut[kWords[i].cont], *U = &g_wordUnder[kWords[i].cont];
+            if (!Q->ok || Q->x0 > a0 - PARCH_OUT_GROW || Q->y0 > b0 - PARCH_OUT_GROW || Q->x0 + Q->w < a1 + PARCH_OUT_GROW || Q->y0 + Q->h < b1 + PARCH_OUT_GROW) { covers = 0; continue; }
+            for (int y = b0; y < b1; y++)
+                for (int x = a0; x < a1; x++) {
+                    const unsigned char *q = Q->px + 4 * ((y - Q->y0) * Q->w + (x - Q->x0)), *was = world + 4 * ((size_t)y * 1002 + x);
+                    int over[3];
+                    for (int ch = 0; ch < 3; ch++) over[ch] = (q[ch] * q[3] + was[ch] * (255 - q[3]) + 127) / 255;
+                    if (abs(over[0] - 0x90) > 4 || abs(over[1] - 0x80) > 4 || abs(over[2] - 0x60) > 4) gone = 0;
+                    if (U->ok && x >= U->x0 && y >= U->y0 && x < U->x0 + U->w && y < U->y0 + U->h) {
+                        const unsigned char *u = U->px + 4 * ((y - U->y0) * U->w + (x - U->x0));
+                        if (abs(u[0] - 0x90) > 4) under = 0;
+                    }
+                }
+            int rx = a0 + 6 - 2, ry = (b0 + b1) / 2;                  /* (a rim of its first letter, and just past it) */
+            int ramp = 0;                                             /* (its edge softened: a ramp of a few texels) */
+            for (int x = rx - 10; x < rx + 3; x++) { int a = Q->px[4 * ((ry - Q->y0) * Q->w + (x - Q->x0)) + 3]; if (a > 0 && a < 255) ramp++; }
+            if (ramp < 3) covers = 0;
+            if (!(Q->px[4 * ((ry - Q->y0) * Q->w + (rx - Q->x0)) + 3] == 255 && Q->px[4 * ((ry - Q->y0) * Q->w + (rx - 1 - Q->x0)) + 3] > 128)) covers = 0;
+        }
+        printf("  the world's names painted out: the world's painting kept %d, gone under their pictures %d, the rims and round them %d, in the painting kept round the continent's own %d\n", kept, gone, covers, under);
+        Check(kept && gone && covers && under, "the world's names painted out, each a picture of its own (the letters, their rims and round them: the paper round them in their place), laid over the world's painting as the name fades, and in the painting kept round a continent's own name; the world's painting itself as it was, both names (the opening)");
+    }
+    /* the paint-out itself: the paper round it with its grain carried on (the sea's hatching across); nothing else changed;
+     * a mask grown, its holes filled (an O's middle, not a C's), softened at its edges */
+    {
+        TestPaintNew(1);
+        for (int y = 0; y < 200; y++) TestPaintFill(0, y, 300, y + 1, (y / 2) % 2 ? 0x706048 : 0x908060);   /* (hatching, two rows each) */
+        static unsigned char keep[300 * 200 * 4];
+        for (int y = 0; y < 200; y++) memcpy(keep + 4 * (size_t)y * 300, g_parchPx + 4 * (size_t)y * g_parchTW, 300 * 4);
+        static unsigned char M[60 * 40];
+        memset(M, 0, sizeof M);
+        for (int y = 10; y < 30; y++) for (int x = 20; x < 40; x++) M[y * 60 + x] = 255;      /* (a square on the box 100, 80) */
+        ParchPaintOut(g_parchPx, g_parchTW, 1002, 668, 100, 80, 60, 40, M, 1);
+        int grain = 1, still = 1;
+        for (int y = 92; y < 104; y++) {                                   /* inside: its rows still dark and light as round it */
+            int here = TestPaintAt(130, y)[0], next = TestPaintAt(130, y + 2)[0];
+            int want = (y / 2) % 2 ? -1 : 1;                                /* (light rows 0x90, dark 0x70) */
+            if ((here - next) * want < 0.25f * 0x20) grain = 0;
+        }
+        for (int y = 0; y < 200; y++) for (int x = 0; x < 300; x++) {
+            int in = x >= 120 && x < 140 && y >= 90 && y < 110;
+            if (!in && memcmp(TestPaintAt(x, y), keep + 4 * ((size_t)y * 300 + x), 4)) still = 0;
+        }
+        TestPaintNew(1);                                                   /* (and stripes down: the grain mirrored, not one texel's) */
+        for (int x = 0; x < 300; x++) TestPaintFill(x, 0, x + 1, 200, (x / 2) % 2 ? 0x706048 : 0x908060);
+        ParchPaintOut(g_parchPx, g_parchTW, 1002, 668, 100, 80, 60, 40, M, 1);
+        int lo = 255, hi = 0;
+        for (int x = 121; x < 129; x++) { int v = TestPaintAt(x, 100)[0]; if (v < lo) lo = v; if (v > hi) hi = v; }   /* (all from its left edge) */
+        if (hi - lo < 0.25f * 0x20) grain = 0;
+        static unsigned char G[21 * 21], O[30 * 30], C[30 * 30], S[20 * 20];
+        memset(G, 0, sizeof G); G[10 * 21 + 10] = 200;
+        ParchMaskGrow(G, 21, 21, 3);
+        int grown = G[7 * 21 + 7] == 200 && G[13 * 21 + 13] == 200 && G[6 * 21 + 10] == 0 && G[10 * 21 + 14] == 0;
+        memset(O, 0, sizeof O); memset(C, 0, sizeof C);
+        for (int y = 5; y < 25; y++) for (int x = 5; x < 25; x++) {
+            int ring = x < 8 || x >= 22 || y < 8 || y >= 22;
+            O[y * 30 + x] = ring ? 255 : 0;
+            C[y * 30 + x] = ring && !(x >= 22 && y >= 12 && y < 18) ? 255 : 0;           /* (a C: open on its right) */
+        }
+        O[15 * 30 + 15] = 60;                                               /* (a faint mark in the O's middle) */
+        ParchMaskHoles(O, 30, 30); ParchMaskHoles(C, 30, 30);
+        int holes = O[15 * 30 + 15] == 255 && O[10 * 30 + 12] == 255 && O[2 * 30 + 2] == 0 && C[15 * 30 + 15] == 0;
+        memset(S, 0, sizeof S);
+        for (int y = 5; y < 15; y++) for (int x = 5; x < 15; x++) S[y * 20 + x] = 255;
+        ParchMaskSoft(S, 20, 20, 1);
+        int soft = S[10 * 20 + 10] == 255 && S[10 * 20 + 5] > 100 && S[10 * 20 + 5] < 255 && S[10 * 20 + 4] > 0 && S[10 * 20 + 4] < 128 && S[10 * 20 + 2] == 0;
+        printf("  the paint-out: the grain carried on %d, nothing else changed %d; a mask grown %d, its holes %d, softened %d\n", grain, still, grown, holes, soft);
+        Check(grain && still && grown && holes && soft,
+              "a name painted out: the paper round it with its grain carried on through it (the hatching's rows dark and light as round it), nothing else changed; its mask grown, its holes filled (an O's middle, never a C's), softened at its edges");
+    }
+    TestPaintNew(1);                                                  /* Azeroth's painting: its own name, larger and elsewhere */
+    TestPaintFill(0, 0, 1002, 668, 0xB09050);
+    for (int y = 0; y < 668; y++) for (int x = 0; x < 1002; x++) g_parchPx[4 * ((size_t)y * g_parchTW + x)] += (x + y) % 2 ? 8 : 0;   /* (its grain) */
+    for (int i = 0; i < PARCH_WORDS; i++) {
+        int a0, b0, a1, b1;
+        if (lstrcmpiA(kWords[i].folder, "Azeroth") || !WordBox(i, 1, 1002, 668, &a0, &b0, &a1, &b1)) continue;
+        TestWordLetters(a0, b0, a1, b1, 1);
+        if (i == 3) TestWordO(a1, b0, b1, 0xB49050, 0xF0D0A0);        /* (an O in its own EASTERN, its middle lit) */
+    }
+    ParchLinesKeep(&g_linesCont, ParchBox(0), 0, 1);
+    int a0, b0, a1, b1;
+    WordBox(3, 1, 1002, 668, &a0, &b0, &a1, &b1);                     /* (Azeroth's EASTERN) */
+    int lx = a0 + 6 + 1, ly = (b0 + b1) / 2;
+    int was = TestPaintAt(lx, ly)[0];
+    static unsigned char cont[1002 * 668 * 4];
+    for (int y = 0; y < 668; y++) memcpy(cont + 4 * (size_t)y * 1002, g_parchPx + 4 * (size_t)y * g_parchTW, 1002 * 4);
+    ok = ParchContWords(0, &g_linesCont) && was == 0x30 && TestPaintAt(lx, ly)[0] > 0x60 && (g_linesCont.m[ly * 1002 + lx] & CUT_WORD);
+    int untouched = 1;                                                /* (outside its own name: the world's name's place too) */
+    for (int y = 0; y < 668; y++)
+        for (int x = 0; x < 1002; x++) {
+            int own = 0;
+            for (int i = 0; i < PARCH_WORDS; i++) {
+                int c0, d0, c1, d1;
+                int g = PARCH_OUT_GROW + 2;                           /* (its letters' mask grown and softened past them) */
+                if (!lstrcmpiA(kWords[i].folder, "Azeroth") && WordBox(i, 1, 1002, 668, &c0, &d0, &c1, &d1) && x >= c0 - g && x < c1 + g && y >= d0 - g && y < d1 + g) own = 1;
+            }
+            if (!own && memcmp(TestPaintAt(x, y), cont + 4 * ((size_t)y * 1002 + x), 4)) untouched = 0;
+        }
+    int noneLeft = 1;                                                 /* (its own name: nothing of it left, an O's middle neither) */
+    for (int i = 0; i < PARCH_WORDS; i++) {
+        int c0, d0, c1, d1;
+        if (lstrcmpiA(kWords[i].folder, "Azeroth") || !WordBox(i, 1, 1002, 668, &c0, &d0, &c1, &d1)) continue;
+        for (int y = d0; y < d1; y++) for (int x = c0; x < c1; x++) if (abs(TestPaintAt(x, y)[0] - 0xB4) > 8) noneLeft = 0;
+    }
+    printf("  the continent's own name painted out: untouched round it %d, nothing of it left %d\n", untouched, noneLeft);
+    ok &= untouched && noneLeft;
+    Check(ok, "a continent's own name painted out of its painting, with the world's painting there (its name painted out too) in its own colours; its letters marked so a zone's outline may take them back; the rest of it untouched, the world's name's place too (no name of the world's laid on it: it fades)");
+    /* the name drawn: over the zone's painting, at the world's place on the frame, the same place every frame */
+    g_viewScreen = 30; g_worldUp = 1; g_viewTex[VT_PWORLD] = 1; g_worldTW = 1024; g_worldK = 1; g_worldAt = 0;
+    g_wordUp[0] = 1; g_viewTex[VT_PWORD0] = 1; g_wordTW[0] = 256; g_wordTH[0] = 64; g_contWords = 0;
+    g_wordOutUp[0] = 1; g_viewTex[VT_PNOUT0] = 1; g_wordOutTW[0] = 256; g_wordOutTH[0] = 128;
+    TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    float px0[3];
+    int order = 1, nb = -1;
+    for (int f = 0; f < 3; f++) {
+        ViewBuild(1920, 1080, 0.04f * (float)f + 0.02f, 2600 + 400 * f);   /* (while it is on the window) */
+        nb = TestBatch(VT_PWORD0);
+        int zb = TestBatch(VT_PARCH), cb = TestBatch(VT_PARCH2);
+        order &= nb >= 0 && nb > zb && nb > cb;
+        const ViewVert *v0 = nb >= 0 ? g_vv + g_vb[nb].first : NULL;
+        float fxw = v0 ? (float)(g_pcam.v.x + (v0->x - 960) / g_pcam.v.s) : -1;   /* (its first corner back on the frame) */
+        px0[f] = fxw;
+    }
+    ParchRect want = { g_wordPic[0].x0 * PARCH_WORLD_FW / 1002.0f, 0, 0, 0 };
+    ok = order && Near(px0[0], want.x0, 0.02) && Near(px0[1], px0[0], 0.02) && Near(px0[2], px0[0], 0.02);
+    nb = TestBatch(VT_PWORD0);
+    ViewBuild(1920, 1080, 0.02f, 2600);
+    nb = TestBatch(VT_PWORD0);
+    float vmax = 0;
+    for (int i = nb >= 0 ? g_vb[nb].first : 0; nb >= 0 && i < g_vb[nb].first + g_vb[nb].count; i++) if (g_vv[i].v > vmax) vmax = g_vv[i].v;
+    ok &= Near(vmax, (double)g_wordPic[0].h / 64, 1e-4);              /* (its texture's height its own) */
+    g_contWords = -1;                                                  /* (its own name not painted out: no second one drawn) */
+    TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, 0.02f, 2600);
+    ok &= TestBatch(VT_PWORD0) < 0 && TestBatch(VT_PNOUT0) < 0;    /* (nor the world's painted out under it) */
+    Check(ok, "the continent's name, the world's, drawn over every painting (the zone's too) at its own place on the frame, the same place every frame of the glide; none drawn over a continent whose own name was not painted out");
+    /* it fades out once wider than the window (his answer, 11 Oct: "yes the continent name should fade out"): whole up to
+     * as wide as the window, half at 1.41 times, gone at twice that and by the landing at the latest */
+    g_contWords = 0;
+    {
+        float nw = g_wordPic[0].w * PARCH_WORLD_FW / 1002.0f;          /* (its width on the frame, map tiles) */
+        int whole = 1, gone = 1, half = 0, seen = 0, fades[2] = { 0, 0 }, out = 1, outSeen = 0;
+        for (int run = 0; run < 2; run++) {                            /* Elwynn; then at sea on the name itself (a landing zoom
+                                                                        * under twice its own: gone by the landing all the same) */
+            if (run) TestGlideArrive(0, 0, 0, -7200, 577, 2000); else TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+            ViewBuild(1920, 1080, 0.0f, 2000);
+            for (int f = 1; f <= 100; f++) {
+                ViewBuild(1920, 1080, f / 100.0f, 2600 + 20 * f);
+                float wpx = nw * (float)g_pcam.v.s, r = wpx / 1920;
+                int b = TestBatch(VT_PWORD0), a = 0;
+                for (int i = b >= 0 ? g_vb[b].first : 0; b >= 0 && i < g_vb[b].first + g_vb[b].count; i++) if (g_vv[i].c[3] > a) a = g_vv[i].c[3];
+                if (b >= 0) seen++;
+                if (!run && r <= 1 && b >= 0 && a != 255) whole = 0;
+                if ((!run && r >= 2.0f && b >= 0) || (f == 100 && b >= 0)) gone = 0;
+                if (!run && r > 1.38f && r < 1.45f && b >= 0 && a > 110 && a < 145) half = 1;
+                if (!run && r > 1 && r < 2 && b >= 0) {                     /* (on the zoom's log, eased: smoothstep) */
+                    float t = logf(r) / logf(2), want = 255 * (1 - t * t * (3 - 2 * t));
+                    if (fabsf((float)a - want) > 6) whole = 0;
+                }
+                if (b >= 0 && a > 0 && a < 255) fades[run]++;
+                /* the name painted out under it, over the world's painting: as much as the name has faded */
+                int qb = TestBatch(VT_PNOUT0), qa = 0, wb = TestBatch(VT_PWORLD), cb = TestBatch(VT_PARCH2);
+                for (int i = qb >= 0 ? g_vb[qb].first : 0; qb >= 0 && i < g_vb[qb].first + g_vb[qb].count; i++) if (g_vv[i].c[3] > qa) qa = g_vv[i].c[3];
+                if (qb >= 0) outSeen++;
+                if (qb >= 0 && (qb < wb || (cb >= 0 && qb > cb))) out = 0;
+                if (b >= 0 && (a + (qb >= 0 ? qa : 0) < 253 || a + (qb >= 0 ? qa : 0) > 257)) out = 0;   /* (while it is on the window) */
+            }
+        }
+        printf("  the name's fade: its painted-out picture under it as it fades %d (%d frames)\n", out, outSeen);
+        ok = whole && gone && half && seen > 20 && fades[0] > 2 && fades[1] > 2 && out && outSeen > 50;
+    }
+    Check(ok, "the continent's name fades out once it is wider than the window (his answer: \"yes the continent name should fade out\"): whole up to as wide as the window, as the opening shows it, half at 1.41 times, gone at twice (eased on the zoom's log) and by the landing at the latest, never always drawn; the world's painting under it has it painted out as much as it has faded, under the continent's and the zone's paintings");
+    /* the work's steps as each painting is made: the continent's lines kept, its own name painted out, it cut to its land
+     * (the world's painting under it); the zone cut to its own area */
+    TestPaintNew(1);                                                  /* the world's lines: Azeroth's land a block of it */
+    TestPaintFill(0, 0, 1002, 668, 0x707060);
+    TestPaintFill(380, 50, 900, 600, 0x302010); TestPaintFill(385, 55, 895, 595, 0xC8A060);
+    ParchLinesKeep(&g_linesWorld, ParchWorldRect(), -2, 1);
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0xB09050);
+    for (int i = 0; i < PARCH_WORDS; i++) {
+        int c0, d0, c1, d1;
+        if (lstrcmpiA(kWords[i].folder, "Azeroth") || !WordBox(i, 1, 1002, 668, &c0, &d0, &c1, &d1)) continue;
+        TestWordLetters(c0, d0, c1, d1, 1);
+    }
+    const char *why = "";
+    g_worldUp = 1;
+    int words = ParchContMade(0, &why);
+    ok = words && g_contWords == 0 && g_linesCont.row == 0 && g_contCut && g_contShare > 0.05f;
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x40A040);
+    float fx, fy;
+    ParchSpot(0, -9464, 62, &fx, &fy);
+    ParchZoneMade(1, 0, fx, fy, &why);
+    ok &= g_zoneCut;
+    g_linesCont.row = 5;                                               /* (another continent's lines: not under it) */
+    ParchZoneMade(1, 0, fx, fy, &why);
+    ok &= !g_zoneCut && strstr(why, "not under it");
+    g_worldUp = 0;
+    words = ParchContMade(0, &why);
+    ok &= !words && g_contWords == -1 && !g_contCut;
+    Check(ok, "as each painting is made: the continent's own lines kept, its own name painted out and it cut to its land as the world's painting draws it (none of it without the world's); the zone cut to its own area (not without its continent's lines)");
+    for (int c = 0; c < 2; c++) { ParchPicFree(&g_wordPic[c]); ParchPicFree(&g_wordUnder[c]); ParchPicFree(&g_wordOut[c]); g_wordUp[c] = g_wordOutUp[c] = 0; }
+    if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
+    if (g_linesWorld.m) HeapFree(GetProcessHeap(), 0, g_linesWorld.m);
+    g_linesCont.m = g_linesWorld.m = NULL;
+    ParchFree();
+    TestGlideState();
 }
 static void TestGlide(void)
 {
@@ -6308,8 +7294,10 @@ static void TestGlide(void)
     ParchWork(132);
     ok &= g_upN == 2 && g_upOrder[1] == VT_PARCH2 && g_parchForScreen == 3 && g_parchAt == 132 && g_parchWant == 1 && g_parchWantCont == 0 &&
           g_parchCont == 0 && g_contAt == 132;
+    ok &= g_linesCont.row == 0 && g_linesCont.m;                       /* (its lines kept, for its zone's outline) */
     ParchWork(148);
-    ok &= g_upN == 3 && g_upOrder[2] == VT_PARCH && g_parchZone == 1 && g_zoneAt == 148 && !g_parchPx;
+    ok &= g_upN == 3 && g_upOrder[2] == VT_PARCH && g_parchZone == 1 && g_zoneAt == 148 && !g_parchPx && g_zoneCut && g_cutBoxed &&
+          LogSays("Elwynn cut to its own area as Azeroth's painting draws it");   /* (flat paintings: its outline leaks, kept to its box) */
     ParchWork(164);                                                     /* (all up: nothing more) */
     ok &= g_upN == 3;
     g_viewScreen = 4;                                                   /* (the next screen, the same place: taken anew, nothing made) */
@@ -6334,6 +7322,315 @@ static void TestGlide(void)
     ParchWork(800);
     ok &= g_upN == 0 && !g_worldUp && LogSays("is not as read");
     Check(ok, "the parchment's work with the fade C: each finer painting and then its copy in the colours under it (the world's); without the client's world frame, no world's painting, and the log says so");
+    /* with the worker (the 32-bit build's thread; here run by hand between frames): each job posted and left to it, the view's
+     * frames going on; done, taken on the next frame; an arrival moved while its zone was being found, found again */
+    TestGlideState();
+    g_parchFade = PARCH_FADE_C; g_upN = 0; g_worldFrameOk = 1;
+    g_parchTablesOk = 1; shim_thread_fn = NULL; shim_thread_prio = 0; shim_events_set = 0;
+    ParchWorkerStart();                                                 /* (its thread asked for, never run by the shim) */
+    int started = g_pjWorker && shim_thread_fn == ParchWorker && shim_thread_prio == THREAD_PRIORITY_BELOW_NORMAL && g_pjEvent;
+    g_testWorker = shim_thread_fn; g_testWorkerArg = shim_thread_arg;
+    ParchWorkerStart();                                                 /* (started once only) */
+    started &= g_testWorker == shim_thread_fn && shim_threads == 1;
+    g_testWorkerClock = 0;
+    g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 50;
+    ParchWork(100);                                                     /* (the world's posted: nothing up yet) */
+    ok = started && g_pj.state == 1 && g_pj.kind == PJ_WORLD && g_upN == 0 && !g_worldUp && !g_parchPx && shim_events_set == 1;
+    ParchWork(116);                                                     /* (still the worker's: nothing done, nothing more posted) */
+    ok &= g_pj.state == 1 && g_upN == 0;
+    TestWorker();                                                      /* (the worker: its own loop, one pass) */
+    ok &= g_upN == 0 && g_parchPx;                                      /* (made, not up: the view's to do) */
+    g_parchPx[0] ^= 0x5A;                                               /* (marked: the view's from now) */
+    unsigned char wmark = g_parchPx[0];
+    TestWorker();                                                       /* (a pass woken by its wait's end: nothing posted) */
+    ok &= g_pj.state == 2 && g_parchPx[0] == wmark;
+    ParchWork(132);                                                     /* (done: up, and nothing more this frame) */
+    ok &= g_upN == 1 && g_upOrder[0] == VT_PWORLD && g_worldUp && g_worldAt == 132 && !g_parchPx && g_pj.state == 0;
+    ParchWork(148);                                                     /* (the arrival's zone to find: posted) */
+    ok &= g_pj.state == 1 && g_pj.kind == PJ_FIND && g_parchForScreen != 50;
+    g_destWX = -9300;                                                   /* (moved while it was being found) */
+    TestWorker();
+    ParchWork(164);
+    ok &= g_parchForScreen != 50 && g_pj.state == 1 && g_pj.kind == PJ_FIND && g_pj.x == -9300;   /* (found again, for where it is now) */
+    g_viewScreen = 51;                                                  /* (and a new screen begun while it was) */
+    TestWorker();
+    ParchWork(170);
+    ok &= g_parchForScreen != 51 && g_pj.state == 1 && g_pj.kind == PJ_FIND && g_pj.screen == 51;  /* (found again, for this screen) */
+    g_viewScreen = 50;
+    TestWorker();
+    ParchWork(174);
+    ok &= g_pj.state == 1 && g_pj.kind == PJ_FIND && g_pj.screen == 50;
+    TestWorker();
+    ParchWork(180);                                                     /* (taken; its continent's posted) */
+    ok &= g_parchForScreen == 50 && g_parchAt == 180 && g_parchForX == -9300 && g_pj.state == 1 && g_pj.kind == PJ_CONT && g_parchCont == -1;
+    TestWorker();
+    ParchWork(196);                                                     /* (up; C's copy posted) */
+    ok &= g_upN == 2 && g_upOrder[1] == VT_PARCH2 && g_parchCont == 0 && g_contAt == 196 && g_pj.state == 1 && g_pj.kind == PJ_MATCH;
+    TestWorker();
+    ParchWork(212);
+    ok &= g_upN == 3 && g_upOrder[2] == VT_PCONTM && g_contMatch == 0 && g_pj.state == 0 && !g_parchPx;
+    ParchWork(228);                                                     /* (its zone's) */
+    ok &= g_pj.state == 1 && g_pj.kind == PJ_ZONE && g_parchZone == -1;
+    TestWorker();
+    ParchWork(244);
+    TestWorker();
+    ParchWork(260);
+    ok &= g_upN == 5 && g_upOrder[3] == VT_PARCH && g_upOrder[4] == VT_PZONEM && g_parchZone == 1 && g_zoneMatch == 1 && g_zoneAt == 244 &&
+          LogSays("Elwynn painted from the client's map") && LogSays("(up 32 ms after)");
+    ParchWork(276);                                                     /* (all up: nothing posted) */
+    ok &= g_pj.state == 0 && g_upN == 5;
+    Check(g_testWorkerClock == 0, "the parchment's worker times its jobs on its own clock (GetTickCount), never the view's (ViewNow, whose statics are the view's thread's alone: the skeptic's find on 61c66db)");
+    /* a painting made anew is not drawn from its post until it is up (its texture is given to OpenGL anew, a strip a
+     * frame): the last screen's other continent's, and the zone's for the other map areas' choice */
+    g_parchCont = 5; g_parchFullOn = 1;
+    g_destWX = -9310; g_viewScreen = 52;
+    ParchWork(292);                                                     /* (the new arrival's zone to find) */
+    TestWorker();
+    ParchWork(308);                                                     /* (taken; its continent's posted) */
+    int anew = g_pj.state == 1 && g_pj.kind == PJ_CONT && g_parchCont == -1;
+    TestWorker();
+    ParchWork(324);
+    TestWorker();
+    ParchWork(340);
+    anew &= g_parchCont == 0;
+    ParchWork(356);                                                     /* (its zone's, for the whole map) */
+    anew &= g_pj.state == 1 && g_pj.kind == PJ_ZONE && g_pj.full == 1 && g_parchZone == -1 && g_zoneMatch == -1;
+    TestWorker();
+    ParchWork(372);
+    TestWorker();
+    ParchWork(388);
+    anew &= g_parchZone == 1 && g_pmadeFull == 1 && g_zoneMatch == 1 && g_pj.state == 0;
+    g_parchFullOn = 0;
+    Check(anew, "with the worker, a painting made anew is not drawn from the moment it is posted until it is up (another continent's, the zone's for the other map areas' choice): never half given to OpenGL");
+    g_pjWorker = 0;
+    Check(ok, "the parchment's work with a worker of its own (ParchWorkerStart: its thread asked for once, below the view's priority; its own loop, ParchWorker, run here a pass at a time): each job posted and left to it while the view's frames go on (none waits on it), done, taken on the next frame and given to OpenGL there; the arrival's zone found again when it moved meanwhile or a new screen began; the same order (the world's, the arrival, its continent's and its copy, its zone's and its copy)");
+    /* the painting given to OpenGL a strip a frame (ParchStrip, the 32-bit build's): an HD painting 2048 a side and its 11
+     * smaller copies, every row of every level once and in order, no frame over PARCH_UP_BYTES, all of it in 11 frames
+     * (22.4 MB); a row wider than the budget still goes, alone; each level's texels where ParchMips lays them */
+    {
+        static unsigned char seen[12][2048];
+        memset(seen, 0, sizeof seen);
+        int level = 0, y = 0, frames = 0, order = 1, over = 0, eL = 0, eY = 0;
+        while (frames < 100) {
+            SIZE_T budget = PARCH_UP_BYTES, used = 0;
+            int sl, sy, rows, any = 0;
+            while (ParchStrip(2048, 11, &level, &y, &budget, &sl, &sy, &rows)) {
+                int w = 2048 >> sl;
+                any = 1;
+                if (sl != eL || sy != eY || rows < 1) order = 0;
+                for (int r = 0; r < rows; r++) { if (sy + r >= w) over = 1; else seen[sl][sy + r]++; }
+                used += (SIZE_T)rows * (SIZE_T)w * 4;
+                eY = sy + rows;
+                if (eY >= w) { eL++; eY = 0; }
+            }
+            if (!any) break;
+            if (used > PARCH_UP_BYTES) over = 1;
+            frames++;
+        }
+        int once = 1;
+        for (int l = 0; l <= 11; l++) for (int r = 0; r < (2048 >> l); r++) if (seen[l][r] != 1) once = 0;
+        SIZE_T b1 = 1000;
+        int l1 = 0, y1 = 0, sl, sy, rows = 0;
+        int wide = ParchStrip(2048, 11, &l1, &y1, &b1, &sl, &sy, &rows) && rows == 1 && b1 == 0 && y1 == 1 &&
+                   !ParchStrip(2048, 11, &l1, &y1, &b1, &sl, &sy, &rows);
+        unsigned char px[64 * 4], mip[(16 + 4 + 1) * 4];
+        unsigned char *keepPx = g_parchPx, *keepMip = g_mipPx;
+        int keepTW = g_parchTW;
+        g_parchPx = px; g_mipPx = mip; g_parchTW = 8;
+        int where = ParchLevelPx(0) == px && ParchLevelPx(1) == mip && ParchLevelPx(2) == mip + 16 * 4 && ParchLevelPx(3) == mip + 20 * 4;
+        g_parchPx = keepPx; g_mipPx = keepMip; g_parchTW = keepTW;
+        printf("  the strips: %d frames, in order %d, over the budget %d, each row once %d, a wide row %d, the levels' texels %d\n", frames, order, over, once, wide, where);
+        Check(frames == 11 && order && !over && once && wide && where,
+              "a painting goes up to OpenGL a strip a frame, at most PARCH_UP_BYTES (2 MB) a frame: every row of it and its smaller copies once, in order, an HD zone's 22.4 MB in 11 frames; a row wider than that alone");
+    }
+    /* the 32-bit build's own upload (ParchUpBegin, ParchUpStep) through the tests' OpenGL, the worker's own loop making
+     * each painting: done, it goes up a strip a frame, not drawn until all of it is, every level as it was made */
+    {
+        TestGlideState();
+        TestGl(1);
+        g_viewTex[VT_PWORLD] = g_viewTex[VT_PARCH2] = 0;
+        g_parchTablesOk = 1; g_pjWorker = 0;
+        ParchWorkerStart();
+        g_testWorker = shim_thread_fn; g_testWorkerArg = shim_thread_arg;
+        g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 60;
+        DWORD t = 2000;
+        ParchWork(t);                                                   /* (the world's posted) */
+        TestWorker();
+        int up = g_pj.state == 2 && g_parchPx && g_mipLevels > 0;
+        TestKeepPainting();
+        int frames = 0, hidden = 1, fresh = 0;
+        long most = 0, all = 0, cmost = 0;
+        while (!g_worldUp && frames < 40) {                             /* (60 Hz frames: up to ParchUpBudget(17) a frame) */
+            g_tglBytes = 0; t += 17;
+            ParchWork(t);
+            frames++;
+            if (g_tglBytes > most) most = g_tglBytes;
+            all += g_tglBytes;
+        }
+        long whole = 0;
+        for (int w = g_tkeepTW; w >= 1; w /= 2) whole += 4L * w * w;
+        up &= g_worldUp && TestUpAsKept(VT_PWORLD) && all == whole && !g_parchPx && g_pjUp < 0;
+        printf("  the world's painting through the 32-bit build's upload: %d x %d, %d levels, %ld bytes in %d frames (most %ld a frame)\n",
+               g_tkeepTW, g_tkeepTW, g_tkeepL + 1, all, frames, most);
+        t += 16; ParchWork(t);                                          /* (the arrival's zone) */
+        TestWorker();
+        t += 16; ParchWork(t);                                          /* (taken: its continent's posted) */
+        TestWorker();
+        TestKeepPainting();
+        int cframes = 0;
+        while (g_parchCont != 0 && cframes < 40) {                       /* (165 Hz frames: PARCH_UP_BYTES a frame) */
+            g_tglBytes = 0; t += 6; ParchWork(t);
+            cframes++;
+            if (g_tglBytes > cmost) cmost = g_tglBytes;
+            if (g_parchCont != 0 && g_pjUp != VT_PARCH2) hidden = 0;        /* (going up the whole time it is not drawn) */
+            if (g_parchCont != 0 && g_viewTex[VT_PARCH2] && cframes == 1) fresh = 1;
+        }
+        up &= g_parchCont == 0 && TestUpAsKept(VT_PARCH2) && hidden && fresh && cframes == 3 && frames == 1 && most > (long)PARCH_UP_BYTES &&
+              most <= (long)ParchUpBudget(17) && cmost == (long)PARCH_UP_BYTES;
+        /* ParchUpBegin and ParchUpStep alone: an 8 x 8 painting whose texels are each their own (levels 8, 4, 2, 1), a budget
+         * a step: each strip from its own rows, its texture bound anew each step (the view draws others between), done only
+         * once its last level is up, OpenGL's refusal heard */
+        {
+            static unsigned char px[8 * 8 * 4], mip[(16 + 4 + 1) * 4];
+            for (int i = 0; i < (int)sizeof px; i++) px[i] = (unsigned char)(i * 7 + 1);
+            for (int i = 0; i < (int)sizeof mip; i++) mip[i] = (unsigned char)(i * 13 + 5);
+            g_parchPx = px; g_mipPx = mip; g_parchTW = 8; g_mipLevels = 3;
+            TestKeepPainting();
+            g_viewTex[VT_PZONEM] = 0;
+            int r0 = ParchUpBegin(VT_PZONEM);
+            gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_PARCH2]);           /* (another drawn between) */
+            int r1 = ParchUpStep(3 * 8 * 4);                                /* (level 0's rows 0 to 2) */
+            gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_PARCH2]);
+            int r2 = ParchUpStep(5 * 8 * 4 + 4 * 4 * 4 + 2 * 2 * 4);        /* (its rows 3 to 7, levels 1 and 2: all but the last) */
+            int r3 = ParchUpStep(4);
+            int one = r0 == 1 && r1 == 0 && r2 == 0 && r3 == 1 && TestUpAsKept(VT_PZONEM);
+            ParchUpBegin(VT_PZONEM);
+            g_tglErr = 1;                                                   /* (OpenGL refuses a strip) */
+            one &= ParchUpStep(1u << 20) == -1;
+            g_parchPx = NULL; g_mipPx = NULL; g_mipLevels = 0;
+            Check(one, "a painting's upload a step at a time (ParchUpBegin, ParchUpStep): each strip from its own rows, its texture bound again each step, done only once its last level is up, and OpenGL's refusal heard");
+        }
+        g_pjWorker = 0;
+        TestGl(0);
+        Check(up, "the 32-bit build's own upload, through the tests' OpenGL, with the worker's own loop making each painting: a painting done goes up a strip a frame (as many bytes as the frame's time gives: at 60 Hz the world's 5.6 MB in one, at 165 Hz the continent's in three of PARCH_UP_BYTES), not drawn until all of it is up, every level of it as it was made");
+        /* by the frame's time: an HD painting (2048 a side, 22.4 MB) up in about the same time at 60, 144 and 165 Hz */
+        int hz[3] = { 60, 144, 165 }, ms[3] = { 0 }, fr[3] = { 0 }, over = 0;
+        for (int k = 0; k < 3; k++) {
+            int level = 0, y = 0, lv, y0, rows;
+            double at = 0;
+            while (level <= 11 && fr[k] < 100) {
+                double next = at + 1000.0 / hz[k];
+                SIZE_T b = ParchUpBudget((DWORD)next - (DWORD)at), b0 = b;
+                at = next; fr[k]++;
+                while (ParchStrip(2048, 11, &level, &y, &b, &lv, &y0, &rows)) {}
+                if (b0 - b > PARCH_UP_MOST) over = 1;
+            }
+            ms[k] = (int)(at + 0.5);
+        }
+        printf("  an HD painting up: at 60 Hz %d frames, %d ms; at 144 Hz %d, %d ms; at 165 Hz %d, %d ms\n", fr[0], ms[0], fr[1], ms[1], fr[2], ms[2]);
+        int budget = ParchUpBudget(0) == PARCH_UP_BYTES && ParchUpBudget(6) == PARCH_UP_BYTES && ParchUpBudget(17) == 17 * (SIZE_T)PARCH_UP_RATE &&
+                     ParchUpBudget(19) == PARCH_UP_MOST && ParchUpBudget(100000) == PARCH_UP_MOST && ParchUpBudget(12289) == PARCH_UP_MOST && ParchUpBudget(0xFFFFFFFFu) == PARCH_UP_MOST;
+        Check(budget && !over && fr[2] == 11 && fr[0] == 4 && ms[0] <= ms[2] + 2 && ms[1] <= ms[2] + 2,
+              "a painting's upload budget by the frame's time (the skeptic's find on 61c66db: an HD painting up in 183 ms at 60 Hz, 67 at 165): PARCH_UP_RATE a ms, at least PARCH_UP_BYTES, at most PARCH_UP_MOST; an HD painting up in about 67 ms at 60, 144 and 165 Hz");
+    }
+    /* a screen ended with a job still the worker's, done, or going up (the skeptic's find on 61c66db: its painting kept
+     * through the game, then given to OpenGL first on the next screen): freed, never up; the next screen makes again what
+     * it wants; the view off the same, and the worker's loop ends */
+    {
+        TestGlideState();
+        TestGl(1);
+        g_viewTex[VT_PWORLD] = g_viewTex[VT_PARCH2] = 0;
+        g_parchTablesOk = 1; g_pjWorker = 0;
+        ParchWorkerStart();
+        g_testWorker = shim_thread_fn; g_testWorkerArg = shim_thread_arg;
+        g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 70;
+        DWORD t = 3000;
+        ParchWork(t);                                                   /* (the world's posted) */
+        int st = g_pj.state == 1 && g_pj.kind == PJ_WORLD;
+        ParchScreenEnd();                                               /* (the screen ends before the worker begins it) */
+        st &= g_pj.state == 3 && !g_ptry.world;
+        t += 6; ParchWork(t);                                           /* (nothing posted over it while it is the worker's) */
+        st &= g_pj.state == 3 && g_pj.kind == PJ_WORLD;
+        g_testTicked = 0; shim_tick_hook = TestTicked;                   /* (never run: its clock never read) */
+        TestWorker();
+        int before = st && g_pj.state == 0 && !g_parchPx && !g_worldUp && !g_testTicked;
+        shim_tick_hook = NULL;
+        g_viewScreen = 71;
+        t += 6; ParchWork(t);                                           /* (the world's posted again) */
+        st &= g_pj.state == 1 && g_pj.kind == PJ_WORLD;
+        shim_tick_hook = ParchScreenEnd;                                /* (the screen ends as the worker runs it) */
+        TestWorker();
+        int during = st && !shim_tick_hook && g_pj.state == 0 && !g_parchPx && !g_mipPx && !g_worldUp && !g_ptry.world;
+        t += 6; ParchWork(t); TestWorker();                             /* (done, not yet taken by the view) */
+        st &= g_pj.state == 2 && g_parchPx;
+        ParchScreenEnd();
+        int done = st && g_pj.state == 0 && !g_parchPx && !g_mipPx && !g_ptry.world;
+        t += 6; ParchWork(t); TestWorker();
+        t += 6; ParchWork(t);                                           /* (going up: its first strip, 2 MB of 5.6) */
+        st &= g_pjUp == VT_PWORLD && !g_worldUp && g_parchPx;
+        ParchScreenEnd();
+        int going = st && g_pjUp < 0 && !g_parchPx && !g_mipPx && !g_worldUp && !g_ptry.world;
+        g_viewScreen = 72; g_tglBytes = 0;
+        t += 6; ParchWork(t);                                           /* (the next screen: the world's made again) */
+        st &= g_pj.state == 1 && g_pj.kind == PJ_WORLD && !g_tglBytes;
+        TestWorker();
+        TestKeepPainting();
+        for (int k = 0; k < 5 && !g_worldUp; k++) { t += 6; ParchWork(t); }
+        int next = st && g_worldUp && TestUpAsKept(VT_PWORLD) && g_tglBytes == 5592404;
+        t += 6; ParchWork(t); TestWorker();                             /* (the arrival's zone found) */
+        t += 6; ParchWork(t);                                           /* (taken: its continent's posted) */
+        st &= g_pj.state == 1 && g_pj.kind == PJ_CONT;
+        shim_waits = 0; shim_tick_hook = ParchStop;                     /* (the view off as the worker runs it) */
+        g_testWorker(g_testWorkerArg);                                  /* (its loop, until it ends by itself) */
+        int off = st && !g_pjWorker && g_pj.state == 0 && !g_parchPx && g_parchCont == -1;
+        g_pj.kind = PJ_MATCH; g_pj.slot = VT_PCONTM; g_pj.state = 2; g_parchCont = 4; g_parchZone = 9;   /* (a copy's job dropped) */
+        ParchScreenEnd();
+        int copy = g_parchCont == -1 && g_parchZone == 9 && !g_pj.state;
+        g_pj.kind = PJ_MATCH; g_pj.slot = VT_PZONEM; g_pj.state = 2; g_parchCont = 4;
+        ParchScreenEnd();
+        copy &= g_parchCont == 4 && g_parchZone == -1 && !g_pj.state;
+        printf("  a screen ended with its job: before it ran %d, as it ran %d, done %d, going up %d; the next screen %d; the view off %d; a copy's %d\n",
+               before, during, done, going, next, off, copy);
+        TestGl(0);
+        g_pjWorker = 0; g_pj.state = 0; g_parchCont = g_parchZone = -1;
+        Check(before && during && done && going && next && off && copy, "a screen ended with its job still the worker's (before it ran, or as it ran), done, or going up: its painting freed and never given to OpenGL, nothing posted over it meanwhile, the world's made again on the next screen and a copy's painting with it; the view off the same, and the worker's loop then ends by itself");
+    }
+    /* the zone's job with the worker: its explored areas as they were as it was posted (copied into it), painted by them
+     * and kept as what it was made for, not as they are when it is up; its painting's size and its post's time its own; the
+     * explored areas it was painted by not left for the next painting (the skeptic's surviving mutants on 61c66db) */
+    {
+        TestGlideState();
+        g_parchTablesOk = 1; g_pjWorker = 0;
+        ParchWorkerStart();
+        g_testWorker = shim_thread_fn; g_testWorkerArg = shim_thread_arg;
+        memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[3] = 0x24; g_scrKnown = 1; g_scrSeq++;
+        g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 80;
+        g_zoneTW = 0; g_zoneK = 0;
+        DWORD t = 4000, postedAt = 0;
+        for (int k = 0; k < 40 && !(g_pj.state == 1 && g_pj.kind == PJ_ZONE); k++) {
+            t += 16; ParchWork(t);
+            if (g_pj.state == 1 && g_pj.kind == PJ_ZONE) postedAt = t;
+            else if (g_pj.state == 1) TestWorker();
+        }
+        int zj = g_pj.state == 1 && g_pj.kind == PJ_ZONE && g_pj.known == 1 && !g_pj.full && Same(g_pj.bits, g_scrBits, EXPLORED_BYTES) &&
+                 g_pj.posted == postedAt && postedAt > 4016;
+        g_scrBits[3] = 0x2C; g_scrSeq++;                                   /* (more found while it was being painted) */
+        TestWorker();
+        zj &= g_makeBits == NULL && g_pj.state == 2;
+        int tw = g_parchTW, k2 = g_parchK;
+        for (int k = 0; k < 10 && (g_parchZone != 1 || g_pj.state || g_pjUp >= 0); k++) { t += 16; ParchWork(t); if (g_pj.state == 1) TestWorker(); }
+        zj &= g_parchZone == 1 && g_pmadeKnown == 1 && g_pmadeBits[3] == 0x24 && g_zoneTW == tw && g_zoneK == k2 && tw > 0;
+        int again = 0;                                                  /* (the next screen: painted again by what is found now) */
+        g_viewScreen = 81;
+        for (int k = 0; k < 10 && !again; k++) {
+            t += 16; ParchWork(t);
+            if (g_pj.state == 1 && g_pj.kind == PJ_ZONE) again = g_pj.bits[3] == 0x2C;
+            if (g_pj.state == 1) TestWorker();
+        }
+        zj &= again;
+        g_pjWorker = 0; g_pj.state = 0; g_scrKnown = 0; g_scrSeq++;
+        Check(zj, "the zone's job with the worker: the explored areas as they stood at its post copied into it and painted by (not left for the next painting), kept as what its painting was made for when it is up though more were found meanwhile, so the next screen paints it again; its painting's size and its post's time its own");
+    }
     for (int i = 0; i < 36; i++) free((void *)tdata[i]);
     TestGlideState();
 
@@ -6676,27 +7973,30 @@ static void TestExplore(void)
 #define STYLE_REL "Data/CinderLoad/style.txt"
 static void TestStyle(void)
 {
-    int ok, map, bar;
-    map = bar = -1;
-    ok = StyleParse("map parchment\r\nbar retro\r\n", &map, &bar) == 2 && map == 1 && bar == 1;
-    map = bar = -1;
-    ok &= StyleParse("MAP Satellite\tbar NEO", &map, &bar) == 2 && map == 0 && bar == 0;
-    map = bar = 7;
-    ok &= StyleParse("# map: parchment or satellite, bar: retro or neo\nbar neo\n", &map, &bar) == 1 && map == 7 && bar == 0;
-    map = bar = 7;
-    ok &= StyleParse("?", &map, &bar) == 0 && StyleParse("parchments retroneo neon sat", &map, &bar) == 0 &&
-          StyleParse(NULL, &map, &bar) == 0 && map == 7 && bar == 7;
-    ok &= StyleParse("map=satellite,bar=neo fault", &map, &bar) == 2 && map == 0 && bar == 0;
-    char v[32];
-    StyleValue(v, 1, 0);
-    ok &= !strcmp(v, "parchment neo");
-    StyleValue(v, 0, 1);
-    ok &= !strcmp(v, "satellite retro");
-    Check(ok, "the style's words: parchment or satellite, retro or neo, in any case, whole words only, a note after '#' passed over; the CVar's value \"parchment neo\"");
+    int ok, map, bar, full;
+    map = bar = full = -1;
+    ok = StyleParse("map parchment\r\nbar retro\r\nareas discovered\r\n", &map, &bar, &full) == 3 && map == 1 && bar == 1 && full == 0;
+    map = bar = full = -1;
+    ok &= StyleParse("MAP Satellite\tbar NEO areas FULL", &map, &bar, &full) == 3 && map == 0 && bar == 0 && full == 1;
+    map = bar = full = 7;
+    ok &= StyleParse("# map: parchment or satellite, bar: retro or neo, areas: discovered or full\nbar neo\n", &map, &bar, &full) == 1 &&
+          map == 7 && bar == 0 && full == 7;
+    map = bar = full = 7;
+    ok &= StyleParse("?", &map, &bar, &full) == 0 && StyleParse("parchments retroneo neon sat fully discover", &map, &bar, &full) == 0 &&
+          StyleParse(NULL, &map, &bar, &full) == 0 && map == 7 && bar == 7 && full == 7;
+    ok &= StyleParse("map=satellite,bar=neo fault", &map, &bar, &full) == 2 && map == 0 && bar == 0 && full == 7;
+    char v[48];
+    StyleValue(v, 1, 0, 0);
+    ok &= !strcmp(v, "parchment neo discovered");
+    StyleValue(v, 0, 1, 1);
+    ok &= !strcmp(v, "satellite retro full");
+    Check(ok, "the style's words: parchment or satellite, retro or neo, discovered or full, in any case, whole words only, a note after '#' passed over; the CVar's value \"parchment neo discovered\"");
 
     Fresh("style-none"); GameDir();
     StyleLoad();
-    ok = g_parchAsked == 1 && g_vbarAsked == 1 && LogSays("style: the map parchment, the bar retro, from the defaults");
+    g_mapFull = 7;
+    StyleLoad();
+    ok = g_parchAsked == 1 && g_vbarAsked == 1 && g_mapFull == 0 && LogSays("style: the map parchment, the bar retro, the map's areas discovered, from the defaults");
     Fresh("style-old-parchment"); GameDir();
     Put("Data/CinderLoad/parchment.txt", "");
     StyleLoad();
@@ -6723,23 +8023,29 @@ static void TestStyle(void)
     Fresh("style-set"); GameDir();
     StyleLoad();
     const char *t;
-    ok = StyleSet(0, 1, "a test") == 1 && g_parchAsked == 0 && g_vbarAsked == 1 && (t = Get(STYLE_REL)) &&
-         strstr(t, "\r\nmap satellite\r\nbar retro\r\n") && t[0] == '#' && Gone("Data/CinderLoad/style.tmp") &&
-         LogSays("style: the map satellite, the bar retro (a test), from the next loading screen; kept in Data\\CinderLoad\\style.txt");
+    ok = StyleSet(0, 1, 0, "a test") == 1 && g_parchAsked == 0 && g_vbarAsked == 1 && (t = Get(STYLE_REL)) &&
+         strstr(t, "\r\nmap satellite\r\nbar retro\r\nareas discovered\r\n") && t[0] == '#' && Gone("Data/CinderLoad/style.tmp") &&
+         LogSays("style: the map satellite, the bar retro, the map's areas discovered (a test), from the next loading screen; kept in Data\\CinderLoad\\style.txt");
     Put(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
-    ok &= StyleSet(0, 1, "the same") == 0 && Is(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
-    ok &= StyleSet(1, 0, "another") == 1;
+    ok &= StyleSet(0, 1, 0, "the same") == 0 && Is(STYLE_REL, "map satellite\nbar retro\n# untouched\n");
+    ok &= StyleSet(1, 0, 0, "another") == 1;
     StyleLoad();
-    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && g_mapFull == 0;
+    ok &= StyleSet(1, 0, 1, "the full map") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nareas full\r\n") &&
+          LogSays("the map's areas full (the full map)") && StyleSet(1, 0, 1, "again") == 0;
+    g_mapFull = 7;
+    StyleLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && g_mapFull == 1 && LogSays("the map's areas full, from Data\\CinderLoad\\style.txt");
+    ok &= StyleSet(1, 0, 0, "back") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nareas discovered\r\n");
     {
         char p[700];
         snprintf(p, sizeof p, "%sData/CinderLoad", shim_gamedir);
         chmod(p, 0555);
-        int changed = StyleSet(0, 0, "unwritable");
+        int changed = StyleSet(0, 0, 0, "unwritable");
         chmod(p, 0755);
         ok &= changed && g_parchAsked == 0 && g_vbarAsked == 0 && LogSays("could NOT be written, so it holds only until the game closes");
     }
-    Check(ok, "a choice made in game: kept in style.txt (written beside it, then moved over it), read back the same at the next start; the same choice again writes nothing; a file that cannot be written: it holds until the game closes, and the log says so");
+    Check(ok, "a choice made in game (the map, the bar, the map's areas): kept in style.txt (written beside it, then moved over it), read back the same at the next start; the same choice again writes nothing; a file that cannot be written: it holds until the game closes, and the log says so");
 
     /* each screen as the view opens it: the choice, as far as it can be */
     int pzN = g_pzN;
@@ -6809,12 +8115,13 @@ static void FakeExec(const char *code, const char *source)
     if (strcmp(source, "CinderLoad")) return;
     if (!strcmp(code, kLuaProbe)) { g_fkProbes++; if (!g_fkUp && g_fkCv) FkSet("?"); return; }
     g_fkSetups++;
-    snprintf(g_fkHead, sizeof g_fkHead, "%.60s", code);
+    snprintf(g_fkHead, sizeof g_fkHead, "%.90s", code);
     g_fkMarked = Get("Data/CinderLoad/ui-setup.tmp") != NULL;
     if (g_fkIgnore) return;
     g_fkUp = 1;
-    char m[16] = "", b[16] = "";
-    if (sscanf(code, "local CL_MAP, CL_BAR = \"%15[a-z]\", \"%15[a-z]\"", m, b) == 2) { char v[40]; snprintf(v, sizeof v, "%s %s", m, b); FkSet(v); }
+    char m[16] = "", b[16] = "", a[16] = "";
+    if (sscanf(code, "local CL_MAP, CL_BAR, CL_AREAS = \"%15[a-z]\", \"%15[a-z]\", \"%15[a-z]\"", m, b, a) == 3) {
+        char v[56]; snprintf(v, sizeof v, "%s %s %s", m, b, a); FkSet(v); }
 }
 static void *FakeLookup(const char *name) { return !strcmp(name, CV_NAME) && g_fkCv && !g_fkHide ? g_fkCv : NULL; }
 static void *FakeRegister(const char *name, const char *help, int flags, const char *def, void *cb, int cat, int unreg, void *arg)
@@ -6907,32 +8214,32 @@ static void TestSwitches(void)
     g_luaOn = 1; g_luaBroken = 0; g_luaBusy = 0; g_luaFails = 0; g_luaSetups = 0; g_luaSynced = 0;
     g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = 0;
     Tick();
-    ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
+    ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro discovered") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
           !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
-          !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"parchment\", \"retro\"\n-- CinderLoad", 57) && !strcmp(g_fkVal, "parchment retro") &&
-          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro");
+          !strncmp(g_fkHead, "local CL_MAP, CL_BAR, CL_AREAS = \"parchment\", \"retro\", \"discovered\"\n-- CinderLoad", 81) && !strcmp(g_fkVal, "parchment retro discovered") &&
+          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro discovered");
     Check(ok, "a login: the CVar made as RegisterCVar makes one (no help, no flags, the choice its default, no callback, category 9, registered), the probe finds no switches, they are made from the choice held (the setup's mark there while it runs, gone after)");
     Tick();
     ok = g_fkProbes == 2 && g_fkSetups == 1 && g_fkRegisters == 1;
-    FkSet("satellite neo");                                           /* the player's clicks */
+    FkSet("satellite neo discovered");                                           /* the player's clicks */
     Tick();
     ok &= g_parchAsked == 0 && g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo") &&
-          LogSays("style: the map satellite, the bar neo (chosen on the world map or with /cinderload)") && g_fkSetups == 1;
+          LogSays("style: the map satellite, the bar neo, the map's areas discovered (chosen on the world map or with /cinderload)") && g_fkSetups == 1;
     g_fkUp = 0;                                                        /* a /reload */
     Tick();
-    ok &= g_fkSetups == 2 && !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"satellite\", \"neo\"\n", 42) && !strcmp(g_fkVal, "satellite neo") &&
-          LogSays("made (again: at a login or a /reload), set to satellite neo");
-    FkSet("parchment neo");                                           /* a click, then at once a teleport */
+    ok &= g_fkSetups == 2 && !strncmp(g_fkHead, "local CL_MAP, CL_BAR, CL_AREAS = \"satellite\", \"neo\", \"discovered\"\n", 66) && !strcmp(g_fkVal, "satellite neo discovered") &&
+          LogSays("made (again: at a login or a /reload), set to satellite neo discovered");
+    FkSet("parchment neo discovered");                                           /* a click, then at once a teleport */
     StyleAtLoad();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0 && LogSays("(chosen just before this loading screen)");
     FkSet("satellite");                                               /* (one word: not the switches' own value) */
     Tick();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0;
-    FkSet("satellite retro");                                         /* a click, then a teleport: the game's first frame of it */
+    FkSet("satellite retro discovered");                                         /* a click, then a teleport: the game's first frame of it */
     g_dispNew = 1;
     GameStep(0.0f, 777000);
     ok &= g_parchAsked == 0 && g_vbarAsked == 1;
-    FkSet("parchment neo");
+    FkSet("parchment neo discovered");
     GameStep(0.05f, 777100);                                          /* (the same screen: only as one begins) */
     ok &= g_parchAsked == 0 && g_vbarAsked == 1;
     StyleAtLoad();
@@ -6953,27 +8260,27 @@ static void TestSwitches(void)
 
     /* a new session: a CVar already there (Config.wtf's, say) never counts before the switches have set it */
     g_luaSynced = 0; g_fkUp = 0;
-    FkSet("satellite retro");
+    FkSet("satellite retro discovered");
     StyleAtLoad();
     ok = g_parchAsked == 1 && g_vbarAsked == 0;
     Tick();
-    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && !strcmp(g_fkVal, "parchment neo") && g_luaSynced;
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && !strcmp(g_fkVal, "parchment neo discovered") && g_luaSynced;
     Check(ok, "a CVar there before the switches set it (Config.wtf's) never counts: style.txt's choice stands, and the switches set the CVar to it");
 
     /* their fault, a chunk that does not run, a CVar the client will not make: off for the session */
-    FkSet("parchment neo fault");
+    FkSet("parchment neo discovered fault");
     Tick();
     runs = g_fkRuns;
     g_fkUp = 0;
     Tick();
     ok = g_luaBroken && g_fkRuns == runs && LogSays("off for this session, as they met a Lua error");
     g_luaBroken = 0; g_fkUp = 0; g_fkIgnore = 1;
-    FkSet("parchment neo");
+    FkSet("parchment neo discovered");
     Tick();
     ok &= !g_luaBroken && g_luaFails == 1 && LogSays("made, but no word back from them (1 time)");
     Tick();
     ok &= g_luaBroken && LogSays("as they did not run (twice made, no word back)");
-    FkSet("satellite neo");                                           /* off: not even a screen's start asks the client */
+    FkSet("satellite neo discovered");                                           /* off: not even a screen's start asks the client */
     StyleAtLoad();
     ok &= g_parchAsked == 1 && g_vbarAsked == 0;
     g_luaBroken = 0; g_luaFails = 0; g_fkUp = 0;                       /* once with no word back, then a good one: counted again */
@@ -6993,7 +8300,7 @@ static void TestSwitches(void)
     Check(ok, "off for the session (logged; the world map and style.txt as ever): when the switches report a Lua error, when they are made twice and never run, when the client will not make their CVar");
 
     char small[64];
-    Check(LuaChunk(small, sizeof small, 1, 1) == 0, "the switches' chunk: never written past its buffer");
+    Check(LuaChunk(small, sizeof small, 1, 1, 0) == 0, "the switches' chunk: never written past its buffer");
     SwitchesQuiet();
     munmap(low, 1 << 16);
 }
@@ -7077,19 +8384,22 @@ static void TestStyleFiles(void)
     Check(ok, "style.txt read whether saved as ASCII, UTF-8 with its mark, or UTF-16 little or big endian with or without its mark (Notepad's \"Unicode\"); a character past ASCII breaks a word");
 
     /* the CVar: only exactly what the switches write */
-    ok = StyleCvarParse("satellite neo", &map, &bar, &fault) && map == 0 && bar == 0 && !fault;
-    ok &= StyleCvarParse("parchment retro", &map, &bar, &fault) && map == 1 && bar == 1 && !fault;
-    ok &= StyleCvarParse("parchment neo fault", &map, &bar, &fault) && map == 1 && bar == 0 && fault;
-    static const char *const kNot[] = { "?", "", "parchment", "parchment retro ", "parchment  retro", "Parchment retro", "parchment retro faulty",
-                                        "parchment retro f", "parchment retro fault x", "parchment retrofault", "neo satellite",
-                                        "satellite neo retro", "satellites neo", "map=satellite,bar=neo" };
+    int full;
+    ok = StyleCvarParse("satellite neo discovered", &map, &bar, &full, &fault) && map == 0 && bar == 0 && full == 0 && !fault;
+    ok &= StyleCvarParse("parchment retro full", &map, &bar, &full, &fault) && map == 1 && bar == 1 && full == 1 && !fault;
+    ok &= StyleCvarParse("parchment neo discovered fault", &map, &bar, &full, &fault) && map == 1 && bar == 0 && full == 0 && fault;
+    static const char *const kNot[] = { "?", "", "parchment", "parchment retro", "parchment retro fault", "parchment retro discovered ",
+                                        "parchment  retro discovered", "Parchment retro discovered", "parchment retro Full",
+                                        "parchment retro discovered faulty", "parchment retro discovered f", "parchment retro full fault x",
+                                        "parchment retro discoveredfault", "neo satellite full", "satellite neo full retro",
+                                        "satellites neo full", "map=satellite,bar=neo,areas=full", "parchment full retro" };
     for (size_t i = 0; i < sizeof kNot / sizeof kNot[0]; i++) {
-        map = bar = fault = 7;
-        int no = !StyleCvarParse(kNot[i], &map, &bar, &fault) && map == 7 && bar == 7 && fault == 7;
+        map = bar = full = fault = 7;
+        int no = !StyleCvarParse(kNot[i], &map, &bar, &full, &fault) && map == 7 && bar == 7 && full == 7 && fault == 7;
         if (!no) printf("  (the CVar's \"%s\" taken)\n", kNot[i]);
         ok &= no;
     }
-    Check(ok, "the CVar heard only as the switches write it: \"<map> <bar>\", or with \" fault\" after; anything else (a word more or less, another case, the probe's \"?\", a run-on \"faulty\") is not theirs");
+    Check(ok, "the CVar heard only as the switches write it: \"<map> <bar> <areas>\", or with \" fault\" after; anything else (a word more or less, another order, another case, an older two-word value, the probe's \"?\", a run-on \"faulty\") is not theirs");
 
     /* the black first frames: only for a parchment the view will draw */
     {
@@ -7123,7 +8433,7 @@ static void TestSwitchesPump(void)
     Put(STYLE_REL, "map satellite\r\nbar neo\r\n");
     g_parchAsked = g_vbarAsked = 1; g_luaOn = 0; g_vsStarts = 0; g_vsFail = 0; shim_threads = 0;
     ok = ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 1 && g_parchAsked == 0 && g_vbarAsked == 0 && g_viewOn &&
-         g_viewLive && g_luaOn && shim_threads == 1 && LogSays("style: the map satellite, the bar neo, from Data\\CinderLoad\\style.txt") &&
+         g_viewLive && g_luaOn && shim_threads == 1 && LogSays("style: the map satellite, the bar neo, the map's areas discovered, from Data\\CinderLoad\\style.txt") &&
          LogSays("view on:");
     g_viewOn = 0; g_viewLive = 0; g_luaOn = 0;
     Fresh("view-start-no-thread"); GameDir();
@@ -7189,7 +8499,7 @@ static void TestSwitchesPump(void)
     Check(ok, "the switches' pump: our thread registers its message, hooks the game's own thread and sends it one message at a time; the game's thread ticks only on taking it off its queue (not on a look, not on another hook code), and never shows it to the game's window; then the next is sent");
 
     /* a choice made in game kept within a poll (no probe needed), the probe still once a second */
-    FkSet("satellite neo");
+    FkSet("satellite neo discovered");
     int probes = g_fkProbes;
     msg.message = g_luaMsg; shim_ticks = 10550;
     shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);
@@ -7216,7 +8526,7 @@ static void TestSwitchesPump(void)
     Check(ok, "no message during a loading screen; one not taken in 5 s (a long freeze, its window gone) sent again, never stuck; a new game window found and its thread hooked");
 
     /* the game quitting: its WM_QUIT taken, a choice made since the last message kept */
-    FkSet("parchment retro");
+    FkSet("parchment retro discovered");
     MSG quit = { shim_game, WM_QUIT, 0, 0, 0, { 0, 0 } };
     shim_hook(HC_ACTION, PM_NOREMOVE, (LPARAM)&quit);
     ok = g_parchAsked == 0;
@@ -7224,17 +8534,17 @@ static void TestSwitchesPump(void)
     t = Get(STYLE_REL);
     ok &= g_parchAsked == 1 && g_vbarAsked == 1 && t && strstr(t, "map parchment\r\nbar retro") && LogSays("(chosen just before the game closed)");
     g_luaBroken = 1;                                                     /* (off for the session: not even as it quits) */
-    FkSet("satellite neo");
+    FkSet("satellite neo discovered");
     shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
     ok &= g_parchAsked == 1 && (t = Get(STYLE_REL)) && strstr(t, "map parchment\r\nbar retro");
     g_luaBroken = 0;
-    FkSet("parchment retro");
+    FkSet("parchment retro discovered");
     Check(ok, "the game quitting (its WM_QUIT off the queue): a choice made in its last moments kept in style.txt; with the switches off for the session, nothing taken");
 
     /* a choice made just before a loading screen is the style of that screen, its explored areas read for it */
     g_parchAsked = 0; g_parchTablesOk = 1;
-    StyleSet(0, 1, "a test");
-    FkSet("parchment retro");
+    StyleSet(0, 1, 0, "a test");
+    FkSet("parchment retro discovered");
     LONG seq = g_scrSeq;
     g_dispNew = 1;
     GameStep(0.0f, 900000);
@@ -7274,12 +8584,13 @@ static void TestSwitchesLua(void)
     char dir[700];
     snprintf(dir, sizeof dir, "%s/lua", g_root);
     mkdir(dir, 0755);
-    static char chunk[sizeof kSwitchesLua + 128];
-    const struct { const char *name; int map, bar; } kOut[2] = { { "setup.lua", 1, 1 }, { "setup-satellite-neo.lua", 0, 0 } };
-    for (int i = 0; i < 2; i++) {
+    static char chunk[sizeof kSwitchesLua + 160];
+    const struct { const char *name; int map, bar, full; } kOut[3] = { { "setup.lua", 1, 1, 0 }, { "setup-satellite-neo.lua", 0, 0, 0 },
+                                                                        { "setup-full.lua", 1, 1, 1 } };
+    for (int i = 0; i < 3; i++) {
         snprintf(p, sizeof p, "%s/%s", dir, kOut[i].name);
         f = fopen(p, "wb");
-        int len = LuaChunk(chunk, (int)sizeof chunk, kOut[i].map, kOut[i].bar);
+        int len = LuaChunk(chunk, (int)sizeof chunk, kOut[i].map, kOut[i].bar, kOut[i].full);
         if (f) { fwrite(chunk, 1, (size_t)len, f); fclose(f); }
     }
     snprintf(p, sizeof p, "%s/probe.lua", dir);
@@ -7428,7 +8739,7 @@ static void TestSwitchesPath(void)
     /* a login: the first message taken makes the CVar, finds no switches, makes them in the game's UI */
     DWORD now = 20000;
     Pump(now);
-    ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, "parchment retro");
+    ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, "parchment retro discovered");
     Bridge("openmap");
     Bridge("text map");
     ok &= BridgeSaid("Parchment shown");
@@ -7436,7 +8747,7 @@ static void TestSwitchesPath(void)
 
     /* Satellite picked on the world map: the CVar says so; the next message (a quarter second) keeps it; the next screen */
     Bridge("pick map satellite");
-    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "satellite retro") && g_parchAsked == 1;
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "satellite retro discovered") && g_parchAsked == 1;
     now += LUA_POLL_MS;
     Pump(now);
     ok &= g_parchAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar retro");
@@ -7456,7 +8767,7 @@ static void TestSwitchesPath(void)
 
     /* /cinderload bar in the chat */
     Bridge("slash bar");
-    ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, "parchment neo");
+    ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, "parchment neo discovered");
     now += LUA_POLL_MS;
     Pump(now);
     ok &= g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "bar neo");
@@ -7466,6 +8777,28 @@ static void TestSwitchesPath(void)
     ok &= g_parchOn && !g_barVanilla;
     Check(ok, "the whole path: /cinderload bar in the chat, kept the same way; the next screen the parchment with the blade");
 
+    /* the full map picked on the world map: the CVar, the next message keeps it, the next screen paints the whole map */
+    Bridge("pick areas full");
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "parchment neo full") && !g_mapFull;
+    now += LUA_POLL_MS;
+    Pump(now);
+    ok &= g_mapFull == 1 && (t = Get(STYLE_REL)) && strstr(t, "areas full") && !g_parchFullOn;
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= g_parchOn && g_parchFullOn == 1 && LogSays("the parchment's map areas full");
+    Bridge("text areas");
+    ok &= BridgeSaid("Full map shown");
+    Bridge("slash areas");                                                /* (and back with /cinderload) */
+    ok &= BridgeSaid("map areas Discovered") && !strcmp(g_fkVal, "parchment neo discovered");
+    now += LUA_POLL_MS;
+    Pump(now);
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= !g_mapFull && !g_parchFullOn && (t = Get(STYLE_REL)) && strstr(t, "areas discovered");
+    Check(ok, "the whole path, the map's areas: Full map picked from its drop-down, the CVar says so, the game's next message keeps it in style.txt, the next loading screen paints the whole map; /cinderload areas back to what was discovered the same way");
+
     /* a /reload: the UI made anew; the probe finds no switches; made again from the choice held, showing it */
     Bridge("fresh");
     int setups = g_fkSetups;
@@ -7473,7 +8806,7 @@ static void TestSwitchesPath(void)
     Pump(now);
     Bridge("openmap");
     Bridge("text bar");
-    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo") && BridgeSaid("Neo shown");
+    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo discovered") && BridgeSaid("Neo shown");
     Bridge("minimize");
     Bridge("text map");
     ok &= BridgeSaid("hidden");
@@ -7498,7 +8831,7 @@ static void TestSwitchesPath(void)
     memset(&g_pathPump, 0, sizeof g_pathPump);
     g_fkCv = g_fkLow + 0x100;
     TestPut32(g_fkCv + CV_VALUE, TestLow(g_fkVal));
-    FkSet("satellite neo");
+    FkSet("satellite neo discovered");
     g_parchAsked = g_vbarAsked = 7;
     ok = BridgeOpen() && ViewStartFrom(shim_module, FakeViewThreadStart) && g_parchAsked == 1 && g_vbarAsked == 1;
     g_luaExec = BridgeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
@@ -7506,7 +8839,7 @@ static void TestSwitchesPath(void)
     Pump(now);
     Bridge("openmap");
     Bridge("text map");
-    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && !strcmp(g_fkVal, "parchment retro") && BridgeSaid("Parchment shown");
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && !strcmp(g_fkVal, "parchment retro discovered") && BridgeSaid("Parchment shown");
     Bridge("text bar");
     ok &= BridgeSaid("Retro shown");
     BridgeClose();
@@ -7742,6 +9075,9 @@ int main(int argc, char **argv)
     TestVanillaBar();
     TestParchment();
     TestZoneRule();
+    TestCut();
+    TestLand();
+    TestWords();
     TestGlide();
     TestModeTurn();
     TestExplore();

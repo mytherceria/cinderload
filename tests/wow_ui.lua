@@ -723,7 +723,7 @@ function UI.Fresh(opts)
     end
     world.cvars.useUiScale = opts.useUiScale or "1"
     world.cvars.uiscale = opts.uiScale or "0.82"
-    if opts.cvar ~= false then world.cvars.CinderLoadStyle = opts.cvar or "parchment retro" end
+    if opts.cvar ~= false then world.cvars.CinderLoadStyle = opts.cvar or "parchment retro discovered" end
     env.SlashCmdList = {}
     env.GRAY_FONT_COLOR = { r = 0.5, g = 0.5, b = 0.5 }
     env.HIGHLIGHT_FONT_COLOR = { r = 1, g = 1, b = 1 }
