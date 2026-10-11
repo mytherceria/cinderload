@@ -6,9 +6,10 @@ makes, not a drawing of the mockup: where the stub's layout and the client's own
 the exact width of words), this is an approximation.
 
 Usage: STORMLIB=/path/to/libstorm.so python3 -I render_panel.py <tree tsv> <client Data dir> <pack mpq> <out png>
-       [--game <frame png> --at <x> <y>] [--scale 2]
+       [--game <frame png> --at <x> <y>] [--scale 2] [--contrast <out tsv>]
    The window is drawn at his screen (5120 x 2160, UI scale as the tree has it); with --game, over that picture
    (stretched to 5120 x 2160) with its top left at x, y, then cut out with a margin as the mockup's close-up is.
+   --contrast: each word's contrast (WCAG) against the brightest pixel behind it, the window drawn without words.
 """
 import ctypes, io, os, sys
 import numpy as np
@@ -157,8 +158,10 @@ def main():
             fonts[key] = ImageFont.truetype(io.BytesIO(got[0]), max(1, int(round(px))))
         return fonts[key]
 
+    boxes = []
+
     def text(r):
-        if not r['text']:
+        if not r['text'] or NOTEXT:
             return
         x0, y0, x1, y1 = box(r)
         f = font(r['font'] or 'Fonts\\FRIZQT__.TTF', r['size'] * r['es'] * k)
@@ -173,6 +176,8 @@ def main():
         sh = max(1, round(r['es'] * k))                       # (the game fonts' shadow, 1 unit down and right)
         d.text((x + sh, y + sh), r['text'], font=f, fill=(0, 0, 0, 255), anchor=anchor)
         d.text((x, y), r['text'], font=f, fill=c, anchor=anchor)
+        r['bbox'] = d.textbbox((x, y), r['text'], font=f, anchor=anchor)
+        boxes.append(r)
 
     def visible_tex(r):
         if r['role'] in ('highlight', 'pushed', 'disabled', 'disabledchecked'):
@@ -214,6 +219,27 @@ def main():
                 canvas.alpha_composite(fill, (int(round(x0)), int(round(y0))))
             elif r['texture']:
                 put(crop(arc.texture(r['texture']), r['tc']), x0, y0, x1, y1)
+    if '--contrast' in sys.argv:                              # (the same drawing without words: what is behind each)
+        global NOTEXT
+        words = [r for r in boxes if r.get('bbox')] if not NOTEXT else []
+        NOTEXT = True
+        sys.argv.remove('--contrast')
+        bare = render_again()
+        def lum(a):
+            a = a / 255.0
+            a = np.where(a <= 0.03928, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
+            return 0.2126 * a[..., 0] + 0.7152 * a[..., 1] + 0.0722 * a[..., 2]
+        back = np.asarray(Image.alpha_composite(Image.new('RGBA', bare.size, (0, 0, 0, 255)), bare).convert('RGB')).astype(np.float64)
+        rows = []
+        for r in words:
+            x0, y0, x1, y1 = [int(v) for v in r['bbox']]
+            lb = float(lum(back[max(0, y0):y1, max(0, x0):x1]).max())
+            lt = float(lum(np.array([v * 255 for v in (r['color'] or [1, 1, 1])[:3]])))
+            rows.append(((lt + 0.05) / (lb + 0.05), r['text']))
+        with open(CONTRAST, 'w') as f:
+            for ratio, t in sorted(rows):
+                f.write('%.1f\t%s\n' % (ratio, t))
+        print('contrast: lowest %.1f:1 (%s), %d words' % (min(rows)[0], min(rows)[1], len(rows)))
     if '--game' in sys.argv:
         game = Image.open(sys.argv[sys.argv.index('--game') + 1]).convert('RGB').resize((5120, 2160), Image.LANCZOS).convert('RGBA')
         i = sys.argv.index('--at')
@@ -242,6 +268,30 @@ def panel_has(R, r, pid):
             return True
         p = R[p]['parent']
     return False
+
+
+NOTEXT = False
+CONTRAST = sys.argv[sys.argv.index('--contrast') + 1] if '--contrast' in sys.argv else None
+if CONTRAST:
+    sys.argv.remove(CONTRAST)
+
+
+def render_again():
+    """The window drawn again (without words when NOTEXT), returned instead of saved."""
+    saved = sys.argv[:]
+    out = sys.argv[4]
+    sys.argv[4] = out + '.bare.png'
+    for k in ('--game',):
+        if k in sys.argv:
+            i = sys.argv.index(k)
+            del sys.argv[i:i + 2]
+            j = sys.argv.index('--at')
+            del sys.argv[j:j + 3]
+    main()
+    im = Image.open(sys.argv[4]).convert('RGBA')
+    os.remove(sys.argv[4])
+    sys.argv[:] = saved
+    return im
 
 
 if __name__ == '__main__':
