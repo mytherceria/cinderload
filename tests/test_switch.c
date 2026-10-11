@@ -5666,7 +5666,8 @@ static void TestParchment(void)
     ViewBuild(1920, 1080, 0.0f, 2000);
     float e0, e1, z0, z1;
     ParchView va = ParchStart(1920, 1080, 1, ParchBox(0)), vz = ParchEnd(1920, 1080, zr, PARCH_ZOOM, fx, fy);
-    float px = 1080 / PARCH_REF_H;                                      /* (the fades on a window PARCH_REF_H tall) */
+    float px = 1;                                                       /* (the fades as on the films he approved: a window
+                                                                         * 1080 tall, its own pixels) */
     ParchSpan(&va, &vz, px * 2004.0f / PARCH_WORLD_FW, PARCH_MAG0, PARCH_MAG1, &e0, &e1);
     ParchRect cr0 = ParchBox(0);
     ParchSpan(&va, &vz, px * 2004.0f / (cr0.x1 - cr0.x0), PARCH_MAG0, PARCH_MAG1, &z0, &z1);
@@ -5682,6 +5683,17 @@ static void TestParchment(void)
     cb = TestBatch(VT_PARCH2);
     cm = cb >= 0 ? TestVertNear(cb, g_pcam.px, g_pcam.py) : NULL;
     ok &= cm && abs(cm->c[3] - half1080) <= 2;
+    /* the continent-to-zone moment (his films, 1080 tall: the continent comes up, then the zone over it; at 2160 they came
+     * up together): as the continent is halfway up the zone has barely begun, on any window */
+    ok &= e0 > 0.03f && z0 > e0 + 0.05f && 0.5f * (z0 + z1) > 0.5f * (e0 + e1) + 0.05f;
+    for (int big = 0; big < 2; big++) {
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+        ViewBuild(big ? 3840 : 1920, big ? 2160 : 1080, 0.0f, 2000);
+        ViewBuild(big ? 3840 : 1920, big ? 2160 : 1080, tm, 3000);
+        int zb2 = TestBatch(VT_PARCH), cb2 = TestBatch(VT_PARCH2);
+        const ViewVert *zm = zb2 >= 0 ? TestVertNear(zb2, g_pcam.px, g_pcam.py) : NULL, *cm2 = cb2 >= 0 ? TestVertNear(cb2, g_pcam.px, g_pcam.py) : NULL;
+        ok &= cm2 && abs(cm2->c[3] - half1080) <= 2 && (!zm || zm->c[3] < 26);
+    }
     TestGlideArrive(0, 1, 0, -9464, 62, 2000);
     ViewBuild(1920, 1080, 0.0f, 2000);
     ViewBuild(1920, 1080, 0.999f, 3100);
@@ -5694,7 +5706,7 @@ static void TestParchment(void)
     int lateZ = TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3];
     g_zoneAt = 0;
     ok &= lateZ > 50 && lateZ < 80;
-    Check(ok, "the fade A: each finer painting comes up over the coarser one as the coarser one is drawn larger than its own texels (halfway where, on a window PARCH_REF_H tall, it would be drawn 1.3 pixels a texel: the same framing on any window), the continent's over the world's before the zone's over the continent's, the zone's whole well before the end");
+    Check(ok, "the fade A: each finer painting comes up over the coarser one as the coarser one is drawn larger than its own texels (halfway where, on a window 1080 tall as his approved films, it would be drawn 1.3 pixels a texel: the same map scale and framing on any window, 1920 x 1080 or 3840 x 2160), the zone barely begun over it as the continent is halfway up over the world's, the zone's whole well before the end");
     TestGlideArrive(0, 1, 0, -9464, 62, 4000);                         /* (taken late, the bar 40% along: the glide starts there) */
     ViewBuild(1920, 1080, 0.4f, 4000);
     ok = g_pcam.e == 0 && Near(g_pcam.v.s, s0, 1e-6);

@@ -8352,8 +8352,10 @@ static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, f
 #define PARCH_CLIP_F    1.0f          /* a continent's painting kept on the world's, soft this far inside its edges (map tiles) */
 #define PARCH_LP        128           /* C: a coarser painting's colours kept this many cells across */
 #define PARCH_LP_SOFT   6             /* and softened this many times (a three-wide box each way: about two cells) */
-#define PARCH_REF_H     2160.0f       /* the fades' pixels a texel are on a window this tall (his): the same framing on any other
-                                       * (the skeptic's find, 11 Oct: they came later on a smaller window) */
+#define PARCH_REF_H     1080.0f       /* the fades' pixels a texel are on a window this tall, the films he judged and approved
+                                       * (1080 tall): the same map scale, the same framing, on any other (the skeptic's find, 11
+                                       * Oct: they came later on a smaller window; and at 2160 the continent and the zone came up
+                                       * together, the continent-to-zone moment gone) */
 #define PARCH_LATE_MS   900           /* an arrival taken with less of the bar's time left than this glides on the clock, this long */
 #define PARCH_LATE_SPARE 100          /* (or less: landed this long before the screen goes, EVEN_EARLY_MS - VIEW_WORLD_GAP_MS after the
                                        * bar is full) */
