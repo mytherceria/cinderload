@@ -38,6 +38,7 @@ static int fails, checks;
 static void Check(int cond, const char *what) { checks++; if (!cond) { printf("FAIL: %s\n", what); fails++; } }
 
 static const char *g_root;
+static const char *g_client;                        /* a real client's folder, when given */
 static void Fresh(const char *name)
 {
     snprintf(shim_gamedir, sizeof shim_gamedir, "%s/%s/", g_root, name);
@@ -1138,6 +1139,26 @@ static void FireBarRealClient(const char *client)
 
 /* The mock's timeline (render_frames.py KEYS) through the sound built from a real client's files, polled as the game
  * would be: the fill changes every 20 ms. Written as 16-bit stereo for listening; a few checks on the way. */
+/* The case's Data folder given every archive of a real client (symlinks, read only), named as the DLL asks for them. */
+static int LinkClient(const char *client)
+{
+    char from[1024], to[1024];
+    DIR *dd = NULL;
+    snprintf(from, sizeof from, "%s/Data", client);
+    if (!(dd = opendir(from))) { printf("FAIL: could not read %s\n", from); fails++; return 0; }
+    for (struct dirent *de; (de = readdir(dd));) {
+        size_t nl = strlen(de->d_name);
+        if (nl < 5 || strcasecmp(de->d_name + nl - 4, ".mpq")) continue;
+        char name[256];
+        snprintf(name, sizeof name, "%.*s.MPQ", (int)(nl - 4), de->d_name);
+        if (!strncasecmp(name, "patch-", 6) && name[6]) name[6] = (char)toupper((unsigned char)name[6]);
+        snprintf(from, sizeof from, "%s/Data/%s", client, de->d_name);
+        snprintf(to, sizeof to, "%sData/%s", shim_gamedir, name);
+        if (symlink(from, to)) { printf("FAIL: could not link %s\n", from); fails++; closedir(dd); return 0; }
+    }
+    closedir(dd);
+    return 1;
+}
 static void FireRealClient(const char *client)
 {
     static const float keys[][2] = { { 0, 0 }, { 0.6f, 0.02f }, { 1.6f, 0.15f }, { 2.8f, 0.18f }, { 3.1f, 0.42f }, { 5.8f, 0.55f },
@@ -1158,21 +1179,7 @@ static void FireRealClient(const char *client)
 
     Fresh("fire-real");
     GameDir();                                              /* the log goes to this folder */
-    char from[1024], to[1024];
-    DIR *dd = NULL;
-    snprintf(from, sizeof from, "%s/Data", client);
-    if (!(dd = opendir(from))) { printf("FAIL: could not read %s\n", from); fails++; return; }
-    for (struct dirent *de; (de = readdir(dd));) {          /* every archive, named as the DLL asks for it */
-        size_t nl = strlen(de->d_name);
-        if (nl < 5 || strcasecmp(de->d_name + nl - 4, ".mpq")) continue;
-        char name[256];
-        snprintf(name, sizeof name, "%.*s.MPQ", (int)(nl - 4), de->d_name);
-        if (!strncasecmp(name, "patch-", 6) && name[6]) name[6] = (char)toupper((unsigned char)name[6]);
-        snprintf(from, sizeof from, "%s/Data/%s", client, de->d_name);
-        snprintf(to, sizeof to, "%sData/%s", shim_gamedir, name);
-        if (symlink(from, to)) { printf("FAIL: could not link %s\n", from); fails++; closedir(dd); return; }
-    }
-    closedir(dd);
+    if (!LinkClient(client)) return;
     /* every recipe, from this client's own files, over the timeline: all its sounds made, it builds, it never clips;
      * each written out for listening (sound-<name>.wav), with its loudness to set the recipes' levels against */
     static short pcm[2 * 12 * 44100 + 2 * 44100];
@@ -6496,9 +6503,32 @@ static void TestSwitchesLua(void)
     const char *lua = !system("lua5.1 -v >/dev/null 2>&1") ? "lua5.1" : !system("luajit -v >/dev/null 2>&1") ? "luajit" : NULL;
     if (!lua) { printf("  (no lua5.1 or luajit here: the switches' Lua not run)\n"); return; }
     const char *layout = getenv("CINDERLOAD_LAYOUT"), *widths = getenv("CINDERLOAD_WIDTHS");
-    char cmd[3000];
-    snprintf(cmd, sizeof cmd, "%s %s/test_lua.lua '%s' %s%s%s %s%s%s 2>&1", lua, here, dir, layout ? "'" : "", layout ? layout : "",
-             layout ? "'" : "", widths ? "'" : "", widths ? widths : "", widths ? "'" : "");
+    char fx[800] = "";
+    if (g_client) {                                      /* the client's own drop-down and world map code, out of its archives */
+        static const char *const kFx[2] = { "UIDropDownMenu.lua", "WorldMapFrame.lua" };
+        Fresh("framexml"); GameDir();
+        int got = LinkClient(g_client);
+        snprintf(fx, sizeof fx, "%s/framexml", dir);
+        mkdir(fx, 0755);
+        for (int i = 0; got && i < 2; i++) {
+            char in[200], outp[1000];
+            unsigned char *data = NULL;
+            unsigned len = 0;
+            const char *from = "";
+            snprintf(in, sizeof in, "Interface\\FrameXML\\%s", kFx[i]);
+            got = ClientPicture(in, "interface.MPQ", &data, &len, &from);
+            snprintf(outp, sizeof outp, "%s/%s", fx, kFx[i]);
+            FILE *o = got ? fopen(outp, "wb") : NULL;
+            if (o) { fwrite(data, 1, len, o); fclose(o); printf("  lua: the client's %s, from its %s\n", kFx[i], from); }
+            got = o != NULL;
+            if (data) HeapFree(GetProcessHeap(), 0, data);
+        }
+        Check(got, "a real client: its own UIDropDownMenu.lua and WorldMapFrame.lua read out of its archives for the switches' Lua");
+        if (!got) fx[0] = 0;
+    }
+    char cmd[4000];
+    snprintf(cmd, sizeof cmd, "%s %s/test_lua.lua '%s' '%s%s' '%s%s' '%s%s' 2>&1", lua, here, dir, layout ? "layout=" : "", layout ? layout : "",
+             widths ? "widths=" : "", widths ? widths : "", fx[0] ? "framexml=" : "", fx);
     FILE *r = popen(cmd, "r");
     char line[1200];
     int seen = 0, done = 0;
@@ -6510,7 +6540,7 @@ static void TestSwitchesLua(void)
         else printf("  lua: %s\n", line);
     }
     int st = r ? pclose(r) : -1;
-    Check(r && done && st == 0 && seen >= 40, "the switches' Lua ran whole under the stubbed UI");
+    Check(r && done && st == 0 && seen >= 60, "the switches' Lua ran whole under the stubbed UI");
 }
 
 /* A real client's WoW.exe: the places the switches use, and the check that keeps a DLL's own functions out of its Lua */
@@ -6547,6 +6577,7 @@ int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
     g_root = argv[1];
+    g_client = argc > 2 ? argv[2] : NULL;
     g_todForce = 720;                                    /* noon (the plain day) unless a test says otherwise */
 
     Fresh("nothing");
