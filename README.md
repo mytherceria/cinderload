@@ -1,6 +1,6 @@
 # CinderLoad
 
-Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client: a living map of Azeroth glides down to where you are going, while a blade of light fills in your class's colour between two purple ravens.
+Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client: a living map of Azeroth glides down to where you are going, while a blade of light fills in your class's colour.
 
 - Every loading screen fills the whole screen instead of sitting in a 4:3 box: 16:10, 16:9, 21:9 and 32:9.
 - Every loading screen is the world map, stitched from the client's own map tiles. As the bar fills, the view zooms in on where you are arriving; for a dungeon, raid or battleground, on its entrance. Cities, zones with their levels, towns, flight paths and every instance entrance are marked, more of them as you get closer.
