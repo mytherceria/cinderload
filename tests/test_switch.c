@@ -5536,7 +5536,8 @@ static void TestGlideState(void)
     g_parchForScreen = -1; g_parchForMap = -2; g_parchWant = g_parchWantCont = -1;
     g_parchScrSeen = -1; g_glide.at = 0; g_glide.tau = 0; g_glide.u0 = 0;
     g_destMap = -1;
-    g_ptry.world = g_ptry.cont = g_ptry.zone = 0; g_pbitsSeq = -1; g_pmadeKnown = -1;
+    g_ptry.world = g_ptry.cont = g_ptry.zone = g_ptry.nearby = 0; g_pbitsSeq = -1; g_pmadeKnown = -1;
+    g_parchNearOn = 0; g_nearZ = -1; g_nearMap = -2;                    /* (the zones nearby: off unless a test asks for them) */
     g_lpWorld.ok = g_lpCont.ok = 0;
     g_pj.state = 0; g_pjUp = -1;
 }
@@ -7969,6 +7970,341 @@ static void TestExplore(void)
     munmap(low, 1 << 16);
 }
 
+/* ---- the zones nearby (11 Oct 2026): every zone whose own land comes within the reach of the arrival, painted and cut
+ * to its land as the arrival's zone is, in one sheet under it, fading by distance from the arrival; the reach from
+ * style.txt's "nearby" line ---- */
+static const unsigned char *TestSheetAt(int map, float x, float y)   /* (the sheet just made, at world x, y) */
+{
+    float fx, fy;
+    ParchSpot(map, x, y, &fx, &fy);
+    const ParchNear *N = &g_pj.nearby;
+    int i = (int)((fx - N->r.x0) / (N->r.x1 - N->r.x0) * (float)g_parchTW), j = (int)((fy - N->r.y0) / (N->r.y1 - N->r.y0) * (float)g_parchTW);
+    static const unsigned char none[4] = { 1, 2, 3, 4 };
+    return i >= 0 && j >= 0 && i < g_parchTW && j < g_parchTW ? g_parchPx + 4 * ((size_t)j * g_parchTW + i) : none;
+}
+static void TestNearChunk(int i, int j, float *x, float *y)          /* (chunk i, j of tile 31_50: its middle, world yards) */
+{
+    *y = (32 - (496 + i + 0.5f) / 16) * PARCH_TILE_YD;
+    *x = (32 - (800 + j + 0.5f) / 16) * PARCH_TILE_YD;
+}
+static void TestNearby(void)
+{
+    /* the fade: whole to half the reach, then smoothly (no step, no kink) to nothing at the reach */
+    int ok = Near(ParchNearFade(0, 1200), 1, 1e-6) && Near(ParchNearFade(600, 1200), 1, 1e-6) && Near(ParchNearFade(900, 1200), 0.5, 1e-5) &&
+             Near(ParchNearFade(1200, 1200), 0, 1e-6) && ParchNearFade(5000, 1200) == 0 && ParchNearFade(0, 0) == 0 && ParchNearFade(10, -5) == 0 &&
+             ParchNearFade(610, 1200) > 0.999f && ParchNearFade(610, 1200) < 1 && ParchNearFade(1190, 1200) < 0.001f && ParchNearFade(1190, 1200) > 0 &&
+             Near(ParchNearFade(300, 600), ParchNearFade(1200, 2400), 1e-6) && Near(ParchNearFade(450, 600), 0.5, 1e-5);
+    float last = 2;
+    for (int d = 0; d <= 1300; d += 5) { float f = ParchNearFade((float)d, 1200); ok &= f <= last + 1e-6f && f >= 0 && f <= 1; last = f; }
+    Check(ok, "the zones nearby fade by distance from the arrival: whole out to half the reach, then smoothly to nothing at the reach and past it (900 of 1200 yards: half); no reach, nothing");
+
+    /* the neighbours: those within the reach, the nearest first, PARCH_NEAR_MAX at most */
+    float yd[9] = { -1, 50, 1300, 400, 10, 400, 900, 1199, 300 };
+    int pick[PARCH_NEAR_MAX];
+    float pyd[PARCH_NEAR_MAX];
+    ok = PARCH_NEAR_MAX == 6 && ParchNearPick(yd, 9, 1200, pick, pyd) == 6 && pick[0] == 4 && pick[1] == 1 && pick[2] == 8 && pick[3] == 3 &&
+         pick[4] == 5 && pick[5] == 6 && pyd[0] == 10 && pyd[5] == 900;
+    ok &= ParchNearPick(yd, 9, 1250, pick, pyd) == 6 && pick[5] == 6;
+    ok &= ParchNearPick(yd, 9, 100, pick, pyd) == 2 && pick[0] == 4 && pick[1] == 1 && ParchNearPick(yd, 9, 50, pick, pyd) == 1;
+    ok &= ParchNearPick(yd, 9, 5, pick, pyd) == 0 && ParchNearPick(yd, 9, 0, pick, pyd) == 0;
+    Check(ok, "the zones nearby: those whose land comes within the reach (not at it), the nearest first, six at most (of seven within 1200 yards, the farthest left out)");
+
+    /* which pages may be neighbours: of the arrival's map, a zone's (not a continent's), not the arrival's zone or another
+     * page of its area, its box near enough, not a page wholly inside another zone's box, not one the arrival's map paints */
+    int pzN = g_pzN, ppN = g_ppN, atN = g_atN, atSorted = g_atSorted;
+    static const struct { const char *n; int id, map, area; float l, r, t, b; } kz[] = {
+        { "Azeroth", 14, 0, 0, 16000, -19200, 7466, -16000 }, { "Elwynn", 30, 0, 12, 1535, -1935, -7939, -10254 },
+        { "Redridge", 36, 0, 44, -1571, -3742, -8575, -10023 }, { "Stormwind", 301, 0, 1519, 1723, -15, -7996, -9154 },
+        { "Entrance", 520, 0, 999, -1600, -1700, -9400, -9500 }, { "Durotar", 4, 1, 14, -1962, -7250, 1808, -1716 },
+        { "Westfall", 39, 0, 40, 3017, -483, -9400, -11733 }, { "Elwynn2", 31, 0, 12, 1535, -1935, -7939, -10254 },
+        { "Far", 37, 0, 33, 100, 0, -14000, -15000 }, { "Lake", 41, 0, 77, 1600, 1400, -9300, -9500 },
+        { "Kalimdor's", 42, 1, 15, -1571, -3742, -8575, -10023 } };
+    g_pzN = (int)(sizeof kz / sizeof kz[0]);
+    for (int i = 0; i < g_pzN; i++) {
+        snprintf(g_pz[i].name, sizeof g_pz[i].name, "%s", kz[i].n);
+        g_pz[i].id = kz[i].id; g_pz[i].map = kz[i].map; g_pz[i].area = kz[i].area;
+        g_pz[i].l = kz[i].l; g_pz[i].r = kz[i].r; g_pz[i].t = kz[i].t; g_pz[i].b = kz[i].b;
+    }
+    memset(g_pp, 0, 2 * sizeof g_pp[0]);
+    g_pp[0].zone = 30; g_pp[0].area[0] = 5000;                          /* (Elwynn's map paints a part of Stormwind's area, */
+    g_pp[1].zone = 30; g_pp[1].area[1] = 77;                            /* and the lake's own) */
+    g_ppN = 2;
+    g_atN = 2; g_atSorted = 1; g_atId[0] = 1519; g_atParent[0] = 0; g_atId[1] = 5000; g_atParent[1] = 1519;
+    int may[11];
+    for (int i = 0; i < 11; i++) may[i] = ParchNearMay(1, i, -9454, -1404, 1200);   /* (Eastvale) */
+    ok = !may[0] && !may[1] && may[2] && !may[4] && !may[5] && !may[7] && !may[8] && !may[9] && !may[10];   /* (10: the other map's,
+                                                                        * its box Redridge's) */
+    ok &= !ParchNearMay(1, 4, -9454, -1404, 50000) && ParchNearMay(1, 2, -9454, -1404, 168) && !ParchNearMay(1, 2, -9454, -1404, 166);
+    ok &= ParchNearMay(1, 6, -9464, 62, 1200) && !ParchNearMay(1, 3, -9464, 62, 1200) && ParchNearMay(2, 3, -9464, 62, 1200) &&
+          ParchNearMay(3, 1, -9464, 62, 1200) && !ParchNearMay(1, 9, -9464, 62, 2000) && ParchNearMay(2, 9, -9464, 62, 2000);
+    ok &= Near(ParchBoxYd(2, -9454, -1404), 167, 1e-3) && ParchBoxYd(1, -9454, -1404) == 0 && Near(ParchBoxYd(8, -13000, 50), 1000, 1e-3);
+    Check(ok, "the zones nearby may be: a zone of the arrival's map whose box comes within the reach, not a continent, the arrival's zone, another page of its area, a page wholly inside another zone's box (an entrance's), nor one whose area (or a part of it) the arrival zone's own pieces paint (Stormwind on Elwynn's map); from Stormwind, Elwynn may");
+    g_pzN = pzN; g_ppN = ppN; g_atN = atN; g_atSorted = atSorted;
+
+    /* the land's distance: to the nearest chunk of its own land (its square), not its sea; none, -1 */
+    {
+        static unsigned char m[9] = { 0, 0, 0, 2, 2, 1, 0, 0, 0 };
+        ParchLand L = { 0 };
+        L.m = m; L.w = 3; L.h = 3; L.gx0 = 496; L.gy0 = 800;
+        float x, y;
+        TestNearChunk(0, 1, &x, &y);
+        ok = Near(LandNearYd(&L, x, y), 1.5f * PARCH_TILE_YD / 16, 1e-2);
+        TestNearChunk(2, 1, &x, &y);
+        ok &= LandNearYd(&L, x, y) == 0;
+        TestNearChunk(0, 4, &x, &y);
+        ok &= Near(LandNearYd(&L, x, y), sqrtf(1.5f * 1.5f + 2.5f * 2.5f) * PARCH_TILE_YD / 16, 1e-2);
+        m[5] = 2;
+        ok &= LandNearYd(&L, x, y) == -1;
+        Check(ok, "a zone's land's distance from the arrival: to the square of its nearest chunk of land (its sea not), none when it has none");
+    }
+
+    /* laid into the sheet: sampled between texels, where two meet the more opaque shows, nothing past its box */
+    {
+        TestPaintNew(1);
+        TestPaintFill(0, 0, 1002, 668, 0xC04020);
+        static unsigned char S[32 * 32 * 4];
+        memset(S, 0, sizeof S);
+        ParchRect r = { 10, 10, 11, 11 }, sr = { 10, 10, 12, 12 };
+        int n = ParchNearLay(S, 32, sr, r);
+        const unsigned char *in = S + 4 * (5 * 32 + 5), *out = S + 4 * (5 * 32 + 20), *in2 = S + 4 * (12 * 32 + 3);
+        ok = n == 16 * 16 && in[0] == 0xC0 && in[1] == 0x40 && in[2] == 0x20 && in[3] == 255 && out[3] == 0 && in2[3] == 255;
+        TestPaintFill(0, 0, 1002, 668, 0x2040C0);
+        for (int y = 0; y < 668; y++) for (int x = 0; x < 1002; x++) g_parchPx[4 * ((size_t)y * g_parchTW + x) + 3] = 128;
+        ParchNearLay(S, 32, sr, r);                                     /* (half clear over the first, whole: the first shows) */
+        float w = powf(128 / 255.0f, 4);
+        ok &= in[3] == 255 && abs(in[0] - (int)((0xC0 + w * 0x20) / (1 + w) + 0.5f)) <= 1 && abs(in[2] - (int)((0x20 + w * 0xC0) / (1 + w) + 0.5f)) <= 1 &&
+              in[0] > 0xB0 && in[2] < 0x30;
+        memset(S, 0, sizeof S);
+        ParchNearLay(S, 32, sr, r);                                     /* (alone: its own colour, its own alpha) */
+        ok &= in[0] == 0x20 && in[2] == 0xC0 && in[3] == 128;
+        for (int y = 0; y < 668; y++) for (int x = 0; x < 1002; x++) {   /* (stripes a texel wide: sampled between them) */
+            unsigned char *p = g_parchPx + 4 * ((size_t)y * g_parchTW + x);
+            p[0] = (unsigned char)(x % 2 ? 0 : 255); p[1] = p[2] = 0; p[3] = 255;
+        }
+        memset(S, 0, sizeof S);
+        ParchRect r3 = { 0, 0, 2, 2 };                                  /* (texel 0: 0.16 of the way from a black stripe to a red) */
+        ParchNearLay(S, 32, r3, r3);
+        ok &= S[0] > 25 && S[0] < 55 && S[3] == 255;
+        Check(ok, "a neighbour laid into the sheet: its painting sampled between texels at its place, nothing past its box; where it is less opaque than what is there already, what is there shows (colours weighted by alpha to the fourth), the alpha the higher; alone, its own colour and alpha");
+        ParchFree();
+    }
+
+    /* the sheet's smaller copies: a half-clear texel keeps its colour (never darkened), a clear one the colour over it */
+    {
+        unsigned char *S = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 4 * 4 * 4);
+        static const unsigned char red[4] = { 200, 20, 10, 255 }, blue[4] = { 10, 20, 200, 255 };
+        memcpy(S, red, 4);
+        for (int y = 2; y < 4; y++) for (int x = 0; x < 4; x++) memcpy(S + 4 * (y * 4 + x), blue, 4);
+        ParchFree();
+        g_parchPx = S; g_parchTW = 4; g_parchSheet = 1;
+        ok = ParchMips() && g_mipLevels == 2;
+        const unsigned char *l1 = ParchLevelPx(1), *l2 = ParchLevelPx(2), *l0 = ParchLevelPx(0);
+        ok &= l1[0] == 200 && l1[1] == 20 && l1[2] == 10 && l1[3] == 64 && l1[4 * 2 + 2] == 200 && l1[4 * 2 + 3] == 255;
+        int r2 = (200 * 64 + 10 * 510 + 287) / 574;                     /* (the whole: by alpha, a quarter red, three blue) */
+        ok &= abs(l2[0] - r2) <= 1 && l2[3] == (64 + 255 + 0 + 255 + 2) / 4;
+        ok &= l0[4 * 1 + 0] == 200 && l0[4 * 4 + 0] == 200 && l0[4 * 1 + 3] == 0;      /* (the clear beside the red: red) */
+        ok &= l1[4 * 1 + 3] == 0 && abs(l1[4 * 1 + 0] - l2[0]) <= 0 && abs(l0[4 * 2 + 0] - l2[0]) <= 0 && abs(l0[4 * 7 + 2] - l2[2]) <= 0;
+        Check(ok, "the sheet's smaller copies: each texel's colour weighted by the alpha under it (a quarter-clear red stays red, never darkened toward the clear), and every clear texel, of the sheet and its copies, given the colour of the copy over it");
+        ParchFree();
+        ok = !g_parchPx && !g_parchSheet && !g_mipPx;
+        TestPaintNew(1); TestPaintFill(0, 0, 1002, 668, 0x808080);
+        g_parchSheet = 0;
+        ok &= ParchMips() && TestPaintAt(1010, 10)[0] == 0x80;          /* (a painting's copies as before: its edge run on) */
+        Check(ok, "the sheet freed with the painting's memory; a painting's copies made as before (its last column run on)");
+        ParchFree();
+    }
+}
+/* the zones nearby made from the client's own files, by the parchment's work: a neighbour painted and cut to its land,
+ * laid in the sheet about the arrival, faded by distance; posted once the arrival's zone is up, drawn under it */
+static void TestNearbyMake(void)
+{
+    Fresh("nearby");
+    GameDir();
+    TestGlideState();
+    g_wmc[0].ok = 0;                                                   /* (the frame: map tiles, no continent's offset) */
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Westfall\0";
+    unsigned wv[3 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+                           30, 0, 12, 9, TestF(533.33333f), TestF(0), TestF(-9600), TestF(-10133.333f),
+                           39, 0, 40, 16, TestF(600), TestF(0), TestF(-9600), TestF(-10133.333f) };
+    static unsigned char wma[256], wmo[256];
+    static const char ostr[] = "\0PIECE\0";                          /* (a piece of Westfall's map, its area 40's) */
+    unsigned ov[17] = { 1, 39, 40, 0, 0, 0, 0, 0, 1, 60, 60, 780, 410 };
+    ParchTables(wma, TestWdbc(wma, 3, 8, wv, wstr, sizeof wstr), wmo, TestWdbc(wmo, 1, 17, ov, ostr, sizeof ostr));
+    unsigned av[3 * 11] = { 0 };
+    static const unsigned arow[3][5] = { { 12, 0, 0, 1, 0x40 }, { 40, 0, 0, 2, 0x40 }, { 87, 0, 12, 3, 0x40 } };
+    for (int i = 0; i < 3; i++) memcpy(av + 11 * i, arow[i], sizeof arow[i]);
+    static unsigned char atb[512];
+    ParchAreas(atb, TestWdbc(atb, 3, 11, av, "\0", 1));
+    static const char mstr[] = "\0Azeroth\0";
+    unsigned mv[3] = { 0, 1, 0 };
+    static unsigned char mpd[64];
+    ParchMaps(mpd, TestWdbc(mpd, 1, 3, mv, mstr, sizeof mstr));
+    g_testAreas = TestLandAreas();                                     /* (Elwynn's land chunks 2..7 x 2..13; Westfall's most of
+                                                                        * the rest of the tile) */
+    g_testSea = NULL; g_testGround = 10; g_testTile[0] = 31; g_testTile[1] = 50;
+    unsigned n0 = TestAdt(g_adt[0], 0, 0, 0, 0, NULL, 0, NULL);
+    static const char *tn[1] = { "World\\Maps\\Azeroth\\Azeroth_31_50.adt" };
+    const char *td[1] = { (const char *)g_adt[0] };
+    MakeMpq("Data/terrain.MPQ", 1, tn, td, &n0);
+    static const char *pn[25];
+    static char pb[25][64];
+    const char *pd[25];
+    unsigned pl[25];
+    for (int i = 0; i < 24; i++) {                                     /* (each zone's twelve tiles, one colour each zone) */
+        snprintf(pb[i], sizeof pb[i], "Interface\\WorldMap\\%s\\%s%d.blp", i < 12 ? "Elwynn" : "Westfall", i < 12 ? "Elwynn" : "Westfall", i % 12 + 1);
+        pn[i] = pb[i];
+        pd[i] = (const char *)TestPalBlp(256, 256, i < 12 ? 0x60A040 : 0x2040C0, 0, &pl[i]);
+    }
+    pn[24] = "Interface\\WorldMap\\Westfall\\PIECE1.blp";             /* (its piece red) */
+    pd[24] = (const char *)TestPalBlp(256, 256, 0xF01010, 0, &pl[24]);
+    MakeMpq("Data/interface.MPQ", 25, pn, pd, pl);
+    g_landPrint = 0;
+    float x, y;
+    TestNearChunk(5, 8, &x, &y);                                       /* (the arrival: on Elwynn's land, 2.5 chunks from Westfall's) */
+
+    /* made: Westfall the one neighbour, 83 yards off; its land whole near the arrival, faded with distance, gone at the reach */
+    ParchNear *N = &g_pj.nearby;
+    const char *why = "";
+    int ok = ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why) && N->n == 1 && N->row[0] == 2 && Near(N->yd[0], 2.5f * PARCH_TILE_YD / 16, 0.05) &&
+             N->laid == 1 && g_parchSheet && g_parchTW == 2048 && g_mipLevels == 11 && g_mipPx && N->tiles == 1 && !N->unread &&
+             Near(N->r.x1 - N->r.x0, 600 / PARCH_TILE_YD, 1e-5) && Near(N->ydTexel, 600.0f / 2048, 1e-4) &&
+             Get("Data/CinderLoad/land-Westfall.bin") != NULL;
+    float cx, cy;
+    TestNearChunk(9, 8, &cx, &cy);                                     /* (Westfall's land, 4 chunks off: 133 yards, whole) */
+    const unsigned char *a = TestSheetAt(0, cx, cy);
+    ok &= a[3] == 255 && abs(a[0] - 0x20) <= 1 && abs(a[1] - 0x40) <= 1 && abs(a[2] - 0xC0) <= 1;
+    TestNearChunk(13, 8, &cx, &cy);                                    /* (8 chunks: 267 yards, an eighth of it left) */
+    a = TestSheetAt(0, cx, cy);
+    int far = a[3];
+    ok &= far > 20 && far < 45 && abs(a[2] - 0xC0) <= 1;
+    ok &= TestSheetAt(0, x, y)[3] == 0;                                /* (the arrival's zone's own land: none of Westfall there) */
+    TestNearChunk(5, 15, &cx, &cy);                                    /* (Westfall's land south, 7 chunks: 233 yards) */
+    a = TestSheetAt(0, cx, cy);
+    ok &= a[3] > 70 && a[3] < 110 && a[2] > 0xB0;
+    TestNearChunk(12, 10, &cx, &cy);                                   /* (its piece: every piece painted, no areas given) */
+    a = TestSheetAt(0, cx, cy);
+    ok &= a[0] > 0xC0 && a[2] < 0x40 && a[3] > 40;
+    Check(ok, "the zones nearby made from the client's files: the one zone whose land is within 300 yards (Westfall, 83 yards off), painted from its own tiles, cut to its land (its land read once and kept), laid in a sheet about the arrival 600 yards a side, whole to 150 yards, fading to nothing at 300; none of it on the arrival zone's own land");
+    ParchFree();
+    static unsigned char bits[EXPLORED_BYTES];                          /* (the areas found: its piece's area not) */
+    ok = ParchNearMake(1, 0, 0, x, y, 300, bits, 1, N, &why);
+    a = TestSheetAt(0, cx, cy);
+    ok &= a[0] < 0x40 && a[2] > 0xB0;
+    ParchFree();
+    bits[0] = 1 << 2;                                                  /* (its area found) */
+    ok &= ParchNearMake(1, 0, 0, x, y, 300, bits, 1, N, &why);
+    a = TestSheetAt(0, cx, cy);
+    ok &= a[0] > 0xC0 && a[2] < 0x40;
+    ParchFree();
+    Check(ok, "the zones nearby painted as the arrival's zone is: only the pieces of each neighbour's map this character has found (a piece whose area is not found left out, its page bare), every piece with the full map");
+    ok = !ParchNearMake(1, 0, 0, x, y, 80, NULL, 1, N, &why) && N->n == 0 && !strcmp(why, "no zone's land within the reach") && !g_parchPx;
+    ok &= !ParchNearMake(1, 0, 0, x, y, 0, NULL, 1, N, &why) && !ParchNearMake(-1, 0, 0, x, y, 300, NULL, 1, N, &why) && !g_parchPx;
+    shim_refuse_size = (size_t)2048 * 2048 * 4; shim_refuse_n = 1;     /* (no memory for its sheet) */
+    ok &= !ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why) && !strcmp(why, "no memory for its sheet") && !g_parchPx && !shim_refuse_n;
+    shim_refuse_n = 0;
+    Check(ok, "the zones nearby: none within the reach (80 yards), no reach or no zone: none made, and why; no memory for the sheet: none, nothing kept");
+
+    /* the work: posted once the arrival's zone is up, run, given to OpenGL, logged; not again for the same arrival, again
+     * for another reach; none with the reach 0 */
+    g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_pjWorker = 0;
+    g_destMap = 0; g_destWX = x; g_destWY = y; g_destZOk = 0; g_scrKnown = 0; g_scrSeq++;
+    TestGlideArrive(0, 1, 0, x, y, 2000);
+    g_zoneK = 1; g_pmadeKnown = 0; g_pmadeFull = g_parchFullOn = 0; g_ptry.cont = g_ptry.zone = 1;
+    g_parchNearOn = 300; g_upN = 0;
+    ParchWork(3000);
+    ok = g_nearZ == 1 && g_viewTex[VT_PNEAR] && g_nearReach == 300 && g_nearMap == 0 && g_nearX == x && g_nearY == y && g_upN == 1 &&
+         g_upOrder[0] == VT_PNEAR && g_nearTW == 2048 && !g_parchPx && !g_parchSheet && g_nearAt == 3000 &&
+         LogSays("the zones nearby within 300 yards of the arrival, under Elwynn: Westfall 83 yd (1 of 1 laid), in a 2048-texel sheet (0.2 yards a texel), whole to 150 yards and gone at 300; their explored areas not known");
+    ParchWork(3100);
+    ok &= g_upN == 1 && g_nearAt == 3000;
+    g_ptry.nearby = 0;                                                 /* (the next screen, the same arrival: kept, not made again) */
+    ParchWork(3150);
+    ok &= g_upN == 1 && g_nearAt == 3000 && g_nearZ == 1;
+    g_ptry.nearby = 0; g_parchNearOn = 200;                            /* (another reach chosen) */
+    ParchWork(3200);
+    ok &= g_upN == 2 && g_nearReach == 200 && g_nearAt == 3200;
+    g_ptry.nearby = 0; g_parchNearOn = 70;
+    ParchWork(3300);
+    ParchWork(3400);
+    ok &= g_upN == 2 && g_nearZ == -1 && LogSays("no zones nearby within 70 yards of the arrival (no zone's land within the reach)");
+    {
+        const char *lg = Get("Logs/CinderLoad.log"), *f = lg ? strstr(lg, "no zones nearby within 70 yards") : NULL;
+        ok &= f && !strstr(f + 1, "no zones nearby within 70 yards");                /* (tried once for this arrival) */
+    }
+    g_ptry.nearby = 0; g_parchNearOn = 0;
+    ParchWork(3500);
+    ok &= g_upN == 2 && g_nearZ == -1 && !LogSays("within 0 yards");
+    g_ptry.nearby = 0; g_parchNearOn = 300; g_parchZone = -1;            /* (its zone not up: tried and not made) */
+    ParchWork(3540);
+    ok &= g_upN == 2 && g_nearZ == -1 && g_pj.state == 0;
+    g_parchZone = 1;
+    ParchWork(3550);
+    ok &= g_upN == 3 && g_nearZ == 1;
+    TestGlideArrive(0, 1, 0, x + 20, y, 2000);                         /* (the next screen, another arrival in the zone) */
+    g_destWX = x + 20; g_ptry.nearby = 0;
+    ParchWork(3560);
+    ok &= g_upN == 4 && g_nearZ == 1 && g_nearX == x + 20;
+    TestGlideArrive(0, 1, 0, x, y, 2000);
+    g_destWX = x; g_ptry.nearby = 0;
+    ParchWork(3570);
+    ok &= g_upN == 5 && g_nearX == x;
+    Check(ok, "the zones nearby, by the parchment's work: once the arrival's zone is up, made and given to OpenGL and logged (each one, its distance, the sheet); not again for the same arrival, again for another reach or another arrival; none within it: logged once and not tried again for this arrival; reach 0: none; its zone not up: none");
+    /* the areas found, as the screen began, or the full map: as the zone's own (the sheet as it went up to OpenGL) */
+    TestGl(1);
+    g_viewTex[VT_PNEAR] = 0;
+    memset(g_scrBits, 0, EXPLORED_BYTES); g_scrKnown = 1; g_scrSeq++; g_ptry.nearby = 0;
+    for (int f = 0; f < 400 && !(g_nearZ == 1 && g_nearKnown == 1); f++) ParchWork(4000 + 10 * (DWORD)f);
+    float pfx, pfy;
+    TestNearChunk(12, 10, &cx, &cy);
+    ParchSpot(0, cx, cy, &pfx, &pfy);
+    int pi = (int)((pfx - g_nearRect.x0) / (g_nearRect.x1 - g_nearRect.x0) * (float)g_nearTW), pj = (int)((pfy - g_nearRect.y0) / (g_nearRect.y1 - g_nearRect.y0) * (float)g_nearTW);
+    const unsigned char *up = g_tgl[VT_PNEAR].lv[0] ? g_tgl[VT_PNEAR].lv[0] + 4 * ((size_t)pj * g_nearTW + pi) : NULL;
+    ok = g_nearZ == 1 && g_nearKnown == 1 && !g_nearFull && up && up[0] < 0x40 && up[2] > 0xB0 && LogSays("Westfall 83 yd (1 of 1 laid)") &&
+         LogSays("the rest not found by this character");
+    g_parchFullOn = 1; g_ptry.nearby = 0;
+    for (int f = 0; f < 400 && !(g_nearZ == 1 && g_nearFull == 1); f++) ParchWork(9000 + 10 * (DWORD)f);
+    up = g_tgl[VT_PNEAR].lv[0] ? g_tgl[VT_PNEAR].lv[0] + 4 * ((size_t)pj * g_nearTW + pi) : NULL;
+    ok &= g_nearFull == 1 && up && up[0] > 0xC0 && up[2] < 0x40 && LogSays("the full map chosen, made in");
+    Check(ok, "the zones nearby by the parchment's work: the pieces this character has found, as the screen began (a piece not found left out), every piece with the full map; the sheet given to OpenGL a strip a frame");
+    TestGl(0);
+    g_parchFullOn = 0; g_scrKnown = 0; g_scrSeq++; g_viewTex[VT_PNEAR] = 1;
+
+    /* drawn under the arrival's zone, over its continent, coming up with the zone; not for another arrival, nor with reach 0 */
+    g_parchNearOn = 300; g_nearZ = -1; g_ptry.nearby = 0;
+    ParchWork(3600);
+    ok = g_nearZ == 1;
+    int seen = 0, both = 1, part = 0;
+    TestGlideArrive(0, 1, 0, x, y, 2000);
+    ViewBuild(1920, 1080, 0.0f, 4000);                                 /* (the glide begun with the bar) */
+    for (int k = 1; k <= 20; k++) {
+        ViewBuild(1920, 1080, 0.05f * (float)k, 4000 + 300 * (DWORD)k);
+        int nb = TestBatch(VT_PNEAR), zb = TestBatch(VT_PARCH), cb = TestBatch(VT_PARCH2);
+        both &= (nb < 0) == (zb < 0);
+        if (nb < 0 || zb < 0) continue;
+        seen++;
+        const ViewVert *nv = TestVertNear(nb, g_pcam.px, g_pcam.py), *zv = TestVertNear(zb, g_pcam.px, g_pcam.py);   /* (at the arrival) */
+        both &= cb < nb && nb < zb && abs(nv->c[3] - zv->c[3]) <= 1;
+        part += nv->c[3] > 0 && nv->c[3] < 255;
+    }
+    ok &= both && seen >= 3 && part >= 1;
+    ok &= TestBatch(VT_PNEAR) >= 0 && TestVertNear(TestBatch(VT_PNEAR), 960, 540)->c[3] == 255;
+    TestGlideArrive(0, 1, 0, x + 10, y, 2000);                         /* (another arrival: its own sheet, not this one) */
+    ViewBuild(1920, 1080, 0.0f, 5000);
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
+    TestGlideArrive(0, 1, 0, x, y, 2000);
+    g_parchNearOn = 0;
+    ViewBuild(1920, 1080, 0.0f, 5000);
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
+    Check(ok, "the zones nearby drawn under the arrival's zone and over its continent, coming up with the zone (the same alpha at the arrival all the way in, whole at the landing); not for another arrival, nor with reach 0");
+
+    g_parchNearOn = 0; g_nearZ = -1;
+    g_testAreas = NULL; g_testGround = -1e30f; g_testTile[0] = g_testTile[1] = 0;
+    ParchLandFree(&g_land); ParchFree();
+    g_mapDirN = 0; g_waN = 0;
+    TestGlideState();
+}
 /* ---- the style: the map and the bar, each the player's (his decision, 10 Oct 2026), and the world map's switches ---- */
 #define STYLE_REL "Data/CinderLoad/style.txt"
 static void TestStyle(void)
@@ -9081,6 +9417,8 @@ int main(int argc, char **argv)
     TestGlide();
     TestModeTurn();
     TestExplore();
+    TestNearby();
+    TestNearbyMake();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
