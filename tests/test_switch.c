@@ -5975,6 +5975,8 @@ static unsigned char g_adt[2][256 * 1024];
 static float g_testGround = -1e30f;                                    /* (above -1e29: every chunk flat at this height, its MCVT) */
 static int g_testTile[2], g_testOcean;                                 /* (the tile's column and row, for the chunks' places; their
                                                                         * flags: ocean) */
+static const unsigned *g_testAreas;                                    /* (each chunk's area, 16 x 16, when given) */
+static const unsigned char *g_testSea;                                 /* (each chunk the sea's: ocean, 5 under its level) */
 static unsigned TestAdt(unsigned char *out, int cx, int cy, unsigned area, unsigned others, const unsigned char *modf, unsigned nModf,
                         const char *wmoName)
 {
@@ -5994,9 +5996,9 @@ static unsigned TestAdt(unsigned char *out, int cx, int cy, unsigned area, unsig
     for (int j = 0; j < 16; j++)
         for (int i = 0; i < 16; i++) {                                 /* every chunk: its header, its place, its area */
             unsigned size = hs + 8 + (hv ? 8 + 145 * 4 : 0), h[2] = { ADT_MCNK, size }, head[32] = { 0 };
-            int sea = 0;
-            head[0] = g_testOcean ? 0x8 : 0;
-            head[1] = (unsigned)i; head[2] = (unsigned)j; head[13] = i == cx && j == cy ? area : others;
+            int sea = g_testSea && g_testSea[j * 16 + i];
+            head[0] = g_testOcean || sea ? 0x8 : 0;
+            head[1] = (unsigned)i; head[2] = (unsigned)j; head[13] = g_testAreas ? g_testAreas[j * 16 + i] : i == cx && j == cy ? area : others;
             if (hv) {
                 float px = (32 - g_testTile[1]) * 533.33333f - j * 33.333333f, py = (32 - g_testTile[0]) * 533.33333f - i * 33.333333f;
                 float hz = sea ? -5.0f : g_testGround;
@@ -6295,10 +6297,240 @@ static void TestCut(void)
     ok = ParchCut(&g_linesWorld, rw, cs, 3, 1, &share, &why) && TestPaintAt(200, 200)[3] == 255 && TestPaintAt(500, 300)[3] == 255 &&
          TestPaintAt(800, 600)[3] == 0 && TestPaintAt(350, 200)[3] == 0 && share > 0.1f && share < 0.2f;
     Check(ok, "the cut, a continent over the world: every piece of its land a seed finds (two islands here), the sea a seed leaks into left out");
+    /* the outline's own checks (a page with no land of its own, an instance's map, is still cut so; the skeptic's three
+     * mutants on 89d75cf): the box 250..650 x 150..450 of the painting under it, its crop 46..854 x -4..604 */
+    float one[2] = { 450, 300 };
+    TestPaintNew(1);                                                  /* (a region far bigger than its box: not the zone alone) */
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(60, 20, 840, 580, 0x302010); TestPaintFill(64, 24, 836, 576, 0xC8A060);
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    TestPaintNew(1); TestPaintFill(0, 0, 1002, 668, 0x80C040);
+    ok = ParchCut(&g_linesCont, rz, one, 1, 0, &share, &why) && g_cutBoxed;
+    TestPaintNew(1);                                                  /* (only a lake found: too little to be the zone) */
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(400, 280, 440, 320, 0x302010); TestPaintFill(404, 284, 436, 316, 0xC8A060);
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+    TestPaintNew(1); TestPaintFill(0, 0, 1002, 668, 0x80C040);
+    float pond[2] = { 420, 300 };
+    ok &= !ParchCut(&g_linesCont, rz, pond, 1, 0, &share, &why) && strstr(why, "too little");
+    TestPaintNew(1);                                                  /* (its region grown into a faint border line out to the crop's
+                                                                       * edge: not trusted) */
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    TestPaintFill(47, 150, 400, 452, 0x585850); TestPaintFill(49, 152, 398, 450, 0xC8A060);
+    ParchLinesKeep(&g_linesCont, rc, -1, 1);
+    TestPaintNew(1); TestPaintFill(0, 0, 1002, 668, 0x80C040);
+    float west[2] = { 300, 300 };
+    ok &= ParchCut(&g_linesCont, rz, west, 1, 0, &share, &why) && g_cutBoxed;
+    Check(ok, "the outline (a page with no land of its own): a fill far bigger than its box, one too small to be the zone, or a region grown out to the crop's edge is not trusted: kept to its box, or none");
     if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
     if (g_linesWorld.m) HeapFree(GetProcessHeap(), 0, g_linesWorld.m);
     g_linesCont.m = g_linesWorld.m = NULL;
     ParchFree();
+}
+/* A zone's land as its terrain gives it, and the cut to it (his rule, 11 Oct: the cut must not "take away anything from
+ * inside the zone"; the skeptic's finds: its own town cut away, a cut run on past its edge). One tile (31_50) is the
+ * zone's box: its chunks 62.6 texels across and 41.75 down on its 256-px painting, 20.9 x 13.9 on its continent's (a
+ * painting three tiles each way, the zone's in the middle). */
+static const unsigned *TestLandAreas(void)
+{
+    static unsigned a[256];
+    for (int j = 0; j < 16; j++)
+        for (int i = 0; i < 16; i++) {
+            unsigned v = 40;                                           /* (its neighbour's) */
+            if (i >= 2 && i < 8 && j >= 2 && j < 14) v = 87;           /* (its land: a town's area, its zone Elwynn's) */
+            if (i >= 2 && i < 8 && j == 14) v = 12;                    /* (its own sea) */
+            if (i >= 11 && i < 13 && j >= 3 && j < 5) v = 12;          /* (an island of its own) */
+            a[j * 16 + i] = v;
+        }
+    return a;
+}
+/* the continent's painting (1002 x 668 over 3 x 3 tiles): parchment, the zone's border a 4-texel line in ink 0.4 of a
+ * chunk past its land (P x 368..512, y 244..426); what: 0 closed, a river across its land; 1 a 20-texel gap on the right
+ * into a neighbour closed off inside the crop; 2 a 6-texel gap into a corridor running out past the crop; 3 its region all
+ * ink but a pocket at its left edge */
+static void TestLandCont(int what)
+{
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0xC8A060);
+    if (what == 3) {
+        TestPaintFill(350, 232, 524, 440, 0x302010);
+        TestPaintFill(362, 296, 388, 316, 0xC8A060);
+    } else {
+        TestPaintFill(368, 244, 512, 426, 0x302010);
+        TestPaintFill(372, 248, 508, 422, 0xC8A060);
+        if (what == 0) TestPaintFill(440, 248, 443, 422, 0x302010);
+        if (what == 1) {
+            TestPaintFill(508, 230, 704, 440, 0x302010); TestPaintFill(512, 234, 700, 436, 0xC8A060);
+            TestPaintFill(508, 320, 512, 340, 0xC8A060);
+        }
+        if (what == 2) {
+            TestPaintFill(508, 316, 1002, 331, 0x302010); TestPaintFill(508, 320, 1002, 327, 0xC8A060);
+        }
+        if (what == 4) {                                               /* (its right border two chunks past its land) */
+            TestPaintFill(508, 248, 512, 422, 0xC8A060);
+            TestPaintFill(512, 244, 547, 248, 0x302010); TestPaintFill(512, 422, 547, 426, 0x302010); TestPaintFill(543, 244, 547, 426, 0x302010);
+        }
+    }
+    ParchRect rc = { 29.3125f, 37.875f, 32.3125f, 40.875f };
+    ParchLinesKeep(&g_linesCont, rc, 0, 1);
+}
+/* another archive (a patch with one small file of its own: the archives' print differs) */
+static void TestLandPatch(const char *rel, const char *text)
+{
+    static const char *nm[1] = { "Interface\\Test\\x.txt" };
+    const char *d[1] = { text };
+    unsigned l[1] = { (unsigned)strlen(text) };
+    MakeMpq(rel, 1, nm, d, l);
+    g_landPrint = 0;
+}
+static void TestLandPaint(void)
+{
+    TestPaintNew(1);
+    TestPaintFill(0, 0, 1002, 668, 0x80C040);
+}
+static void TestLand(void)
+{
+    Fresh("land");
+    GameDir();
+    TestGlideState();
+    g_wmc[0].ok = 0;                                                   /* (the frame: map tiles, no continent's offset) */
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Ironforge\0";
+    unsigned wv[3 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+                           30, 0, 12, 9, TestF(533.33333f), TestF(0), TestF(-9600), TestF(-10133.333f),
+                           341, 0, 1537, 17, TestF(533.33333f), TestF(0), TestF(-9600), TestF(-10133.333f) };
+    static unsigned char wma[256];
+    unsigned wn = TestWdbc(wma, 3, 8, wv, wstr, sizeof wstr);
+    ParchTables(wma, wn, NULL, 0);
+    unsigned av[5 * 11] = { 0 };
+    static const unsigned arow[5][5] = { { 12, 0, 0, 1, 0x40 }, { 40, 0, 0, 2, 0x40 }, { 87, 0, 12, 3, 0x40 }, { 1537, 0, 0, 4, 0x138 }, { 9, 0, 1537, 5, 0 } };
+    for (int i = 0; i < 5; i++) memcpy(av + 11 * i, arow[i], sizeof arow[i]);
+    static unsigned char atb[512];
+    unsigned an = TestWdbc(atb, 5, 11, av, "\0", 1);
+    ParchAreas(atb, an);
+    static const char mstr[] = "\0Azeroth\0";
+    unsigned mv[3] = { 0, 1, 0 };
+    static unsigned char mpd[64];
+    ParchMaps(mpd, TestWdbc(mpd, 1, 3, mv, mstr, sizeof mstr));
+    unsigned wav[11] = { 1, 208, 0, 0xFFFFFFFFu, 0, 0, 0, 0, 0, 0, 1537 };
+    static unsigned char wat[128];
+    ParchWmoAreas(wat, TestWdbc(wat, 1, 11, wav, "\0", 1));
+    g_testAreas = TestLandAreas();
+    static unsigned char sea[256];
+    for (int i = 2; i < 8; i++) sea[14 * 16 + i] = 1;
+    g_testSea = sea; g_testGround = 10; g_testTile[0] = 31; g_testTile[1] = 50;
+    unsigned n0 = TestAdt(g_adt[0], 0, 0, 0, 0, NULL, 0, NULL);
+    static const char *tn[1] = { "World\\Maps\\Azeroth\\Azeroth_31_50.adt" };
+    const char *td[1] = { (const char *)g_adt[0] };
+    unsigned tl[1] = { n0 };
+    MakeMpq("Data/terrain.MPQ", 1, tn, td, tl);
+    g_landPrint = 0;
+
+    /* its land: the chunks of its box whose area's zone is its own, the sea not; kept in its file, read back from it */
+    ParchLand L = { 0 };
+    const char *why = "";
+    int ok = ParchLandMake(1, &L, &why) && L.n == 6 * 12 + 2 * 2 && L.tiles == 1 && !L.fromFile && L.gx0 == 495 && L.gy0 == 799 &&
+             LandOwn(&L, 496 + 2, 800 + 2) && LandOwn(&L, 496 + 7, 800 + 13) && !LandOwn(&L, 496 + 8, 800 + 2) && !LandOwn(&L, 496 + 1, 800 + 2) &&
+             LandOwn(&L, 496 + 11, 800 + 3) && !LandOwn(&L, 496 + 3, 800 + 14) && L.m[(800 + 14 - 799) * L.w + 496 + 3 - 495] == 2 &&
+             Get("Data/CinderLoad/land-Elwynn.bin") != NULL;
+    ParchLand L2 = { 0 };
+    ok &= ParchLandMake(1, &L2, &why) && L2.fromFile && L2.n == L.n && L2.tiles == 0 && !memcmp(L2.m, L.m, (size_t)L.w * L.h);
+    TestLandPatch("Data/patch-2.MPQ", "x");                            /* (another archive: the print differs, made again) */
+    ok &= ParchLandMake(1, &L2, &why) && !L2.fromFile && L2.n == L.n;
+    g_pz[1].t = -9500;                                                 /* (another box: made again) */
+    ok &= ParchLandMake(1, &L2, &why) && !L2.fromFile && L2.n == L.n;
+    g_pz[1].t = -9600;
+    ok &= ParchLandMake(1, &L2, &why) && !L2.fromFile;
+    ok &= ParchLandMake(1, &L2, &why) && L2.fromFile;
+    Check(ok, "a zone's land as its terrain gives it: every chunk of its box whose area's zone is its own (a town's, an island's), not the sea under its own coast's area; made once and kept in Data/CinderLoad/land-<zone>.bin, read back from it while the client's archives and its box are as they were, made again when either changes");
+    /* a city inside its building: its placement's chunks */
+    static unsigned char modf[64];
+    TestModf(modf, -9900, 200, -9800, 300, 0);
+    g_testAreas = NULL; g_testSea = NULL;
+    unsigned n1 = TestAdt(g_adt[1], 0, 0, 40, 40, modf, 1, "World\\wmo\\Test\\City.wmo");
+    unsigned wl[2];
+    TestWmo(7, 0x20, wl);
+    static const char *wn2[3] = { "World\\Maps\\Azeroth\\Azeroth_31_50.adt", "World\\wmo\\Test\\City.wmo", "World\\wmo\\Test\\City_000.wmo" };
+    const char *wd[3] = { (const char *)g_adt[1], (const char *)g_wmoRoot, (const char *)g_wmoGroup };
+    unsigned wl3[3] = { n1, wl[0], wl[1] };
+    MakeMpq("Data/terrain.MPQ", 1, wn2, wd, wl3);
+    MakeMpq("Data/wmo.MPQ", 2, wn2 + 1, wd + 1, wl3 + 1);
+    g_landPrint = 0;
+    ParchLand Lc = { 0 };
+    float gx, gy;
+    LandChunkAt(-9850, 250, &gx, &gy);
+    ok = ParchLandMake(2, &Lc, &why) && Lc.n >= 9 && Lc.n <= 16 && LandOwn(&Lc, (int)gx, (int)gy) && !LandOwn(&Lc, (int)gx + 5, (int)gy);
+    g_waArea[0] = 40;                                                  /* (its building another zone's: none) */
+    TestLandPatch("Data/patch-3.MPQ", "xy");
+    ok &= ParchLandMake(2, &Lc, &why) && Lc.n == 0;
+    g_waArea[0] = 1537;
+    Check(ok, "a city inside its building (Ironforge, Undercity: no terrain of its own): its land the chunks its building's placement covers, when the building's WMOAreaTable rows name the city's area");
+    ParchLandFree(&Lc); ParchLandFree(&L2);
+    MakeMpq("Data/terrain.MPQ", 1, tn, td, tl);
+    TestLandPatch("Data/patch-3.MPQ", "xyz");
+    g_testAreas = TestLandAreas(); g_testSea = sea;
+    ParchLandMake(1, &L, &why);
+
+    /* the cut to it: its land whole, the outline refining its edge within a chunk, nothing far past it */
+    ParchRect rz = ParchBox(1);
+    float share = 0;
+    int held = 0;
+    TestLandCont(0);
+    TestLandPaint();
+    ok = ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held >= 2;
+    int whole = 1;
+    for (int y = 84; y < 584; y += 9) for (int x = 126; x < 500; x += 9) if (TestPaintAt(x, y)[3] != 255) whole = 0;   /* (its land: whole, the river too) */
+    for (int y = 126; y < 208; y += 9) for (int x = 690; x < 813; x += 9) if (TestPaintAt(x, y)[3] != 255) whole = 0;   /* (its island, no outline round it) */
+    ok &= whole && TestPaintAt(118, 300)[3] == 255 && TestPaintAt(100, 300)[3] < 255 && TestPaintAt(60, 300)[3] == 0 &&   /* (its outline 11 texels past its land) */
+          TestPaintAt(300, 595)[3] == 255 && TestPaintAt(300, 625)[3] < 255 && TestPaintAt(900, 350)[3] == 0 && share > 0.25f && share < 0.4f;
+    TestLandCont(4);                                                   /* (an outline drawn two chunks past its land: a chunk of it) */
+    TestLandPaint();
+    ok &= ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held >= 1 && TestPaintAt(540, 300)[3] == 255 && TestPaintAt(600, 300)[3] < 128;
+    Check(ok, "the cut to its land: every texel of the zone's land whole (crossed by a river in ink, an island with no outline round it); past it, the outline its continent's painting draws refines its edge within a chunk, never further; its own sea and its neighbour's land past the grown margin, nothing");
+    /* a fill that runs through a gap into a neighbour (closed off inside the crop) is not the zone's: its land alone */
+    TestLandCont(1);
+    TestLandPaint();
+    ok = ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held == 0;
+    ok &= TestPaintAt(118, 300)[3] < 255 && TestPaintAt(140, 300)[3] == 255 && TestPaintAt(540, 300)[3] < 128;
+    /* one that runs on out of the crop (a corridor, little of it far): not the zone's either */
+    TestLandCont(2);
+    TestLandPaint();
+    ok &= ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held == 0 && TestPaintAt(118, 300)[3] < 255 && TestPaintAt(140, 300)[3] == 255;
+    /* a fill that finds only a pocket (a lake, a town in ink): too little of the land to trust */
+    TestLandCont(3);
+    TestLandPaint();
+    ok &= ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && held == 0 && TestPaintAt(110, 250)[3] < 255 && TestPaintAt(140, 250)[3] == 255;
+    Check(ok, "the cut stops at the zone's edge: a fill that runs through a gap in its border into a neighbour (much of it more than three chunks from its land), or on out past the crop, or that finds only a pocket of it is not trusted: its land alone, whole, the rest in the margin");
+    /* its overlay pieces as the client lays them, whole wherever they lie (a capital's piece on its zone's map) */
+    TestLandCont(0);
+    TestLandPaint();
+    g_pieceA = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)g_parchTW * g_parchTW);
+    for (int y = 280; y < 320; y++) for (int x = 880; x < 940; x++) g_pieceA[y * g_parchTW + x] = 200;
+    for (int y = 280; y < 320; y++) for (int x = 950; x < 960; x++) g_pieceA[y * g_parchTW + x] = 100;
+    ok = ParchLandCut(&g_linesCont, 0, rz, &L, &share, &held, &why) && TestPaintAt(910, 300)[3] == 255 && TestPaintAt(955, 300)[3] < 255 &&
+         TestPaintAt(900, 450)[3] == 0;
+    HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL;
+    Check(ok, "the cut to its land keeps the zone's overlay pieces whole where the client lays them (their alpha half or more): the map it shows for the zone, a capital's piece on its zone's map too");
+    /* the work: a zone with land cut to it (and logged), one with none the outline as before */
+    g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_destZOk = 0;
+    TestLandCont(0);
+    ParchZoneMade(1, 0, 30.8f, 39.3f, &why);
+    ok = g_zoneCut && g_cutLand && g_land.n == L.n;
+    g_testAreas = NULL; g_testSea = NULL;
+    n0 = TestAdt(g_adt[0], 0, 0, 40, 40, NULL, 0, NULL);
+    tl[0] = n0;
+    MakeMpq("Data/terrain.MPQ", 1, tn, td, tl);
+    TestLandPatch("Data/patch-3.MPQ", "xyzw");
+    TestLandPaint();
+    ParchZoneMade(1, 0, 30.8f, 39.3f, &why);
+    ok &= !g_cutLand && g_land.n == 0;
+    Check(ok, "the zone's cut: to its land when its terrain gives it some; none (an instance's map), the outline as before");
+    ParchLandFree(&L); ParchLandFree(&g_land);
+    g_testGround = -1e30f; g_testTile[0] = g_testTile[1] = 0;
+    if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
+    g_linesCont.m = NULL;
+    ParchFree();
+    g_mapDirN = 0; g_waN = 0;
+    TestGlideState();
 }
 /* The continent's name, one label in one place (his note, 11 Oct): the world's kept, cut out of its painting; the
  * continent's own painted out of its painting with the world's painting there */
@@ -7196,6 +7428,7 @@ int main(int argc, char **argv)
     TestParchment();
     TestZoneRule();
     TestCut();
+    TestLand();
     TestWords();
     TestGlide();
     TestModeTurn();

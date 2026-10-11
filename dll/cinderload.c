@@ -8322,7 +8322,9 @@ static unsigned char *ParchTile(const char *folder, const char *name, int n, uns
     HeapFree(GetProcessHeap(), 0, d);
     return out;
 }
-/* src (sw x sh RGBA) over the painting at x, y, as far as cw x ch of it, blended by its alpha (opaque when solid). */
+/* src (sw x sh RGBA) over the painting at x, y, as far as cw x ch of it, blended by its alpha (opaque when solid); an
+ * overlay piece's alpha kept too (g_pieceA, a byte a texel at the painting's stride: the most of any piece's there). */
+static unsigned char *g_pieceA;
 static void ParchPut(const unsigned char *src, unsigned sw, unsigned sh, int x, int y, int cw, int ch, int solid)
 {
     for (int j = 0; j < ch && j < (int)sh; j++) {
@@ -8336,6 +8338,8 @@ static void ParchPut(const unsigned char *src, unsigned sw, unsigned sh, int x, 
             unsigned a = solid ? 255u : s[3];
             for (int c = 0; c < 3; c++) o[c] = (unsigned char)((s[c] * a + o[c] * (255u - a) + 127u) / 255u);
             o[3] = 255;
+            unsigned char *pa = g_pieceA ? g_pieceA + (unsigned)py * (unsigned)g_parchTW + (unsigned)px : NULL;
+            if (!solid && pa && *pa < a) *pa = (unsigned char)a;
         }
     }
 }
@@ -8401,6 +8405,9 @@ static int ParchMakeNamed(const char *name, int id, int z, const char **why)
     }
     if (have < 12) { *why = "its twelve tiles are not all in the client's archives"; return 0; }
     ParchSeams(T, PARCH_MAP_W * g_parchK, PARCH_MAP_H * g_parchK);
+    if (g_pieceA) { HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL; }
+    if (z >= 0 && g_pz[z].area)                                    /* (a zone's: where its pieces lie, for its cut) */
+        g_pieceA = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)g_parchTW * (SIZE_T)g_parchTW);
     for (int p = 0; p < g_ppN; p++) {                             /* the overlay pieces, as the world map lays them */
         const ParchPiece *P = &g_pp[p];
         if (P->zone != id) continue;
@@ -8906,6 +8913,7 @@ static int ParchMips(void)
 static void ParchFree(void)
 {
     if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
+    if (g_pieceA) { HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL; }
     if (g_mipPx) { HeapFree(GetProcessHeap(), 0, g_mipPx); g_mipPx = NULL; }
     g_mipLevels = 0;
 }
@@ -9001,6 +9009,212 @@ static int ParchMatch(const ParchLow *L, ParchRect rf)
         }
     }
     HeapFree(GetProcessHeap(), 0, g);
+    return 1;
+}
+/* ---- a zone's land, as the client's terrain gives it (his rule, 11 Oct 2026: the cut must not "take away anything
+ * from inside the zone"; the skeptic's find: cut by its continent's lines alone it lost up to a quarter of its own map,
+ * the arrival's own town among it at Menethil and Theramore) ----
+ * Each map tile's file holds 16 x 16 chunks (33 1/3 yards each) and each chunk says its area (AdtArea): the zone's land
+ * is every chunk of its box whose area's zone (AreaZone) is the zone's own, but the sea: a chunk the terrain marks as
+ * ocean (its header's flag 0x8) and that lies wholly under the sea's level (its highest point at most 0) is the sea's,
+ * though its area is the coast's. On a grid of the map's chunks (gx = 16 x the tile's column and the chunk's in it, gy
+ * the same down: 1024 each way), over the zone's box and ParchLandMargin past it. Read once a zone from the client's
+ * own files (terrain.MPQ and its patches, newest first, read only) and kept in Data\CinderLoad\land-<zone>.bin, with a
+ * print of the archives (their sizes) and the box it was made for; another print, another box: made again. The zone's
+ * cut keeps every texel of its land whole (ParchLandCut), and the same grid, chunk for chunk, is each zone's share of the
+ * map: no chunk is two zones' land. */
+#define LAND_MAGIC      0x444E4C43u   /* "CLND" */
+#define LAND_VERSION    1
+#define LAND_CHUNKS     1024          /* the map's chunks across and down (64 tiles of 16) */
+#define ADT_OCEAN       0x8u          /* a chunk's header flags: ocean */
+typedef struct { int z, gx0, gy0, w, h, n, tiles, fromFile; unsigned char *m; } ParchLand;   /* m: w x h, 1 the zone's own land,
+                                                       * 2 its own sea (its area's, under the sea); n: its land's chunks */
+static ParchLand g_land;                      /* the land of the zone last cut */
+static unsigned g_landPrint;                  /* the archives' print (their sizes), once a session; 0 not yet */
+/* The client's terrain archives' print: each archive the terrain may come from (as ClientPicture tries them) and its
+ * size, hashed; never 0. */
+static unsigned LandPrint(void)
+{
+    if (g_landPrint) return g_landPrint;
+    static const char kOrder[] = "ZYXWVUTSRQPONMLKJIHGFEDCBA98765432";
+    char arch[16];
+    unsigned h = 2166136261u;
+    for (int a = 0; a <= (int)sizeof kOrder + 1; a++) {
+        if (a < (int)sizeof kOrder - 1) { lstrcpyA(arch, "patch-?.MPQ"); arch[6] = kOrder[a]; }
+        else lstrcpyA(arch, a == (int)sizeof kOrder - 1 ? "patch.MPQ" : a == (int)sizeof kOrder ? "terrain.MPQ" : "dbc.MPQ");
+        void *f = IoOpen(NULL, arch);
+        unsigned long long n = f ? IoSize(NULL, f) : 0;
+        if (f) IoClose(NULL, f);
+        for (int i = 0; arch[i]; i++) h = (h ^ (unsigned char)arch[i]) * 16777619u;
+        for (int k = 0; k < 8; k++) h = (h ^ (unsigned)((n >> (8 * k)) & 0xFF)) * 16777619u;
+    }
+    g_landPrint = h ? h : 1;
+    return g_landPrint;
+}
+/* A tile's 256 chunks (t: World\Maps\<folder>\<folder>_<tx>_<ty>.adt): each one's area (0 none) and whether it is dry
+ * (not the sea, above): 1 when the tile was read. */
+static int LandTile(const char *dir, int tx, int ty, int *area, unsigned char *dry)
+{
+    char path[160];
+    wsprintfA(path, "World\\Maps\\%s\\%s_%d_%d.adt", dir, dir, tx, ty);
+    unsigned char *d = NULL;
+    unsigned n = 0, sz = 0;
+    const char *from;
+    if (!ClientPicture(path, "terrain.MPQ", &d, &n, &from)) return 0;
+    unsigned in = AdtChunk(d, n, ADT_MCIN, &sz);
+    for (int c = 0; c < 256; c++) {
+        area[c] = AdtArea(d, n, c % 16, c / 16);
+        if (area[c] < 0) area[c] = 0;
+        dry[c] = 1;
+        unsigned at = in && sz >= 256 * 16 ? Rd32(d + in + 16 * (unsigned)c) : 0;
+        if (!at || at > n || n - at < 8 + 0x74) continue;
+        const unsigned char *h = d + at + 8;
+        unsigned oh = Rd32(h + 0x14);
+        if (!(Rd32(h) & ADT_OCEAN) || oh > n - at || n - at - oh < 8 + 145 * 4 || Rd32(d + at + oh) != ADT_MCVT) continue;
+        float base = DbcFloat(h + 0x70), top = -1e30f;
+        for (int k = 0; k < 145; k++) { float v = base + DbcFloat(d + at + oh + 8 + 4 * (unsigned)k); if (v > top) top = v; }
+        dry[c] = top > 0;
+    }
+    HeapFree(GetProcessHeap(), 0, d);
+    return 1;
+}
+/* The map's chunk grid at world x, y (yards): gx across (as the tiles' columns: from world y), gy down (from world x). */
+static void LandChunkAt(float x, float y, float *gx, float *gy)
+{
+    *gx = 16 * (PARCH_GRID_MID - y / PARCH_TILE_YD);
+    *gy = 16 * (PARCH_GRID_MID - x / PARCH_TILE_YD);
+}
+/* The world map's frame (map tiles) at the chunk grid's gx, gy on map (ParchSpot's place for it), and back. */
+static void LandFrame(int map, float gx, float gy, float *fx, float *fy)
+{
+    int ok = map >= 0 && map <= 1 && g_wmc[map].ok;
+    float s = ok ? g_wmc[map].s : 1, ox = ok ? g_wmc[map].ox : 0, oy = ok ? g_wmc[map].oy : 0;
+    *fx = (gx / 16 - PARCH_GRID_MID) * s + ox + PARCH_WORLD_FW / 2;
+    *fy = (gy / 16 - PARCH_GRID_MID) * s + oy + PARCH_WORLD_FH / 2;
+}
+static void FrameLand(int map, float fx, float fy, float *gx, float *gy)
+{
+    int ok = map >= 0 && map <= 1 && g_wmc[map].ok;
+    float s = ok ? g_wmc[map].s : 1, ox = ok ? g_wmc[map].ox : 0, oy = ok ? g_wmc[map].oy : 0;
+    *gx = 16 * ((fx - ox - PARCH_WORLD_FW / 2) / s + PARCH_GRID_MID);
+    *gy = 16 * ((fy - oy - PARCH_WORLD_FH / 2) / s + PARCH_GRID_MID);
+}
+/* 1 when chunk gx, gy (any int) is the land's. */
+static int LandOwn(const ParchLand *L, int gx, int gy)
+{
+    gx -= L->gx0; gy -= L->gy0;
+    return L->m && gx >= 0 && gy >= 0 && gx < L->w && gy < L->h && L->m[gy * L->w + gx] == 1;
+}
+static void ParchLandFree(ParchLand *L) { if (L->m) HeapFree(GetProcessHeap(), 0, L->m); L->m = NULL; L->n = 0; L->z = -1; }
+/* A file of the game's folder (rel under it) read whole into buf (cap bytes at most): its size, or -1. */
+static int FileGet(const char *rel, void *buf, unsigned cap)
+{
+    char path[MAX_PATH];
+    if (!Join(path, g_dir, rel)) return -1;
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return -1;
+    DWORD size = GetFileSize(f, NULL), got = 0;
+    int ok = size != INVALID_FILE_SIZE && size <= cap && ReadFile(f, buf, size, &got, NULL) && got == size;
+    CloseHandle(f);
+    return ok ? (int)size : -1;
+}
+/* Tile tx, ty's buildings whose WMOAreaTable rows (any group's, or the root's) name zone z's own area: the chunks of L
+ * whose middles their placements' bounds hold, marked. Those marked. */
+static int LandBuilding(const char *dir, int tx, int ty, int z, ParchLand *L)
+{
+    char path[160];
+    wsprintfA(path, "World\\Maps\\%s\\%s_%d_%d.adt", dir, dir, tx, ty);
+    unsigned char *d = NULL;
+    unsigned n = 0, msz = 0, wsz = 0, isz = 0;
+    const char *from;
+    if (!ClientPicture(path, "terrain.MPQ", &d, &n, &from)) return 0;
+    unsigned mo = AdtChunk(d, n, ADT_MODF, &msz), mw = AdtChunk(d, n, ADT_MWMO, &wsz), mi = AdtChunk(d, n, ADT_MWID, &isz);
+    int got = 0;
+    for (unsigned k = 0; mo && mw && mi && k < msz / 64; k++) {
+        const unsigned char *e = d + mo + 64 * k;
+        unsigned name = Rd32(e), set = Rd32(e + 60) & 0xFFFFu;
+        if (name >= isz / 4 || Rd32(d + mi + 4 * name) >= wsz) continue;
+        char wp[160];
+        unsigned at = Rd32(d + mi + 4 * name), i = 0;
+        while (at + i < wsz && d[mw + at + i] && i < sizeof wp - 1) { wp[i] = (char)d[mw + at + i]; i++; }
+        wp[i] = 0;
+        unsigned char *w = NULL;
+        unsigned wl = 0, hs = 0;
+        if (!wp[0] || !ClientPicture(wp, "wmo.MPQ", &w, &wl, &from)) continue;
+        unsigned hd = AdtChunk(w, wl, WMO_MOHD, &hs);
+        int wmo = hd && hs >= 0x24 ? (int)Rd32(w + hd + 0x20) : -1, its = 0;
+        HeapFree(GetProcessHeap(), 0, w);
+        for (int r = 0; wmo >= 0 && r < g_waN && !its; r++) its = g_waWmo[r] == wmo && g_waSet[r] == (int)set && AreaZone(g_waArea[r]) == g_pz[z].area;
+        if (!its) continue;
+        for (int j = 0; j < L->h; j++)                                  /* (its bounds: x across from world y, z down from world x) */
+            for (int c = 0; c < L->w; c++) {
+                float wy = (PARCH_GRID_MID - ((float)(L->gx0 + c) + 0.5f) / 16) * PARCH_TILE_YD, wx = (PARCH_GRID_MID - ((float)(L->gy0 + j) + 0.5f) / 16) * PARCH_TILE_YD;
+                float px = ADT_ZERO - wy, pz = ADT_ZERO - wx;
+                if (L->m[j * L->w + c] == 1 || !(px >= DbcFloat(e + 32) && px <= DbcFloat(e + 44) && pz >= DbcFloat(e + 40) && pz <= DbcFloat(e + 52))) continue;
+                L->m[j * L->w + c] = 1;
+                got++;
+            }
+    }
+    HeapFree(GetProcessHeap(), 0, d);
+    return got;
+}
+/* Zone z's land (its row) into L: from its file when it is there and holds this box and the archives' print, else from
+ * the tiles (and its file written): 1 when made (its land may be none: a city inside its building, an instance's map),
+ * 0 and why not. */
+static int ParchLandMake(int z, ParchLand *L, const char **why)
+{
+    ParchLandFree(L);
+    L->tiles = 0; L->fromFile = 0;
+    const char *dir = NULL;
+    for (int i = 0; i < g_mapDirN; i++) if (g_mapDir[i].id == g_pz[z].map) dir = g_mapDir[i].dir;
+    if (!dir) { *why = "its map has no folder (Map.dbc)"; return 0; }
+    if (g_pz[z].area <= 0) { *why = "it is a continent"; return 0; }
+    float ax, ay, bx, by;
+    LandChunkAt(g_pz[z].t, g_pz[z].l, &ax, &ay);                  /* (its box's corners on the grid) */
+    LandChunkAt(g_pz[z].b, g_pz[z].r, &bx, &by);
+    int gx0 = (int)ax - 1, gy0 = (int)ay - 1, gx1 = (int)bx + 1, gy1 = (int)by + 1;
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 > LAND_CHUNKS - 1) gx1 = LAND_CHUNKS - 1;
+    if (gy1 > LAND_CHUNKS - 1) gy1 = LAND_CHUNKS - 1;
+    if (gx1 < gx0 || gy1 < gy0) { *why = "its box is off the map"; return 0; }
+    int w = gx1 - gx0 + 1, h = gy1 - gy0 + 1, bytes = (w * h + 3) / 4;
+    L->m = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)w * (SIZE_T)h);
+    unsigned char *file = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(36 + bytes));
+    if (!L->m || !file) { if (file) HeapFree(GetProcessHeap(), 0, file); ParchLandFree(L); *why = "no memory for it"; return 0; }
+    L->z = z; L->gx0 = gx0; L->gy0 = gy0; L->w = w; L->h = h;
+    unsigned head[9] = { LAND_MAGIC, LAND_VERSION, LandPrint(), (unsigned)g_pz[z].id, (unsigned)g_pz[z].area, (unsigned)gx0, (unsigned)gy0, (unsigned)w, (unsigned)h };
+    char rel[96];
+    wsprintfA(rel, "Data\\CinderLoad\\land-%s.bin", g_pz[z].name);
+    int got = FileGet(rel, file, (unsigned)(36 + bytes));
+    int same = got == 36 + bytes;
+    for (int k = 0; same && k < 9; k++) same = Rd32(file + 4 * k) == head[k];
+    if (same) {                                                     /* (as kept) */
+        for (int i = 0; i < w * h; i++) { L->m[i] = (file[36 + i / 4] >> (2 * (i % 4))) & 3; L->n += L->m[i] == 1; }
+        L->fromFile = 1;
+        HeapFree(GetProcessHeap(), 0, file);
+        return 1;
+    }
+    static int area[256];
+    static unsigned char dry[256];
+    for (int ty = gy0 / 16; ty <= gy1 / 16; ty++)
+        for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) {
+            if (!LandTile(dir, tx, ty, area, dry)) continue;
+            L->tiles++;
+            for (int c = 0; c < 256; c++) {
+                int gx = tx * 16 + c % 16, gy = ty * 16 + c / 16;
+                if (gx < gx0 || gx > gx1 || gy < gy0 || gy > gy1 || !area[c] || AreaZone(area[c]) != g_pz[z].area) continue;
+                L->m[(gy - gy0) * w + gx - gx0] = dry[c] ? 1 : 2;
+                L->n += dry[c];
+            }
+        }
+    for (int ty = gy0 / 16; !L->n && ty <= gy1 / 16; ty++)           /* none: a city inside its building (Ironforge, Undercity):
+                                                                     * the chunks its building's placement covers */
+        for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) L->n += LandBuilding(dir, tx, ty, z, L);
+    for (int k = 0; k < 9; k++) { file[4 * k] = (unsigned char)head[k]; file[4 * k + 1] = (unsigned char)(head[k] >> 8); file[4 * k + 2] = (unsigned char)(head[k] >> 16); file[4 * k + 3] = (unsigned char)(head[k] >> 24); }
+    for (int i = 0; i < w * h; i++) file[36 + i / 4] |= (unsigned char)((L->m[i] & 3) << (2 * (i % 4)));
+    FilePut(rel, file, (unsigned)(36 + bytes));
+    HeapFree(GetProcessHeap(), 0, file);
     return 1;
 }
 /* ---- the cut (his pick, 11 Oct ~01:10, after GRADIENT, CUT and COMBO were mocked on Elwynn: "go with the COMBO"; and on
@@ -9443,6 +9657,144 @@ static int CutZoneSeeds(const ParchLines *P, ParchRect rz, int id, float fx, flo
     seeds[2 * n] = (0.5f * (rz.x0 + rz.x1) - P->r.x0) / sx; seeds[2 * n + 1] = (0.5f * (rz.y0 + rz.y1) - P->r.y0) / sy;
     return n + 1;
 }
+/* ---- the cut to the zone's land (the skeptic's finds, 11 Oct: a zone's own land cut away, the arrival's town among it;
+ * a cut run on past the zone's edge, its neighbours' names and its page's torn edges back) ----
+ * The zone's painting is kept whole on every texel of its land (ParchLand: the chunks its terrain gives it), and its
+ * continent's lines only refine that land's edge, never past PARCH_LAND_EDGE chunks of it: the region inside the zone's
+ * border line as its continent's painting draws it, filled from every chunk of its land (so the cut is the same whatever
+ * the arrival), each fill held only when it is the zone's (one that reaches the crop's edge, or has over PARCH_LAND_LEAK
+ * of its cells farther than PARCH_LAND_NEAR chunks from the land, ran through a gap into another zone's land: left out),
+ * those held made whole as the outline was (CutWhole), and none of it trusted when it covers under PARCH_LAND_FEW of the
+ * land (a lake or a town in ink, not the zone). inside = its land, the outline where it lies within PARCH_LAND_EDGE
+ * chunks of the land, and its overlay pieces as the client lays them (the map it shows for the zone: the skeptic's
+ * measure of its own art, each piece against none); then the grown margin outside it, fading and softened, as before
+ * (CutApply). A page with no land of its own (an instance's map) is cut to its outline as before (ParchCut). */
+#define PARCH_LAND_EDGE  1            /* the outline refines the land's edge this many chunks past it at most */
+#define PARCH_LAND_NEAR  3            /* a fill's cells farther than this many chunks from the land are another zone's, */
+#define PARCH_LAND_LEAK  0.2f         /* and over this share of its cells there: it ran through a gap (not held) */
+#define PARCH_LAND_PIECE 128          /* an overlay piece the client lays on the zone's map kept whole where its alpha is this */
+#define PARCH_LAND_FEW   0.3f         /* the fills held cover at least this share of the land (as the painting under it draws
+                                       * it), or none is trusted */
+/* L's land grown by r chunks (Chebyshev: a square of 2r + 1 about each chunk) into g, (L->w + 2r) x (L->h + 2r) from
+ * gx0 - r, gy0 - r. */
+static void LandGrow(const ParchLand *L, int r, unsigned char *g)
+{
+    int W = L->w + 2 * r, H = L->h + 2 * r;
+    for (int i = 0; i < W * H; i++) g[i] = 0;
+    for (int y = 0; y < L->h; y++)
+        for (int x = 0; x < L->w; x++) {
+            if (L->m[y * L->w + x] != 1) continue;
+            for (int dy = 0; dy <= 2 * r; dy++)
+                for (int dx = 0; dx <= 2 * r; dx++) g[(y + dy) * W + x + dx] = 1;
+        }
+}
+/* The painting in g_parchPx (zone row z, at rf on the frame, on map) cut to its land L, its edge refined by P's lines
+ * (above): its own share of its picture through *share, the outline's fills held through *held; 0 and why when its land
+ * has nothing on its painting or there is no memory (then it is left as it was). */
+static int ParchLandCut(const ParchLines *P, int map, ParchRect rf, const ParchLand *L, float *share, int *held, const char **why)
+{
+    int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, E = PARCH_LAND_EDGE, N = PARCH_LAND_NEAR;
+    int EW = L->w + 2 * E, EH = L->h + 2 * E, NW = L->w + 2 * N, NH = L->h + 2 * N;
+    *held = 0; *share = 0;
+    *why = "no memory for it";
+    if (!L->m || !g_parchPx) { *why = "no land"; return 0; }
+    unsigned char *inside = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * 2);
+    unsigned char *eg = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)EW * EH + (SIZE_T)NW * NH);
+    int *gcol = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(pw + ph) * sizeof(int));
+    if (!inside || !eg || !gcol) {
+        if (inside) HeapFree(GetProcessHeap(), 0, inside);
+        if (eg) HeapFree(GetProcessHeap(), 0, eg);
+        if (gcol) HeapFree(GetProcessHeap(), 0, gcol);
+        return 0;
+    }
+    unsigned char *outline = inside + (SIZE_T)pw * ph, *ng = eg + EW * EH;
+    int *grow = gcol + pw;
+    LandGrow(L, E, eg);
+    LandGrow(L, N, ng);
+    float gx, gy;
+    for (int x = 0; x < pw; x++) { FrameLand(map, rf.x0 + ((float)x + 0.5f) / (float)pw * (rf.x1 - rf.x0), rf.y0, &gx, &gy); gcol[x] = (int)gx - (gx < 0); }
+    for (int y = 0; y < ph; y++) { FrameLand(map, rf.x0, rf.y0 + ((float)y + 0.5f) / (float)ph * (rf.y1 - rf.y0), &gx, &gy); grow[y] = (int)gy - (gy < 0); }
+    int nT = 0;
+    for (int y = 0; y < ph; y++)                                       /* its land, whole */
+        for (int x = 0; x < pw; x++) { int o = LandOwn(L, gcol[x], grow[y]); inside[y * pw + x] = (unsigned char)o; nT += o; }
+    for (int y = 0; g_pieceA && y < ph; y++)                           /* and its overlay pieces as the client lays them, whole: the
+                                                                        * map it shows for the zone (a capital's piece on its zone's
+                                                                        * map too, Stormwind's on Elwynn's; a piece's art over its
+                                                                        * border, Northwind's northern hills) */
+        for (int x = 0; x < pw; x++) if (g_pieceA[(SIZE_T)y * (SIZE_T)g_parchTW + (SIZE_T)x] >= PARCH_LAND_PIECE) inside[y * pw + x] = 1;
+    if (!nT) {
+        HeapFree(GetProcessHeap(), 0, inside); HeapFree(GetProcessHeap(), 0, eg); HeapFree(GetProcessHeap(), 0, gcol);
+        *why = "its land does not fall on its painting";
+        return 0;
+    }
+    /* the outline, on P's crop about its box */
+    int ok = 1;
+    if (P->m) {
+        float bx0 = (rf.x0 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w, bx1 = (rf.x1 - P->r.x0) / (P->r.x1 - P->r.x0) * (float)P->w;
+        float by0 = (rf.y0 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h, by1 = (rf.y1 - P->r.y0) / (P->r.y1 - P->r.y0) * (float)P->h;
+        float mx = PARCH_CUT_ROOM * (bx1 - bx0) + 4 * P->K, my = PARCH_CUT_ROOM * (by1 - by0) + 4 * P->K;
+        int cx0 = (int)(bx0 - mx), cy0 = (int)(by0 - my), cw = (int)(bx1 + mx) - cx0 + 1, ch = (int)(by1 + my) - cy0 + 1;
+        SIZE_T cells = (SIZE_T)cw * (SIZE_T)ch;
+        unsigned char *reg = cw >= 8 && ch >= 8 && (double)cw * ch <= 8e6 ? (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cells * 5) : NULL;
+        int *q = reg ? (int *)HeapAlloc(GetProcessHeap(), 0, cells * sizeof(int) + (SIZE_T)(cw + ch) * 2 * sizeof(int)) : NULL;
+        float *sm = q ? (float *)HeapAlloc(GetProcessHeap(), 0, cells * sizeof(float)) : NULL;
+        if (sm) {
+            unsigned char *line = reg + cells, *open = reg + 2 * cells, *a = reg + 3 * cells, *mark = reg + 4 * cells;   /* mark: 1 held, 2 not */
+            int *ccol = q + cells, *crow = ccol + cw;                     /* (each crop column's and row's chunk; and as near) */
+            float sx = (P->r.x1 - P->r.x0) / (float)P->w, sy = (P->r.y1 - P->r.y0) / (float)P->h;
+            for (int x = 0; x < cw; x++) { FrameLand(map, P->r.x0 + ((float)(cx0 + x) + 0.5f) * sx, P->r.y0, &gx, &gy); ccol[x] = (int)gx - (gx < 0); }
+            for (int y = 0; y < ch; y++) { FrameLand(map, P->r.x0, P->r.y0 + ((float)(cy0 + y) + 0.5f) * sy, &gx, &gy); crow[y] = (int)gy - (gy < 0); }
+            CutOpen(P, cx0, cy0, cw, ch, line, open, a);
+            for (SIZE_T c = 0; c < cells; c++) a[c] = 0;                  /* (its room, each fill's marks) */
+            int k = P->K, landP = 0, total = 0;
+            for (int y = 0; y < ch; y++) for (int x = 0; x < cw; x++) landP += LandOwn(L, ccol[x], crow[y]);
+            for (int j = 0; j < L->h; j++)                                /* a fill from each chunk of its land */
+                for (int i = 0; i < L->w; i++) {
+                    if (L->m[j * L->w + i] != 1) continue;
+                    float fx, fy;
+                    LandFrame(map, (float)(L->gx0 + i) + 0.5f, (float)(L->gy0 + j) + 0.5f, &fx, &fy);
+                    int x0 = (int)((fx - P->r.x0) / sx) - cx0, y0 = (int)((fy - P->r.y0) / sy) - cy0, win = 3 * k, start = -1, best = 1 << 30;
+                    if (x0 >= 0 && y0 >= 0 && x0 < cw && y0 < ch && mark[y0 * cw + x0]) continue;   /* (in a fill already) */
+                    for (int dy = -win; dy <= win; dy++)
+                        for (int dx = -win; dx <= win; dx++) {
+                            int xx = x0 + dx, yy = y0 + dy, d = dx * dx + dy * dy;
+                            if (xx >= 0 && yy >= 0 && xx < cw && yy < ch && open[yy * cw + xx] && !mark[yy * cw + xx] && d < best) { best = d; start = yy * cw + xx; }
+                        }
+                    if (start < 0) continue;
+                    int n = CutFill(a, open, cw, ch, start, q), edge = 0, away = 0;
+                    for (int t = 0; t < n; t++) {
+                        int c = q[t], xx = c % cw, yy = c / cw, nx = ccol[xx] - L->gx0 + N, ny = crow[yy] - L->gy0 + N;
+                        edge |= xx == 0 || yy == 0 || xx == cw - 1 || yy == ch - 1;
+                        away += !(nx >= 0 && ny >= 0 && nx < NW && ny < NH && ng[ny * NW + nx]);
+                    }
+                    int good = !edge && (float)away <= PARCH_LAND_LEAK * (float)n;
+                    for (int t = 0; t < n; t++) { mark[q[t]] = (unsigned char)(good ? 1 : 2); a[q[t]] = 0; }
+                    if (good) { (*held)++; total += n; }
+                }
+            for (SIZE_T c = 0; c < cells; c++) mark[c] = mark[c] == 1;
+            if (*held && (float)total < PARCH_LAND_FEW * (float)landP) *held = 0;   /* (a lake or a town found, not the zone) */
+            if (*held) {
+                CutWhole(line, cw, ch, k, mark, a, reg, q);
+                CutLay(P, mark, cx0, cy0, cw, ch, rf, pw, ph, outline, sm);
+                for (int y = 0; y < ph; y++)                              /* within PARCH_LAND_EDGE chunks of its land */
+                    for (int x = 0; x < pw; x++) {
+                        int ex = gcol[x] - L->gx0 + E, ey = grow[y] - L->gy0 + E;
+                        if (outline[y * pw + x] && ex >= 0 && ey >= 0 && ex < EW && ey < EH && eg[ey * EW + ex]) inside[y * pw + x] = 1;
+                    }
+            }
+        } else ok = 0;
+        if (reg) HeapFree(GetProcessHeap(), 0, reg);
+        if (q) HeapFree(GetProcessHeap(), 0, q);
+        if (sm) HeapFree(GetProcessHeap(), 0, sm);
+    }
+    int in = 0;
+    for (int i = 0; i < pw * ph; i++) in += inside[i];
+    *share = (float)in / (float)(pw * ph);
+    if (ok && !CutApply(inside, pw, ph, K)) ok = 0;
+    HeapFree(GetProcessHeap(), 0, inside); HeapFree(GetProcessHeap(), 0, eg); HeapFree(GetProcessHeap(), 0, gcol);
+    if (!ok) *why = "no memory for its outline or its margin";
+    return ok;
+}
 /* ---- the continent's name, one label in one place (his note, 11 Oct: "the words Eastern Kingdom move slightly, they
  * disappear, and then they reappear slightly different spot than they were. It would be better to just have it in one
  * location and not move it"; and for Kalimdor and every zone near either name) ----
@@ -9876,12 +10228,20 @@ static int ParchContMade(int c, const char **why)
 }
 /* The zone's painting just made (g_parchPx, row z on continent row c; the arrival's spot fx, fy on the frame): cut to its
  * own area as its continent's painting draws it (g_zoneCut; the plain band at its edges when none holds, and why). */
+static int g_cutLand, g_cutHeld;               /* the last zone's cut: to its land (ParchLandCut); its outline's fills held */
 static void ParchZoneMade(int z, int c, float fx, float fy, const char **why)
 {
-    float zseeds[2 * PARCH_CUT_SEEDS];
+    const char *lwhy = "";
+    g_zoneShare = 0; g_cutLand = 0; g_cutHeld = 0; g_cutBoxed = 0;
+    if (ParchLandMake(z, &g_land, &lwhy) && g_land.n) {             /* its land, as its terrain gives it */
+        static const ParchLines none;
+        g_cutLand = ParchLandCut(g_linesCont.m && g_linesCont.row == c ? &g_linesCont : &none, g_pz[z].map, ParchBox(z), &g_land,
+                                 &g_zoneShare, &g_cutHeld, why);
+        if (g_cutLand) { g_zoneCut = 1; return; }
+    }
+    float zseeds[2 * PARCH_CUT_SEEDS];                                /* (none: a city inside its building, an instance's map) */
     int zn = g_linesCont.m && g_linesCont.row == c ? CutZoneSeeds(&g_linesCont, ParchBox(z), g_pz[z].id, fx, fy, zseeds) : 0;
     *why = "its continent's painting is not under it";
-    g_zoneShare = 0;
     g_zoneCut = zn && ParchCut(&g_linesCont, ParchBox(z), zseeds, zn, 0, &g_zoneShare, why);
 }
 static struct { int world, cont, zone; } g_ptry;     /* tried (once a session; this arrival's), so a failure is not tried again */
@@ -9980,7 +10340,13 @@ static void ParchWork(DWORD now)
             const char *zwhy = "";
             ParchSpot(map, x, y, &fx, &fy);
             ParchZoneMade(z, c, fx, fy, &zwhy);
-            if (g_zoneCut) { wsprintfA(m, "  the parchment: %s cut to its own area as %s's painting draws it (%d%% of its painting%s), grown %d texels", g_pz[z].name,
+            if (g_zoneCut && g_cutLand) {
+                wsprintfA(m, "  the parchment: %s cut to its land as its terrain gives it (%d chunks, %s), its edge %s (%d%% of its painting), grown %d texels",
+                          g_pz[z].name, g_land.n, g_land.fromFile ? "kept from before" : "read from the client's terrain",
+                          g_cutHeld ? "as its continent's painting draws it" : "its terrain's (its outline not held)", (int)(100 * g_zoneShare + 0.5f),
+                          PARCH_CUT_GROW * g_zoneK / 2); Log(m);
+                if (!g_land.fromFile) { wsprintfA(m, "  the parchment: %s's land read from %d tiles and kept in Data\\CinderLoad\\land-%s.bin", g_pz[z].name, g_land.tiles, g_pz[z].name); Log(m); }
+            } else if (g_zoneCut) { wsprintfA(m, "  the parchment: %s cut to its own area as %s's painting draws it (%d%% of its painting%s), grown %d texels", g_pz[z].name,
                                        c >= 0 ? g_pz[c].name : "its continent", (int)(100 * g_zoneShare + 0.5f), g_cutBoxed ? "; its outline leaked, kept to its own box" : "",
                                        PARCH_CUT_GROW * g_zoneK / 2); Log(m); }
             else { wsprintfA(m, "  the parchment: %s not cut to its own area (%s): the plain band at its edges", g_pz[z].name, zwhy); Log(m); }
