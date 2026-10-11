@@ -8442,16 +8442,16 @@ static void TestStyle(void)
 static unsigned char *g_fkLow, *g_fkCv;
 static char *g_fkVal;
 static int g_fkUp, g_fkRuns, g_fkProbes, g_fkSetups, g_fkIgnore, g_fkRegisters, g_fkRegFail, g_fkMarked, g_fkHide;
-static char g_fkHead[96], g_fkDef[64];
+static char g_fkHead[200], g_fkDef[64];
 static int g_fkArgs[6];
-static void FkSet(const char *v) { snprintf(g_fkVal, 64, "%s", v); }
+static void FkSet(const char *v) { snprintf(g_fkVal, 400, "%s", v); }
 static void FakeExec(const char *code, const char *source)
 {
     g_fkRuns++;
     if (strcmp(source, "CinderLoad")) return;
     if (!strcmp(code, kLuaProbe)) { g_fkProbes++; if (!g_fkUp && g_fkCv) FkSet("?"); return; }
     g_fkSetups++;
-    snprintf(g_fkHead, sizeof g_fkHead, "%.90s", code);
+    snprintf(g_fkHead, sizeof g_fkHead, "%.190s", code);
     g_fkMarked = Get("Data/CinderLoad/ui-setup.tmp") != NULL;
     if (g_fkIgnore) return;
     g_fkUp = 1;
@@ -8552,7 +8552,8 @@ static void TestSwitches(void)
     Tick();
     ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro discovered") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
           !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
-          !strncmp(g_fkHead, "local CL_MAP, CL_BAR, CL_AREAS = \"parchment\", \"retro\", \"discovered\"\n-- CinderLoad", 81) && !strcmp(g_fkVal, "parchment retro discovered") &&
+          !strncmp(g_fkHead, "local CL_MAP, CL_BAR, CL_AREAS = \"parchment\", \"retro\", \"discovered\"\nlocal CL_LOOK = \"nearby 1200 thick 100 width own "
+                             "whole off effect heat colour class quality pulse raw\"\n-- CinderLoad", 184) && !strcmp(g_fkVal, "parchment retro discovered") &&
           g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro discovered");
     Check(ok, "a login: the CVar made as RegisterCVar makes one (no help, no flags, the choice its default, no callback, category 9, registered), the probe finds no switches, they are made from the choice held (the setup's mark there while it runs, gone after)");
     Tick();
@@ -8560,7 +8561,7 @@ static void TestSwitches(void)
     FkSet("satellite neo discovered");                                           /* the player's clicks */
     Tick();
     ok &= g_parchAsked == 0 && g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo") &&
-          LogSays("style: the map satellite, the bar neo, the map's areas discovered (chosen on the world map or with /cinderload)") && g_fkSetups == 1;
+          LogSays("style: the map satellite, the bar neo, the map's areas discovered (chosen in the /cinderload window or with its words)") && g_fkSetups == 1;
     g_fkUp = 0;                                                        /* a /reload */
     Tick();
     ok &= g_fkSetups == 2 && !strncmp(g_fkHead, "local CL_MAP, CL_BAR, CL_AREAS = \"satellite\", \"neo\", \"discovered\"\n", 66) && !strcmp(g_fkVal, "satellite neo discovered") &&
@@ -8725,6 +8726,116 @@ static void TestNearbyStyle(void)
     ok &= g_parchNearOn == 900 && LogSays("  the view: the parchment's zones nearby out to 900 yards of the arrival, under its zone");
     Check(ok, "the reach at start: the default (1200 yards) without style.txt or with 0.3.0's three lines; style.txt's nearby line read beside the three choices, other lines passed over; kept when a choice is written; 0: none; each screen takes it as it opens");
     g_nearYd = PARCH_NEAR_YD; g_parchNearOn = 0; g_pzN = 0;
+}
+/* the bar's look from the /cinderload window (his design, 11 Oct 2026): its own lines in style.txt, new words only, read
+ * beside the old ones; the CVar's whole value; kept, read back, and the old files still read */
+static void TestLookStyle(void)
+{
+    Look lk = LOOK_DEFAULT, def = LOOK_DEFAULT;
+    int ok = StyleLook("thick 125\r\nwidth 50\r\nwhole on\r\neffect smooth\r\ncolour ember\r\nquality liquid unstable\r\n", &lk) == 6 &&
+             lk.thick == 125 && lk.width == 50 && lk.whole == 1 && lk.effect == LOOK_SMOOTH && lk.ember == 1 &&
+             lk.quality == (int)(SABER_LIQUID | SABER_UNSTABLE);
+    lk = def;
+    ok &= StyleLook("THICK 300\nWidth 5\nwidth own\nWHOLE Off\nEffect BLADE\ncolor class\nquality none\n", &lk) == 7 && lk.thick == 200 &&
+          lk.width == 0 && lk.whole == 0 && lk.effect == LOOK_BLADE && lk.ember == 0 && lk.quality == 0;
+    lk = def;
+    ok &= StyleLook("thick 10 width 999999999 quality raw\npulse", &lk) == 3 && lk.thick == 50 && lk.width == 100 && lk.quality == (int)SABER_RAW;
+    lk = def;
+    ok &= StyleLook("# thick 150\nthick\n150\nwhole maybe\neffect fire\ncolour red\nquality banana\nthickness 150 width full\n"
+                    "map parchment\nbar neo\nareas full\nnearby 600\n", &lk) == 0 && LookSame(&lk, &def) && StyleLook(NULL, &lk) == 0;
+    Check(ok, "the bar's look in style.txt: thick, width (or own), whole on or off, effect heat, smooth or blade, colour class or ember, quality and any of liquid, pulse, unstable and raw (or none); any case, numbers held to their range; a note, a word not ours, a value on the next line: not named");
+
+    /* none of the six choice words in a line of the look, so a 0.3.0 DLL reads a newer file the same */
+    char text[300];
+    Look all[4] = { LOOK_DEFAULT, { 200, 100, 1, LOOK_BLADE, 1, 15 }, { 50, 20, 0, LOOK_SMOOTH, 0, 0 }, { 125, 0, 1, LOOK_HEAT, 1, 4 } };
+    ok = 1;
+    for (int i = 0; i < 4; i++) {
+        int map = 7, bar = 7, full = 7;
+        StyleLookText(text, &all[i], "\r\n");
+        Look back = def;
+        ok &= StyleParse(text, &map, &bar, &full) == 0 && map == 7 && bar == 7 && full == 7 && StyleLook(text, &back) == 6 && LookSame(&back, &all[i]);
+        int yd = 9;
+        ok &= StyleNearby(text, &yd) == 0 && yd == 9;
+    }
+    StyleLookText(text, &def, " ");
+    ok &= !strcmp(text, "thick 100 width own whole off effect heat colour class quality pulse raw");
+    Check(ok, "the look's lines name none of the six choice words (parchment, satellite, retro, neo, discovered, full) and no nearby: an older DLL reads a newer style.txt as before; each look written reads back the same; the defaults spelt as the CVar carries them");
+
+    /* the CVar's whole value, as the window writes it */
+    Style st;
+    int fault = 7;
+    StyleNow(&st);
+    st.look = def; st.nearYd = PARCH_NEAR_YD;
+    ok = StyleCvarRead("satellite neo full nearby 600 thick 125 width 50 whole on effect blade colour ember quality liquid raw", &st, &fault) &&
+         st.map == 0 && st.bar == 0 && st.full == 1 && st.nearYd == 600 && st.look.thick == 125 && st.look.width == 50 && st.look.whole == 1 &&
+         st.look.effect == LOOK_BLADE && st.look.ember == 1 && st.look.quality == (int)(SABER_LIQUID | SABER_RAW) && !fault;
+    ok &= StyleCvarRead("parchment retro discovered nearby 0 thick 50 width own whole off effect heat colour class quality none fault", &st, &fault) &&
+          st.map == 1 && st.nearYd == 0 && st.look.thick == 50 && st.look.width == 0 && st.look.quality == 0 && fault == 1;
+    ok &= StyleCvarRead("parchment retro discovered thick 75", &st, &fault) && st.look.thick == 75 && st.nearYd == 0 && st.look.width == 0 && !fault;
+    Style before = st;
+    static const char *const kNot[] = { "parchment retro discovered thick", "parchment retro discovered thick 49", "parchment retro discovered thick 201",
+                                        "parchment retro discovered width 19", "parchment retro discovered width 0", "parchment retro discovered width 050",
+                                        "parchment retro discovered nearby 4001", "parchment retro discovered nearby -5",
+                                        "parchment retro discovered whole yes", "parchment retro discovered effect fire",
+                                        "parchment retro discovered colour red", "parchment retro discovered quality",
+                                        "parchment retro discovered quality raw raw", "parchment retro discovered quality none raw",
+                                        "parchment retro discovered quality banana", "parchment retro discovered thick 100 nearby 600",
+                                        "parchment retro discovered thick 100 thick 100", "parchment retro discovered  thick 100",
+                                        "parchment retro discovered thick  100", "parchment retro discovered thick 100 ",
+                                        "parchment retro discovered fault thick 100", "parchment retro discovered Thick 100",
+                                        "parchment retro discovered zoom 5", "parchment retro discovered thick 100 fault x" };
+    for (size_t i = 0; i < sizeof kNot / sizeof kNot[0]; i++) {
+        int no = !StyleCvarRead(kNot[i], &st, &fault) && !memcmp(&st, &before, sizeof st);
+        if (!no) printf("  (the CVar's \"%s\" taken)\n", kNot[i]);
+        ok &= no;
+    }
+    Check(ok, "the CVar's whole value heard as the window writes it: the three, then nearby, thick, width, whole, effect, colour and quality in that order, each at most once, any missing (kept), \" fault\" last; out of range, out of order, twice, an extra space or a word not ours: not theirs, nothing changed");
+
+    /* kept in style.txt as a choice is made; read back at the next start; an old file (no look) the defaults */
+    Fresh("style-look"); GameDir();
+    StyleLoad();
+    ok = LookSame(&g_look, &def) && LogSays("style: the bar's look: thick 100, width own, whole off, effect heat, colour class, quality pulse raw, from the defaults");
+    Style want;
+    StyleNow(&want);
+    want.look.thick = 150; want.look.width = 40; want.look.effect = LOOK_SMOOTH; want.look.quality = (int)SABER_UNSTABLE; want.nearYd = 900;
+    const char *t;
+    ok &= StyleApply(&want, "a test") == 1 && (t = Get(STYLE_REL)) &&
+          strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas discovered\r\nnearby 900\r\nthick 150\r\nwidth 40\r\nwhole off\r\neffect smooth\r\n"
+                    "colour class\r\nquality unstable\r\n") && StyleApply(&want, "again") == 0;
+    g_look = def; g_nearYd = 7;
+    StyleLoad();
+    ok &= g_look.thick == 150 && g_look.width == 40 && g_look.effect == LOOK_SMOOTH && g_look.quality == (int)SABER_UNSTABLE && g_nearYd == 900 &&
+          LogSays("style: the bar's look: thick 150, width 40, whole off, effect smooth, colour class, quality unstable, from Data\\CinderLoad\\style.txt");
+    ok &= StyleSet(0, 0, 1, "the three alone") == 1 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo\r\nareas full\r\nnearby 900\r\nthick 150\r\n");
+    Put(STYLE_REL, "map satellite\r\nbar neo\r\nareas full\r\n");                             /* (0.3.0's three lines) */
+    StyleLoad();
+    ok &= LookSame(&g_look, &def) && g_parchAsked == 0 && g_mapFull == 1;
+    Put(STYLE_REL, "map satellite\r\nbar neo\r\n");                                            /* (0.2.x's two) */
+    StyleLoad();
+    ok &= LookSame(&g_look, &def) && g_parchAsked == 0 && g_vbarAsked == 0 && g_mapFull == 0 && g_nearYd == PARCH_NEAR_YD;
+    Put(STYLE_REL, "map parchment\nthick 80\nsomething new 5\nbar retro\n");                    /* (a newer line: passed over) */
+    StyleLoad();
+    ok &= g_look.thick == 80 && g_look.width == 0 && g_parchAsked == 1 && g_vbarAsked == 1;
+    Check(ok, "the look kept in style.txt as a choice is made (its lines after nearby), the same choice again writes nothing, read back at the next start; a choice of the three alone keeps it; 0.3.0's and 0.2's files (no look) read as before with today's look; a line not ours passed over");
+
+    /* each screen takes Neo's qualities as it opens (the other parts of the look are drawn by a later stage) */
+    g_look.quality = (int)(SABER_PULSE | SABER_RAW);
+    g_saberStyle = SABER_PULSE | SABER_RAW;
+    int pzN = g_pzN;
+    g_pzN = 4;
+    StylePick();
+    ok = g_saberStyle == (SABER_PULSE | SABER_RAW);
+    g_look.quality = (int)SABER_LIQUID;
+    StylePick();
+    ok &= g_saberStyle == SABER_LIQUID && LogSays("  the view: the blade's qualities liquid");
+    g_look.quality = 0;
+    StylePick();
+    ok &= g_saberStyle == 0 && LogSays("  the view: the blade's qualities none");
+    g_look = def;
+    StylePick();
+    ok &= g_saberStyle == (SABER_PULSE | SABER_RAW);
+    g_pzN = pzN;
+    Check(ok, "each screen takes Neo's qualities from the look as it opens (pulse and raw by default, as before), logged as they change");
 }
 static void TestStyleFiles(void)
 {
@@ -8966,7 +9077,7 @@ static void TestSwitchesLua(void)
     char dir[700];
     snprintf(dir, sizeof dir, "%s/lua", g_root);
     mkdir(dir, 0755);
-    static char chunk[sizeof kSwitchesLua + 160];
+    static char chunk[sizeof kSwitchesLua + 420];
     const struct { const char *name; int map, bar, full; } kOut[3] = { { "setup.lua", 1, 1, 0 }, { "setup-satellite-neo.lua", 0, 0, 0 },
                                                                         { "setup-full.lua", 1, 1, 1 } };
     for (int i = 0; i < 3; i++) {
@@ -9466,6 +9577,7 @@ int main(int argc, char **argv)
     TestNearby();
     TestNearbyMake();
     TestNearbyStyle();
+    TestLookStyle();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }

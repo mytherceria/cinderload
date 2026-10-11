@@ -12535,6 +12535,100 @@ static int StyleNearby(const char *text, int *yd)
     }
     return named;
 }
+/* ---- the bar's look, chosen in the /cinderload panel (his design, 11 Oct 2026): its thickness, its width or the whole
+ * width of the screen, its fill (heat, smooth or blade light) in the class's colour or CinderLoad's ember, and Neo's four
+ * qualities. Kept in style.txt as lines of their own, each a word none of the six choice words is (StyleParse matches
+ * those anywhere): "thick 125" (percent of the bar's own), "width 50" (percent of the screen) or "width own" (each bar's
+ * own: retro its art's, neo edge to edge), "whole on" or "whole off", "effect heat", "effect smooth" or "effect blade",
+ * "colour class" or "colour ember", "quality" and any of liquid, pulse, unstable and raw (or none). A line missing: its
+ * default, today's look. g_look holds them (the game's thread writes it, the view's reads it as each screen opens). ---- */
+#define LOOK_THICK_LEAST 50
+#define LOOK_THICK_MOST  200
+#define LOOK_WIDTH_LEAST 20
+#define LOOK_WIDTH_MOST  100
+enum { LOOK_HEAT, LOOK_SMOOTH, LOOK_BLADE, LOOK_EFFECTS };
+typedef struct { int thick, width, whole, effect, ember, quality; } Look;    /* (width 0: each bar's own) */
+#define LOOK_DEFAULT { 100, 0, 0, LOOK_HEAT, 0, SABER_PULSE | SABER_RAW }
+static Look g_look = LOOK_DEFAULT;
+static const char *const kLookEffect[LOOK_EFFECTS] = { "heat", "smooth", "blade" };
+static const char *const kLookQuality[4] = { "liquid", "pulse", "unstable", "raw" };     /* SABER_LIQUID << i */
+/* The next word of s (letters, or digits) into w (lower case, at most n - 1 kept), '#' to the line's end passed over and
+ * the end of the line reported: 1 a word, 2 a number, 3 the end of a line, 0 the end of the text. */
+static int LookWord(const char **s, char *w, int n)
+{
+    const char *p = *s;
+    for (;;) {
+        if (!p || !*p) { *s = p; return 0; }
+        if (*p == '#') { while (*p && *p != '\n') p++; continue; }
+        if (*p == '\n') { *s = p + 1; return 3; }
+        if (StyleLetter(*p) || (*p >= '0' && *p <= '9')) break;
+        p++;
+    }
+    int digit = *p >= '0' && *p <= '9', i = 0;
+    while (digit ? (*p >= '0' && *p <= '9') : StyleLetter(*p)) {
+        if (i < n - 1) w[i++] = (char)(digit ? *p : (*p | 0x20));
+        p++;
+    }
+    w[i] = 0;
+    *s = p;
+    return digit ? 2 : 1;
+}
+static int LookNumber(const char *w, int lo, int hi)
+{
+    int v = 0;
+    for (; *w; w++) if (v <= hi) v = v * 10 + (*w - '0');
+    return v < lo ? lo : v > hi ? hi : v;
+}
+/* The look's lines in text, into *lk (a line not there, or not as said: left as it was). The lines named. */
+static int StyleLook(const char *text, Look *lk)
+{
+    char w[16], x[16];
+    int named = 0, k, kx;
+    const char *s = text;
+    while (s && (k = LookWord(&s, w, (int)sizeof w))) {
+        if (k != 1) continue;
+        const char *at = s;
+        kx = LookWord(&at, x, (int)sizeof x);
+        if (!lstrcmpiA(w, "thick") && kx == 2) { lk->thick = LookNumber(x, LOOK_THICK_LEAST, LOOK_THICK_MOST); named++; s = at; }
+        else if (!lstrcmpiA(w, "width") && kx == 2) { lk->width = LookNumber(x, LOOK_WIDTH_LEAST, LOOK_WIDTH_MOST); named++; s = at; }
+        else if (!lstrcmpiA(w, "width") && kx == 1 && !lstrcmpiA(x, "own")) { lk->width = 0; named++; s = at; }
+        else if (!lstrcmpiA(w, "whole") && kx == 1 && (!lstrcmpiA(x, "on") || !lstrcmpiA(x, "off"))) { lk->whole = x[1] == 'n'; named++; s = at; }
+        else if (!lstrcmpiA(w, "effect") && kx == 1) {
+            for (int e = 0; e < LOOK_EFFECTS; e++) if (!lstrcmpiA(x, kLookEffect[e])) { lk->effect = e; named++; s = at; }
+        } else if ((!lstrcmpiA(w, "colour") || !lstrcmpiA(w, "color")) && kx == 1 && (!lstrcmpiA(x, "class") || !lstrcmpiA(x, "ember"))) {
+            lk->ember = x[0] == 'e'; named++; s = at;
+        } else if (!lstrcmpiA(w, "quality")) {                      /* its words, as many as follow on its line */
+            int q = 0, any = 0;
+            for (const char *t = s; LookWord(&t, x, (int)sizeof x) == 1;) {
+                int one = -1;
+                for (int i = 0; i < 4; i++) if (!lstrcmpiA(x, kLookQuality[i])) one = i;
+                if (one < 0 && lstrcmpiA(x, "none")) break;
+                if (one >= 0) q |= (int)SABER_LIQUID << one;
+                any = 1;
+                s = t;
+            }
+            if (any) { lk->quality = q; named++; }
+        }
+    }
+    return named;
+}
+/* The look's lines as style.txt and the CVar carry them, one after another with sep between ("\r\n" or " "). */
+static void StyleLookText(char *out, const Look *lk, const char *sep)
+{
+    char q[48] = "";
+    for (int i = 0; i < 4; i++)
+        if (lk->quality & ((int)SABER_LIQUID << i)) { if (q[0]) lstrcatA(q, " "); lstrcatA(q, kLookQuality[i]); }
+    char wd[8];
+    if (lk->width) wsprintfA(wd, "%d", lk->width); else lstrcpyA(wd, "own");
+    wsprintfA(out, "thick %d%swidth %s%swhole %s%seffect %s%scolour %s%squality %s", lk->thick, sep, wd, sep, lk->whole ? "on" : "off", sep,
+              kLookEffect[lk->effect >= 0 && lk->effect < LOOK_EFFECTS ? lk->effect : 0], sep, lk->ember ? "ember" : "class", sep,
+              q[0] ? q : "none");
+}
+static int LookSame(const Look *a, const Look *b)
+{
+    return a->thick == b->thick && a->width == b->width && a->whole == b->whole && a->effect == b->effect && a->ember == b->ember &&
+           a->quality == b->quality;
+}
 static const char *StyleMapName(int map) { return map ? "parchment" : "satellite"; }
 static const char *StyleBarName(int bar) { return bar ? "retro" : "neo"; }
 static const char *StyleAreasName(int full) { return full ? "full" : "discovered"; }
@@ -12550,12 +12644,15 @@ static void StyleValue(char *out, int map, int bar, int full)
 /* style.txt written whole (a file beside it, then moved over it): 1 when it was. */
 static int StyleSave(int map, int bar, int full)
 {
-    char path[MAX_PATH], tmp[MAX_PATH], text[500];
+    char path[MAX_PATH], tmp[MAX_PATH], text[1200];
     if (!Join(path, g_dir, STYLE_PATH) || !Join(tmp, g_dir, STYLE_TMP_PATH)) return 0;
-    lstrcpyA(text, "# CinderLoad's loading screens, as chosen in game (on the world map, M, or with /cinderload); from the next "
+    lstrcpyA(text, "# CinderLoad's loading screens, as chosen in game (the /cinderload panel); from the next "
                    "loading screen.\r\n# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade). areas: "
                    "discovered (the parchment shows only what you have discovered) or full (all of it).\r\n# nearby: how far round "
-                   "where you arrive the parchment shows the zones nearby, in yards (0: none).\r\nmap ");
+                   "where you arrive the parchment shows the zones nearby, in yards (0: none).\r\n# thick: the bar's thickness, "
+                   "percent of its own (50 to 200). width: percent of the screen (20 to 100), or own (each bar's own). whole: on "
+                   "(the whole width of the screen) or off.\r\n# effect: heat, smooth or blade (blade light). colour: class (your "
+                   "class's) or ember. quality: Neo's, any of liquid, pulse, unstable and raw, or none.\r\nmap ");
     lstrcatA(text, StyleMapName(map));
     lstrcatA(text, "\r\nbar ");
     lstrcatA(text, StyleBarName(bar));
@@ -12564,6 +12661,10 @@ static int StyleSave(int map, int bar, int full)
     char nearby[32];
     wsprintfA(nearby, "\r\nnearby %d\r\n", *(volatile int *)&g_nearYd);
     lstrcatA(text, nearby);
+    char look[200];
+    StyleLookText(look, &g_look, "\r\n");
+    lstrcatA(text, look);
+    lstrcatA(text, "\r\n");
     HANDLE f = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
     DWORD len = (DWORD)lstrlenA(text), wrote = 0;
@@ -12593,13 +12694,15 @@ static char *StyleText(char *text, DWORD n)
 static void StyleLoad(void)
 {
     char path[MAX_PATH], m[300];
-    int map = 1, bar = 1, full = 0, reach = PARCH_NEAR_YD, reachNamed = 0;
+    int map = 1, bar = 1, full = 0, reach = PARCH_NEAR_YD, reachNamed = 0, lookNamed = 0;
+    Look look = LOOK_DEFAULT;
     const char *from = "the defaults (no choice made in game yet)";
     DWORD n = 0;
     char *text = Join(path, g_dir, STYLE_PATH) ? ReadTextN(path, 4096, &n) : NULL;
     if (text) {
         StyleParse(StyleText(text, n), &map, &bar, &full);
         reachNamed = StyleNearby(text, &reach);
+        lookNamed = StyleLook(text, &look);
         HeapFree(GetProcessHeap(), 0, text);
         from = "Data\\CinderLoad\\style.txt (chosen in game)";
     } else {
@@ -12611,30 +12714,65 @@ static void StyleLoad(void)
     *(volatile int *)&g_vbarAsked = bar;
     *(volatile int *)&g_mapFull = full;
     *(volatile int *)&g_nearYd = reach;
-    wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game on the world map (M) or with /cinderload",
+    g_look = look;
+    wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game with /cinderload (its panel)",
               StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
     Log(m);
     if (reach) wsprintfA(m, "style: the parchment's zones nearby out to %d yards of the arrival (whole to %d), from %s", reach, reach / 2,
                          reachNamed ? "Data\\CinderLoad\\style.txt" : "the default");
     else lstrcpyA(m, "style: the parchment's zones nearby off (style.txt's nearby 0)");
     Log(m);
+    char lk[200];
+    StyleLookText(lk, &look, ", ");
+    wsprintfA(m, "style: the bar's look: %s, from %s", lk, lookNamed ? "Data\\CinderLoad\\style.txt" : "the defaults");
+    Log(m);
 }
 /* The game's thread: the choice changed to map, bar, full (how: where it came from, for the log), kept in style.txt. 1
  * when it changed. */
-static int StyleSet(int map, int bar, int full, const char *how)
+typedef struct { int map, bar, full, nearYd; Look look; } Style;    /* the whole choice: the three, the reach, the look */
+static void StyleNow(Style *st)
 {
-    if (map == *(volatile int *)&g_parchAsked && bar == *(volatile int *)&g_vbarAsked && full == *(volatile int *)&g_mapFull) return 0;
-    *(volatile int *)&g_parchAsked = map;
-    *(volatile int *)&g_vbarAsked = bar;
-    *(volatile int *)&g_mapFull = full;
-    char m[300];
-    int saved = StyleSave(map, bar, full);
-    wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s (%s), from the next loading screen; %s", StyleMapName(map),
-              StyleBarName(bar), StyleAreasName(full), how,
-              saved ? "kept in Data\\CinderLoad\\style.txt" : "Data\\CinderLoad\\style.txt could NOT be written, so it holds only "
-                                                             "until the game closes");
-    Log(m);
+    st->map = *(volatile int *)&g_parchAsked;
+    st->bar = *(volatile int *)&g_vbarAsked;
+    st->full = *(volatile int *)&g_mapFull;
+    st->nearYd = *(volatile int *)&g_nearYd;
+    st->look = g_look;
+}
+static int StyleApply(const Style *st, const char *how)
+{
+    Style was;
+    StyleNow(&was);
+    int three = st->map != was.map || st->bar != was.bar || st->full != was.full, rest = st->nearYd != was.nearYd || !LookSame(&st->look, &was.look);
+    if (!three && !rest) return 0;
+    *(volatile int *)&g_parchAsked = st->map;
+    *(volatile int *)&g_vbarAsked = st->bar;
+    *(volatile int *)&g_mapFull = st->full;
+    *(volatile int *)&g_nearYd = st->nearYd;
+    g_look = st->look;
+    char m[400];
+    int saved = StyleSave(st->map, st->bar, st->full);
+    const char *kept = saved ? "kept in Data\\CinderLoad\\style.txt" : "Data\\CinderLoad\\style.txt could NOT be written, so it holds only "
+                                                                     "until the game closes";
+    if (three || !rest) {
+        wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s (%s), from the next loading screen; %s", StyleMapName(st->map),
+                  StyleBarName(st->bar), StyleAreasName(st->full), how, kept);
+        Log(m);
+    }
+    if (rest) {
+        char lk[200];
+        StyleLookText(lk, &st->look, ", ");
+        wsprintfA(m, "style: the zones nearby out to %d yards, the bar's look %s (%s), from the next loading screen; %s", st->nearYd, lk, how, kept);
+        Log(m);
+    }
     return 1;
+}
+/* The three alone changed (the reach and the look kept). */
+__attribute__((unused)) static int StyleSet(int map, int bar, int full, const char *how)
+{
+    Style st;
+    StyleNow(&st);
+    st.map = map; st.bar = bar; st.full = full;
+    return StyleApply(&st, how);
 }
 /* The parchment can be drawn: the client's WorldMapArea.dbc gave zones (read on the view's thread as it starts; the game's
  * thread sees the count once it is there). */
@@ -12665,6 +12803,14 @@ static void StylePick(void)
     }
     g_parchOn = parch;
     g_barVanilla = retro;
+    unsigned q = (unsigned)*(volatile int *)&g_look.quality & (SABER_LIQUID | SABER_PULSE | SABER_UNSTABLE | SABER_RAW);
+    if (q != g_saberStyle) {                                       /* Neo's qualities, as chosen in the panel */
+        char qm[120];
+        wsprintfA(qm, "  the view: the blade's qualities%s%s%s%s%s", q & SABER_LIQUID ? " liquid" : "", q & SABER_PULSE ? " pulse" : "",
+                  q & SABER_UNSTABLE ? " unstable" : "", q & SABER_RAW ? " raw" : "", q ? "" : " none");
+        Log(qm);
+        g_saberStyle = q;
+    }
     int nearYd = *(volatile int *)&g_nearYd;
     if (nearYd != g_parchNearOn) {
         char nm[160];
@@ -12806,10 +12952,77 @@ static int CvText(const void *cv, char *out, int size)
     if (size > 0) out[size - 1] = 0;
     return v != NULL;
 }
-/* The CVar's value as the switches set it (CL.Save): exactly "<map> <bar> <areas>", or that and " fault" when they met
- * an error, each word as StyleMapName, StyleBarName and StyleAreasName spell it. Anything else (the probe's "?", a value
- * from Config.wtf, an older two-word one, a value cut short or run on) is not theirs: 0. */
-static int StyleCvarParse(const char *v, int *map, int *bar, int *full, int *fault)
+/* The rest of the CVar's value after its three words, as the panel writes it (CL.Save): " nearby <yards>", then the look
+ * as StyleLookText spells it with single spaces, each part at most once and in that order, and " fault" last when they
+ * met an error; any part may be missing (kept as *st has it). 1 when the whole of it is that; else 0, *st untouched. */
+/* The quality word at v (its length into *len): 0 to 3 as kLookQuality, 4 "none", else -1. */
+static int LookQualityAt(const char *v, int *len)
+{
+    char x[16];
+    int n = 0;
+    while (n < 15 && v[n] >= 'a' && v[n] <= 'z') { x[n] = v[n]; n++; }
+    x[n] = 0;
+    *len = n;
+    for (int i = 0; i < 4; i++) if (n && !lstrcmpiA(x, kLookQuality[i])) return i;
+    return n && !lstrcmpiA(x, "none") ? 4 : -1;
+}
+static int StyleCvarTail(const char *v, Style *st, int *fault)
+{
+    static const char *const kKeys[7] = { "nearby", "thick", "width", "whole", "effect", "colour", "quality" };
+    Style out = *st;
+    int next = 0;
+    *fault = 0;
+    while (*v) {
+        if (*v++ != ' ') return 0;
+        char w[16], x[16];
+        int n = 0;
+        while (n < 15 && *v >= 'a' && *v <= 'z') w[n++] = *v++;
+        w[n] = 0;
+        if (!lstrcmpiA(w, "fault") && !*v) { *fault = 1; break; }
+        int k = next;
+        while (k < 7 && lstrcmpiA(w, kKeys[k])) k++;
+        if (k == 7 || *v++ != ' ') return 0;
+        next = k + 1;
+        if (k == 6) {                                              /* quality: its words, each once, or none */
+            int q = 0, len, i = LookQualityAt(v, &len), j;
+            if (i < 0) return 0;
+            if (i == 4) v += len;
+            else for (;;) {
+                if (q & ((int)SABER_LIQUID << i)) return 0;
+                q |= (int)SABER_LIQUID << i;
+                v += len;
+                if (*v != ' ' || (j = LookQualityAt(v + 1, &len)) < 0 || j == 4) break;
+                v++;
+                i = j;
+            }
+            out.look.quality = q;
+            continue;
+        }
+        n = 0;
+        while (n < 15 && ((*v >= 'a' && *v <= 'z') || (*v >= '0' && *v <= '9'))) x[n++] = *v++;
+        x[n] = 0;
+        int digits = n > 0 && n < 5, letters = n > 0;
+        for (int i = 0; i < n; i++) { if (x[i] < '0' || x[i] > '9') digits = 0; else letters = 0; }
+        if (digits && x[0] == '0' && n > 1) return 0;
+        int val = digits ? LookNumber(x, 0, 99999) : 0;
+        if (k == 0 && digits && val <= PARCH_NEAR_MOST) out.nearYd = val;
+        else if (k == 1 && digits && val >= LOOK_THICK_LEAST && val <= LOOK_THICK_MOST) out.look.thick = val;
+        else if (k == 2 && digits && val >= LOOK_WIDTH_LEAST && val <= LOOK_WIDTH_MOST) out.look.width = val;
+        else if (k == 2 && letters && !lstrcmpiA(x, "own")) out.look.width = 0;
+        else if (k == 3 && letters && (!lstrcmpiA(x, "on") || !lstrcmpiA(x, "off"))) out.look.whole = x[1] == 'n';
+        else if (k == 4 && letters && (!lstrcmpiA(x, "heat") || !lstrcmpiA(x, "smooth") || !lstrcmpiA(x, "blade")))
+            out.look.effect = x[0] == 'h' ? LOOK_HEAT : x[0] == 's' ? LOOK_SMOOTH : LOOK_BLADE;
+        else if (k == 5 && letters && (!lstrcmpiA(x, "class") || !lstrcmpiA(x, "ember"))) out.look.ember = x[0] == 'e';
+        else return 0;
+    }
+    *st = out;
+    return 1;
+}
+/* The CVar's value as the switches set it (CL.Save): exactly "<map> <bar> <areas>", each word as StyleMapName,
+ * StyleBarName and StyleAreasName spell it, then the rest as StyleCvarTail reads it (the panel's reach and look, " fault"
+ * when they met an error). Anything else (the probe's "?", a value from Config.wtf, an older two-word one, a value cut
+ * short or run on) is not theirs: 0. *st: the whole choice, its parts not named kept. */
+static int StyleCvarRead(const char *v, Style *st, int *fault)
 {
     for (int m = 0; m < 2; m++)
         for (int b = 0; b < 4; b++) {
@@ -12818,23 +13031,34 @@ static int StyleCvarParse(const char *v, int *map, int *bar, int *full, int *fau
             int i = 0;
             while (want[i] && v[i] == want[i]) i++;
             if (want[i]) continue;
-            static const char kFault[] = " fault";
-            int f = 0;
-            while (kFault[f] && v[i + f] == kFault[f]) f++;
-            if (v[i] && (kFault[f] || v[i + f])) continue;
-            *map = m; *bar = b & 1; *full = b >> 1; *fault = v[i] != 0;
+            Style t = *st;
+            if (!StyleCvarTail(v + i, &t, fault)) continue;
+            t.map = m; t.bar = b & 1; t.full = b >> 1;
+            *st = t;
             return 1;
         }
     return 0;
+}
+/* (the three alone, as StyleCvarRead reads them) */
+__attribute__((unused)) static int StyleCvarParse(const char *v, int *map, int *bar, int *full, int *fault)
+{
+    Style st;
+    StyleNow(&st);
+    int f;
+    if (!StyleCvarRead(v, &st, &f)) return 0;
+    *map = st.map; *bar = st.bar; *full = st.full; *fault = f;
+    return 1;
 }
 /* A choice made in game, from the CVar (once the switches have set it this session: before that it may be Config.wtf's,
  * which never counts): taken. -1 when the CVar says "fault"; else 1 when the choice changed. */
 static int StyleFromCvar(const void *cv, const char *how)
 {
-    char v[64];
-    int map, bar, full, fault;
-    if (!g_luaSynced || !CvText(cv, v, (int)sizeof v) || !StyleCvarParse(v, &map, &bar, &full, &fault)) return 0;
-    int changed = StyleSet(map, bar, full, how);
+    char v[256];
+    Style st;
+    int fault;
+    StyleNow(&st);
+    if (!g_luaSynced || !CvText(cv, v, (int)sizeof v) || !StyleCvarRead(v, &st, &fault)) return 0;
+    int changed = StyleApply(&st, how);
     return fault ? -1 : changed;
 }
 /* The switches off for the rest of the session, and why (the world map, the game: as they were). */
@@ -12846,11 +13070,12 @@ static void LuaBreak(const char *why)
                  "Data\\CinderLoad\\style.txt still sets the style", why);
     Log(m);
 }
-/* The chunk the switches are made by: the choice held, then dll/switches.lua. Its length, or 0 when out is too small. */
+/* The chunk the switches are made by: the choice held (the three, then the reach and the look as the CVar carries them),
+ * then dll/switches.lua. Its length, or 0 when out is too small. */
 static int LuaChunk(char *out, int size, int map, int bar, int full)
 {
     static const char head[] = "local CL_MAP, CL_BAR, CL_AREAS = \"";
-    int need = (int)sizeof head + 48 + (int)sizeof kSwitchesLua;
+    int need = (int)sizeof head + 48 + 260 + (int)sizeof kSwitchesLua;
     if (size < need) return 0;
     lstrcpyA(out, head);
     lstrcatA(out, StyleMapName(map));
@@ -12858,7 +13083,10 @@ static int LuaChunk(char *out, int size, int map, int bar, int full)
     lstrcatA(out, StyleBarName(bar));
     lstrcatA(out, "\", \"");
     lstrcatA(out, StyleAreasName(full));
-    lstrcatA(out, "\"\n");
+    char look[260], lk[200];
+    StyleLookText(lk, &g_look, " ");
+    wsprintfA(look, "\"\nlocal CL_LOOK = \"nearby %d %s\"\n", *(volatile int *)&g_nearYd, lk);
+    lstrcatA(out, look);
     lstrcatA(out, kSwitchesLua);
     return lstrlenA(out);
 }
@@ -12868,7 +13096,7 @@ static void LuaTick(DWORD now)
 {
     if (!g_luaOn || g_luaBroken || g_luaBusy || !LuaSafeNow()) return;
     g_luaBusy = 1;
-    char m[300], v[64];
+    char m[400], v[256];
     void *cv = g_cvLookup(CV_NAME);
     if (!cv) {                                                     /* our messenger, made as RegisterCVar makes one */
         static char def[48];
@@ -12878,7 +13106,7 @@ static void LuaTick(DWORD now)
         Log("the world map's switches: their CVar " CV_NAME " made, as the client's own RegisterCVar makes one");
     }
     g_luaCv = cv;
-    if (StyleFromCvar(cv, "chosen on the world map or with /cinderload") < 0) {
+    if (StyleFromCvar(cv, "chosen in the /cinderload window or with its words") < 0) {
         LuaBreak("they met a Lua error and turned themselves off (the chat said where)");
         g_luaBusy = 0;
         return;
@@ -12887,7 +13115,7 @@ static void LuaTick(DWORD now)
     g_luaProbeAt = now ? now : 1;
     g_luaExec(kLuaProbe, "CinderLoad");
     if (CvText(cv, v, (int)sizeof v) && v[0] == '?' && !v[1]) {    /* not there: made, from the choice held */
-        static char chunk[sizeof kSwitchesLua + 160];
+        static char chunk[sizeof kSwitchesLua + 420];
         char mark[MAX_PATH];
         int len = LuaChunk(chunk, (int)sizeof chunk, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked, *(volatile int *)&g_mapFull);
         int marked = len && Join(mark, g_dir, LUA_SETUP_MARK);
