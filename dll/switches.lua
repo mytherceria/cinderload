@@ -539,10 +539,11 @@ function CL.Preview()
         CL.At(t, q[1], top, q[2], bh, nil, v.strip)
     end
     v.size = { x0, top, bw, bh }
-    -- the fill in the bar's channel (retro: its art's texels 28 to 449 of 476 across, 9 to 34 of 42 down; neo: between its
-    -- caps, the blade's 16 rows of 48 at its middle), to 60% (a still), the way still to go dark
+    -- the fill in the bar's channel (retro: its art's texels 28 to 449 of 476 across, 9 to 34 of 42 down; neo: inside its
+    -- frame's rails, rows 11 to 45 of 48, from 8 texels into each cap, where the blade's light lies), to 60% (a still), the
+    -- way still to go dark
     local cl, cr, ct, ch
-    if neo then cl, cr, ct, ch = x0 + cw, x0 + bw - cw, top + bh * 16 / 48, bh * 16 / 48
+    if neo then cl, cr, ct, ch = x0 + cw * 8 / 40, x0 + bw - cw * 8 / 40, top + bh * 11 / 48, bh * 34 / 48
     else cl, cr, ct, ch = x0 + cw * 28 / 34, x0 + bw - cw * 27 / 34, top + bh * 9 / 42, bh * 25 / 42 end
     local c, fw = CL.FillColour(), (cr - cl) * 0.6
     v.fill:SetTexture(CL.FILL)

@@ -84,7 +84,7 @@ def load(tree):
                          size=float(c[19] or 0), justify=c[20], checked=c[21] == '1', bg=c[22], edge=c[23],
                          edgeSize=float(c[24] or 0), insets=floats(c[25]), bdColor=floats(c[26]), bdBorder=floats(c[27]),
                          min=float(c[28] or 0), max=float(c[29] or 0), value=float(c[30] or 0), es=float(c[31] or 1),
-                         point=c[32] if len(c) > 32 else ''))
+                         point=c[32] if len(c) > 32 else '', shade=c[33].split() if len(c) > 33 else []))
     return {r['i']: r for r in rows}
 
 
@@ -218,7 +218,15 @@ def main():
                                  tuple(int(255 * v) for v in c[:3]) + (int(255 * (c[3] if len(c) > 3 else 1)),))
                 canvas.alpha_composite(fill, (int(round(x0)), int(round(y0))))
             elif r['texture']:
-                put(crop(arc.texture(r['texture']), r['tc']), x0, y0, x1, y1)
+                im, sh = crop(arc.texture(r['texture']), r['tc']), r['shade']
+                if sh and sh[0] == 'HORIZONTAL' and im is not None:   # (SetGradient: each end's colour, the file times it)
+                    w = max(1, int(round(x1 - x0)))
+                    a = np.asarray(im.resize((w, max(1, int(round(y1 - y0)))), Image.LANCZOS)).astype(np.float32)
+                    lo, hi = np.array([float(v) for v in sh[1:4]]), np.array([float(v) for v in sh[4:7]])
+                    a[..., :3] *= (lo[None, :] + (hi - lo)[None, :] * np.linspace(0, 1, w)[:, None])[None, :, :]
+                    canvas.alpha_composite(Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)), (int(round(x0)), int(round(y0))))
+                else:                                          # (SetVertexColor: the file times it)
+                    put(im, x0, y0, x1, y1, [float(v) for v in sh] if sh else None)
     if '--contrast' in sys.argv:                              # (the same drawing without words: what is behind each)
         global NOTEXT
         words = [r for r in boxes if r.get('bbox')] if not NOTEXT else []

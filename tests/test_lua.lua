@@ -399,8 +399,10 @@ local function Fill() return PB(pv.fill), PB(pv.rest), PB(pv.core) end
 local f, r, c = Fill()
 Check(pv.fill.texture == "Interface\\ChatFrame\\ChatFrameBackground" and pv.fill.gradient and pv.fill.gradient[1] == "HORIZONTAL" and
       Is3({ pv.fill.gradient[2], pv.fill.gradient[3], pv.fill.gradient[4] }, MAGE, 0.35) and Is3({ pv.fill.gradient[5], pv.fill.gradient[6], pv.fill.gradient[7] }, MAGE) and
-      not pv.core:IsVisible() and Near(f.l, a2.l) and Near(f.r - f.l, 0.6 * (a2.r - a2.l)) and Near(r.l, f.r) and Near(r.r, a2.r) and pv.rest.color and pv.rest.color[1] < 0.05,
-      "the preview's fill, Heat in the class's colour: dark at its tail to the mage's colour at its tip, in Neo's channel between its caps to 60%, the rest dark")
+      not pv.core:IsVisible() and Near(f.l, a1.l + (a1.r - a1.l) * 8 / 40) and Near(r.r, a3.r - (a3.r - a3.l) * 8 / 40) and
+      Near(f.r - f.l, 0.6 * (r.r - f.l)) and Near(r.l, f.r) and Near(f.t, a1.t + (a1.b - a1.t) * 11 / 48) and Near(f.b - f.t, (a1.b - a1.t) * 34 / 48) and
+      pv.rest.color and pv.rest.color[1] < 0.05,
+      "the preview's fill, Heat in the class's colour: dark at its tail to the mage's colour at its tip, over Neo's blade inside its frame's rails (rows 11 to 45 of 48, 8 texels into each cap) to 60%, the rest dark")
 UI.Click(cards["effect smooth"])
 Check(Is3(pv.fill.vertex, MAGE) and not pv.fill.gradient and not pv.core:IsVisible(), "Smooth: the fill the class's colour, even")
 UI.Click(cards["effect blade"])
@@ -613,7 +615,8 @@ local function Dump(path)
                                r.checked and "1" or "0", bdp and Q(bdp.bgFile) or "", bdp and Q(bdp.edgeFile) or "", bdp and Q(bdp.edgeSize) or "",
                                bdp and bdp.insets and L({ bdp.insets.left, bdp.insets.right, bdp.insets.top, bdp.insets.bottom }) or "",
                                L(r.backdropColor), L(r.backdropBorderColor), Q(r.min), Q(r.max), Q(r.value), Q(r:GetEffectiveScale()),
-                               Q(table.getn(r.points or {}) == 1 and r.points[1].p or "") }, "\t") .. "\n")
+                               Q(table.getn(r.points or {}) == 1 and r.points[1].p or ""),
+                               r.gradient and L(r.gradient) or L(r.vertex) }, "\t") .. "\n")
         r.id0 = i
     end
     f:close()
