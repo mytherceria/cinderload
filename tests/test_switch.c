@@ -5999,6 +5999,285 @@ static void TestStyle(void)
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
 }
 
+/* The fakes of the client's three calls, over a CVar in low memory (its value a 32-bit pointer, as the client's) */
+static unsigned char *g_fkLow, *g_fkCv;
+static char *g_fkVal;
+static int g_fkUp, g_fkRuns, g_fkProbes, g_fkSetups, g_fkIgnore, g_fkRegisters, g_fkRegFail, g_fkMarked, g_fkHide;
+static char g_fkHead[96], g_fkDef[64];
+static int g_fkArgs[6];
+static void FkSet(const char *v) { snprintf(g_fkVal, 64, "%s", v); }
+static void FakeExec(const char *code, const char *source)
+{
+    g_fkRuns++;
+    if (strcmp(source, "CinderLoad")) return;
+    if (!strcmp(code, kLuaProbe)) { g_fkProbes++; if (!g_fkUp && g_fkCv) FkSet("?"); return; }
+    g_fkSetups++;
+    snprintf(g_fkHead, sizeof g_fkHead, "%.60s", code);
+    g_fkMarked = Get("Data/CinderLoad/ui-setup.tmp") != NULL;
+    if (g_fkIgnore) return;
+    g_fkUp = 1;
+    char m[16] = "", b[16] = "";
+    if (sscanf(code, "local CL_MAP, CL_BAR = \"%15[a-z]\", \"%15[a-z]\"", m, b) == 2) { char v[40]; snprintf(v, sizeof v, "%s %s", m, b); FkSet(v); }
+}
+static void *FakeLookup(const char *name) { return !strcmp(name, CV_NAME) && g_fkCv && !g_fkHide ? g_fkCv : NULL; }
+static void *FakeRegister(const char *name, const char *help, int flags, const char *def, void *cb, int cat, int unreg, void *arg)
+{
+    g_fkRegisters++;
+    g_fkArgs[0] = help != NULL; g_fkArgs[1] = flags; g_fkArgs[2] = cb != NULL; g_fkArgs[3] = cat; g_fkArgs[4] = unreg; g_fkArgs[5] = arg != NULL;
+    snprintf(g_fkDef, sizeof g_fkDef, "%s", def);
+    if (g_fkRegFail || strcmp(name, CV_NAME)) return NULL;
+    g_fkCv = g_fkLow + 0x100;
+    TestPut32(g_fkCv + CV_VALUE, TestLow(g_fkVal));
+    FkSet(def);
+    return g_fkCv;
+}
+static void LuaPlant(void)
+{
+    for (int i = 0; i < LUA_CODE_COUNT; i++) memcpy(shim_module + (kLuaCode[i].va - 0x400000u), kLuaCode[i].bytes, (size_t)kLuaCode[i].n);
+}
+static void TestSwitches(void)
+{
+    int ok;
+    const char *what = "";
+    /* every place the switches use, checked byte for byte first */
+    Fresh("switches-code"); GameDir();
+    LuaPlant();
+    ok = LuaCodeOk(&what);
+    for (int i = 0; i < LUA_CODE_COUNT; i++) {
+        unsigned char *at = shim_module + (kLuaCode[i].va - 0x400000u) + kLuaCode[i].n / 2;
+        *at ^= 0x40;
+        ok &= !LuaCodeOk(&what) && what == kLuaCode[i].what;
+        *at ^= 0x40;
+    }
+    ok &= LuaCodeOk(&what);
+    Check(ok, "the world map's switches: each of the client's places they use checked byte for byte before any is used (any one off: off)");
+
+    ok = LuaWanted() && g_luaExec == (LuaExecFn)(void *)ClientAt(LUA_EXEC_VA) && g_cvLookup == (CvLookupFn)(void *)ClientAt(CV_LOOKUP_VA) &&
+         g_cvRegister == (CvRegisterFn)(void *)ClientAt(CV_REGISTER_VA);
+    Put("Data/CinderLoad/ui-setup.tmp", "x");
+    ok &= !LuaWanted() && Gone("Data/CinderLoad/ui-setup.tmp") && Get("Data/CinderLoad/ui-off.txt") &&
+          LogSays("the last session ended while they were being made");
+    ok &= !LuaWanted() && LogSays("Data\\CinderLoad\\ui-off.txt is there");
+    Fresh("switches-unwritable"); GameDir();                           /* (the mark found, and ui-off.txt cannot be written: off still) */
+    LuaPlant();
+    Put("Data/CinderLoad/ui-setup.tmp", "x");
+    {
+        char p[700];
+        snprintf(p, sizeof p, "%sData/CinderLoad", shim_gamedir);
+        chmod(p, 0555);
+        ok &= !LuaWanted() && Gone("Data/CinderLoad/ui-off.txt");
+        chmod(p, 0755);
+    }
+    Fresh("switches-other-exe"); GameDir();
+    LuaPlant();
+    shim_module[LUA_EXEC_VA - 0x400000u] = 0xC3;
+    ok &= !LuaWanted() && LogSays("the world map's switches: off, as WoW.exe is not as read (FrameScript_Execute");
+    Check(ok, "the switches at start: on with the client as read; off with another WoW.exe, or when the last session ended while they were being made (ui-off.txt then keeps them off until it is deleted)");
+
+    /* the game's thread at a safe moment: a player in the world, no loading screen, the UI's Lua idle */
+    unsigned char *low = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    if (low == MAP_FAILED) { Check(0, "low memory for the switches' test"); return; }
+    memset(low, 0, 1 << 16);
+    unsigned char *mgr = low + 0x1000, *L = low + 0x2000;
+    g_fkLow = low + 0x3000; g_fkVal = (char *)(low + 0x4000);
+    Fresh("switches"); GameDir();
+    LuaPlant();
+    TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));
+    TestPut32(mgr + OBJ_MGR_GUID, 0x1234);
+    TestPut32(shim_module + (LUA_STATE_VA - 0x400000), TestLow(L));
+    TestPut32(L + LUA_L_CI, 0x5000); TestPut32(L + LUA_L_BASE_CI, 0x5000);
+    ok = LuaSafeNow();
+    TestPut32(shim_module + FIRE_LAYER_RVA, 7);    ok &= !LuaSafeNow(); TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    TestPut32(mgr + OBJ_MGR_GUID, 0);              ok &= !LuaSafeNow(); TestPut32(mgr + OBJ_MGR_GUID + 4, 9); ok &= LuaSafeNow();
+    TestPut32(mgr + OBJ_MGR_GUID + 4, 0); TestPut32(mgr + OBJ_MGR_GUID, 0x1234);
+    TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), 0); ok &= !LuaSafeNow(); TestPut32(shim_module + (OBJ_MGR_VA - 0x400000), TestLow(mgr));
+    TestPut32(shim_module + (LUA_STATE_VA - 0x400000), 0); ok &= !LuaSafeNow(); TestPut32(shim_module + (LUA_STATE_VA - 0x400000), TestLow(L));
+    L[LUA_L_NCCALLS] = 1;                          ok &= !LuaSafeNow(); L[LUA_L_NCCALLS] = 0;
+    L[LUA_L_NCCALLS + 1] = 1;                      ok &= !LuaSafeNow(); L[LUA_L_NCCALLS + 1] = 0;
+    TestPut32(L + LUA_L_CI, 0x5010);               ok &= !LuaSafeNow(); TestPut32(L + LUA_L_CI, 0x5000);
+    ok &= LuaSafeNow();
+    Check(ok, "the switches run only at a safe moment of the game's thread: a player in the world, no loading screen, the UI's Lua there and running nothing (no C call into it, its call stack at its base)");
+
+    /* the ticks, through fakes of the client's calls */
+    const char *t;
+    StyleLoad();
+    ok = LuaWanted();
+    g_luaExec = FakeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+    g_luaOn = 1; g_luaBroken = 0; g_luaBusy = 0; g_luaFails = 0; g_luaSetups = 0; g_luaSynced = 0;
+    g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = 0;
+    LuaTick();
+    ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
+          !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
+          !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"parchment\", \"retro\"\n-- CinderLoad", 57) && !strcmp(g_fkVal, "parchment retro") &&
+          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro");
+    Check(ok, "a login: the CVar made as RegisterCVar makes one (no help, no flags, the choice its default, no callback, category 9, registered), the probe finds no switches, they are made from the choice held (the setup's mark there while it runs, gone after)");
+    LuaTick();
+    ok = g_fkProbes == 2 && g_fkSetups == 1 && g_fkRegisters == 1;
+    FkSet("satellite neo");                                           /* the player's clicks */
+    LuaTick();
+    ok &= g_parchAsked == 0 && g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo") &&
+          LogSays("style: the map satellite, the bar neo (chosen on the world map or with /cinderload)") && g_fkSetups == 1;
+    g_fkUp = 0;                                                        /* a /reload */
+    LuaTick();
+    ok &= g_fkSetups == 2 && !strncmp(g_fkHead, "local CL_MAP, CL_BAR = \"satellite\", \"neo\"\n", 42) && !strcmp(g_fkVal, "satellite neo") &&
+          LogSays("made (again: at a login or a /reload), set to satellite neo");
+    FkSet("parchment neo");                                           /* a click, then at once a teleport */
+    StyleAtLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && LogSays("(chosen just before this loading screen)");
+    FkSet("satellite");                                               /* (one word: not the switches' own value) */
+    LuaTick();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    FkSet("satellite retro");                                         /* a click, then a teleport: the game's first frame of it */
+    g_dispNew = 1;
+    GameStep(0.0f, 777000);
+    ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+    FkSet("parchment neo");
+    GameStep(0.05f, 777100);                                          /* (the same screen: only as one begins) */
+    ok &= g_parchAsked == 0 && g_vbarAsked == 1;
+    StyleAtLoad();
+    Check(ok, "each tick: a choice made on the world map or with /cinderload taken and kept in style.txt; after a /reload made again from it; one made just before a loading screen, taken as it begins (the game's first frame of it); a value not the switches' own never");
+
+    int runs = g_fkRuns;
+    TestPut32(shim_module + FIRE_LAYER_RVA, 3);
+    LuaTick();
+    ok = g_fkRuns == runs;
+    TestPut32(shim_module + FIRE_LAYER_RVA, 0);
+    g_luaBusy = 1; LuaTick(); g_luaBusy = 0;
+    ok &= g_fkRuns == runs;
+    L[LUA_L_NCCALLS] = 2; LuaTick(); L[LUA_L_NCCALLS] = 0;
+    ok &= g_fkRuns == runs;
+    g_luaOn = 0; LuaTick(); g_luaOn = 1;
+    ok &= g_fkRuns == runs;
+    Check(ok, "no tick in a loading screen, inside another tick, with the UI's Lua running, or with the switches off");
+
+    /* a new session: a CVar already there (Config.wtf's, say) never counts before the switches have set it */
+    g_luaSynced = 0; g_fkUp = 0;
+    FkSet("satellite retro");
+    StyleAtLoad();
+    ok = g_parchAsked == 1 && g_vbarAsked == 0;
+    LuaTick();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0 && !strcmp(g_fkVal, "parchment neo") && g_luaSynced;
+    Check(ok, "a CVar there before the switches set it (Config.wtf's) never counts: style.txt's choice stands, and the switches set the CVar to it");
+
+    /* their fault, a chunk that does not run, a CVar the client will not make: off for the session */
+    FkSet("parchment neo fault");
+    LuaTick();
+    runs = g_fkRuns;
+    g_fkUp = 0;
+    LuaTick();
+    ok = g_luaBroken && g_fkRuns == runs && LogSays("off for this session, as they met a Lua error");
+    g_luaBroken = 0; g_fkUp = 0; g_fkIgnore = 1;
+    FkSet("parchment neo");
+    LuaTick();
+    ok &= !g_luaBroken && g_luaFails == 1 && LogSays("made, but no word back from them (1 time)");
+    LuaTick();
+    ok &= g_luaBroken && LogSays("as they did not run (twice made, no word back)");
+    FkSet("satellite neo");                                           /* off: not even a screen's start asks the client */
+    StyleAtLoad();
+    ok &= g_parchAsked == 1 && g_vbarAsked == 0;
+    g_luaBroken = 0; g_luaFails = 0; g_fkUp = 0;                       /* once with no word back, then a good one: counted again */
+    LuaTick();
+    g_fkIgnore = 0; g_fkUp = 0;
+    LuaTick();
+    g_fkIgnore = 1; g_fkUp = 0;
+    LuaTick();
+    ok &= !g_luaBroken && g_luaFails == 1;
+    g_luaBroken = 0; g_luaFails = 0; g_fkIgnore = 0; g_fkCv = NULL; g_fkRegFail = 1;
+    LuaTick();
+    ok &= g_luaBroken && LogSays("the client would not make its CVar");
+    g_luaBroken = 0; g_fkCv = NULL; g_fkRegFail = 0; g_fkHide = 1;      /* made, but the client's lookup does not find it */
+    LuaTick();
+    ok &= g_luaBroken;
+    g_fkHide = 0;
+    Check(ok, "off for the session (logged; the world map and style.txt as ever): when the switches report a Lua error, when they are made twice and never run, when the client will not make their CVar");
+
+    char small[64];
+    Check(LuaChunk(small, sizeof small, 1, 1) == 0, "the switches' chunk: never written past its buffer");
+    g_luaOn = 0; g_luaBroken = 0; g_luaFails = 0; g_luaSynced = 0; g_luaExec = NULL; g_cvLookup = NULL; g_cvRegister = NULL;
+    g_parchAsked = 0; g_vbarAsked = 0;
+    munmap(low, 1 << 16);
+}
+
+/* The switches' Lua (dll/switches.lua) as the DLL sends it, run by Lua 5.1 against a stubbed 1.12 UI with 5.0's limits
+ * (tests/test_lua.lua); and switches_lua.h the same text as switches.lua. */
+static void TestSwitchesLua(void)
+{
+    char here[1024], p[1200];
+    snprintf(here, sizeof here, "%s", __FILE__);
+    char *slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(p, sizeof p, "%s/../dll/switches.lua", here);
+    FILE *f = fopen(p, "rb");
+    static char src[65536];
+    size_t n = f ? fread(src, 1, sizeof src - 1, f) : 0;
+    if (f) fclose(f);
+    src[n] = 0;
+    Check(n > 0 && !strcmp(src, kSwitchesLua), "dll/switches_lua.h holds dll/switches.lua as it is (tools/lua_to_c.py)");
+    char dir[700];
+    snprintf(dir, sizeof dir, "%s/lua", g_root);
+    mkdir(dir, 0755);
+    static char chunk[sizeof kSwitchesLua + 128];
+    const struct { const char *name; int map, bar; } kOut[2] = { { "setup.lua", 1, 1 }, { "setup-satellite-neo.lua", 0, 0 } };
+    for (int i = 0; i < 2; i++) {
+        snprintf(p, sizeof p, "%s/%s", dir, kOut[i].name);
+        f = fopen(p, "wb");
+        int len = LuaChunk(chunk, (int)sizeof chunk, kOut[i].map, kOut[i].bar);
+        if (f) { fwrite(chunk, 1, (size_t)len, f); fclose(f); }
+    }
+    snprintf(p, sizeof p, "%s/probe.lua", dir);
+    f = fopen(p, "wb");
+    if (f) { fputs(kLuaProbe, f); fclose(f); }
+    const char *lua = !system("lua5.1 -v >/dev/null 2>&1") ? "lua5.1" : !system("luajit -v >/dev/null 2>&1") ? "luajit" : NULL;
+    if (!lua) { printf("  (no lua5.1 or luajit here: the switches' Lua not run)\n"); return; }
+    const char *layout = getenv("CINDERLOAD_LAYOUT"), *widths = getenv("CINDERLOAD_WIDTHS");
+    char cmd[3000];
+    snprintf(cmd, sizeof cmd, "%s %s/test_lua.lua '%s' %s%s%s %s%s%s 2>&1", lua, here, dir, layout ? "'" : "", layout ? layout : "",
+             layout ? "'" : "", widths ? "'" : "", widths ? widths : "", widths ? "'" : "");
+    FILE *r = popen(cmd, "r");
+    char line[1200];
+    int seen = 0, done = 0;
+    while (r && fgets(line, sizeof line, r)) {
+        line[strcspn(line, "\n")] = 0;
+        if (!strncmp(line, "ok ", 3)) { Check(1, line + 3); seen++; }
+        else if (!strncmp(line, "FAIL ", 5)) { Check(0, line + 5); seen++; }
+        else if (!strncmp(line, "done ", 5)) done = 1;
+        else printf("  lua: %s\n", line);
+    }
+    int st = r ? pclose(r) : -1;
+    Check(r && done && st == 0 && seen >= 40, "the switches' Lua ran whole under the stubbed UI");
+}
+
+/* A real client's WoW.exe: the places the switches use, and the check that keeps a DLL's own functions out of its Lua */
+static void LuaRealClient(const char *client)
+{
+    char exe[1024];
+    snprintf(exe, sizeof exe, "%s/WoW.exe", client);
+    FILE *x = fopen(exe, "rb");
+    int match = x != NULL;
+    for (int i = 0; x && match && i < LUA_CODE_COUNT; i++) {
+        unsigned char got[64];
+        long off = ExeOffset(x, kLuaCode[i].va - 0x400000u);
+        match &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, (size_t)kLuaCode[i].n, x) == (size_t)kLuaCode[i].n &&
+                 !memcmp(got, kLuaCode[i].bytes, (size_t)kLuaCode[i].n);
+        if (!match) printf("FAIL: VA 0x%X (%s) differs in %s\n", kLuaCode[i].va, kLuaCode[i].what, exe);
+    }
+    /* luaD_precall hands each C function's address to 0x42A320 before it calls it ("Invalid function pointer: %p" when it
+     * is outside the client's code): why the switches speak through a CVar */
+    static const unsigned char kPrecall[12] = { 0x8B, 0xCF, 0xE8, 0x7A, 0x41, 0xD3, 0xFF, 0x8B, 0xCE, 0xFF, 0xD7, 0xC1 };
+    static const unsigned char kRange[8] = { 0x3B, 0xF0, 0x72, 0x04, 0x3B, 0xF1, 0x72, 0x1D };
+    unsigned char got[32];
+    long off = x ? ExeOffset(x, 0x6F619F - 0x400000u) : -1;
+    int checked = off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, 12, x) == 12 && !memcmp(got, kPrecall, 12);
+    off = x ? ExeOffset(x, 0x42A34C - 0x400000u) : -1;
+    checked &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, 8, x) == 8 && !memcmp(got, kRange, 8);
+    off = x ? ExeOffset(x, 0x833124 - 0x400000u) : -1;
+    checked &= off >= 0 && !fseek(x, off, SEEK_SET) && fread(got, 1, 28, x) == 28 && !memcmp(got, "Invalid function pointer: %p", 28);
+    if (x) fclose(x);
+    Check(match, "a real client: every place the world map's switches use holds the bytes they were made for, in its WoW.exe");
+    Check(checked, "a real client: its Lua checks each C function's address against its own code before calling it (so the switches speak through a CVar, never a function of the DLL's)");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -6171,9 +6450,12 @@ int main(int argc, char **argv)
     LiveTests();
     ViewTests();
     TestStyle();
+    TestSwitches();
+    TestSwitchesLua();
     if (argc > 2) {
         FireBarRealClient(argv[2]);
         FireRealClient(argv[2]);
+        LuaRealClient(argv[2]);
     }
 
     TestShips();

@@ -24,6 +24,17 @@ To remove: delete CinderLoad.dll, its dlls.txt line, the folder Data/CinderLoad,
 
 Check the files against SHA256SUMS on the release.
 
+## The style: the map and the bar
+
+Two choices, each on its own:
+
+- The loading screen's map: **Parchment** (the zone you arrive in, painted as the game's own world map paints it) or **Satellite** (the living map).
+- Its loading bar: **Retro** (the game's own loading bar, filling in your class's colour) or **Neo** (the blade of light in its metal frame, the RavenCraft logo on it).
+
+Parchment and Retro to begin with. Change them on the world map (M): the check boxes at its bottom right. Or in the chat: `/cinderload` says what is chosen, `/cinderload map` or `/cinderload bar` flips one, and `/cinderload map satellite`, `/cinderload map parchment`, `/cinderload bar retro` or `/cinderload bar neo` sets one. A change counts from your next loading screen and is kept in Data/CinderLoad/style.txt (`map parchment` or `map satellite`, `bar retro` or `bar neo`), which you can also edit with the game closed.
+
+The check boxes and `/cinderload` are made by CinderLoad.dll inside the game; there is no add-on to install. They never change the game's own world map. If they ever meet an error they turn themselves off until the game starts again, and the chat says so. If a game ever closes while they are being made, Data/CinderLoad/ui-off.txt keeps them off until you delete it; style.txt still sets the style.
+
 ## The living map's window
 
 The living map, the place's name, the ships, the weather and the blade are drawn in a window of CinderLoad's own, over the game, while a loading screen shows. It is on by default.
