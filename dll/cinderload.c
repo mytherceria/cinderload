@@ -9182,6 +9182,7 @@ static int CutApply(const unsigned char *inside, int pw, int ph, int K)
         for (int x = 0; x < pw; x++) {
             int i = y * pw + x;
             if (!d[i]) continue;
+            if (d[i] >= 3 * grow) { g_parchPx[4 * ((unsigned)y * (unsigned)T + (unsigned)x) + 3] = 0; continue; }   /* (past the line: none) */
             float dt = (float)d[i] / 3.0f, w = ParchSmooth(dt / (float)grow), al = 1 - ParchSmooth((dt - (float)(grow - band)) / (float)band);
             float u = ((float)x + 0.5f) / (float)c - 0.5f;
             int i0 = u < 0 ? 0 : (int)u, i1 = i0 + 1 < nw ? i0 + 1 : i0;
