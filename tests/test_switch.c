@@ -5726,6 +5726,69 @@ static void TestParchment(void)
     g_zoneAt = 0;
     ok &= lateZ > 50 && lateZ < 80;
     Check(ok, "the fade A: each finer painting comes up over the coarser one as the coarser one is drawn larger than its own texels (halfway where, on a window 1080 tall as his approved films, it would be drawn 1.3 pixels a texel: the same map scale and framing on any window, 1920 x 1080 or 3840 x 2160), the zone barely begun over it as the continent is halfway up over the world's, the zone's whole well before the end");
+    /* the player's marker (his pick, 11 Oct, option 1, no ripple): the world map's own arrow pointing north over a dark disc,
+     * the candle's amber glow breathing over 2 s, over everything, coming up with the zone's painting */
+    {
+        static const char *mn[2] = { PARCH_MARK_PATH, PARCH_GLOW_PATH };
+        unsigned ml[2];
+        const char *md[2] = { (const char *)TestPalBlp(64, 64, 0xC0C0D0, 8, &ml[0]), (const char *)TestPalBlp(32, 32, 0x203080, 0, &ml[1]) };
+        MakeMpq("Data/patch-I.MPQ", 2, mn, md, ml);
+        int rd = ParchMarkRead();
+        ok = rd && g_markPic[0].w == 64 && g_markPic[1].w == 32 && g_markPic[1].px[3] == 0x80 && g_markPic[0].px[3] == 255;   /* (the glow's alpha its brightness) */
+        for (int k = 0; k < 2; k++) { g_markTW[k] = g_markTH[k] = g_markPic[k].w; g_viewTex[VT_PMARK + k] = 1; }
+        g_markUp = 1;
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+        ViewBuild(1920, 1080, 0.0f, 2000);
+        ok &= TestBatch(VT_PMARK) < 0 && TestBatch(VT_PGLOW) < 0;      /* (the zone not up yet: no marker) */
+        ViewBuild(1920, 1080, 1.0f, 9500);                             /* (landed: the zone whole, the marker on the spot) */
+        int gb = -1, db = -1, ab = TestBatch(VT_PMARK);
+        for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_PGLOW) { if (g_vb[b].add) gb = b; else db = b; }
+        int last = 1;
+        for (int b = 0; b < g_vbN; b++) if (b > ab && (g_vb[b].tex == VT_PARCH || g_vb[b].tex == VT_PWORD0 || g_vb[b].tex == VT_PARCH2)) last = 0;
+        float k = 0.5f + 0.5f * sinf(6.2831853f * 9500 / 2000);      /* (his 2 s breath; the mock's sizes: markers.py) */
+        const ViewVert *gv = gb >= 0 ? &g_vv[g_vb[gb].first] : NULL, *dv = db >= 0 ? &g_vv[g_vb[db].first] : NULL, *av = ab >= 0 ? &g_vv[g_vb[ab].first] : NULL;
+        ok &= gv && dv && av && gb < db && db < ab && last && g_vb[gb].count == 4 && g_vb[ab].count == 4 &&
+              Near(gv[2].x - gv[0].x, 230 * (0.94f + 0.06f * k), 0.01) && Near(0.5f * (gv[0].x + gv[2].x), 960, 0.01) && Near(0.5f * (gv[0].y + gv[2].y), 540, 0.01) &&
+              Near(dv[2].x - dv[0].x, 88 * 1.05f, 0.01) && Near(av[2].x - av[0].x, 88, 0.01) &&
+              Near(0.5f * (av[0].y + av[2].y), 540 - 6, 0.01) && av[0].c[3] == 255 && av[0].c[0] == 255 &&
+              abs(gv[0].c[3] - (int)(255 * (0.16f + 0.16f * k) + 0.5f)) <= 1 && gv[0].c[0] == 255 && abs(gv[0].c[1] - 189) <= 1 && abs(gv[0].c[2] - 102) <= 1 &&
+              abs(dv[0].c[3] - (int)(255 * 0.62f + 0.5f)) <= 1 && dv[0].c[0] < 20 && av[0].v == 0 && av[2].v == 1;   /* (north: its picture upright) */
+        float g0 = gv ? gv[2].x - gv[0].x : 0;
+        ViewBuild(1920, 1080, 1.0f, 10500);                            /* (a second later: the breath's other half) */
+        gb = -1;
+        for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_PGLOW && g_vb[b].add) gb = b;
+        float g1 = gb >= 0 ? g_vv[g_vb[gb].first + 2].x - g_vv[g_vb[gb].first].x : 0, k1 = 1 - k;
+        ok &= Near(g1, 230 * (0.94f + 0.06f * k1), 0.01);
+        ViewBuild(1920, 1080, 1.0f, 11500);                            /* (two seconds on: as it was) */
+        for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_PGLOW && g_vb[b].add) gb = b;
+        ok &= Near(g_vv[g_vb[gb].first + 2].x - g_vv[g_vb[gb].first].x, g0, 0.01) && fabsf(g0 - g1) > 10;
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (his window, twice as tall: twice as big) */
+        ViewBuild(3840, 2160, 0.0f, 2000);
+        ViewBuild(3840, 2160, 1.0f, 9000);
+        ab = TestBatch(VT_PMARK);
+        ok &= ab >= 0 && Near(g_vv[g_vb[ab].first + 2].x - g_vv[g_vb[ab].first].x, 2 * 88, 0.01) &&
+              Near(0.5f * (g_vv[g_vb[ab].first].y + g_vv[g_vb[ab].first + 2].y), 1080 - 12, 0.01);
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (21:9, as tall: the same size, by the height) */
+        ViewBuild(2560, 1080, 0.0f, 2000);
+        ViewBuild(2560, 1080, 1.0f, 9000);
+        ab = TestBatch(VT_PMARK);
+        ok &= ab >= 0 && Near(g_vv[g_vb[ab].first + 2].x - g_vv[g_vb[ab].first].x, 88, 0.01);
+        TestGlideArrive(0, 0, 0, -500, 500, 2000);                     /* (at sea: with its continent's painting) */
+        ViewBuild(1920, 1080, 0.0f, 2000);
+        ViewBuild(1920, 1080, 0.6f, 2500);
+        ab = TestBatch(VT_PMARK);
+        ok &= ab >= 0 && g_pcam.mc > 0.05f && abs(g_vv[g_vb[ab].first].c[3] - (int)(255 * g_pcam.mc + 0.5f)) <= 1;
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (halfway up with the zone's painting) */
+        ViewBuild(1920, 1080, 0.0f, 2000);
+        ViewBuild(1920, 1080, TestTauFor(0.5f * (z0 + z1)), 3000);
+        ab = TestBatch(VT_PMARK);
+        ok &= ab >= 0 && abs(g_vv[g_vb[ab].first].c[3] - (int)(255 * g_pcam.mz + 0.5f)) <= 1 && g_pcam.mz > 0.3f && g_pcam.mz < 0.7f;
+        g_markUp = 0;                                                  /* (not read from the client: none) */
+        ViewBuild(1920, 1080, 1.0f, 9000);
+        ok &= TestBatch(VT_PMARK) < 0 && TestBatch(VT_PGLOW) < 0;
+        for (int k2 = 0; k2 < 2; k2++) { ParchPicFree(&g_markPic[k2]); g_viewTex[VT_PMARK + k2] = 0; free((void *)md[k2]); }
+        Check(ok, "the player's marker (his pick, option 1): the world map's own arrow (MinimapArrow.blp) pointing north over a dark disc, the candle's amber glow (GenericGlow2_32.blp, its alpha its brightness) added round it breathing over 2 s, centred on the character's spot over everything, sized for a window 1080 tall (twice on 2160), coming up with the zone's painting; none before it, none without its pictures");
+    }
     TestGlideArrive(0, 1, 0, -9464, 62, 4000);                         /* (taken late, the bar 40% along: the glide starts there) */
     ViewBuild(1920, 1080, 0.4f, 4000);
     ok = g_pcam.e == 0 && Near(g_pcam.v.s, s0, 1e-6);

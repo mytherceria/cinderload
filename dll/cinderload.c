@@ -5686,13 +5686,16 @@ static int TextHas(const char *list, const char *name)
  * none). A batch is drawn over what is under it, or added to it (add 1: light, the blade's glow), or its picture is
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
-       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_PWORLD, VT_PCONTM, VT_PZONEM, VT_PWORD0, VT_PWORD1, VT_COUNT };
+       VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_PWORLD, VT_PCONTM, VT_PZONEM, VT_PWORD0, VT_PWORD1, VT_PMARK,
+       VT_PGLOW, VT_COUNT };
                                                                 /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client;
                                                                  * VT_PARCH, VT_PARCH2, VT_PWORLD: the parchment's zone, its
                                                                  * continent and the world, painted here from the client's map;
                                                                  * VT_PCONTM, VT_PZONEM: with the fade C, the continent's and the
                                                                  * zone's copies in the colours under them; VT_PWORD0, 1:
-                                                                 * the world's names of the two continents, cut out of it) */
+                                                                 * the world's names of the two continents, cut out of it;
+                                                                 * VT_PMARK, VT_PGLOW: the player's marker, the world map's
+                                                                 * own arrow and the candle's glow, read from the client) */
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -7676,8 +7679,8 @@ static void VBarRead(unsigned char **blp, unsigned *len)
  * The zone you arrive in, painted as the client's own world map paints it (Interface\WorldMap\<zone>, read from its
  * archives: the HD patch's 512-px tiles where it is installed), every overlay piece laid on (the whole zone painted;
  * only the pieces this character has found is a later slice), the tiles' seams blended, by candlelight at all times,
- * the view gliding in toward where you arrive, vanilla's own bar under it. No names, no arrow, no ships, no weather (his
- * calls). The paintings are made on the view's thread, outside the step lock, one a frame: the world's once a session,
+ * the view gliding in toward where you arrive, vanilla's own bar under it. No names, no ships, no weather (his calls);
+ * the world map's own player arrow where you arrive (his pick, 11 Oct: ParchMarkDraw). The paintings are made on the view's thread, outside the step lock, one a frame: the world's once a session,
  * then each screen's arrival's continent and zone; until the world's is made the paper is dark.
  * Data\CinderLoad\parchment.txt asks for it, until it is the default. */
 #define PARCH_ZONES     256
@@ -8768,6 +8771,76 @@ static void ParchGlideBegin(ParchView a, float shown, DWORD now, int c, int z)
     }
     g_glide.at = g_parchAt; g_glide.screen = g_viewScreen; g_glide.c = c; g_glide.z = z;
 }
+/* ---- the player's marker (his pick, 11 Oct ~03:00, option 1 of the markers mocked, no ripple) ----
+ * Where the character is, the 1.12 world map's own player arrow (Interface\Minimap\MinimapArrow.blp, the picture of the
+ * model WorldMapFrame.lua's CreateWorldMapArrowFrame draws for the player; this client's from its patch-I: the silver
+ * arrow with the blue eye), pointing north (a loading screen does not know the facing), over a soft dark disc for
+ * contrast (the candle's glow picture laid dark), with the candle's warm amber glow (Interface\Glues\Models\UI_NightElf\
+ * GenericGlow2_32.blp, added, as its model blends it) breathing on PARCH_MARK_BREATH: sizes and colours as the mock
+ * (markers.py), in pixels of a window 1080 tall (twice on his 2160). It comes up with the finest painting under it (the
+ * zone's, at sea its continent's), at the character's spot as the glide draws it. Both pictures read from the client's
+ * archives, newest first, read only; the glow's alpha its brightness (it has none of its own). Parchment only. */
+#define PARCH_MARK_ARROW 88.0f        /* the arrow's picture (64 texels) drawn this big, */
+#define PARCH_MARK_LIFT  6.0f         /* its middle this far above the spot (the arrow's head is above its picture's middle) */
+#define PARCH_MARK_DISC  1.05f        /* the dark disc this much the arrow's size, */
+#define PARCH_MARK_DARK  0.62f        /* this dark at its middle */
+#define PARCH_MARK_GLOW  230.0f       /* the glow this big at its widest, */
+#define PARCH_MARK_BREATH 2000        /* breathing over this (ms): its size 0.94 to 1, its alpha 0.16 to 0.32 */
+#define PARCH_MARK_PATH  "Interface\\Minimap\\MinimapArrow.blp"
+#define PARCH_GLOW_PATH  "Interface\\Glues\\Models\\UI_NightElf\\GenericGlow2_32.blp"
+static void ParchPicFree(ParchPic *P);
+static ParchPic g_markPic[2];                  /* the arrow, the glow (RGBA) */
+static int g_markUp;                           /* both on OpenGL */
+static int g_markTW[2], g_markTH[2];
+/* The marker's two pictures read and decoded (the glow's alpha its brightness): 1 when both were. */
+static int ParchMarkRead(void)
+{
+    static const char *const kPath[2] = { PARCH_MARK_PATH, PARCH_GLOW_PATH };
+    int ok = 1;
+    for (int k = 0; k < 2; k++) {
+        ParchPicFree(&g_markPic[k]);
+        unsigned char *d = NULL;
+        unsigned n = 0;
+        const char *from;
+        BlpInfo b;
+        if (!ClientPicture(kPath[k], "interface.MPQ", &d, &n, &from)) { ok = 0; continue; }
+        ParchPic *P = &g_markPic[k];
+        if (BlpParse(d, n, &b) && b.w <= 256 && b.h <= 256 &&
+            (P->px = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)b.w * b.h * 4)) != NULL) {
+            if (b.dxt) DxtDecode(d + b.off[0], b.w, b.h, b.dxt, P->px);
+            else BlpPalDecode(d, &b, 0, b.w, b.h, P->px);
+            P->w = (int)b.w; P->h = (int)b.h; P->x0 = P->y0 = 0; P->ok = 1;
+            for (int i = 0; k == 1 && i < P->w * P->h; i++) {             /* (the glow: its alpha its brightness) */
+                unsigned char *q = P->px + 4 * i, m = q[0] > q[1] ? q[0] : q[1];
+                q[3] = m > q[2] ? m : q[2];
+            }
+        } else ok = 0;
+        HeapFree(GetProcessHeap(), 0, d);
+    }
+    return ok;
+}
+/* The marker at (x, y) on a W x H window, now, a its alpha (its painting's mix): the glow added, the dark disc, the arrow. */
+static void ParchMarkDraw(float x, float y, float W, float H, DWORD now, float a)
+{
+    (void)W;
+    if (!g_markUp || !(a > 0) || !g_viewTex[VT_PMARK] || !g_viewTex[VT_PGLOW]) return;
+    float u = H / PARCH_REF_H, ph = 6.2831853f * (float)(now % PARCH_MARK_BREATH) / PARCH_MARK_BREATH, k = 0.5f + 0.5f * SeaSin(ph);
+    static const float kWarm[3] = { 1.0f, 0.74f, 0.40f }, kDark[3] = { 0.06f, 0.04f, 0.02f };
+    for (int part = 0; part < 3; part++) {                           /* the glow, the disc, the arrow */
+        int slot = part == 2 ? VT_PMARK : VT_PGLOW, m = part == 2 ? 0 : 1;
+        float s = part == 0 ? PARCH_MARK_GLOW * (0.94f + 0.06f * k) : part == 1 ? PARCH_MARK_ARROW * PARCH_MARK_DISC : PARCH_MARK_ARROW;
+        float cy = part == 2 ? y - PARCH_MARK_LIFT * u : y, h = 0.5f * s * u;
+        float al = a * (part == 0 ? 0.16f + 0.16f * k : part == 1 ? PARCH_MARK_DARK : 1);
+        const float *t = part == 0 ? kWarm : part == 1 ? kDark : NULL;
+        float rgb[3] = { t ? t[0] : 1, t ? t[1] : 1, t ? t[2] : 1 };
+        ViewVert *q = ViewQuadMode(slot, part == 0);
+        if (!q) return;
+        DWORD c = SaberArgb(VBarRgb(rgb), al);
+        float u1 = (float)g_markPic[m].w / (float)g_markTW[m], v1 = (float)g_markPic[m].h / (float)g_markTH[m];
+        ViewVertSet(q, x - h, cy - h, 0, 0, c); ViewVertSet(q + 1, x + h, cy - h, u1, 0, c);
+        ViewVertSet(q + 2, x + h, cy + h, u1, v1, c); ViewVertSet(q + 3, x - h, cy + h, 0, v1, c);
+    }
+}
 /* This frame's paper: dark, the world's painting coming up over it as a screen begins, the camera on the opening until
  * the arrival is taken, then gliding (above) on the even bar as shown (shown: never back), the finer paintings coming up
  * one of four ways (g_parchFade), all by candlelight. */
@@ -8864,6 +8937,8 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         ParchLayerT(VT_PWORD0 + wc, (float)g_wordTW[wc], (float)g_wordTH[wc], (float)P->w, (float)P->h, nr, v, W, H,
                     ParchUp01(now, (LONG)(g_worldAt - g_parchScrAt) > 0 ? g_worldAt : g_parchScrAt), 0, NULL, NULL);
     }
+    /* the player's marker over them all, coming up with the finest painting under it */
+    if (arrive) ParchMarkDraw(g_pcam.px, g_pcam.py, W, H, now, zoneUp ? g_pcam.mz : contUp && z < 0 ? g_pcam.mc : 0);
 }
 
 /* ---- the paintings' making, a frame at a time (the view's thread) ---- */
@@ -10277,6 +10352,10 @@ static void ParchWork(DWORD now)
                 g_worldUp = 1; g_worldAt = now;
                 for (int k = 0; k < 2; k++)
                     g_wordUp[k] = g_wordPic[k].ok && PARCH_UPPIC(VT_PWORD0 + k, &g_wordPic[k], &g_wordTW[k], &g_wordTH[k]);
+                g_markUp = ParchMarkRead() && PARCH_UPPIC(VT_PMARK, &g_markPic[0], &g_markTW[0], &g_markTH[0]) &&
+                           PARCH_UPPIC(VT_PGLOW, &g_markPic[1], &g_markTW[1], &g_markTH[1]);
+                Log(g_markUp ? "  the parchment: the player's marker, the world map's own arrow (MinimapArrow.blp) and the candle's glow (GenericGlow2_32.blp), read from the client"
+                             : "  the parchment: the player's marker could not be read from the client (MinimapArrow.blp, GenericGlow2_32.blp): none drawn");
                 wsprintfA(m, "  the parchment: the world painted from the client's map (%d-px tiles) in %lu ms, the opening over the Maelstrom; "
                           "its names cut out to stay put: Eastern Kingdoms %s, Kalimdor %s", 256 * g_worldK, (unsigned long)(ViewNow() - t0),
                           g_wordUp[0] ? "yes" : "no", g_wordUp[1] ? "yes" : "no"); Log(m);
