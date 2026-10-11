@@ -8987,16 +8987,33 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
 
 /* ---- the paintings' making, a frame at a time (the view's thread) ---- */
 static DWORD ViewNow(void);
+static int ParchUpBegin(int slot);
+static int ParchUpStep(void);
 #if defined(__i386__) && !defined(PARCH_UP)
 #define PARCH_UP_BEGIN ParchUpBegin          /* (the 32-bit build: a painting goes up a strip a frame) */
 #define PARCH_UP_STEP ParchUpStep
-static int ParchUpBegin(int slot);
-static int ParchUpStep(void);
 #else
 #ifndef PARCH_UP
 #define PARCH_UP ParchUp                     /* (the tests and the harness keep the painting instead of OpenGL) */
 #endif
 static int ParchUp(int slot);
+/* The tests' OpenGL, as much of the view's own (gl, g_view.maxTex) as a painting's upload uses: unset (no TexSubImage2D),
+ * a painting is kept whole at once (PARCH_UP); set by a test, it goes up a strip a frame through the 32-bit build's own
+ * ParchUpBegin and ParchUpStep. */
+static struct {
+    void (WINAPI *GenTextures)(int, unsigned *);
+    void (WINAPI *BindTexture)(unsigned, unsigned);
+    void (WINAPI *TexParameteri)(unsigned, unsigned, int);
+    void (WINAPI *TexImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (WINAPI *TexSubImage2D)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+    void (WINAPI *PixelStorei)(unsigned, int);
+    unsigned (WINAPI *GetError)(void);
+} gl;
+static struct { int maxTex; } g_view;
+#ifndef PARCH_UP_BEGIN
+#define PARCH_UP_BEGIN(slot) (gl.TexSubImage2D ? ParchUpBegin(slot) : PARCH_UP(slot))
+#define PARCH_UP_STEP() (gl.TexSubImage2D ? ParchUpStep() : 1)
+#endif
 #endif
 static unsigned char *g_mipPx;               /* the painting's smaller copies, level after level (see ParchMips) */
 static int g_mipLevels;
@@ -10646,14 +10663,9 @@ static struct {
     DWORD posted, ran;                                    /* (the view's clock as it was posted; the worker's ms on it) */
 } g_pj;
 static volatile LONG g_pjWorker;                          /* a worker runs the jobs (once started), */
-#ifdef __i386__
 static HANDLE g_pjEvent;                                  /* woken by this as each is posted */
-#endif
 static int g_pjUp = -1;                                   /* the slot going up to OpenGL a strip a frame (-1: none) */
-#ifndef PARCH_UP_BEGIN
-#define PARCH_UP_BEGIN(slot) PARCH_UP(slot)              /* (the tests and the harness: up whole, at once) */
-#define PARCH_UP_STEP() 1
-#endif
+static void ParchWorkerStart(void);
 /* The job posted, run (the worker's thread, or at once without one). */
 static void ParchJobRun(void)
 {
@@ -10711,9 +10723,7 @@ static void ParchJobPost(int kind, DWORD now)
     if (kind != PJ_MATCH) { g_pj.posted = now; g_pj.ran = 0; }
     InterlockedExchange(&g_pj.state, 1);
     if (!g_pjWorker) { ParchJobRun(); InterlockedExchange(&g_pj.state, 2); }
-#ifdef __i386__
     else SetEvent(g_pjEvent);
-#endif
 }
 /* The next job, the first needed first (the view's thread, nothing posted or going up): 1 when one was posted. */
 static int ParchJobNext(DWORD now, int map, float x, float y, float h, int zok, LONG known, LONG screen)
@@ -11107,13 +11117,7 @@ static void ViewOpenFirst(float w, float h, DWORD now)
     ViewFirstList(w, h, now);
 }
 
-#ifdef __i386__
-#include <d3d9.h>
-/* ITS DRAWING IS OPENGL, NOT DIRECT3D (4 Oct 2026, 22:23, his first launch of the proof: a critical error). Mods such as
- * comfyfog hook Direct3D 9 by patching the device's function table, and that table is shared by every device the
- * game's d3d9.dll makes, ours included: our device's calls ran through comfyfog's hooks, and the game's next frame
- * called a null pointer inside comfyfog. OpenGL (opengl32.dll, GDI's pixel formats) is a different library that no
- * Direct3D mod touches; it is loaded by name at run time, so the DLL's own imports stay kernel32 and user32. */
+/* OpenGL's names, by number (the view's drawing; the paintings' upload the tests drive too, ParchUpBegin) */
 #define GL_COLOR_BUFFER_BIT_     0x4000
 #define GL_QUADS_                0x0007
 #define GL_PROJECTION_           0x1701
@@ -11146,6 +11150,13 @@ static void ViewOpenFirst(float w, float h, DWORD now)
 #define GL_SRC_ALPHA_            0x0302
 #define GL_ONE_MINUS_SRC_ALPHA_  0x0303
 #define GL_ONE_                  1
+#ifdef __i386__
+#include <d3d9.h>
+/* ITS DRAWING IS OPENGL, NOT DIRECT3D (4 Oct 2026, 22:23, his first launch of the proof: a critical error). Mods such as
+ * comfyfog hook Direct3D 9 by patching the device's function table, and that table is shared by every device the
+ * game's d3d9.dll makes, ours included: our device's calls ran through comfyfog's hooks, and the game's next frame
+ * called a null pointer inside comfyfog. OpenGL (opengl32.dll, GDI's pixel formats) is a different library that no
+ * Direct3D mod touches; it is loaded by name at run time, so the DLL's own imports stay kernel32 and user32. */
 static struct {
     HMODULE lib, gdi;
     HGLRC (WINAPI *CreateContext)(HDC);
@@ -11323,42 +11334,6 @@ static int ViewSparkUp(void)
     return g_viewTex[VT_SPARK] != 0;
 }
 
-/* The painting made (g_parchPx) and its smaller copies (ParchMips) given to OpenGL in slot (its name made once, its
- * pictures replaced each time), drawn smoothly between them, a strip a frame so the view's frame never waits on it (the
- * brief, 11 Oct): ParchUpBegin makes room for every level (1 when OpenGL took it), ParchUpStep gives it the next
- * PARCH_UP_BYTES (ParchStrip; 1 when all of it is up, 0 more to come, -1 refused). g_parchPx and its copies stay the
- * caller's until it is up. */
-static struct { int slot, level, y; } g_pul;
-static int ParchUpBegin(int slot)
-{
-    if (!g_parchPx || g_parchTW <= 0 || g_parchTW > g_view.maxTex || (!g_mipLevels && !ParchMips())) return 0;
-    while (gl.GetError()) {}
-    if (!g_viewTex[slot]) gl.GenTextures(1, &g_viewTex[slot]);
-    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
-    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
-    int w = g_parchTW;
-    for (int i = 0; i <= g_mipLevels; i++, w /= 2) gl.TexImage2D(GL_TEXTURE_2D_, i, GL_RGBA8_, w, w, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, NULL);
-    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, g_mipLevels);
-    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_MIPMAP_LINEAR_);
-    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
-    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
-    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
-    g_pul.slot = slot; g_pul.level = 0; g_pul.y = 0;
-    return !gl.GetError();
-}
-static int ParchUpStep(void)
-{
-    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[g_pul.slot]);
-    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
-    SIZE_T budget = PARCH_UP_BYTES;
-    int lv, y0, rows;
-    while (ParchStrip(g_parchTW, g_mipLevels, &g_pul.level, &g_pul.y, &budget, &lv, &y0, &rows)) {
-        int w = g_parchTW >> lv;
-        gl.TexSubImage2D(GL_TEXTURE_2D_, lv, 0, y0, w, rows, GL_RGBA_, GL_UNSIGNED_BYTE_, ParchLevelPx(lv) + 4 * (SIZE_T)y0 * (SIZE_T)w);
-    }
-    if (gl.GetError()) return -1;
-    return g_pul.level > g_mipLevels;
-}
 
 /* A picture (P: w x h RGBA) given to OpenGL in slot, on a texture as many texels as the powers of two holding it (its
  * last column and row carried on to its edges), with its smaller copies: 1 when it took it, its size in *tw, *th. */
@@ -11648,33 +11623,6 @@ static DWORD ViewOff(const char *why)
     Log(m);
     return 0;
 }
-/* The parchment's worker (above, the jobs): a thread of its own, at a lower priority than the view's, that runs each job
- * posted (woken by g_pjEvent) and says it is done; never touching OpenGL. Started with the view, once the parchment's
- * tables are read. */
-static DWORD WINAPI ParchWorker(LPVOID arg)
-{
-    (void)arg;
-    while (g_pjWorker) {
-        WaitForSingleObject(g_pjEvent, 100);
-        if (g_pj.state == 1) { ParchJobRun(); InterlockedExchange(&g_pj.state, 2); }
-    }
-    return 0;
-}
-static void ParchWorkerStart(void)
-{
-    if (!g_parchTablesOk || g_pjWorker) return;
-    g_pjEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
-    InterlockedExchange(&g_pjWorker, 1);                  /* (before it runs: its loop's) */
-    HANDLE t = g_pjEvent ? CreateThread(NULL, 0, ParchWorker, NULL, 0, NULL) : NULL;
-    if (!t) {
-        InterlockedExchange(&g_pjWorker, 0);
-        Log("  the parchment: its worker's thread could not be started; its paintings are made on the view's thread");
-        return;
-    }
-    SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL);
-    CloseHandle(t);
-    Log("  the parchment: its paintings made by a worker thread of their own, given to OpenGL a strip a frame");
-}
 static DWORD WINAPI ViewThread(LPVOID arg)
 {
     const unsigned char *base = (const unsigned char *)arg;
@@ -11826,6 +11774,77 @@ static DWORD ViewNow(void) { return GetTickCount(); }
 static int ParchUp(int slot) { (void)slot; return 0; }      /* (no OpenGL here: the tests' PARCH_UP keeps the painting) */
 static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th) { (void)slot; (void)P; *tw = *th = 0; return 0; }
 #endif
+/* The painting made (g_parchPx) and its smaller copies (ParchMips) given to OpenGL in slot (its name made once, its
+ * pictures replaced each time), drawn smoothly between them, a strip a frame so the view's frame never waits on it (the
+ * brief, 11 Oct): ParchUpBegin makes room for every level (1 when OpenGL took it), ParchUpStep gives it the next
+ * PARCH_UP_BYTES (ParchStrip; 1 when all of it is up, 0 more to come, -1 refused). g_parchPx and its copies stay the
+ * caller's until it is up. */
+static struct { int slot, level, y; } g_pul;
+static int ParchUpBegin(int slot)
+{
+    if (!g_parchPx || g_parchTW <= 0 || g_parchTW > g_view.maxTex || (!g_mipLevels && !ParchMips())) return 0;
+    while (gl.GetError()) {}
+    if (!g_viewTex[slot]) gl.GenTextures(1, &g_viewTex[slot]);
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[slot]);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    int w = g_parchTW;
+    for (int i = 0; i <= g_mipLevels; i++, w /= 2) gl.TexImage2D(GL_TEXTURE_2D_, i, GL_RGBA8_, w, w, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, NULL);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, g_mipLevels);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_MIPMAP_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    g_pul.slot = slot; g_pul.level = 0; g_pul.y = 0;
+    return !gl.GetError();
+}
+static int ParchUpStep(void)
+{
+    gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[g_pul.slot]);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    SIZE_T budget = PARCH_UP_BYTES;
+    int lv, y0, rows;
+    while (ParchStrip(g_parchTW, g_mipLevels, &g_pul.level, &g_pul.y, &budget, &lv, &y0, &rows)) {
+        int w = g_parchTW >> lv;
+        gl.TexSubImage2D(GL_TEXTURE_2D_, lv, 0, y0, w, rows, GL_RGBA_, GL_UNSIGNED_BYTE_, ParchLevelPx(lv) + 4 * (SIZE_T)y0 * (SIZE_T)w);
+    }
+    if (gl.GetError()) return -1;
+    return g_pul.level > g_mipLevels;
+}
+/* The parchment's worker (above, the jobs): a thread of its own, at a lower priority than the view's, that runs each job
+ * posted (woken by g_pjEvent) and says it is done (ParchWorkerTurn, a pass of its loop); never touching OpenGL. Started
+ * with the view, once the parchment's tables are read; the tests run its loop by hand between frames (their shim's
+ * thread is never run). */
+static int ParchWorkerTurn(void)
+{
+    if (g_pj.state != 1) return 0;
+    ParchJobRun();
+    InterlockedExchange(&g_pj.state, 2);
+    return 1;
+}
+static DWORD WINAPI ParchWorker(LPVOID arg)
+{
+    (void)arg;
+    while (g_pjWorker) {
+        WaitForSingleObject(g_pjEvent, 100);
+        ParchWorkerTurn();
+    }
+    return 0;
+}
+static void ParchWorkerStart(void)
+{
+    if (!g_parchTablesOk || g_pjWorker) return;
+    g_pjEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    InterlockedExchange(&g_pjWorker, 1);                  /* (before it runs: its loop's) */
+    HANDLE t = g_pjEvent ? CreateThread(NULL, 0, ParchWorker, NULL, 0, NULL) : NULL;
+    if (!t) {
+        InterlockedExchange(&g_pjWorker, 0);
+        Log("  the parchment: its worker's thread could not be started; its paintings are made on the view's thread");
+        return;
+    }
+    SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL);
+    CloseHandle(t);
+    Log("  the parchment: its paintings made by a worker thread of their own, given to OpenGL a strip a frame");
+}
 
 /* ---- the ending's drawing, on the game's own device (see BLUR_MS) ----
  * The present's six bytes at VA 0x5A19FD go to PresentStub, which hands the game's device object (esi) to PrePresent and

@@ -140,8 +140,20 @@ extern int shim_wine;                                /* 1: ntdll exports wine_ge
 static FARPROC GetProcAddress(HMODULE h, const char *n)
 { (void)h; return shim_wine && n && !strcmp(n, "wine_get_version") ? (FARPROC)(size_t)1 : NULL; }
 typedef DWORD (*LPTHREAD_START_ROUTINE)(LPVOID);
+static LPTHREAD_START_ROUTINE shim_thread_fn;        /* the last thread asked for, never run: a test may run it */
+static LPVOID shim_thread_arg;
+static int shim_thread_prio, shim_events_set;
 static HANDLE CreateThread(void *sa, size_t st, LPTHREAD_START_ROUTINE f, LPVOID arg, DWORD fl, DWORD *id)
-{ (void)sa; (void)st; (void)f; (void)arg; (void)fl; (void)id; shim_threads++; return (HANDLE)(long)1000; }
+{ (void)sa; (void)st; (void)fl; (void)id; shim_threads++; shim_thread_fn = f; shim_thread_arg = arg; return (HANDLE)(long)1000; }
+#define THREAD_PRIORITY_BELOW_NORMAL (-1)
+static BOOL SetThreadPriority(HANDLE t, int p) { (void)t; shim_thread_prio = p; return TRUE; }
+static HANDLE CreateEventA(void *sa, BOOL manual, BOOL initial, const char *name)
+{ (void)sa; (void)manual; (void)initial; (void)name; return (HANDLE)(long)1000; }
+static BOOL SetEvent(HANDLE e) { (void)e; shim_events_set++; return TRUE; }
+static int shim_waits;                               /* WaitForSingleObject returns at once; as shim_waits runs out, */
+static volatile LONG *shim_wait_stop;                /* it sets *shim_wait_stop to 0 (a thread's loop told to end) */
+static DWORD WaitForSingleObject(HANDLE h, DWORD ms)
+{ (void)h; (void)ms; if (shim_waits > 0 && --shim_waits == 0 && shim_wait_stop) *shim_wait_stop = 0; return 0; }
 static void Sleep(DWORD ms) { (void)ms; }
 static DWORD GetTickCount(void) { return shim_ticks; }
 static LONG InterlockedExchange(volatile LONG *at, LONG v) { LONG old = *at; *at = v; return old; }
