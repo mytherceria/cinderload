@@ -8988,7 +8988,7 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
 /* ---- the paintings' making, a frame at a time (the view's thread) ---- */
 static DWORD ViewNow(void);
 static int ParchUpBegin(int slot);
-static int ParchUpStep(void);
+static int ParchUpStep(SIZE_T budget);
 #if defined(__i386__) && !defined(PARCH_UP)
 #define PARCH_UP_BEGIN ParchUpBegin          /* (the 32-bit build: a painting goes up a strip a frame) */
 #define PARCH_UP_STEP ParchUpStep
@@ -9012,7 +9012,7 @@ static struct {
 static struct { int maxTex; } g_view;
 #ifndef PARCH_UP_BEGIN
 #define PARCH_UP_BEGIN(slot) (gl.TexSubImage2D ? ParchUpBegin(slot) : PARCH_UP(slot))
-#define PARCH_UP_STEP() (gl.TexSubImage2D ? ParchUpStep() : 1)
+#define PARCH_UP_STEP(budget) (gl.TexSubImage2D ? ParchUpStep(budget) : 1)
 #endif
 #endif
 static unsigned char *g_mipPx;               /* the painting's smaller copies, level after level (see ParchMips) */
@@ -9061,11 +9061,23 @@ static void ParchFree(void)
     g_mipLevels = 0;
 }
 /* The painting given to OpenGL a strip a frame (the brief, 11 Oct: the view's thread must not stall): at most
- * PARCH_UP_BYTES a frame. ParchStrip: of a painting T texels a side, its levels 0 to L each half the last, from the cursor
+ * ParchUpBudget's bytes a frame. ParchStrip: of a painting T texels a side, its levels 0 to L each half the last, from the cursor
  * (*level, *y) on, the next strip: as many whole rows of that level as *budget bytes hold (one at least), never past its
  * last; its level, first row and rows in *sl, *sy, *rows, the budget less them, the cursor after them. 0 when the budget
  * is spent or all of it is up. ParchLevelPx: a level's texels (0 the painting's own, then its copies in g_mipPx). */
 #define PARCH_UP_BYTES  (2u << 20)
+/* The bytes a frame gives OpenGL, by the time since the last frame (the skeptic's find on 61c66db: at PARCH_UP_BYTES a
+ * frame an HD painting took 67 ms to go up at 165 Hz but 183 ms at 60 Hz, so a late arrival landed on its zone barely
+ * faded in): PARCH_UP_RATE a ms of it (PARCH_UP_BYTES in a 165 Hz frame's 6 ms), never less than PARCH_UP_BYTES (as
+ * before) nor more than PARCH_UP_MOST (a 60 Hz frame's 17 ms of it, so a long frame does not hold the next): an HD
+ * painting up in about 67 ms from 60 Hz up. */
+#define PARCH_UP_RATE   (PARCH_UP_BYTES / 6)
+#define PARCH_UP_MOST   (6u << 20)
+static SIZE_T ParchUpBudget(DWORD dt)
+{
+    unsigned b = (unsigned)(dt < 1000 ? dt : 1000) * (unsigned)PARCH_UP_RATE;   /* (32 bits: a long frame's held to 1 s) */
+    return b < PARCH_UP_BYTES ? PARCH_UP_BYTES : b > PARCH_UP_MOST ? PARCH_UP_MOST : b;
+}
 static int ParchStrip(int T, int L, int *level, int *y, SIZE_T *budget, int *sl, int *sy, int *rows)
 {
     if (!*budget || *level > L) return 0;
@@ -10646,7 +10658,7 @@ static int g_pmadeFull = -1;                         /* the map's areas the zone
  * Each step is a job: the arrival's zone found (as the client finds it), the world's painting, its continent's, its
  * zone's, C's colour-matched copies. The parchment's worker, a thread of its own (the 32-bit build's: ParchWorkerStart),
  * runs it (the tiles read and laid, the seams, the lines, the cut, the land, the smaller copies) while the view's thread
- * draws on; done, the view's thread gives the painting to OpenGL a strip a frame (PARCH_UP_BYTES at most: PARCH_UP_BEGIN,
+ * draws on; done, the view's thread gives the painting to OpenGL a strip a frame (ParchUpBudget's bytes at most: PARCH_UP_BEGIN,
  * PARCH_UP_STEP), then takes the next. The painting is the worker's from a job's post until it is done, the view's from
  * then until it is up and freed: never both at once. Without a worker (the tests' build, the harness) a job runs at once
  * in the call that posts it and its painting goes up whole: one painting a call, as before. */
@@ -10875,9 +10887,12 @@ static int ParchUpDone(DWORD now, int slot, int up)
  * is known (its zone found), and the paintings made and given to OpenGL, the first needed first: the world's (once a
  * session), the arrival's continent's, its zone's (only the pieces this character has found, unless the full map is
  * chosen), each with C its colour-matched copy; one job at a time, off this thread when the worker runs (above). */
+static DWORD g_pworkAt;                                  /* the last frame's ParchWork (its clock) */
 static void ParchWork(DWORD now)
 {
     if (!g_parchOn) return;
+    DWORD dt = now - g_pworkAt;                                  /* (the frame's time: the upload's budget) */
+    g_pworkAt = now;
     int held = StepLock(), map = g_destMap, zok = g_destZOk;
     float x = g_destWX, y = g_destWY, h = g_destWZ;
     LONG seq = g_scrSeq, known = g_scrKnown, screen = g_viewScreen;   /* (this screen's character's explored areas, as it began) */
@@ -10885,7 +10900,7 @@ static void ParchWork(DWORD now)
     StepUnlock(held);
     for (int steps = 0; steps < 8; steps++) {
         if (g_pjUp >= 0) {                                       /* a painting going up, a strip a frame */
-            int r = PARCH_UP_STEP();
+            int r = PARCH_UP_STEP(ParchUpBudget(dt));
             if (!r) return;
             int slot = g_pjUp;
             g_pjUp = -1;
@@ -11776,8 +11791,8 @@ static int ParchUpPic(int slot, const ParchPic *P, int *tw, int *th) { (void)slo
 #endif
 /* The painting made (g_parchPx) and its smaller copies (ParchMips) given to OpenGL in slot (its name made once, its
  * pictures replaced each time), drawn smoothly between them, a strip a frame so the view's frame never waits on it (the
- * brief, 11 Oct): ParchUpBegin makes room for every level (1 when OpenGL took it), ParchUpStep gives it the next
- * PARCH_UP_BYTES (ParchStrip; 1 when all of it is up, 0 more to come, -1 refused). g_parchPx and its copies stay the
+ * brief, 11 Oct): ParchUpBegin makes room for every level (1 when OpenGL took it), ParchUpStep gives it the next budget
+ * bytes (ParchUpBudget's, by the frame's time; ParchStrip; 1 when all of it is up, 0 more to come, -1 refused). g_parchPx and its copies stay the
  * caller's until it is up. */
 static struct { int slot, level, y; } g_pul;
 static int ParchUpBegin(int slot)
@@ -11797,11 +11812,10 @@ static int ParchUpBegin(int slot)
     g_pul.slot = slot; g_pul.level = 0; g_pul.y = 0;
     return !gl.GetError();
 }
-static int ParchUpStep(void)
+static int ParchUpStep(SIZE_T budget)
 {
     gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[g_pul.slot]);
     gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
-    SIZE_T budget = PARCH_UP_BYTES;
     int lv, y0, rows;
     while (ParchStrip(g_parchTW, g_mipLevels, &g_pul.level, &g_pul.y, &budget, &lv, &y0, &rows)) {
         int w = g_parchTW >> lv;

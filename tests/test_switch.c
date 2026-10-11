@@ -7327,6 +7327,10 @@ static void TestGlide(void)
     ok &= g_pj.state == 1 && g_upN == 0;
     TestWorker();                                                      /* (the worker: its own loop, one pass) */
     ok &= g_upN == 0 && g_parchPx;                                      /* (made, not up: the view's to do) */
+    g_parchPx[0] ^= 0x5A;                                               /* (marked: the view's from now) */
+    unsigned char wmark = g_parchPx[0];
+    TestWorker();                                                       /* (a pass woken by its wait's end: nothing posted) */
+    ok &= g_pj.state == 2 && g_parchPx[0] == wmark;
     ParchWork(132);                                                     /* (done: up, and nothing more this frame) */
     ok &= g_upN == 1 && g_upOrder[0] == VT_PWORLD && g_worldUp && g_worldAt == 132 && !g_parchPx && g_pj.state == 0;
     ParchWork(148);                                                     /* (the arrival's zone to find: posted) */
@@ -7441,14 +7445,13 @@ static void TestGlide(void)
         int up = g_pj.state == 2 && g_parchPx && g_mipLevels > 0;
         TestKeepPainting();
         int frames = 0, hidden = 1, fresh = 0;
-        long most = 0, all = 0;
-        while (!g_worldUp && frames < 40) {
-            g_tglBytes = 0; t += 16;
+        long most = 0, all = 0, cmost = 0;
+        while (!g_worldUp && frames < 40) {                             /* (60 Hz frames: up to ParchUpBudget(17) a frame) */
+            g_tglBytes = 0; t += 17;
             ParchWork(t);
             frames++;
             if (g_tglBytes > most) most = g_tglBytes;
             all += g_tglBytes;
-            if (!g_worldUp && g_viewTex[VT_PWORLD] && frames == 1) fresh = 1;
         }
         long whole = 0;
         for (int w = g_tkeepTW; w >= 1; w /= 2) whole += 4L * w * w;
@@ -7461,15 +7464,60 @@ static void TestGlide(void)
         TestWorker();
         TestKeepPainting();
         int cframes = 0;
-        while (g_parchCont != 0 && cframes < 40) {
-            t += 16; ParchWork(t);
+        while (g_parchCont != 0 && cframes < 40) {                       /* (165 Hz frames: PARCH_UP_BYTES a frame) */
+            g_tglBytes = 0; t += 6; ParchWork(t);
             cframes++;
+            if (g_tglBytes > cmost) cmost = g_tglBytes;
             if (g_parchCont != 0 && g_pjUp != VT_PARCH2) hidden = 0;        /* (going up the whole time it is not drawn) */
+            if (g_parchCont != 0 && g_viewTex[VT_PARCH2] && cframes == 1) fresh = 1;
         }
-        up &= g_parchCont == 0 && TestUpAsKept(VT_PARCH2) && hidden && fresh && cframes > 1 && frames > 1 && most <= (long)PARCH_UP_BYTES;
+        up &= g_parchCont == 0 && TestUpAsKept(VT_PARCH2) && hidden && fresh && cframes == 3 && frames == 1 && most > (long)PARCH_UP_BYTES &&
+              most <= (long)ParchUpBudget(17) && cmost == (long)PARCH_UP_BYTES;
+        /* ParchUpBegin and ParchUpStep alone: an 8 x 8 painting whose texels are each their own (levels 8, 4, 2, 1), a budget
+         * a step: each strip from its own rows, its texture bound anew each step (the view draws others between), done only
+         * once its last level is up, OpenGL's refusal heard */
+        {
+            static unsigned char px[8 * 8 * 4], mip[(16 + 4 + 1) * 4];
+            for (int i = 0; i < (int)sizeof px; i++) px[i] = (unsigned char)(i * 7 + 1);
+            for (int i = 0; i < (int)sizeof mip; i++) mip[i] = (unsigned char)(i * 13 + 5);
+            g_parchPx = px; g_mipPx = mip; g_parchTW = 8; g_mipLevels = 3;
+            TestKeepPainting();
+            g_viewTex[VT_PZONEM] = 0;
+            int r0 = ParchUpBegin(VT_PZONEM);
+            gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_PARCH2]);           /* (another drawn between) */
+            int r1 = ParchUpStep(3 * 8 * 4);                                /* (level 0's rows 0 to 2) */
+            gl.BindTexture(GL_TEXTURE_2D_, g_viewTex[VT_PARCH2]);
+            int r2 = ParchUpStep(5 * 8 * 4 + 4 * 4 * 4 + 2 * 2 * 4);        /* (its rows 3 to 7, levels 1 and 2: all but the last) */
+            int r3 = ParchUpStep(4);
+            int one = r0 == 1 && r1 == 0 && r2 == 0 && r3 == 1 && TestUpAsKept(VT_PZONEM);
+            ParchUpBegin(VT_PZONEM);
+            g_tglErr = 1;                                                   /* (OpenGL refuses a strip) */
+            one &= ParchUpStep(1u << 20) == -1;
+            g_parchPx = NULL; g_mipPx = NULL; g_mipLevels = 0;
+            Check(one, "a painting's upload a step at a time (ParchUpBegin, ParchUpStep): each strip from its own rows, its texture bound again each step, done only once its last level is up, and OpenGL's refusal heard");
+        }
         g_pjWorker = 0;
         TestGl(0);
-        Check(up, "the 32-bit build's own upload, through the tests' OpenGL, with the worker's own loop making each painting: a painting done goes up a strip a frame (at most PARCH_UP_BYTES), not drawn until all of it is up, every level of it as it was made");
+        Check(up, "the 32-bit build's own upload, through the tests' OpenGL, with the worker's own loop making each painting: a painting done goes up a strip a frame (as many bytes as the frame's time gives: at 60 Hz the world's 5.6 MB in one, at 165 Hz the continent's in three of PARCH_UP_BYTES), not drawn until all of it is up, every level of it as it was made");
+        /* by the frame's time: an HD painting (2048 a side, 22.4 MB) up in about the same time at 60, 144 and 165 Hz */
+        int hz[3] = { 60, 144, 165 }, ms[3] = { 0 }, fr[3] = { 0 }, over = 0;
+        for (int k = 0; k < 3; k++) {
+            int level = 0, y = 0, lv, y0, rows;
+            double at = 0;
+            while (level <= 11 && fr[k] < 100) {
+                double next = at + 1000.0 / hz[k];
+                SIZE_T b = ParchUpBudget((DWORD)next - (DWORD)at), b0 = b;
+                at = next; fr[k]++;
+                while (ParchStrip(2048, 11, &level, &y, &b, &lv, &y0, &rows)) {}
+                if (b0 - b > PARCH_UP_MOST) over = 1;
+            }
+            ms[k] = (int)(at + 0.5);
+        }
+        printf("  an HD painting up: at 60 Hz %d frames, %d ms; at 144 Hz %d, %d ms; at 165 Hz %d, %d ms\n", fr[0], ms[0], fr[1], ms[1], fr[2], ms[2]);
+        int budget = ParchUpBudget(0) == PARCH_UP_BYTES && ParchUpBudget(6) == PARCH_UP_BYTES && ParchUpBudget(17) == 17 * (SIZE_T)PARCH_UP_RATE &&
+                     ParchUpBudget(19) == PARCH_UP_MOST && ParchUpBudget(100000) == PARCH_UP_MOST && ParchUpBudget(12289) == PARCH_UP_MOST && ParchUpBudget(0xFFFFFFFFu) == PARCH_UP_MOST;
+        Check(budget && !over && fr[2] == 11 && fr[0] == 4 && ms[0] <= ms[2] + 2 && ms[1] <= ms[2] + 2,
+              "a painting's upload budget by the frame's time (the skeptic's find on 61c66db: an HD painting up in 183 ms at 60 Hz, 67 at 165): PARCH_UP_RATE a ms, at least PARCH_UP_BYTES, at most PARCH_UP_MOST; an HD painting up in about 67 ms at 60, 144 and 165 Hz");
     }
     for (int i = 0; i < 36; i++) free((void *)tdata[i]);
     TestGlideState();
