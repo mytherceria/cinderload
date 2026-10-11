@@ -5575,6 +5575,8 @@ static void TestHoldStub(void) {}
  * one pass between the view's frames */
 static LPTHREAD_START_ROUTINE g_testWorker;
 static LPVOID g_testWorkerArg;
+static int g_testTicked;
+static void TestTicked(void) { g_testTicked = 1; }
 static int g_testWorkerClock;                                          /* (the view's clock asked by the worker's passes) */
 static void TestWorker(void)
 {
@@ -7523,6 +7525,68 @@ static void TestGlide(void)
                      ParchUpBudget(19) == PARCH_UP_MOST && ParchUpBudget(100000) == PARCH_UP_MOST && ParchUpBudget(12289) == PARCH_UP_MOST && ParchUpBudget(0xFFFFFFFFu) == PARCH_UP_MOST;
         Check(budget && !over && fr[2] == 11 && fr[0] == 4 && ms[0] <= ms[2] + 2 && ms[1] <= ms[2] + 2,
               "a painting's upload budget by the frame's time (the skeptic's find on 61c66db: an HD painting up in 183 ms at 60 Hz, 67 at 165): PARCH_UP_RATE a ms, at least PARCH_UP_BYTES, at most PARCH_UP_MOST; an HD painting up in about 67 ms at 60, 144 and 165 Hz");
+    }
+    /* a screen ended with a job still the worker's, done, or going up (the skeptic's find on 61c66db: its painting kept
+     * through the game, then given to OpenGL first on the next screen): freed, never up; the next screen makes again what
+     * it wants; the view off the same, and the worker's loop ends */
+    {
+        TestGlideState();
+        TestGl(1);
+        g_viewTex[VT_PWORLD] = g_viewTex[VT_PARCH2] = 0;
+        g_parchTablesOk = 1; g_pjWorker = 0;
+        ParchWorkerStart();
+        g_testWorker = shim_thread_fn; g_testWorkerArg = shim_thread_arg;
+        g_destMap = 0; g_destWX = -9464; g_destWY = 62; g_viewScreen = 70;
+        DWORD t = 3000;
+        ParchWork(t);                                                   /* (the world's posted) */
+        int st = g_pj.state == 1 && g_pj.kind == PJ_WORLD;
+        ParchScreenEnd();                                               /* (the screen ends before the worker begins it) */
+        st &= g_pj.state == 3 && !g_ptry.world;
+        t += 6; ParchWork(t);                                           /* (nothing posted over it while it is the worker's) */
+        st &= g_pj.state == 3 && g_pj.kind == PJ_WORLD;
+        g_testTicked = 0; shim_tick_hook = TestTicked;                   /* (never run: its clock never read) */
+        TestWorker();
+        int before = st && g_pj.state == 0 && !g_parchPx && !g_worldUp && !g_testTicked;
+        shim_tick_hook = NULL;
+        g_viewScreen = 71;
+        t += 6; ParchWork(t);                                           /* (the world's posted again) */
+        st &= g_pj.state == 1 && g_pj.kind == PJ_WORLD;
+        shim_tick_hook = ParchScreenEnd;                                /* (the screen ends as the worker runs it) */
+        TestWorker();
+        int during = st && !shim_tick_hook && g_pj.state == 0 && !g_parchPx && !g_mipPx && !g_worldUp && !g_ptry.world;
+        t += 6; ParchWork(t); TestWorker();                             /* (done, not yet taken by the view) */
+        st &= g_pj.state == 2 && g_parchPx;
+        ParchScreenEnd();
+        int done = st && g_pj.state == 0 && !g_parchPx && !g_mipPx && !g_ptry.world;
+        t += 6; ParchWork(t); TestWorker();
+        t += 6; ParchWork(t);                                           /* (going up: its first strip, 2 MB of 5.6) */
+        st &= g_pjUp == VT_PWORLD && !g_worldUp && g_parchPx;
+        ParchScreenEnd();
+        int going = st && g_pjUp < 0 && !g_parchPx && !g_mipPx && !g_worldUp && !g_ptry.world;
+        g_viewScreen = 72; g_tglBytes = 0;
+        t += 6; ParchWork(t);                                           /* (the next screen: the world's made again) */
+        st &= g_pj.state == 1 && g_pj.kind == PJ_WORLD && !g_tglBytes;
+        TestWorker();
+        TestKeepPainting();
+        for (int k = 0; k < 5 && !g_worldUp; k++) { t += 6; ParchWork(t); }
+        int next = st && g_worldUp && TestUpAsKept(VT_PWORLD) && g_tglBytes == 5592404;
+        t += 6; ParchWork(t); TestWorker();                             /* (the arrival's zone found) */
+        t += 6; ParchWork(t);                                           /* (taken: its continent's posted) */
+        st &= g_pj.state == 1 && g_pj.kind == PJ_CONT;
+        shim_waits = 0; shim_tick_hook = ParchStop;                     /* (the view off as the worker runs it) */
+        g_testWorker(g_testWorkerArg);                                  /* (its loop, until it ends by itself) */
+        int off = st && !g_pjWorker && g_pj.state == 0 && !g_parchPx && g_parchCont == -1;
+        g_pj.kind = PJ_MATCH; g_pj.slot = VT_PCONTM; g_pj.state = 2; g_parchCont = 4; g_parchZone = 9;   /* (a copy's job dropped) */
+        ParchScreenEnd();
+        int copy = g_parchCont == -1 && g_parchZone == 9 && !g_pj.state;
+        g_pj.kind = PJ_MATCH; g_pj.slot = VT_PZONEM; g_pj.state = 2; g_parchCont = 4;
+        ParchScreenEnd();
+        copy &= g_parchCont == 4 && g_parchZone == -1 && !g_pj.state;
+        printf("  a screen ended with its job: before it ran %d, as it ran %d, done %d, going up %d; the next screen %d; the view off %d; a copy's %d\n",
+               before, during, done, going, next, off, copy);
+        TestGl(0);
+        g_pjWorker = 0; g_pj.state = 0; g_parchCont = g_parchZone = -1;
+        Check(before && during && done && going && next && off && copy, "a screen ended with its job still the worker's (before it ran, or as it ran), done, or going up: its painting freed and never given to OpenGL, nothing posted over it meanwhile, the world's made again on the next screen and a copy's painting with it; the view off the same, and the worker's loop then ends by itself");
     }
     for (int i = 0; i < 36; i++) free((void *)tdata[i]);
     TestGlideState();

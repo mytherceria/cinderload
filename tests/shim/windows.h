@@ -155,9 +155,11 @@ static volatile LONG *shim_wait_stop;                /* it sets *shim_wait_stop 
 static DWORD WaitForSingleObject(HANDLE h, DWORD ms)
 { (void)h; (void)ms; if (shim_waits > 0 && --shim_waits == 0 && shim_wait_stop) *shim_wait_stop = 0; return 0; }
 static void Sleep(DWORD ms) { (void)ms; }
-static DWORD GetTickCount(void) { return shim_ticks; }
+static void (*shim_tick_hook)(void);                /* called once by the next GetTickCount (then cleared) */
+static DWORD GetTickCount(void) { if (shim_tick_hook) { void (*h)(void) = shim_tick_hook; shim_tick_hook = NULL; h(); } return shim_ticks; }
 static LONG InterlockedExchange(volatile LONG *at, LONG v) { LONG old = *at; *at = v; return old; }
 static LONG InterlockedIncrement(volatile LONG *p) { return ++*p; }
+static LONG InterlockedCompareExchange(volatile LONG *at, LONG v, LONG cmp) { LONG old = *at; if (old == cmp) *at = v; return old; }
 /* The game's window and its thread's message hook, for the world map's switches (LuaPumpStep, LuaHook): one window,
  * shim_game, alive while shim_game_alive; a hook is recorded, never called by the shim (the test pumps it). */
 typedef void *HWND, *HHOOK;

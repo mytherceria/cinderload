@@ -10664,7 +10664,8 @@ static int g_pmadeFull = -1;                         /* the map's areas the zone
  * in the call that posts it and its painting goes up whole: one painting a call, as before. */
 enum { PJ_NONE, PJ_WORLD, PJ_FIND, PJ_CONT, PJ_ZONE, PJ_MATCH };
 static struct {
-    volatile LONG state;                                  /* 0 none, 1 posted (the worker's), 2 done (the view's) */
+    volatile LONG state;                                  /* 0 none, 1 posted (the worker's), 2 done (the view's), 3 stale
+                                                           * (the worker's still: freed as it is done, never up) */
     int kind, slot, C;                                    /* (PJ_MATCH: its copy's slot, VT_PCONTM or VT_PZONEM) */
     int map, zok, z, c, known, full;                      /* what it is for */
     float x, y, h, fx, fy;
@@ -10909,7 +10910,7 @@ static void ParchWork(DWORD now)
             int more = ParchUpDone(now, slot, r > 0);
             if (!more) { ParchFree(); return; }                  /* (one painting a call) */
         }
-        if (g_pj.state == 1) return;                             /* (the worker's: done on a later frame) */
+        if (g_pj.state == 1 || g_pj.state == 3) return;          /* (the worker's: done on a later frame) */
         if (g_pj.state == 2) {
             InterlockedExchange(&g_pj.state, 0);
             if (!ParchJobDone(now, map, x, y, screen)) return;
@@ -10917,6 +10918,27 @@ static void ParchWork(DWORD now)
         }
         if (!ParchJobNext(now, map, x, y, h, zok, known, screen)) return;
     }
+}
+/* The screen gone, or the view off (the view's thread; the skeptic's find on 61c66db: a job still running as a screen
+ * ended kept its painting, 22 to 36 MB, on the DLL's heap through the game, and the next screen gave that painting to
+ * OpenGL before it looked for its own arrival): a job still the worker's is stale, its painting freed by the worker as
+ * soon as it is done and never given to OpenGL; one done, or going up, freed now. What it was for is made again when
+ * next wanted (the world's on the next screen; a copy's painting with it). */
+static void ParchScreenEnd(void)
+{
+    int kind = g_pj.kind, slot = g_pjUp;
+    LONG was = InterlockedCompareExchange(&g_pj.state, 3, 1);
+    if (was == 0 && slot < 0) return;                           /* (nothing in hand) */
+    if (was == 2) { InterlockedExchange(&g_pj.state, 0); ParchFree(); }
+    if (slot >= 0) { g_pjUp = -1; ParchFree(); }
+    if (kind == PJ_WORLD) g_ptry.world = 0;
+    if (kind == PJ_MATCH) { if (g_pj.slot == VT_PCONTM) g_parchCont = -1; else g_parchZone = -1; }
+}
+/* The view off for the session: its job stale (above) and the worker's loop ended after it. */
+static void ParchStop(void)
+{
+    ParchScreenEnd();
+    InterlockedExchange(&g_pjWorker, 0);
 }
 /* A screen's first frame, made at once as the view opens (before its first step can be: his note, 10 Oct, "for a split
  * second ... you get the previous screen"): the dark paper and vanilla's bar empty, for the parchment; for the living map,
@@ -11633,6 +11655,7 @@ static DWORD ViewOff(const char *why)
     InterlockedExchange(&g_viewSteps, 0);
     StepUnlock(held);
     InterlockedExchange(&g_viewLive, 0);                    /* (the game's frames draw all their own again) */
+    ParchStop();                                            /* (the parchment's job and its painting freed) */
     if (g_view.win) ShowWindow(g_view.win, SW_HIDE);
     for (int i = 0; i < VT_COUNT; i++)
         if (g_view.blp[i]) { HeapFree(GetProcessHeap(), 0, g_view.blp[i]); g_view.blp[i] = NULL; }
@@ -11751,6 +11774,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             int held = StepLock();
             InterlockedExchange(&g_viewSteps, 0);
             StepUnlock(held);
+            ParchScreenEnd();                               /* (its job's painting never kept into the game) */
             showing = 0;
             waitAt = now ? now : 1;                         /* it fades once the world shows (above) */
             worldSeen = g_worldFrames;
@@ -11833,9 +11857,11 @@ static int ParchUpStep(SIZE_T budget)
  * thread is never run). */
 static int ParchWorkerTurn(void)
 {
-    if (g_pj.state != 1) return 0;
+    LONG s = g_pj.state;
+    if (s == 3) { ParchFree(); InterlockedExchange(&g_pj.state, 0); return 1; }   /* (stale before it ran) */
+    if (s != 1) return 0;
     ParchJobRun();
-    InterlockedExchange(&g_pj.state, 2);
+    if (InterlockedCompareExchange(&g_pj.state, 2, 1) == 3) { ParchFree(); InterlockedExchange(&g_pj.state, 0); }   /* (stale as it ran) */
     return 1;
 }
 static DWORD WINAPI ParchWorker(LPVOID arg)
