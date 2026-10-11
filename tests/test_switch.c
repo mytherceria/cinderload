@@ -8802,6 +8802,11 @@ static void TestLookStyle(void)
     ok &= StyleApply(&want, "a test") == 1 && (t = Get(STYLE_REL)) &&
           strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas discovered\r\nnearby 900\r\nthick 150\r\nwidth 40\r\nwhole off\r\neffect smooth\r\n"
                     "colour class\r\nquality unstable\r\n") && StyleApply(&want, "again") == 0;
+    want.look.ember = 1;                                                     /* (the look alone changed: kept too) */
+    ok &= StyleApply(&want, "the colour alone") == 1 && g_look.ember == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\ncolour ember\r\n") &&
+          LogSays("colour ember, quality unstable (the colour alone), from the next loading screen; kept in");
+    want.look.ember = 0;
+    ok &= StyleApply(&want, "back") == 1 && g_look.ember == 0;
     g_look = def; g_nearYd = 7;
     StyleLoad();
     ok &= g_look.thick == 150 && g_look.width == 40 && g_look.effect == LOOK_SMOOTH && g_look.quality == (int)SABER_UNSTABLE && g_nearYd == 900 &&

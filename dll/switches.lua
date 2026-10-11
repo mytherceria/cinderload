@@ -372,10 +372,10 @@ function CL.Build()
     p:SetHeight(CL.H)
     p:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
     p:SetFrameStrata("DIALOG")
-    p:SetToplevel(1)
+    if p.SetToplevel then p:SetToplevel(1) end           -- (raised over the game's windows when clicked, where the client can)
     p:EnableMouse(1)
     p:SetMovable(1)
-    p:SetClampedToScreen(1)
+    if p.SetClampedToScreen then p:SetClampedToScreen(1) end
     p:SetBackdrop({ bgFile = "Interface\\Tooltips\\UI-Tooltip-Background", edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
                     tile = 1, tileSize = 32, edgeSize = 32, insets = { left = 11, right = 12, top = 12, bottom = 11 } })
     p:SetBackdropColor(0, 0, 0, 0.88)            -- (the "plus": the dialog's black 88% opaque, not the art's 60%)
