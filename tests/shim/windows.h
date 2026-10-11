@@ -139,6 +139,38 @@ static void Sleep(DWORD ms) { (void)ms; }
 static DWORD GetTickCount(void) { return shim_ticks; }
 static LONG InterlockedExchange(volatile LONG *at, LONG v) { LONG old = *at; *at = v; return old; }
 static LONG InterlockedIncrement(volatile LONG *p) { return ++*p; }
+/* The game's window and its thread's message hook, for the world map's switches (LuaPumpStep, LuaHook): one window,
+ * shim_game, alive while shim_game_alive; a hook is recorded, never called by the shim (the test pumps it). */
+typedef void *HWND, *HHOOK;
+typedef unsigned UINT;
+typedef unsigned long WPARAM;
+typedef long LPARAM, LRESULT;
+#define CALLBACK
+typedef struct { HWND hwnd; UINT message; WPARAM wParam; LPARAM lParam; DWORD time; struct { LONG x, y; } pt; } MSG;
+#define WM_NULL 0x0000
+#define WM_QUIT 0x0012
+#define PM_NOREMOVE 0
+#define PM_REMOVE 1
+#define HC_ACTION 0
+#define WH_GETMESSAGE 3
+typedef LRESULT (*HOOKPROC)(int, WPARAM, LPARAM);
+extern HWND shim_game;                               /* the game's window (NULL: not found yet) */
+extern int shim_game_alive;                          /* IsWindow says so */
+extern DWORD shim_game_tid;                          /* its thread */
+extern HOOKPROC shim_hook;                           /* the message hook put in (NULL: none) */
+extern DWORD shim_hook_tid;
+extern int shim_hooks, shim_unhooks, shim_hook_fail; /* hooks put in and taken out; 1: SetWindowsHookExA fails */
+extern int shim_posted, shim_post_fail;              /* messages posted to the game's window; 1: PostMessageA fails */
+extern UINT shim_posted_msg;
+static UINT RegisterWindowMessageA(const char *n) { (void)n; return 0xC0DE; }
+static BOOL IsWindow(HWND h) { return h && h == shim_game && shim_game_alive; }
+static DWORD GetWindowThreadProcessId(HWND h, DWORD *pid) { (void)h; if (pid) *pid = 0; return shim_game_tid; }
+static HHOOK SetWindowsHookExA(int id, HOOKPROC f, HINSTANCE m, DWORD tid)
+{ (void)m; if (shim_hook_fail || id != WH_GETMESSAGE) return NULL; shim_hook = f; shim_hook_tid = tid; shim_hooks++; return (HHOOK)(long)(0x500 + shim_hooks); }
+static BOOL UnhookWindowsHookEx(HHOOK h) { (void)h; shim_unhooks++; shim_hook = NULL; return TRUE; }
+static LRESULT CallNextHookEx(HHOOK h, int c, WPARAM w, LPARAM l) { (void)h; (void)c; (void)w; (void)l; return 0; }
+static BOOL PostMessageA(HWND h, UINT m, WPARAM w, LPARAM l)
+{ (void)w; (void)l; if (shim_post_fail || !IsWindow(h)) return FALSE; shim_posted++; shim_posted_msg = m; return TRUE; }
 typedef struct { int held; } CRITICAL_SECTION;       /* one thread here: counts, so a test can see it is let go */
 static void InitializeCriticalSection(CRITICAL_SECTION *c) { c->held = 0; }
 static void EnterCriticalSection(CRITICAL_SECTION *c) { c->held++; }
