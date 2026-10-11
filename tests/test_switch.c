@@ -5709,6 +5709,15 @@ static void TestParchment(void)
     ok &= Near(g_pcam.px, 960, 1e-3) && TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255;
     g_worldFrameOk = 1;
     Check(ok, "the parchment's glide without the client's world frame: it opens on the arrival's continent's painting, whole across the window, and glides from there to the character's spot");
+    g_worldFrameOk = 0;                                                 /* (no continent's either: the zone's whole painting first) */
+    TestGlideArrive(0, 1, -1, -9464, 62, 2000);
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    ok = TestBatch(VT_PARCH2) < 0 && TestBatch(VT_PARCH) >= 0 && Near(g_pcam.v.s, 1920.0 / (zr.x1 - zr.x0), 1e-4) &&
+         Near(g_pcam.v.x, 0.5 * (zr.x0 + zr.x1), 1e-4) && TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255;
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    ok &= Near(g_pcam.px, 960, 1e-3) && Near(g_pcam.v.s, 1920 * PARCH_ZOOM / (zr.x1 - zr.x0), 1e-3);
+    g_worldFrameOk = 1;
+    Check(ok, "the parchment's glide with neither the world's nor a continent's painting: it opens on the zone's whole painting and glides in to the character's spot");
     /* at sea (no zone holds it): the continent's painting the finest, the glide ending PARCH_SEA_ZOOM in on it */
     TestGlideArrive(0, 0, 0, -500, 500, 2000);
     ViewBuild(1920, 1080, 1.0f, 9000);

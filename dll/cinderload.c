@@ -8387,7 +8387,7 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         float fx, fy;
         ParchSpot(map, g_parchForX, g_parchForY, &fx, &fy);
         b = ParchEnd(W, H, z >= 0 ? ParchBox(z) : cr, z >= 0 ? PARCH_ZOOM : PARCH_SEA_ZOOM, fx, fy);
-        if (!world && c < 0) a = ParchStart(W, H, 0, ParchBox(z));   /* (no continent either: the zone's whole painting first) */
+        if (!world && c < 0 && z >= 0) a = ParchStart(W, H, 0, ParchBox(z));   /* (no continent either: the zone's whole painting first) */
         if (g_glide.at != g_parchAt) { g_glide.at = g_parchAt; g_glide.u0 = shown < 0.95f ? shown : 0.95f; g_glide.tau = 0; }
         float t = FireClamp((shown - g_glide.u0) / (1 - g_glide.u0), 0, 1);
         if (t > g_glide.tau) g_glide.tau = t;                      /* (never back) */
