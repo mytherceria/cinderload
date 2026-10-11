@@ -3788,7 +3788,7 @@ static int g_parchAsked;                         /* (the style's map, below: 1 t
 static int g_mapFull;                             /* (the style's map areas: 1 the full map, 0 only what was discovered) */
 static int g_parchFullOn;                         /* (the view's, as this screen opened: StylePick) */
 #ifndef PARCH_NEAR_YD
-#define PARCH_NEAR_YD   1200                        /* the zones nearby: the reach, yards (0: none) */
+#define PARCH_NEAR_YD   1200                        /* the zones nearby: the reach, yards, unless style.txt says (0: none) */
 #endif
 static int g_nearYd = PARCH_NEAR_YD;                /* (the style's reach for the zones nearby, yards: 0 none) */
 static int g_parchNearOn;                           /* (the view's, as this screen opened: StylePick) */
@@ -10674,7 +10674,7 @@ static void ParchZoneMade(int z, int c, float fx, float fy, const char **why)
 /* ---- the zones nearby (11 Oct 2026: the hybrid layering picked at 03:00 and put on hold, brought into 0.3.0 with each
  * neighbour fading by its distance from where the character arrives, and its reach a setting) ----
  * Every zone of the arrival's map whose own land (as ParchLandMake gives it, the same land its own cut keeps whole) comes
- * within the reach of the arrival (PARCH_NEAR_YD yards; 0: none), the
+ * within the reach of the arrival (style.txt's "nearby" line, in yards; PARCH_NEAR_YD unless it says; 0: none), the
  * nearest first and PARCH_NEAR_MAX at most, is painted as the arrival's zone is (only the pieces this character has
  * found, or every piece with the full map), cut to its own land the same way (ParchLandCut: whole inside it, the grown
  * soft margin outside it) and laid into one sheet about the arrival: a square twice the reach a side, PARCH_NEAR_TEX
@@ -12509,6 +12509,32 @@ static int StyleParse(const char *text, int *map, int *bar, int *full)
     }
     return named;
 }
+/* The text's "nearby <yards>" (case aside; '#' to the line's end is a note; the number after spaces, '=' or ':'): the
+ * parchment's zones nearby out to that many yards of the arrival, 0 none, held to PARCH_NEAR_MOST, into *yd; the last
+ * one named counts. 1 when one was named. */
+static int StyleNearby(const char *text, int *yd)
+{
+    int named = 0;
+    for (const char *s = text; s && *s;) {
+        if (*s == '#') { while (*s && *s != '\n') s++; continue; }
+        if (!StyleLetter(*s)) { s++; continue; }
+        const char *w = s;
+        while (StyleLetter(*s)) s++;
+        static const char kNear[] = "nearby";
+        int i = 0;
+        while (i < (int)(s - w) && kNear[i] && (w[i] | 0x20) == kNear[i]) i++;
+        if (i != (int)(s - w) || kNear[i]) continue;
+        const char *p = s;
+        while (*p == ' ' || *p == '\t' || *p == '=' || *p == ':') p++;
+        if (*p < '0' || *p > '9') continue;
+        int v = 0;
+        for (; *p >= '0' && *p <= '9'; p++) if (v <= PARCH_NEAR_MOST) v = v * 10 + (*p - '0');
+        *yd = v > PARCH_NEAR_MOST ? PARCH_NEAR_MOST : v;
+        named = 1;
+        s = p;
+    }
+    return named;
+}
 static const char *StyleMapName(int map) { return map ? "parchment" : "satellite"; }
 static const char *StyleBarName(int bar) { return bar ? "retro" : "neo"; }
 static const char *StyleAreasName(int full) { return full ? "full" : "discovered"; }
@@ -12528,13 +12554,16 @@ static int StyleSave(int map, int bar, int full)
     if (!Join(path, g_dir, STYLE_PATH) || !Join(tmp, g_dir, STYLE_TMP_PATH)) return 0;
     lstrcpyA(text, "# CinderLoad's loading screens, as chosen in game (on the world map, M, or with /cinderload); from the next "
                    "loading screen.\r\n# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade). areas: "
-                   "discovered (the parchment shows only what you have discovered) or full (all of it).\r\nmap ");
+                   "discovered (the parchment shows only what you have discovered) or full (all of it).\r\n# nearby: how far round "
+                   "where you arrive the parchment shows the zones nearby, in yards (0: none).\r\nmap ");
     lstrcatA(text, StyleMapName(map));
     lstrcatA(text, "\r\nbar ");
     lstrcatA(text, StyleBarName(bar));
     lstrcatA(text, "\r\nareas ");
     lstrcatA(text, StyleAreasName(full));
-    lstrcatA(text, "\r\n");
+    char nearby[32];
+    wsprintfA(nearby, "\r\nnearby %d\r\n", *(volatile int *)&g_nearYd);
+    lstrcatA(text, nearby);
     HANDLE f = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
     DWORD len = (DWORD)lstrlenA(text), wrote = 0;
@@ -12564,12 +12593,13 @@ static char *StyleText(char *text, DWORD n)
 static void StyleLoad(void)
 {
     char path[MAX_PATH], m[300];
-    int map = 1, bar = 1, full = 0;
+    int map = 1, bar = 1, full = 0, reach = PARCH_NEAR_YD, reachNamed = 0;
     const char *from = "the defaults (no choice made in game yet)";
     DWORD n = 0;
     char *text = Join(path, g_dir, STYLE_PATH) ? ReadTextN(path, 4096, &n) : NULL;
     if (text) {
         StyleParse(StyleText(text, n), &map, &bar, &full);
+        reachNamed = StyleNearby(text, &reach);
         HeapFree(GetProcessHeap(), 0, text);
         from = "Data\\CinderLoad\\style.txt (chosen in game)";
     } else {
@@ -12580,8 +12610,13 @@ static void StyleLoad(void)
     *(volatile int *)&g_parchAsked = map;
     *(volatile int *)&g_vbarAsked = bar;
     *(volatile int *)&g_mapFull = full;
+    *(volatile int *)&g_nearYd = reach;
     wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game on the world map (M) or with /cinderload",
               StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
+    Log(m);
+    if (reach) wsprintfA(m, "style: the parchment's zones nearby out to %d yards of the arrival (whole to %d), from %s", reach, reach / 2,
+                         reachNamed ? "Data\\CinderLoad\\style.txt" : "the default");
+    else lstrcpyA(m, "style: the parchment's zones nearby off (style.txt's nearby 0)");
     Log(m);
 }
 /* The game's thread: the choice changed to map, bar, full (how: where it came from, for the log), kept in style.txt. 1

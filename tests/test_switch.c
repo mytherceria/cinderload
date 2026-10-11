@@ -8680,6 +8680,52 @@ static int g_vsStarts, g_vsFail;
 static int FakeViewThreadStart(const unsigned char *base) { (void)base; g_vsStarts++; return !g_vsFail; }
 /* The style's file as Notepad and others save it; the CVar's value only as the switches write it; the black first frames
  * only for a parchment that will be drawn. */
+/* the reach from style.txt: one line "nearby <yards>" (0: none), read at start, kept as a choice is written, the old
+ * three lines still read the same and anything else passed over */
+static void TestNearbyStyle(void)
+{
+    int yd = 7;
+    int ok = StyleNearby("map parchment\r\nnearby 600\r\n", &yd) == 1 && yd == 600;
+    yd = 7;
+    ok &= StyleNearby("NEARBY=0", &yd) == 1 && yd == 0 && StyleNearby("nearby: 99999999", &yd) == 1 && yd == PARCH_NEAR_MOST;
+    yd = 7;
+    ok &= StyleNearby("# nearby 5\nmap parchment\nbar retro\nareas full\n", &yd) == 0 && StyleNearby("nearby x 5", &yd) == 0 &&
+          StyleNearby("nearbyz 5 anearby 5 near 5", &yd) == 0 && StyleNearby(NULL, &yd) == 0 && StyleNearby("nearby", &yd) == 0 && yd == 7;
+    ok &= StyleNearby("nearby 300\nnearby\t1500 yards", &yd) == 1 && yd == 1500 && StyleNearby("nearby 4000", &yd) && yd == 4000 &&
+          StyleNearby("nearby 4001", &yd) && yd == 4000;
+    int map = -1, bar = -1, full = -1;
+    ok &= StyleParse("map satellite\r\nbar neo\r\nareas full\r\nnearby 600\r\nzoom 5\r\n", &map, &bar, &full) == 3 && map == 0 && bar == 0 && full == 1;
+    Check(ok, "the style's reach for the zones nearby: \"nearby\" and a number of yards (after spaces, '=' or ':'), held to 4000, 0 none; the last one counts; a note, another word, no number: not named; the three choices read as before beside it");
+
+    Fresh("style-nearby"); GameDir();
+    g_nearYd = 7;
+    StyleLoad();
+    ok = g_nearYd == PARCH_NEAR_YD && LogSays("style: the parchment's zones nearby out to 1200 yards of the arrival (whole to 600), from the default");
+    Put(STYLE_REL, "map parchment\r\nbar retro\r\nareas discovered\r\n");      /* (0.3.0's three lines: the default reach) */
+    StyleLoad();
+    ok &= g_nearYd == PARCH_NEAR_YD && g_parchAsked == 1 && g_mapFull == 0;
+    Put(STYLE_REL, "map satellite\r\nbar neo\r\nareas full\r\nnearby 600\r\nsomething else 9\r\n");
+    StyleLoad();
+    ok &= g_nearYd == 600 && g_parchAsked == 0 && g_vbarAsked == 0 && g_mapFull == 1 &&
+          LogSays("zones nearby out to 600 yards of the arrival (whole to 300), from Data\\CinderLoad\\style.txt");
+    const char *t;
+    ok &= StyleSet(1, 1, 0, "a test") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas discovered\r\nnearby 600\r\n") &&
+          strstr(t, "# nearby: how far round where you arrive the parchment shows the zones nearby, in yards (0: none).");
+    g_nearYd = 7;
+    StyleLoad();
+    ok &= g_nearYd == 600 && g_parchAsked == 1;
+    Put(STYLE_REL, "nearby 0\r\n");
+    StyleLoad();
+    ok &= g_nearYd == 0 && LogSays("style: the parchment's zones nearby off (style.txt's nearby 0)");
+    g_parchNearOn = 5; g_pzN = 4;
+    StylePick();
+    ok &= g_parchNearOn == 0 && LogSays("  the view: the parchment's zones nearby off");
+    g_nearYd = 900;
+    StylePick();
+    ok &= g_parchNearOn == 900 && LogSays("  the view: the parchment's zones nearby out to 900 yards of the arrival, under its zone");
+    Check(ok, "the reach at start: the default (1200 yards) without style.txt or with 0.3.0's three lines; style.txt's nearby line read beside the three choices, other lines passed over; kept when a choice is written; 0: none; each screen takes it as it opens");
+    g_nearYd = PARCH_NEAR_YD; g_parchNearOn = 0; g_pzN = 0;
+}
 static void TestStyleFiles(void)
 {
     int ok = 1, map, bar, fault;
@@ -9419,6 +9465,7 @@ int main(int argc, char **argv)
     TestExplore();
     TestNearby();
     TestNearbyMake();
+    TestNearbyStyle();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
