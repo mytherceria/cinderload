@@ -17,6 +17,8 @@ static const float kWholeUV[8] = { 0, 1, 1, 1, 0, 0, 1, 0 };   /* the whole pict
 #include <dirent.h>
 #include <ctype.h>
 #include <strings.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 char shim_gamedir[512];
 unsigned char shim_module[SHIM_MODULE_SIZE];
@@ -6471,6 +6473,8 @@ static void TestSwitchesPump(void)
     munmap(low, 1 << 16);
 }
 
+static const char *g_luaBin;                             /* (TestSwitchesLua's finds) */
+static char g_testsDir[1024], g_fxDir[800];
 /* The switches' Lua (dll/switches.lua) as the DLL sends it, run by Lua 5.1 against a stubbed 1.12 UI with 5.0's limits
  * (tests/test_lua.lua); and switches_lua.h the same text as switches.lua. */
 static void TestSwitchesLua(void)
@@ -6502,6 +6506,8 @@ static void TestSwitchesLua(void)
     if (f) { fputs(kLuaProbe, f); fclose(f); }
     const char *lua = !system("lua5.1 -v >/dev/null 2>&1") ? "lua5.1" : !system("luajit -v >/dev/null 2>&1") ? "luajit" : NULL;
     if (!lua) { printf("  (no lua5.1 or luajit here: the switches' Lua not run)\n"); return; }
+    g_luaBin = lua;
+    snprintf(g_testsDir, sizeof g_testsDir, "%s", here);
     const char *layout = getenv("CINDERLOAD_LAYOUT"), *widths = getenv("CINDERLOAD_WIDTHS");
     char fx[800] = "";
     if (g_client) {                                      /* the client's own drop-down and world map code, out of its archives */
@@ -6525,6 +6531,7 @@ static void TestSwitchesLua(void)
         }
         Check(got, "a real client: its own UIDropDownMenu.lua and WorldMapFrame.lua read out of its archives for the switches' Lua");
         if (!got) fx[0] = 0;
+        snprintf(g_fxDir, sizeof g_fxDir, "%s", fx);
     }
     char cmd[4000];
     snprintf(cmd, sizeof cmd, "%s %s/test_lua.lua '%s' '%s%s' '%s%s' '%s%s' 2>&1", lua, here, dir, layout ? "layout=" : "", layout ? layout : "",
@@ -6541,6 +6548,194 @@ static void TestSwitchesLua(void)
     }
     int st = r ? pclose(r) : -1;
     Check(r && done && st == 0 && seen >= 60, "the switches' Lua ran whole under the stubbed UI");
+}
+
+/* ---- the whole path, run (the skeptic's finding, 11 Oct: it had never run anywhere): the DLL's start, its thread's
+ * message, the game's thread taking it, the CVar, the switches' chunk run in the game's UI, a player's pick on the world
+ * map's drop-down, style.txt, a loading screen drawn as picked, a /reload, the game quitting, the next session. The game's
+ * UI is tests/wow_ui.lua's (the client's own drop-down and world map code with a client folder), in a Lua of its own
+ * (tests/lua_bridge.lua, over a pipe); the client's three calls are the bridge (FrameScript_Execute) and the fake CVar. */
+static FILE *g_brTo, *g_brFrom;
+static pid_t g_brPid;
+static char g_brInfo[8][400];
+static int g_brInfoN;
+static int BridgeOpen(void)
+{
+    int to[2], from[2];
+    char script[1100], fx[900];
+    snprintf(script, sizeof script, "%s/lua_bridge.lua", g_testsDir);
+    snprintf(fx, sizeof fx, "framexml=%s", g_fxDir);
+    if (!g_luaBin || pipe(to) || pipe(from)) return 0;
+    fflush(stdout);
+    g_brPid = fork();
+    if (g_brPid < 0) return 0;
+    if (!g_brPid) {
+        dup2(to[0], 0); dup2(from[1], 1);
+        close(to[0]); close(to[1]); close(from[0]); close(from[1]);
+        execlp(g_luaBin, g_luaBin, script, fx, (char *)NULL);
+        _exit(127);
+    }
+    close(to[0]); close(from[1]);
+    g_brTo = fdopen(to[1], "w"); g_brFrom = fdopen(from[0], "r");
+    return g_brTo && g_brFrom;
+}
+static void BridgeClose(void)
+{
+    if (g_brTo) fclose(g_brTo);
+    if (g_brFrom) fclose(g_brFrom);
+    g_brTo = g_brFrom = NULL;
+    if (g_brPid > 0) waitpid(g_brPid, NULL, 0);
+    g_brPid = 0;
+}
+/* One request: the CVar as the client holds it, the command (and data); the UI's answer taken (its info lines, the CVar). */
+static int BridgeSend(const char *cmd, const char *data, size_t n)
+{
+    g_brInfoN = 0;
+    if (!g_brTo) return 0;
+    if (g_fkCv) fprintf(g_brTo, "cvar %s\n", g_fkVal); else fputs("nocvar\n", g_brTo);
+    fprintf(g_brTo, "%s\n", cmd);
+    if (data) fwrite(data, 1, n, g_brTo);
+    fflush(g_brTo);
+    char line[1200];
+    while (fgets(line, sizeof line, g_brFrom)) {
+        line[strcspn(line, "\n")] = 0;
+        if (!strcmp(line, "end")) return 1;
+        if (!strncmp(line, "cvar ", 5)) { if (g_fkCv) FkSet(line + 5); }
+        else if (!strncmp(line, "info ", 5) && g_brInfoN < 8) snprintf(g_brInfo[g_brInfoN++], sizeof g_brInfo[0], "%s", line + 5);
+    }
+    return 0;
+}
+static int Bridge(const char *cmd) { return BridgeSend(cmd, NULL, 0); }
+static int BridgeSaid(const char *s) { for (int i = 0; i < g_brInfoN; i++) if (strstr(g_brInfo[i], s)) return 1; return 0; }
+static void BridgeExec(const char *code, const char *source)          /* FrameScript_Execute, in the stubbed UI */
+{
+    g_fkRuns++;
+    if (strcmp(source, "CinderLoad")) return;
+    if (!strcmp(code, kLuaProbe)) g_fkProbes++; else g_fkSetups++;
+    char cmd[40];
+    snprintf(cmd, sizeof cmd, "exec %u", (unsigned)strlen(code));
+    BridgeSend(cmd, code, strlen(code));
+}
+static LuaPump g_pathPump;
+/* Our thread's poll at now, and the game's thread taking our message off its queue if one was sent. */
+static void Pump(DWORD now)
+{
+    LuaPumpStep(&g_pathPump, now);
+    if (!g_luaPosted || !shim_hook) return;
+    MSG msg = { shim_game, g_luaMsg, 0, 0, 0, { 0, 0 } };
+    shim_ticks = now;
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&msg);
+}
+static void TestSwitchesPath(void)
+{
+    if (!g_luaBin) { printf("  (no lua5.1 or luajit here: the whole path not run)\n"); return; }
+    signal(SIGPIPE, SIG_IGN);
+    unsigned char *low = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
+    if (low == MAP_FAILED) { Check(0, "low memory for the whole path"); return; }
+    int wine = shim_wine, pzN = g_pzN, ok;
+    const char *t;
+    Fresh("switches-path"); GameDir();
+    SwitchesWorld(low);
+    shim_wine = 1; g_map.ok = 1; g_driftOn = 1;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
+    g_pzN = 4; g_parchZone = -1; g_parchCont = -1; g_class = 4;
+    memset(&g_pathPump, 0, sizeof g_pathPump);
+    /* the game starts (DllMain's ViewStart): the style (none chosen yet), the view, the switches' thread */
+    ok = BridgeOpen() && ViewStartFrom(shim_module, FakeViewThreadStart) && g_luaOn && g_parchAsked == 1 && g_vbarAsked == 1;
+    g_luaExec = BridgeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+    /* a login: the first message taken makes the CVar, finds no switches, makes them in the game's UI */
+    DWORD now = 20000;
+    Pump(now);
+    ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, "parchment retro");
+    Bridge("openmap");
+    Bridge("text map");
+    ok &= BridgeSaid("Parchment shown");
+    Check(ok, "the whole path, a login: the DLL starts (the style the defaults), its thread's message is taken on the game's thread, which makes the CVar and the switches in the game's UI: the world map's drop-down says Parchment");
+
+    /* Satellite picked on the world map: the CVar says so; the next message (a quarter second) keeps it; the next screen */
+    Bridge("pick map satellite");
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, "satellite retro") && g_parchAsked == 1;
+    now += LUA_POLL_MS;
+    Pump(now);
+    ok &= g_parchAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar retro");
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= !g_parchOn && g_barVanilla && g_vbN == 0;
+    Check(ok, "the whole path: Satellite picked from the drop-down, the CVar says so, the game's next message keeps it in style.txt, and the next loading screen is the living map");
+
+    /* the parchment picked a moment before a loading screen, no message between: that screen the parchment */
+    Bridge("pick map parchment");
+    g_dispNew = 1;
+    GameStep(0.0f, now + 100);
+    ViewOpenFirst(1920, 1080, now + 110);
+    ok = g_parchAsked == 1 && g_parchOn && g_vbN > 0 && (t = Get(STYLE_REL)) && strstr(t, "map parchment");
+    Check(ok, "the whole path: the parchment picked just before a loading screen is that very screen's (taken as it begins), and kept");
+
+    /* /cinderload bar in the chat */
+    Bridge("slash bar");
+    ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, "parchment neo");
+    now += LUA_POLL_MS;
+    Pump(now);
+    ok &= g_vbarAsked == 0 && (t = Get(STYLE_REL)) && strstr(t, "bar neo");
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= g_parchOn && !g_barVanilla;
+    Check(ok, "the whole path: /cinderload bar in the chat, kept the same way; the next screen the parchment with the blade");
+
+    /* a /reload: the UI made anew; the probe finds no switches; made again from the choice held, showing it */
+    Bridge("fresh");
+    int setups = g_fkSetups;
+    now += LUA_TICK_MS;
+    Pump(now);
+    Bridge("openmap");
+    Bridge("text bar");
+    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo") && BridgeSaid("Neo shown");
+    Bridge("minimize");
+    Bridge("text map");
+    ok &= BridgeSaid("hidden");
+    Bridge("maximize");
+    Bridge("text map");
+    ok &= BridgeSaid("Parchment shown");
+    Check(ok, "the whole path: a /reload, the switches made again from what the DLL holds (the drop-downs say it); the map minimised, they hide with its own; maximised, back");
+
+    /* Retro picked in the game's last moment, then it quits: kept (its WM_QUIT) */
+    Bridge("pick bar retro");
+    MSG quit = { shim_game, WM_QUIT, 0, 0, 0, { 0, 0 } };
+    shim_hook(HC_ACTION, PM_REMOVE, (LPARAM)&quit);
+    ok = (t = Get(STYLE_REL)) && strstr(t, "map parchment\r\nbar retro");
+    Bridge("errors");
+    ok &= BridgeSaid("0 ");
+    BridgeClose();
+    Check(ok, "the whole path: Retro picked in the game's last moment, kept as it quits; no Lua error in its UI all along");
+
+    /* the next session: style.txt at start; a CVar left in Config.wtf (an old choice) never counts; the switches made from
+     * style.txt's, the drop-downs saying it */
+    SwitchesWorld(low);
+    memset(&g_pathPump, 0, sizeof g_pathPump);
+    g_fkCv = g_fkLow + 0x100;
+    TestPut32(g_fkCv + CV_VALUE, TestLow(g_fkVal));
+    FkSet("satellite neo");
+    g_parchAsked = g_vbarAsked = 7;
+    ok = BridgeOpen() && ViewStartFrom(shim_module, FakeViewThreadStart) && g_parchAsked == 1 && g_vbarAsked == 1;
+    g_luaExec = BridgeExec; g_cvLookup = FakeLookup; g_cvRegister = FakeRegister;
+    now += 60000;
+    Pump(now);
+    Bridge("openmap");
+    Bridge("text map");
+    ok &= g_parchAsked == 1 && g_vbarAsked == 1 && !strcmp(g_fkVal, "parchment retro") && BridgeSaid("Parchment shown");
+    Bridge("text bar");
+    ok &= BridgeSaid("Retro shown");
+    BridgeClose();
+    Check(ok, "the whole path, the next session: the style from style.txt at start, the switches made from it (an old value of the CVar in Config.wtf never counts), the drop-downs saying it");
+
+    g_viewOn = 0; g_viewLive = 0; shim_wine = wine; g_pzN = pzN; g_map.ok = 0; g_driftOn = 0;
+    g_parchOn = 0; g_barVanilla = 0; g_class = 0;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    SwitchesQuiet();
+    munmap(low, 1 << 16);
 }
 
 /* A real client's WoW.exe: the places the switches use, and the check that keeps a DLL's own functions out of its Lua */
@@ -6750,6 +6945,7 @@ int main(int argc, char **argv)
     TestSwitches();
     TestSwitchesPump();
     TestSwitchesLua();
+    TestSwitchesPath();
     if (argc > 2) {
         FireBarRealClient(argv[2]);
         FireRealClient(argv[2]);
