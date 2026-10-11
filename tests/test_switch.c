@@ -8053,7 +8053,7 @@ static void TestStyle(void)
     g_pzN = 4; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
     g_parchAsked = 1; g_vbarAsked = 1;
     StylePick();
-    ok = g_parchOn == 1 && g_barVanilla == 1 && LogSays("  the view: the parchment (each screen") && LogSays("vanilla's own bar (retro");
+    ok = g_parchOn == 1 && g_barVanilla == 1 && LogSays("  the view: the parchment (each screen, the world gliding in to where you arrive, in the client's own map paintings, by candlelight)") && LogSays("vanilla's own bar (retro");
     g_parchAsked = 0; g_vbarAsked = 0;
     StylePick();
     ok &= !g_parchOn && !g_barVanilla && LogSays("  the view: the living map (satellite), the blade for the bar (neo)");

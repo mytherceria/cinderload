@@ -12311,8 +12311,8 @@ static void StylePick(void)
     if (now != said) {
         char m[400];
         wsprintfA(m, "  the view: %s, %s", !map ? "the living map (satellite)"
-                                         : parch ? "the parchment (each screen, the zone you arrive in as the client's own map "
-                                                   "paints it, by candlelight)"
+                                         : parch ? "the parchment (each screen, the world gliding in to where you arrive, in "
+                                                   "the client's own map paintings, by candlelight)"
                                          : "the parchment is chosen, but the client's WorldMapArea.dbc gave no zones: the living map",
                   !bar ? "the blade for the bar (neo)"
                   : retro ? "vanilla's own bar (retro: its frame and glass the client's, its fill the class's colour)"
