@@ -10689,7 +10689,8 @@ static void ParchZoneMade(int z, int c, float fx, float fy, const char **why)
  * map). Made on the parchment's worker
  * after the arrival's zone is up, one neighbour's painting at a time (the sheet and one painting in memory at most). */
 #define PARCH_NEAR_MOST  4000         /* the reach at most, yards */
-#define PARCH_NEAR_MAX   6            /* neighbours at most, the nearest first */
+#define PARCH_NEAR_MAX   12           /* neighbours at most, the nearest first (each painted in turn, one in memory at a
+                                       * time: the cap holds the worker's time, about 0.1 s a neighbour, not memory) */
 #define PARCH_NEAR_TEX   2048         /* the sheet's texels a side at most (and 256 at least) */
 #define AREA_OPEN        0x40         /* AreaTable flags: the open world (duels allowed there; an instance's areas have none) */
 /* The fade by distance d from the arrival (yards) for reach (yards): 1 out to half the reach, then smoothstep down to 0
@@ -11124,7 +11125,7 @@ static int ParchJobDone(DWORD now, int map, float x, float y, LONG screen)
  * 1 when a job follows in this call. */
 static int ParchUpDone(DWORD now, int slot, int up)
 {
-    char m[720];                                                 /* (the zones nearby's line: up to six names) */
+    char m[1024];                                                /* (the zones nearby's line: up to twelve names; wsprintfA's most) */
     DWORD ms = g_pj.ran;
     if (slot == VT_PWORLD) {
         if (!up) { Log("  the parchment: OpenGL would not take the world's painting; each glide opens on its continent's painting"); return 0; }
@@ -11148,7 +11149,7 @@ static int ParchUpDone(DWORD now, int slot, int up)
         g_nearZ = g_pj.z; g_nearAt = now; g_nearRect = N->r; g_nearMap = g_pj.map; g_nearX = g_pj.x; g_nearY = g_pj.y;
         g_nearReach = (int)g_pj.reach; g_nearKnown = g_pj.known; g_nearFull = g_pj.full;
         for (int i = 0; i < EXPLORED_BYTES; i++) g_nearBits[i] = g_pj.bits[i];
-        char names[220] = "";
+        char names[480] = "";
         for (int k = 0; k < N->n; k++) {
             char one[64];
             wsprintfA(one, "%s%s %d yd", k ? ", " : "", g_pz[N->row[k]].name, (int)(N->yd[k] + 0.5f));

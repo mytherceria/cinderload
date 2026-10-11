@@ -8001,16 +8001,22 @@ static void TestNearby(void)
     for (int d = 0; d <= 1300; d += 5) { float f = ParchNearFade((float)d, 1200); ok &= f <= last + 1e-6f && f >= 0 && f <= 1; last = f; }
     Check(ok, "the zones nearby fade by distance from the arrival: whole out to half the reach, then smoothly to nothing at the reach and past it (900 of 1200 yards: half); no reach, nothing");
 
-    /* the neighbours: those within the reach, the nearest first, PARCH_NEAR_MAX at most */
-    float yd[9] = { -1, 50, 1300, 400, 10, 400, 900, 1199, 300 };
-    int pick[PARCH_NEAR_MAX];
-    float pyd[PARCH_NEAR_MAX];
-    ok = PARCH_NEAR_MAX == 6 && ParchNearPick(yd, 9, 1200, pick, pyd) == 6 && pick[0] == 4 && pick[1] == 1 && pick[2] == 8 && pick[3] == 3 &&
-         pick[4] == 5 && pick[5] == 6 && pyd[0] == 10 && pyd[5] == 900;
-    ok &= ParchNearPick(yd, 9, 1250, pick, pyd) == 6 && pick[5] == 6;
-    ok &= ParchNearPick(yd, 9, 100, pick, pyd) == 2 && pick[0] == 4 && pick[1] == 1 && ParchNearPick(yd, 9, 50, pick, pyd) == 1;
-    ok &= ParchNearPick(yd, 9, 5, pick, pyd) == 0 && ParchNearPick(yd, 9, 0, pick, pyd) == 0;
-    Check(ok, "the zones nearby: those whose land comes within the reach (not at it), the nearest first, six at most (of seven within 1200 yards, the farthest left out)");
+    /* the neighbours: those within the reach, the nearest first, PARCH_NEAR_MAX (twelve) at most */
+    float yd[17] = { -1, 50, 1300, 400, 10, 400, 900, 1199, 300, 100, 200, 500, 600, 700, 1150, 800, 5 };
+    int pick[PARCH_NEAR_MAX + 1];
+    float pyd[PARCH_NEAR_MAX + 1];
+    pick[PARCH_NEAR_MAX] = -7; pyd[PARCH_NEAR_MAX] = -7;                /* (past the end: never written) */
+    ok = PARCH_NEAR_MAX == 12 && ParchNearPick(yd, 17, 1200, pick, pyd) == 12 && pick[0] == 16 && pick[1] == 4 && pick[2] == 1 &&
+         pick[3] == 9 && pick[4] == 10 && pick[5] == 8 && pyd[0] == 5 && pyd[11] == 800 && pick[11] == 15;
+    ok &= ParchNearPick(yd, 17, 100, pick, pyd) == 3 && pick[0] == 16 && pick[1] == 4 && pick[2] == 1 && ParchNearPick(yd, 17, 50, pick, pyd) == 2;
+    ok &= ParchNearPick(yd, 17, 5, pick, pyd) == 0 && ParchNearPick(yd, 17, 0, pick, pyd) == 0;
+    {                                                                   /* (twelve near, then a farther thirteenth, then a nearer) */
+        float y2[14] = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 500, 1 };
+        ok &= ParchNearPick(y2, 14, 1200, pick, pyd) == 12 && pick[0] == 13 && pick[11] == 10 && pyd[11] == 110;
+        ok &= ParchNearPick(y2, 13, 1200, pick, pyd) == 12 && pick[11] == 11 && pyd[11] == 120;
+    }
+    ok &= pick[PARCH_NEAR_MAX] == -7 && pyd[PARCH_NEAR_MAX] == -7;
+    Check(ok, "the zones nearby: those whose land comes within the reach (not at it), the nearest first, twelve at most (of fifteen within 1200 yards, the three farthest left out; a farther thirteenth after twelve left out, never written past the twelve)");
 
     /* which pages may be neighbours: of the arrival's map, a zone's (not a continent's), not the arrival's zone or another
      * page of its area, its box near enough, not a page wholly inside another zone's box, not one the arrival's map paints */
