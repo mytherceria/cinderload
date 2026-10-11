@@ -190,11 +190,28 @@ local ml, bl, al = env[m.name .. "Label"], env[b.name .. "Label"], env[a.name ..
 Check(ml and bl and ml.text == "Loading map" and bl.text == "Loading bar" and ml.font == "GameFontNormalSmall" and bl.font == "GameFontNormalSmall" and
       ml.layer == "OVERLAY" and ml.points[1].p == "TOPLEFT" and ml.points[1].rel == m and ml.points[1].x == 20 and ml.points[1].y == 10,
       "his labels, \"Loading map\" and \"Loading bar\", in gold over each (GameFontNormalSmall at the template's top left, 20, 10: as the map's \"Continent\" and \"Zone\")")
-Check(env[m.name .. "Middle"].w == 92 and m.w == 142 and env[m.name .. "Text"].w == 67 and b.w == 142 and m.noResize == 1,
-      "the first two each 92 wide inside, as UIDropDownMenu_SetWidth makes it (its frame 142, its words 67)")
+Check(env[m.name .. "Middle"].w == 92 and m.w == 142 and env[m.name .. "Text"].w == 74 and b.w == 142 and m.noResize == 1,
+      "the first two each 92 wide inside, as UIDropDownMenu_SetWidth makes it (its frame 142), their words 74 (the box's whole middle)")
 Check(al and al.text == "Map areas" and al.font == "GameFontNormalSmall" and al.points[1].rel == a and al.points[1].x == 20 and
-      env[a.name .. "Middle"].w == 78 and a.w == 128 and env[a.name .. "Text"].w == 53,
-      "the third, \"Map areas\" in gold over it, 78 wide inside (its frame 128, its words 53: \"Discovered\" fits)")
+      env[a.name .. "Middle"].w == 78 and a.w == 128 and env[a.name .. "Text"].w == 60,
+      "the third, \"Map areas\" in gold over it, 78 wide inside (its frame 128, its words 60, the box's whole middle)")
+-- each choice's words as the client draws them on a 5120 x 2160 screen, in the map's units: FRIZQT__ at whole pixels a
+-- letter, the widest of 28 px (the whole-screen map, at 1), 24 px (the map as a window at 0.85) and 23 px (the UI's 0.82).
+-- The same measure gives "Discover...", "Parchment" and "Eastern Kingdoms" 51.9, 52.7 and 89.1 where a recording of the
+-- map as a window at 0.85 (11 Oct 2026) shows them 51.1, 52.3 and 89.5; in the template's 53 "Discovered" showed as
+-- "Discover...".
+local DRAWN = { Parchment = 52.7, Satellite = 39.7, Retro = 26.8, Neo = 20.8, Discovered = 55.5, ["Full map"] = 42.2 }
+local fit, inside, said = true, true, ""
+for _, d in ipairs(env.CinderLoad.drops) do
+    local t = env[d.frame.name .. "Text"]
+    for _, o in ipairs(d.setting.options) do
+        if not DRAWN[o.text] or DRAWN[o.text] > t:GetWidth() then fit = false; said = said .. " " .. o.text .. " in " .. t:GetWidth() end
+    end
+    local tl, lr = UI.Box(t), Boxed(env[d.frame.name .. "Left"]).r
+    if not (tl and lr and tl >= lr - 0.01) then inside = false end
+end
+Check(fit and inside, "every choice's words whole in its drop-down as the client draws them (\"Discovered\" 55.5, not cut to \"Discover...\"), " ..
+      "and within the box, from the end of its left cap" .. said)
 Check(env[m.name .. "Text"].text == "Parchment" and env[b.name .. "Text"].text == "Retro" and env[a.name .. "Text"].text == "Discovered" and
       m.selectedValue == "parchment" and b.selectedValue == "retro" and a.selectedValue == "discovered", "the choice held shows: Parchment, Retro, Discovered")
 Check(env.SLASH_CINDERLOAD1 == "/cinderload" and type(env.SlashCmdList.CINDERLOAD) == "function", "/cinderload made")

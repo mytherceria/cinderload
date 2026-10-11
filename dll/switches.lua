@@ -41,10 +41,14 @@ CL.settings = {
 }
 -- Where they sit, in the world map's 1024 x 768 box (WorldMapPositioningGuide), from its top left: on the row of the
 -- Continent drop-down (its TOP at the box's TOP, -80, -35: x 342 to 522), from x 32 (clear of the top bar's left
--- flourish), each the width WIDTH inside (its frame WIDTH + 50; the third its own, 78, as wide as "Discovered" needs),
+-- flourish), each the width WIDTH inside (its frame WIDTH + 50; the third its own, 78, room for "Discovered" with CL.WORDS),
 -- each over the one before's right end by OVERLAP as Zone is over Continent's: x 32 to 378, the third's frame over
 -- Continent's (from 342) by 36, three more than Zone's over Continent's.
-CL.X, CL.Y, CL.WIDTH, CL.OVERLAP = 32, -35, 92, -33
+-- The words in each are given the whole middle of its box, from the end of its left cap to where the template sets them
+-- right (CL.WORDS: the width inside less 18, where UIDropDownMenu_SetWidth leaves it less 25): the client draws its
+-- letters at whole pixels, so on a 5120 x 2160 screen "Discovered" is 55.5 wide, and in the template's 53 it showed
+-- "Discover..." (seen on the map in a window at 0.85, 11 Oct 2026). Nothing moves: only the words' own width.
+CL.X, CL.Y, CL.WIDTH, CL.OVERLAP, CL.WORDS = 32, -35, 92, -33, -18
 CL.drops = {}
 
 function CL.Say(text)
@@ -266,6 +270,7 @@ function CL.Build()
         local d = { setting = s, frame = f }
         d.pick = CL.Pick(d)
         UIDropDownMenu_SetWidth(s.width or CL.WIDTH, f)
+        getglobal(name .. "Text"):SetWidth((s.width or CL.WIDTH) + CL.WORDS)        -- (see CL.WORDS)
         if DropDownList1 and DropDownList1:IsShown() then
             f.initialize = CL.Menu(d)                 -- (a list open: the client's Initialize would empty it; it is set later)
         else
