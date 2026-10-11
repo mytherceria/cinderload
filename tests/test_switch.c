@@ -8122,6 +8122,7 @@ static void TestNearby(void)
         for (int x = 40; x < 215; x++) { int st = abs(S[4 * (128 * 256 + x + 1) + 3] - S[4 * (128 * 256 + x) + 3]); if (st > most) most = st; }
         for (int y = 40; y < 215; y++) { int st = abs(S[4 * ((y + 1) * 256 + 128) + 3] - S[4 * (y * 256 + 128) + 3]); if (st > mostV) mostV = st; }
         ok = at128 == 255 && edge < 30 && most <= 60 && mostV <= 60 && S[4 * (128 * 256 + 63) + 3] == 0;
+        ok &= S[4 * (128 * 256 + 69) + 3] < 255 && S[4 * (128 * 256 + 72) + 3] == 255;   /* (soft over 0.06 of it, whole past that) */
         TestPaintFill(0, 0, 1002, 668, 0x2040C0);                       /* (b over a's right edge: a fades out into b) */
         ParchNearLay(S, 256, sr, rb);
         int mostR = 0;
