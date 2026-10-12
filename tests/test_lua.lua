@@ -647,6 +647,7 @@ local function Dump(path)
     local f = io.open(path, "w")
     local function Q(v) if v == nil then return "" end; return string.gsub(tostring(v), "[\t\n]", " ") end
     local function L(t) if not t then return "" end; local o = {}; for i = 1, table.getn(t) do o[i] = Q(t[i]) end; return table.concat(o, " ") end
+    local function Alpha(r) local a = 1; while r do a = a * (r.alpha or 1); r = r.parent end; return a end   -- (as drawn: its frames' alphas)
     for _, r in ipairs(world.made) do r.id0 = nil end
     for i, r in ipairs(world.made) do
         local l, b, rr, t = UI.Rect(r)
@@ -658,7 +659,7 @@ local function Dump(path)
                                bdp and bdp.insets and L({ bdp.insets.left, bdp.insets.right, bdp.insets.top, bdp.insets.bottom }) or "",
                                L(r.backdropColor), L(r.backdropBorderColor), Q(r.min), Q(r.max), Q(r.value), Q(r:GetEffectiveScale()),
                                Q(table.getn(r.points or {}) == 1 and r.points[1].p or ""),
-                               r.gradient and L(r.gradient) or L(r.vertex) }, "\t") .. "\n")
+                               r.gradient and L(r.gradient) or L(r.vertex), Q(Alpha(r)), r.disabled and "1" or "0" }, "\t") .. "\n")
         r.id0 = i
     end
     f:close()

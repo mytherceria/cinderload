@@ -84,7 +84,8 @@ def load(tree):
                          size=float(c[19] or 0), justify=c[20], checked=c[21] == '1', bg=c[22], edge=c[23],
                          edgeSize=float(c[24] or 0), insets=floats(c[25]), bdColor=floats(c[26]), bdBorder=floats(c[27]),
                          min=float(c[28] or 0), max=float(c[29] or 0), value=float(c[30] or 0), es=float(c[31] or 1),
-                         point=c[32] if len(c) > 32 else '', shade=c[33].split() if len(c) > 33 else []))
+                         point=c[32] if len(c) > 32 else '', shade=c[33].split() if len(c) > 33 else [],
+                         alpha=float(c[34]) if len(c) > 34 and c[34] else 1.0, disabled=len(c) > 35 and c[35] == '1'))
     return {r['i']: r for r in rows}
 
 
@@ -180,10 +181,13 @@ def main():
         boxes.append(r)
 
     def visible_tex(r):
-        if r['role'] in ('highlight', 'pushed', 'disabled', 'disabledchecked'):
+        if r['role'] in ('highlight', 'pushed', 'disabled'):
             return False
-        if r['role'] == 'checked':
-            return R[r['parent']]['checked']
+        owner = R[r['parent']]
+        if r['role'] == 'checked':                            # (a disabled box shows its disabled tick instead)
+            return owner['checked'] and not owner['disabled']
+        if r['role'] == 'disabledchecked':
+            return owner['checked'] and owner['disabled']
         return True
 
     # each region at its frame's level: the frame's backdrop, then its regions by layer, then the frames over it
@@ -198,7 +202,7 @@ def main():
         elif r['kind'] in ('Texture', 'FontString') and panel_has(R, r, panel['i']):
             owner = R[r['parent']]
             items.append(((owner['level'], LAYERS.get(r['layer'], 2), r['i']), r['kind'], r))
-    for _, what, r in sorted(items, key=lambda t: t[0]):
+    def draw(what, r):
         if what == 'backdrop':
             backdrop(r)
         elif what == 'FontString':
@@ -210,7 +214,7 @@ def main():
                 f = (s['value'] - s['min']) / ((s['max'] - s['min']) or 1)
                 cx, cy, half = x0 + 8 * s['es'] * k + (x1 - x0 - 16 * s['es'] * k) * f, (y0 + y1) / 2, 16 * s['es'] * k
                 put(arc.texture(r['texture']), cx - half, cy - half, cx + half, cy + half)
-                continue
+                return
             x0, y0, x1, y1 = box(r)
             if r['color'] and not r['texture']:
                 c = r['color']
@@ -227,6 +231,17 @@ def main():
                     canvas.alpha_composite(Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)), (int(round(x0)), int(round(y0))))
                 else:                                          # (SetVertexColor: the file times it)
                     put(im, x0, y0, x1, y1, [float(v) for v in sh] if sh else None)
+    for _, what, r in sorted(items, key=lambda t: t[0]):
+        if r.get('alpha', 1.0) < 0.999:                        # (SetAlpha on it or a frame under it: drawn that see-through)
+            real = canvas
+            canvas = Image.new('RGBA', real.size, (0, 0, 0, 0))
+            draw(what, r)
+            layer = np.asarray(canvas).astype(np.float32)
+            layer[..., 3] *= r['alpha']
+            real.alpha_composite(Image.fromarray(np.clip(layer, 0, 255).astype(np.uint8)))
+            canvas = real
+        else:
+            draw(what, r)
     if '--contrast' in sys.argv:                              # (the same drawing without words: what is behind each)
         global NOTEXT
         words = [r for r in boxes if r.get('bbox')] if not NOTEXT else []
