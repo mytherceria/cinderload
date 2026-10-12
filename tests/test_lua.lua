@@ -78,8 +78,8 @@ Check(Lex50(probeSrc) == nil, "the probe: Lua 5.0's syntax only (" .. tostring(L
 Check(string.find(setupSrc, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"\n') ~= nil and
       string.find(setupSN, '^local CL_MAP, CL_BAR, CL_AREAS = "satellite", "neo", "discovered"\n') ~= nil and
       string.find(setupFull, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "full"\n') ~= nil, "the chunk begins with the choice the DLL holds")
-local DEF = "fade zone thick 100 width own whole off effect heat colour class quality pulse raw"
-local LOOK = "fade third thick 150 width 60 whole on effect blade colour ember quality liquid unstable"
+local DEF = "fade zone thick 100 width own whole off effect heat neofill blade colour class quality pulse raw"
+local LOOK = "fade third thick 150 width 60 whole on effect blade neofill smooth colour ember quality liquid unstable"
 Check(string.find(setupSrc, '^[^\n]*\nlocal CL_LOOK = "' .. DEF .. '"\n%-%- CinderLoad') ~= nil and
       string.find(setupLook, '\nlocal CL_LOOK = "' .. LOOK .. '"\n', 1, true) ~= nil,
       "and its second line the zones nearby's fade and the bar's look the DLL holds, as the CVar carries them")
@@ -327,7 +327,7 @@ Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retr
 UI.Click(P("areasdiscovered"))
 Check(CV() == Value("parchment retro discovered"), "Discovered's radio: back")
 UI.Click(P("fadethird"))
-Check(CV() == Value("parchment retro discovered", "fade third thick 100 width own whole off effect heat colour class quality pulse raw") and
+Check(CV() == Value("parchment retro discovered", "fade third thick 100 width own whole off effect heat neofill blade colour class quality pulse raw") and
       Fades("third") and NoErrors(), "the zones nearby's \"Per zone, nearest third\": the CVar's fade third (one line of style.txt), its radio alone checked")
 UI.Click(P("fade3600"))
 Check(string.find(CV(), " fade 3600 ", 1, true) and Fades("3600"), "\"Circle, 3,600 yd\": fade 3600")
@@ -428,6 +428,10 @@ Check(stands, "Neo in the preview stands on the strip's foot at 50% to 200% (as 
 local MAGE, EMBER = { 0.412, 0.8, 0.941 }, { 1, 0.541, 0.165 }
 local function Is3(t, c, k) k = k or 1; return t and Near(t[1], c[1] * k) and Near(t[2], c[2] * k) and Near(t[3], c[3] * k) end
 local function Fill() return PB(pv.fill), PB(pv.rest), PB(pv.core) end
+Check(Gold("effect", "blade") and env.CinderLoad.effect == "blade" and string.find(CV(), " effect heat neofill blade ", 1, true) and pv.core:IsVisible(),
+      "Neo picked: its own fill, Blade light, chosen and shown at once (his pick: Neo keeps its blade), Retro's Heat kept for Retro")
+UI.Click(cards["effect heat"])
+Check(Gold("effect", "heat") and string.find(CV(), " effect heat neofill heat ", 1, true), "Heat picked with Neo: Neo's own fill Heat (neofill heat), Retro's untouched")
 local f, r, c = Fill()
 Check(pv.fill.texture == "Interface\\ChatFrame\\ChatFrameBackground" and pv.fill.gradient and pv.fill.gradient[1] == "HORIZONTAL" and
       Is3({ pv.fill.gradient[2], pv.fill.gradient[3], pv.fill.gradient[4] }, MAGE, 0.35) and Is3({ pv.fill.gradient[5], pv.fill.gradient[6], pv.fill.gradient[7] }, MAGE) and
@@ -446,6 +450,7 @@ Check(Is3(pv.fill.vertex, EMBER) and Is3(pv.colour, EMBER), "In my class's colou
 UI.Click(P("Colour"))
 Check(Is3(pv.fill.vertex, MAGE), "ticked again: the class's colour")
 UI.Click(cards["bar retro"])
+Check(Gold("effect", "heat") and string.find(CV(), " effect heat neofill blade ", 1, true), "back to Retro: its own fill, Heat, as it had it; Neo's Blade light kept for Neo")
 a1, a2, a3 = Bar()
 f, r = Fill()
 Check(Near(f.l, a1.l + (a1.r - a1.l) * 28 / 34) and Near(r.r, a3.r - (a3.r - a3.l) * 27 / 34) and Near(f.t, a1.t + (a1.b - a1.t) * 9 / 42) and
@@ -454,11 +459,11 @@ UI.Click(cards["effect heat"])
 UI.Click(P("Colour"))
 -- Defaults (the class's colour unticked before it)
 world.sounds = {}
-UI.Click(P("fade1800")); UI.Click(P("mapsatellite")); UI.Click(P("barneo")); UI.Slide(P("thickSlider"), 150)
+UI.Click(P("fade1800")); UI.Click(P("mapsatellite")); UI.Click(P("barneo")); UI.Click(cards["effect smooth"]); UI.Slide(P("thickSlider"), 150)
 UI.Click(P("Defaults"))
 Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retro") and Fades("zone") and SliderSays("thick", 100, "100%") and
       SliderSays("width", 30, "each bar's own") and P("Colour"):GetChecked() and not P("Whole"):GetChecked() and
-      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it begins (his, 11 Oct: the parchment, the Full map, each zone fading whole, Retro; 100%, each bar's own width, Heat, the class's colour, Pulse and Raw)")
+      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it begins (his, 11 Oct: the parchment, the Full map, each zone fading whole, Retro; 100%, each bar's own width, Heat for Retro and Blade light for Neo, the class's colour, Pulse and Raw)")
 UI.Click(P("barneo"))
 a1, a2, a3 = Bar()
 Check(Near(a3.r - a1.l, 316) and Near(a1.l, 406) and SliderSays("width", 100, "the whole screen"),
@@ -556,8 +561,8 @@ Check(P("QualityLiquid"):GetChecked() and P("QualityUnstable"):GetChecked() and 
       "and Neo's qualities held: Liquid and Unstable")
 -- a look set by hand in style.txt, off the sliders' steps: said back exactly at a login (no click), so style.txt is never
 -- rewritten by a login; only the slider a player moves puts its own value on a step
-for _, odd in ipairs({ "fade 1800 thick 123 width 33 whole off effect heat colour class quality pulse raw",
-                       "fade 3600 thick 51 width 99 whole off effect smooth colour class quality raw" }) do
+for _, odd in ipairs({ "fade 1800 thick 123 width 33 whole off effect heat neofill blade colour class quality pulse raw",
+                       "fade 3600 thick 51 width 99 whole off effect smooth neofill heat colour class quality raw" }) do
     Fresh({ cvar = "?" })
     Run((string.gsub(setupSrc, 'local CL_LOOK = "[^"]*"', 'local CL_LOOK = "' .. odd .. '"', 1)))
     local said = CV()

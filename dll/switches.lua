@@ -10,7 +10,7 @@
 -- Run inside the game by CinderLoad.dll, on the game's own thread while no Lua is running (no add-on folder: the release
 -- is the DLL and its packs). The DLL puts two lines before this text, the choice it holds:
 --   local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "full"
---   local CL_LOOK = "fade zone thick 100 width own whole off effect heat colour class quality pulse raw"
+--   local CL_LOOK = "fade zone thick 100 width own whole off effect heat neofill blade colour class quality pulse raw"
 -- Written for the client's Lua 5.0: no #, no %, no ... in a body, no string methods, no string.match.
 -- If this breaks, the game's own UI is unharmed: only frames of its own are made, every handler runs inside pcall, a
 -- fault switches it all off (CL.broken, the CVar told "fault"), no function of Blizzard's is replaced or hooked and no
@@ -49,8 +49,14 @@ CL.ART = "Interface\\CinderLoad\\"             -- the panel's pictures, in Cinde
 -- everything as it begins (his defaults, 11 Oct: the parchment, the full map, each zone fading whole; Retro)
 function CL.Defaults()
     CL.map, CL.bar, CL.areas, CL.fade = "parchment", "retro", "full", "zone"
-    CL.thick, CL.width, CL.whole, CL.effect, CL.ember = 100, 0, nil, "heat", nil
+    CL.thick, CL.width, CL.whole, CL.ember = 100, 0, nil, nil
+    CL.retrofx, CL.neofx = "heat", "blade"                 -- (each bar keeps its own fill: his pick, "Neo keeps its blade")
+    CL.effect = CL.retrofx
     CL.quality = { pulse = 1, raw = 1 }
+end
+-- the fill shown and chosen is the bar's own: CL.effect follows CL.bar
+function CL.BarFill()
+    if CL.bar == "neo" then CL.effect = CL.neofx else CL.effect = CL.retrofx end
 end
 
 -- a number held to its range, whole (as the DLL keeps it): what style.txt or the CVar says, unchanged when it is in range
@@ -68,7 +74,7 @@ function CL.Clamp(v, key)
 end
 
 -- the look as the DLL sends it (CL_LOOK) or as the CVar carries it: "fade zone thick 100 width own whole off effect heat
--- colour class quality pulse raw"; a part missing or not ours: as it was. Numbers are held to their range only, never
+-- neofill blade colour class quality pulse raw" (effect Retro's fill, neofill Neo's); a part missing or not ours: as it was. Numbers are held to their range only, never
 -- put on a slider's step: Setup sends back what it read, so a login never rewrites style.txt (a hand-set "thick 123" stays)
 function CL.ReadLook(s)
     local w = {}
@@ -83,7 +89,8 @@ function CL.ReadLook(s)
         elseif k == "width" and num then CL.width = CL.Hold(num, "width"); i = i + 1
         elseif k == "width" and v == "own" then CL.width = 0; i = i + 1
         elseif k == "whole" and (v == "on" or v == "off") then CL.whole = (v == "on") or nil; i = i + 1
-        elseif k == "effect" and CL.Find(CL.effects, v) then CL.effect = v; i = i + 1
+        elseif k == "effect" and CL.Find(CL.effects, v) then CL.retrofx = v; i = i + 1
+        elseif k == "neofill" and CL.Find(CL.effects, v) then CL.neofx = v; i = i + 1
         elseif k == "colour" and (v == "class" or v == "ember") then CL.ember = (v == "ember") or nil; i = i + 1
         elseif k == "quality" then
             local q = {}
@@ -142,7 +149,7 @@ function CL.Value()
     local width = "own"
     if CL.width ~= 0 then width = tostring(CL.width) end
     return CL.map .. " " .. CL.bar .. " " .. CL.areas .. " fade " .. CL.fade .. " thick " .. tostring(CL.thick) ..
-           " width " .. width .. " whole " .. (CL.whole and "on" or "off") .. " effect " .. CL.effect .. " colour " ..
+           " width " .. width .. " whole " .. (CL.whole and "on" or "off") .. " effect " .. CL.retrofx .. " neofill " .. CL.neofx .. " colour " ..
            (CL.ember and "ember" or "class") .. " quality " .. q
 end
 
@@ -158,6 +165,10 @@ function CL.Set(key, value)
         if not CL.Option(CL.Setting(key), value) then return end
     end
     CL[key] = value
+    if key == "effect" then                              -- (the fill picked is the bar's own: kept for it)
+        if CL.bar == "neo" then CL.neofx = value else CL.retrofx = value end
+    end
+    CL.BarFill()
     CL.Save()
     CL.Refresh()
     return 1
@@ -661,6 +672,7 @@ function CL.Setup()
     CL.Defaults()
     CL.map, CL.bar, CL.areas = CL_MAP, CL_BAR, CL_AREAS
     CL.ReadLook(CL_LOOK)
+    CL.BarFill()
     CL.Save()                                        -- (first: the DLL hears that this ran)
     SLASH_CINDERLOAD1 = "/cinderload"
     SlashCmdList["CINDERLOAD"] = function(msg)

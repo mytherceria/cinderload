@@ -12758,8 +12758,10 @@ static int StyleNearby(const char *text, int *yd)
  * "colour class" or "colour ember", "quality" and any of liquid, pulse, unstable and raw (or none). A line missing: its
  * default, today's look. g_look holds them (the game's thread writes it, the view's reads it as each screen opens; the
  * effects' words LOOK_HEAT and the rest are the view's, with the bar's fill). ---- */
-typedef struct { int thick, width, whole, effect, ember, quality; } Look;    /* (width 0: each bar's own) */
-#define LOOK_DEFAULT { 100, 0, 0, LOOK_HEAT, 0, SABER_PULSE | SABER_RAW }
+/* (width 0: each bar's own; effect retro's fill, neofx Neo's: each bar keeps its own, his pick 11 Oct evening: "Neo keeps
+ * its blade", so picking Neo looks as 0.2.0's did straight away and going back finds what each had) */
+typedef struct { int thick, width, whole, effect, ember, quality, neofx; } Look;
+#define LOOK_DEFAULT { 100, 0, 0, LOOK_HEAT, 0, SABER_PULSE | SABER_RAW, LOOK_BLADE }
 static Look g_look = LOOK_DEFAULT;
 static const char *const kLookEffect[LOOK_EFFECTS] = { "heat", "smooth", "blade" };
 static const char *const kLookQuality[4] = { "liquid", "pulse", "unstable", "raw" };     /* SABER_LIQUID << i */
@@ -12806,6 +12808,8 @@ static int StyleLook(const char *text, Look *lk)
         else if (!lstrcmpiA(w, "whole") && kx == 1 && (!lstrcmpiA(x, "on") || !lstrcmpiA(x, "off"))) { lk->whole = x[1] == 'n'; named++; s = at; }
         else if (!lstrcmpiA(w, "effect") && kx == 1) {
             for (int e = 0; e < LOOK_EFFECTS; e++) if (!lstrcmpiA(x, kLookEffect[e])) { lk->effect = e; named++; s = at; }
+        } else if (!lstrcmpiA(w, "neofill") && kx == 1) {
+            for (int e = 0; e < LOOK_EFFECTS; e++) if (!lstrcmpiA(x, kLookEffect[e])) { lk->neofx = e; named++; s = at; }
         } else if ((!lstrcmpiA(w, "colour") || !lstrcmpiA(w, "color")) && kx == 1 && (!lstrcmpiA(x, "class") || !lstrcmpiA(x, "ember"))) {
             lk->ember = x[0] == 'e'; named++; s = at;
         } else if (!lstrcmpiA(w, "quality")) {                      /* its words, as many as follow on its line */
@@ -12848,14 +12852,15 @@ static void StyleLookText(char *out, const Look *lk, const char *sep)
         if (lk->quality & ((int)SABER_LIQUID << i)) { if (q[0]) lstrcatA(q, " "); lstrcatA(q, kLookQuality[i]); }
     char wd[8];
     if (lk->width) wsprintfA(wd, "%d", lk->width); else lstrcpyA(wd, "own");
-    wsprintfA(out, "thick %d%swidth %s%swhole %s%seffect %s%scolour %s%squality %s", lk->thick, sep, wd, sep, lk->whole ? "on" : "off", sep,
-              kLookEffect[lk->effect >= 0 && lk->effect < LOOK_EFFECTS ? lk->effect : 0], sep, lk->ember ? "ember" : "class", sep,
+    wsprintfA(out, "thick %d%swidth %s%swhole %s%seffect %s%sneofill %s%scolour %s%squality %s", lk->thick, sep, wd, sep, lk->whole ? "on" : "off",
+              sep, kLookEffect[lk->effect >= 0 && lk->effect < LOOK_EFFECTS ? lk->effect : 0], sep,
+              kLookEffect[lk->neofx >= 0 && lk->neofx < LOOK_EFFECTS ? lk->neofx : LOOK_BLADE], sep, lk->ember ? "ember" : "class", sep,
               q[0] ? q : "none");
 }
 static int LookSame(const Look *a, const Look *b)
 {
     return a->thick == b->thick && a->width == b->width && a->whole == b->whole && a->effect == b->effect && a->ember == b->ember &&
-           a->quality == b->quality;
+           a->quality == b->quality && a->neofx == b->neofx;
 }
 static const char *StyleMapName(int map) { return map ? "parchment" : "satellite"; }
 static const char *StyleBarName(int bar) { return bar ? "retro" : "neo"; }
@@ -12881,7 +12886,7 @@ static int StyleSave(int map, int bar, int full)
                    "zone across the whole of it), third (each zone, its nearest third whole), 3600 or 1800 (a circle round where "
                    "you arrive, that many yards).\r\n# thick: the bar's thickness, percent of its own (50 to 200). width: percent "
                    "of the screen (20 to 100), or own (its own); retro's alone, Neo is always the whole width. whole: on (the whole "
-                   "width of the screen) or off.\r\n# effect: heat, smooth or blade (blade light). colour: class (your "
+                   "width of the screen) or off.\r\n# effect: Retro's fill, heat, smooth or blade (blade light); neofill: Neo's, the same three. colour: class (your "
                    "class's) or ember. quality: Neo's, any of liquid, pulse, unstable and raw, or none.\r\nmap ");
     lstrcatA(text, StyleMapName(map));
     lstrcatA(text, "\r\nbar ");
@@ -13070,8 +13075,8 @@ static void StylePick(void)
         Log(sm);
         g_barThick = thick; g_barWidth = width; g_barWhole = whole;
     }
-    int effect = *(volatile int *)&g_look.effect, ember = *(volatile int *)&g_look.ember != 0;
-    if (effect < 0 || effect >= LOOK_EFFECTS) effect = LOOK_HEAT;
+    int effect = retro ? *(volatile int *)&g_look.effect : *(volatile int *)&g_look.neofx, ember = *(volatile int *)&g_look.ember != 0;
+    if (effect < 0 || effect >= LOOK_EFFECTS) effect = retro ? LOOK_HEAT : LOOK_BLADE;   /* (the bar's own fill: retro its own, neo its own) */
     if (effect != g_barEffect || ember != g_barEmber) {             /* the bar's fill and colour, as chosen in the panel */
         char em[160];
         wsprintfA(em, "  the view: the bar's fill %s, in %s", effect == LOOK_BLADE ? "blade light" : kLookEffect[effect],
@@ -13236,7 +13241,7 @@ static int LookQualityAt(const char *v, int *len)
 }
 static int StyleCvarTail(const char *v, Style *st, int *fault)
 {
-    static const char *const kKeys[7] = { "fade", "thick", "width", "whole", "effect", "colour", "quality" };
+    static const char *const kKeys[8] = { "fade", "thick", "width", "whole", "effect", "neofill", "colour", "quality" };
     Style out = *st;
     int next = 0;
     *fault = 0;
@@ -13248,10 +13253,10 @@ static int StyleCvarTail(const char *v, Style *st, int *fault)
         w[n] = 0;
         if (!lstrcmpiA(w, "fault") && !*v) { *fault = 1; break; }
         int k = next;
-        while (k < 7 && lstrcmpiA(w, kKeys[k])) k++;
-        if (k == 7 || *v++ != ' ') return 0;
+        while (k < 8 && lstrcmpiA(w, kKeys[k])) k++;
+        if (k == 8 || *v++ != ' ') return 0;
         next = k + 1;
-        if (k == 6) {                                              /* quality: its words, each once, or none */
+        if (k == 7) {                                              /* quality: its words, each once, or none */
             int q = 0, len, i = LookQualityAt(v, &len), j;
             if (i < 0) return 0;
             if (i == 4) v += len;
@@ -13280,9 +13285,9 @@ static int StyleCvarTail(const char *v, Style *st, int *fault)
         else if (k == 2 && digits && val >= LOOK_WIDTH_LEAST && val <= LOOK_WIDTH_MOST) out.look.width = val;
         else if (k == 2 && letters && !lstrcmpiA(x, "own")) out.look.width = 0;
         else if (k == 3 && letters && (!lstrcmpiA(x, "on") || !lstrcmpiA(x, "off"))) out.look.whole = x[1] == 'n';
-        else if (k == 4 && letters && (!lstrcmpiA(x, "heat") || !lstrcmpiA(x, "smooth") || !lstrcmpiA(x, "blade")))
-            out.look.effect = x[0] == 'h' ? LOOK_HEAT : x[0] == 's' ? LOOK_SMOOTH : LOOK_BLADE;
-        else if (k == 5 && letters && (!lstrcmpiA(x, "class") || !lstrcmpiA(x, "ember"))) out.look.ember = x[0] == 'e';
+        else if ((k == 4 || k == 5) && letters && (!lstrcmpiA(x, "heat") || !lstrcmpiA(x, "smooth") || !lstrcmpiA(x, "blade")))
+            *(k == 4 ? &out.look.effect : &out.look.neofx) = x[0] == 'h' ? LOOK_HEAT : x[0] == 's' ? LOOK_SMOOTH : LOOK_BLADE;
+        else if (k == 6 && letters && (!lstrcmpiA(x, "class") || !lstrcmpiA(x, "ember"))) out.look.ember = x[0] == 'e';
         else return 0;
     }
     *st = out;

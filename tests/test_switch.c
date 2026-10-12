@@ -5948,20 +5948,32 @@ static void TestBarEffects(void)
     /* the view takes the fill and the colour as each screen opens (StylePick), and says so */
     Fresh("bar-effect-pick"); GameDir();
     Look keep = g_look;
+    int vb = g_vbarAsked;
     g_barEffect = LOOK_HEAT; g_barEmber = 0;
-    g_look.effect = LOOK_SMOOTH; g_look.ember = 1;
+    g_vbarAsked = 1; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;                       /* (retro, its pictures there) */
+    g_look.effect = LOOK_SMOOTH; g_look.neofx = LOOK_HEAT; g_look.ember = 1;
     StylePick();
     ok = g_barEffect == LOOK_SMOOTH && g_barEmber == 1 && LogSays("the view: the bar's fill smooth, in CinderLoad's ember");
-    g_look.effect = LOOK_BLADE; g_look.ember = 0;
+    g_vbarAsked = 0;                                                                         /* (neo: its own fill) */
+    StylePick();
+    ok &= g_barEffect == LOOK_HEAT && LogSays("the view: the bar's fill heat, in CinderLoad's ember");
+    g_look.neofx = LOOK_BLADE; g_look.ember = 0;
     StylePick();
     ok &= g_barEffect == LOOK_BLADE && g_barEmber == 0 && LogSays("the view: the bar's fill blade light, in the class's colour");
-    g_look.effect = 77;
+    g_look.neofx = 77;
+    StylePick();
+    ok &= g_barEffect == LOOK_BLADE;
+    g_vbarAsked = 1; g_look.effect = 77;
     StylePick();
     ok &= g_barEffect == LOOK_HEAT;
     g_look = keep;
     StylePick();
     ok &= g_barEffect == LOOK_HEAT && g_barEmber == 0;
-    Check(ok, "each screen takes the bar's fill and colour as it opens (style.txt's effect and colour), the log saying so; a fill not ours: Heat");
+    g_vbarAsked = 0;
+    StylePick();
+    ok &= g_barEffect == LOOK_BLADE;
+    g_vbarAsked = vb; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 0;
+    Check(ok, "each screen takes the bar's own fill and the colour as it opens (style.txt's effect for Retro, neofill for Neo, and colour), the log saying so; a fill not ours: the bar's own, Heat for Retro, Blade light for Neo; at the defaults Retro Heat and Neo Blade light (Neo keeps its blade)");
 }
 
 /* The zones nearby's fade, his four (11 Oct 2026): style.txt's fade line read, kept, written back only when the file
@@ -9184,7 +9196,7 @@ static void TestSwitches(void)
     g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = 0;
     Tick();
     static const char kHead[] = "local CL_MAP, CL_BAR, CL_AREAS = \"parchment\", \"retro\", \"full\"\nlocal CL_LOOK = \"fade zone thick 100 width own "
-                                "whole off effect heat colour class quality pulse raw\"\n-- CinderLoad";
+                                "whole off effect heat neofill blade colour class quality pulse raw\"\n-- CinderLoad";
     ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro full") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
           !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
           !strncmp(g_fkHead, kHead, sizeof kHead - 1) && !strcmp(g_fkVal, "parchment retro full") &&
@@ -9374,9 +9386,11 @@ static void TestNearbyStyle(void)
 static void TestLookStyle(void)
 {
     Look lk = LOOK_DEFAULT, def = LOOK_DEFAULT;
-    int ok = StyleLook("thick 125\r\nwidth 50\r\nwhole on\r\neffect smooth\r\ncolour ember\r\nquality liquid unstable\r\n", &lk) == 6 &&
+    int ok = StyleLook("thick 125\r\nwidth 50\r\nwhole on\r\neffect smooth\r\nneofill heat\r\ncolour ember\r\nquality liquid unstable\r\n", &lk) == 7 &&
              lk.thick == 125 && lk.width == 50 && lk.whole == 1 && lk.effect == LOOK_SMOOTH && lk.ember == 1 &&
-             lk.quality == (int)(SABER_LIQUID | SABER_UNSTABLE);
+             lk.quality == (int)(SABER_LIQUID | SABER_UNSTABLE) && lk.neofx == LOOK_HEAT;
+    lk = def;
+    ok &= StyleLook("effect smooth\r\n", &lk) == 1 && lk.effect == LOOK_SMOOTH && lk.neofx == LOOK_BLADE;   /* (a file with Retro's alone: Neo keeps its blade) */
     lk = def;
     ok &= StyleLook("THICK 300\nWidth 5\nwidth own\nWHOLE Off\nEffect BLADE\ncolor class\nquality none\n", &lk) == 7 && lk.thick == 200 &&
           lk.width == 0 && lk.whole == 0 && lk.effect == LOOK_BLADE && lk.ember == 0 && lk.quality == 0;
@@ -9385,22 +9399,22 @@ static void TestLookStyle(void)
     lk = def;
     ok &= StyleLook("# thick 150\nthick\n150\nwhole maybe\neffect fire\ncolour red\nquality banana\nthickness 150 width full\n"
                     "map parchment\nbar neo\nareas full\nnearby 600\n", &lk) == 0 && LookSame(&lk, &def) && StyleLook(NULL, &lk) == 0;
-    Check(ok, "the bar's look in style.txt: thick, width (or own), whole on or off, effect heat, smooth or blade, colour class or ember, quality and any of liquid, pulse, unstable and raw (or none); any case, numbers held to their range; a note, a word not ours, a value on the next line: not named");
+    Check(ok, "the bar's look in style.txt: thick, width (or own), whole on or off, effect (Retro's) and neofill (Neo's) heat, smooth or blade, Neo's blade light when its line is missing, colour class or ember, quality and any of liquid, pulse, unstable and raw (or none); any case, numbers held to their range; a note, a word not ours, a value on the next line: not named");
 
     /* none of the six choice words in a line of the look, so a 0.3.0 DLL reads a newer file the same */
     char text[300];
-    Look all[4] = { LOOK_DEFAULT, { 200, 100, 1, LOOK_BLADE, 1, 15 }, { 50, 20, 0, LOOK_SMOOTH, 0, 0 }, { 125, 0, 1, LOOK_HEAT, 1, 4 } };
+    Look all[4] = { LOOK_DEFAULT, { 200, 100, 1, LOOK_BLADE, 1, 15, LOOK_HEAT }, { 50, 20, 0, LOOK_SMOOTH, 0, 0, LOOK_SMOOTH }, { 125, 0, 1, LOOK_HEAT, 1, 4, LOOK_BLADE } };
     ok = 1;
     for (int i = 0; i < 4; i++) {
         int map = 7, bar = 7, full = 7;
         StyleLookText(text, &all[i], "\r\n");
         Look back = def;
-        ok &= StyleParse(text, &map, &bar, &full) == 0 && map == 7 && bar == 7 && full == 7 && StyleLook(text, &back) == 6 && LookSame(&back, &all[i]);
+        ok &= StyleParse(text, &map, &bar, &full) == 0 && map == 7 && bar == 7 && full == 7 && StyleLook(text, &back) == 7 && LookSame(&back, &all[i]);
         int yd = 9;
         ok &= StyleNearby(text, &yd) == 0 && yd == 9;
     }
     StyleLookText(text, &def, " ");
-    ok &= !strcmp(text, "thick 100 width own whole off effect heat colour class quality pulse raw");
+    ok &= !strcmp(text, "thick 100 width own whole off effect heat neofill blade colour class quality pulse raw");
     Check(ok, "the look's lines name none of the six choice words (parchment, satellite, retro, neo, discovered, full) and no nearby: an older DLL reads a newer style.txt as before; each look written reads back the same; the defaults spelt as the CVar carries them");
 
     /* the CVar's whole value, as the window writes it */
@@ -9414,6 +9428,9 @@ static void TestLookStyle(void)
     ok &= StyleCvarRead("parchment retro discovered fade 1800 thick 50 width own whole off effect heat colour class quality none fault", &st, &fault) &&
           st.map == 1 && st.fade == NEAR_C1800 && st.look.thick == 50 && st.look.width == 0 && st.look.quality == 0 && fault == 1;
     ok &= StyleCvarRead("parchment retro discovered fade 3600", &st, &fault) && st.fade == NEAR_C3600 && !fault;
+    ok &= StyleCvarRead("parchment neo discovered effect heat neofill smooth colour class", &st, &fault) && st.look.effect == LOOK_HEAT &&
+          st.look.neofx == LOOK_SMOOTH && !fault;
+    ok &= StyleCvarRead("parchment neo discovered neofill blade", &st, &fault) && st.look.neofx == LOOK_BLADE && st.look.effect == LOOK_HEAT;
     ok &= StyleCvarRead("parchment retro discovered fade zone", &st, &fault) && st.fade == NEAR_ZONE && !fault;
     ok &= StyleCvarRead("parchment retro discovered thick 75", &st, &fault) && st.look.thick == 75 && st.fade == NEAR_ZONE && st.look.width == 0 && !fault;
     Style before = st;
@@ -9424,7 +9441,8 @@ static void TestLookStyle(void)
                                         "parchment retro discovered whole yes", "parchment retro discovered effect fire",
                                         "parchment retro discovered colour red", "parchment retro discovered quality",
                                         "parchment retro discovered quality raw raw", "parchment retro discovered quality none raw",
-                                        "parchment retro discovered quality banana", "parchment retro discovered thick 100 fade zone",
+                                        "parchment retro discovered quality banana", "parchment retro discovered thick 100 fade zone", "parchment retro discovered neofill fire",
+                                        "parchment retro discovered neofill heat effect heat", "parchment retro discovered neofill",
                                         "parchment retro discovered thick 100 thick 100", "parchment retro discovered  thick 100",
                                         "parchment retro discovered thick  100", "parchment retro discovered thick 100 ",
                                         "parchment retro discovered fault thick 100", "parchment retro discovered Thick 100",
@@ -9434,29 +9452,34 @@ static void TestLookStyle(void)
         if (!no) printf("  (the CVar's \"%s\" taken)\n", kNot[i]);
         ok &= no;
     }
-    Check(ok, "the CVar's whole value heard as the window writes it: the three, then fade (zone, third, 3600 or 1800), thick, width, whole, effect, colour and quality in that order, each at most once, any missing (kept), \" fault\" last; the reach (nearby) no longer the window's; out of range, out of order, twice, an extra space or a word not ours: not theirs, nothing changed");
+    Check(ok, "the CVar's whole value heard as the window writes it: the three, then fade (zone, third, 3600 or 1800), thick, width, whole, effect (Retro's fill), neofill (Neo's), colour and quality in that order, each at most once, any missing (kept), \" fault\" last; the reach (nearby) no longer the window's; out of range, out of order, twice, an extra space or a word not ours: not theirs, nothing changed");
 
     /* kept in style.txt as a choice is made; read back at the next start; an old file (no look) the defaults */
     Fresh("style-look"); GameDir();
     StyleLoad();
-    ok = LookSame(&g_look, &def) && LogSays("style: the bar's look: thick 100, width own, whole off, effect heat, colour class, quality pulse raw, from the defaults");
+    ok = LookSame(&g_look, &def) && LogSays("style: the bar's look: thick 100, width own, whole off, effect heat, neofill blade, colour class, quality pulse raw, from the defaults");
     Style want;
     StyleNow(&want);
     want.look.thick = 150; want.look.width = 40; want.look.effect = LOOK_SMOOTH; want.look.quality = (int)SABER_UNSTABLE; want.nearYd = 900; want.fade = NEAR_THIRD;
     const char *t;
     ok &= StyleApply(&want, "a test") == 1 && (t = Get(STYLE_REL)) &&
           strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas full\r\nnearby 900\r\nfade third\r\nthick 150\r\nwidth 40\r\nwhole off\r\neffect smooth\r\n"
-                    "colour class\r\nquality unstable\r\n") && StyleApply(&want, "again") == 0;
+                    "neofill blade\r\ncolour class\r\nquality unstable\r\n") && StyleApply(&want, "again") == 0;
     want.look.ember = 1;                                                     /* (the look alone changed: kept too) */
     ok &= StyleApply(&want, "the colour alone") == 1 && g_look.ember == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\ncolour ember\r\n") &&
           LogSays("colour ember, quality unstable (the colour alone), from the next loading screen; kept in");
+    want.look.neofx = LOOK_SMOOTH;                                           /* (Neo's fill alone: kept, Retro's as it was) */
+    ok &= StyleApply(&want, "Neo's fill") == 1 && g_look.neofx == LOOK_SMOOTH && g_look.effect == LOOK_SMOOTH && (t = Get(STYLE_REL)) &&
+          strstr(t, "\r\neffect smooth\r\nneofill smooth\r\n");
+    want.look.neofx = LOOK_BLADE;
+    ok &= StyleApply(&want, "back") == 1;
     want.look.ember = 0;
     ok &= StyleApply(&want, "back") == 1 && g_look.ember == 0;
     g_look = def; g_nearYd = 7; g_nearFade = 9; g_nearFadeNamed = 0;
     StyleLoad();
     ok &= g_look.thick == 150 && g_look.width == 40 && g_look.effect == LOOK_SMOOTH && g_look.quality == (int)SABER_UNSTABLE && g_nearYd == 900 &&
           g_nearFade == NEAR_THIRD && g_nearFadeNamed &&
-          LogSays("style: the bar's look: thick 150, width 40, whole off, effect smooth, colour class, quality unstable, from Data\\CinderLoad\\style.txt");
+          LogSays("style: the bar's look: thick 150, width 40, whole off, effect smooth, neofill blade, colour class, quality unstable, from Data\\CinderLoad\\style.txt");
     ok &= StyleSet(0, 0, 1, "the three alone") == 1 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo\r\nareas full\r\nnearby 900\r\nfade third\r\nthick 150\r\n");
     Put(STYLE_REL, "map satellite\r\nbar neo\r\nareas full\r\n");                             /* (0.3.0's three lines) */
     StyleLoad();
@@ -9732,7 +9755,7 @@ static void TestSwitchesLua(void)
     static char chunk[sizeof kSwitchesLua + 420];
     const struct { const char *name; int map, bar, full, look; } kOut[4] = { { "setup.lua", 1, 1, 0, 0 }, { "setup-satellite-neo.lua", 0, 0, 0, 0 },
                                                                               { "setup-full.lua", 1, 1, 1, 0 }, { "setup-look.lua", 1, 1, 0, 1 } };
-    Look was = g_look, held = LOOK_DEFAULT, other = { 150, 60, 1, LOOK_BLADE, 1, (int)(SABER_LIQUID | SABER_UNSTABLE) };
+    Look was = g_look, held = LOOK_DEFAULT, other = { 150, 60, 1, LOOK_BLADE, 1, (int)(SABER_LIQUID | SABER_UNSTABLE), LOOK_SMOOTH };
     int fade = g_nearFade;
     for (int i = 0; i < 4; i++) {                        /* (the look and the fade the DLL holds: the defaults, or another) */
         g_look = kOut[i].look ? other : held;
@@ -9889,7 +9912,7 @@ static void TestSwitchesPath(void)
     /* a login: the first message taken makes the CVar, finds no switches, makes them in the game's UI */
     DWORD now = 20000;
     Pump(now);
-    static const char kDef[] = " fade zone thick 100 width own whole off effect heat colour class quality pulse raw";
+    static const char kDef[] = " fade zone thick 100 width own whole off effect heat neofill blade colour class quality pulse raw";
     char want[300];
     snprintf(want, sizeof want, "parchment retro full%s", kDef);
     ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, want);
@@ -9973,14 +9996,14 @@ static void TestSwitchesPath(void)
     ok &= BridgeSaid("unticked");
     Bridge("tick QualityLiquid");
     Bridge("tick QualityPulse");
-    ok &= !strcmp(g_fkVal, "parchment neo full fade third thick 125 width 50 whole off effect blade colour ember quality liquid raw");
+    ok &= !strcmp(g_fkVal, "parchment neo full fade third thick 125 width 50 whole off effect heat neofill blade colour ember quality liquid raw");
     now += LUA_POLL_MS;
     Pump(now);
-    ok &= g_look.thick == 125 && g_look.width == 50 && g_look.whole == 0 && g_look.effect == LOOK_BLADE && g_look.ember == 1 &&
+    ok &= g_look.thick == 125 && g_look.width == 50 && g_look.whole == 0 && g_look.effect == LOOK_HEAT && g_look.neofx == LOOK_BLADE && g_look.ember == 1 &&
           g_look.quality == (int)(SABER_LIQUID | SABER_RAW) && g_nearFade == NEAR_THIRD && g_nearFadeNamed && g_nearYd == PARCH_NEAR_YD &&
           (t = Get(STYLE_REL)) && !strstr(t, "\r\nnearby") &&
-          strstr(t, "\r\nareas full\r\nfade third\r\nthick 125\r\nwidth 50\r\nwhole off\r\neffect blade\r\ncolour ember\r\nquality liquid raw\r\n") &&
-          LogSays("style: the zones nearby out to 1600 yards, their fade third, the bar's look thick 125, width 50, whole off, effect blade, colour ember, quality liquid raw");
+          strstr(t, "\r\nareas full\r\nfade third\r\nthick 125\r\nwidth 50\r\nwhole off\r\neffect heat\r\nneofill blade\r\ncolour ember\r\nquality liquid raw\r\n") &&
+          LogSays("style: the zones nearby out to 1600 yards, their fade third, the bar's look thick 125, width 50, whole off, effect heat, neofill blade, colour ember, quality liquid raw");
     g_dispNew = 1;
     GameStep(0.0f, now + 10);
     ViewOpenFirst(1920, 1080, now + 20);
@@ -9995,7 +10018,7 @@ static void TestSwitchesPath(void)
     Pump(now);
     Bridge("open");
     Bridge("text bar");
-    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo full fade third thick 125 width 50 whole off effect blade colour ember quality liquid raw") &&
+    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo full fade third thick 125 width 50 whole off effect heat neofill blade colour ember quality liquid raw") &&
          BridgeSaid("Neo shown");
     Bridge("text thick");
     ok &= BridgeSaid("125% shown");
@@ -10015,7 +10038,6 @@ static void TestSwitchesPath(void)
     Bridge("closemap");
     Bridge("tick Whole");                                                /* (back as they were, for what follows) */
     Bridge("tick Colour");
-    Bridge("pick effect heat");
     Bridge("tick QualityLiquid");
     Bridge("tick QualityPulse");
     Bridge("slide thick 100");
@@ -10050,7 +10072,7 @@ static void TestSwitchesPath(void)
     Bridge("open");
     Bridge("text map");
     ok &= g_parchAsked == 1 && g_vbarAsked == 1 && g_look.width == 70 && BridgeSaid("Parchment shown") &&
-          !strcmp(g_fkVal, "parchment retro full fade zone thick 100 width 70 whole off effect heat colour class quality pulse raw") && g_nearFadeNamed &&
+          !strcmp(g_fkVal, "parchment retro full fade zone thick 100 width 70 whole off effect heat neofill blade colour class quality pulse raw") && g_nearFadeNamed &&
           g_mapFull == 1;
     Bridge("text bar");
     ok &= BridgeSaid("Retro shown");
