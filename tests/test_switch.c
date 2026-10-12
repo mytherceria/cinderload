@@ -9637,8 +9637,8 @@ static int FakeViewThreadStart(const unsigned char *base) { (void)base; g_vsStar
 /* The style's file as Notepad and others save it; the CVar's value only as the switches write it; the black first frames
  * only for a parchment that will be drawn. */
 /* the fade from style.txt: one line "fade <how>" (zone, third, 3600 or 1800), read at start, written back as a choice is
- * written only when the file named it; the old three lines still read the same, an old "nearby" line (never released)
- * and anything else passed over */
+ * written only when the file named it; the old three lines still read the same, an old "nearby" line passed over by the
+ * fade and kept as the file had it (StyleNearby's, drawn no longer), anything else passed over */
 static void TestNearbyStyle(void)
 {
     int f = 7;
@@ -9678,15 +9678,15 @@ static void TestNearbyStyle(void)
     ok &= g_nearFade == NEAR_C3600 && g_nearFadeNamed && g_parchAsked == 0 && g_vbarAsked == 0 && g_mapFull == 1 &&
           LogSays("style: the parchment's zones nearby fade 3600 (a circle, whole to 1800 yards, gone at 3600), from Data\\CinderLoad\\style.txt");
     const char *t;
-    ok &= StyleSet(1, 1, 0, "a test") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas discovered\r\nfade 3600\r\n") &&
-          !strstr(t, "nearby 600") && strlen(t) < 640;
+    ok &= StyleSet(1, 1, 0, "a test") == 1 && (t = Get(STYLE_REL)) &&
+          strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas discovered\r\nnearby 600\r\nfade 3600\r\n") && strlen(t) < 1500;
     g_nearFade = 7;
     StyleLoad();
     ok &= g_nearFade == NEAR_C3600 && g_parchAsked == 1;
     Put(STYLE_REL, "nearby 0\r\nfade bogus\r\n");                    /* (neither named: the default, and not written back) */
     StyleLoad();
     ok &= g_nearFade == NEAR_ZONE && !g_nearFadeNamed && LogSays("fade zone (each neighbour across its own land, whole where you would enter it, gone where you would leave it), from the default");
-    ok &= StyleSet(0, 0, 1, "a test") == 1 && (t = Get(STYLE_REL)) && !strstr(t, "\nfade") && !strstr(t, "\nnearby");
+    ok &= StyleSet(0, 0, 1, "a test") == 1 && (t = Get(STYLE_REL)) && !strstr(t, "\nfade") && strstr(t, "\r\nareas full\r\nnearby 0\r\n");
     Put(STYLE_REL, "fade 1800\r\nfade third\r\n");
     StyleLoad();
     ok &= g_nearFade == NEAR_THIRD && g_nearFadeNamed && LogSays("fade third (each neighbour across its own land, its nearest third whole), from Data\\CinderLoad\\style.txt");
@@ -9700,7 +9700,7 @@ static void TestNearbyStyle(void)
     g_nearFade = 9;                                                    /* (none of the four: the default) */
     StylePick();
     ok &= g_parchNearOn == NEAR_ZONE + 1;
-    Check(ok, "the fade at start: the default (zone, his) without style.txt or with 0.3.0's three lines; style.txt's fade line read beside the three choices, an old nearby line and other lines passed over; written back when a choice is written only when the file named it (the default not pinned), the nearby line never; each screen takes it as it opens");
+    Check(ok, "the fade at start: the default (zone, his) without style.txt or with 0.3.0's three lines; style.txt's fade line read beside the three choices, an old nearby line and other lines passed over; written back when a choice is written only when the file named it (the default not pinned), the nearby line as the file had it; each screen takes it as it opens");
     g_nearFade = PARCH_NEAR_FADE; g_nearFadeNamed = 0; g_parchNearOn = 0; g_pzN = 0;
 }
 /* the bar's look from the /cinderload window (his design, 11 Oct 2026): its own lines in style.txt, new words only, read
