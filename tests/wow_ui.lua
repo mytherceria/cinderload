@@ -836,7 +836,9 @@ function UI.Fresh(opts)
         elseif template then error("no such template here: " .. tostring(template)) end
         return f
     end
-    if opts.noPack then world.missing = function(p) return string.find(string.lower(p), "^interface\\cinderload\\") ~= nil end end
+    if opts.noPack then                       -- (a pack older than its living map and blade: none of CinderLoad's own pictures)
+        world.missing = function(p) return string.find(string.lower(p), "^interface\\glues\\loadingscreens\\cinder") ~= nil end
+    end
     env.PlaySound = function(s) table.insert(world.sounds, s) end
     env.SetCVar = function(n, v)
         if world.cvars[n] == nil then error("Couldn't find CVar named '" .. tostring(n) .. "'") end

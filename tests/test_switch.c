@@ -9815,6 +9815,36 @@ static void TestSwitchesLua(void)
     Check(r && done && st == 0 && seen >= 90, "the switches' Lua ran whole under the stubbed UI");
 }
 
+/* No Blizzard art in a pack (his rules: the parchment's art is read from the player's own client at run time, never shipped;
+ * no Blizzard assets): the /cinderload window ships no picture of its own; it makes each in game from the client's own
+ * textures and CinderLoad's own pack, so the pack builder has nothing of the window's to pack and refuses --panel. */
+static void TestNoShippedArt(void)
+{
+    char here[1024], p[1200];
+    snprintf(here, sizeof here, "%s", __FILE__);
+    char *slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    static char pack[65536], lua[65536];
+    snprintf(p, sizeof p, "%s/../tools/make_pack.py", here);
+    FILE *f = fopen(p, "rb");
+    size_t n = f ? fread(pack, 1, sizeof pack - 1, f) : 0;
+    if (f) fclose(f);
+    pack[n] = 0;
+    snprintf(p, sizeof p, "%s/../tools/make_panel_art.py", here);
+    struct stat st;
+    int maker = !stat(p, &st);
+    snprintf(p, sizeof p, "%s/../dll/switches.lua", here);
+    f = fopen(p, "rb");
+    size_t m = f ? fread(lua, 1, sizeof lua - 1, f) : 0;
+    if (f) fclose(f);
+    lua[m] = 0;
+    const char *refuse = strstr(pack, "if '--panel' in sys.argv:");
+    int ok = n > 0 && m > 0 && !maker && refuse && strstr(refuse, "raise SystemExit") && strstr(refuse, "raise SystemExit") < strstr(refuse, "\n    if REVEAL") &&
+             !strstr(pack, "Interface\\\\CinderLoad\\\\") && !strstr(pack, "make_panel_art") && !strstr(lua, "Interface\\\\CinderLoad\\\\") &&
+             strstr(lua, "Interface\\\\WorldMap\\\\Azeroth\\\\Azeroth") && strstr(lua, "Interface\\\\CastingBar\\\\UI-CastingBar-Border");
+    Check(ok, "no Blizzard art in a pack: the window ships no picture (no tools/make_panel_art.py, no Interface\\CinderLoad\\ in the window or the pack builder); make_pack.py --panel refuses, packing nothing; the window's pictures are the client's own and CinderLoad's own pack's, made in game");
+}
+
 /* ---- the whole path, run (the skeptic's finding, 11 Oct: it had never run anywhere): the DLL's start, its thread's
  * message, the game's thread taking it, the CVar, the switches' chunk run in the game's UI, a player's pick on the world
  * map's drop-down, style.txt, a loading screen drawn as picked, a /reload, the game quitting, the next session. The game's
@@ -10323,6 +10353,7 @@ int main(int argc, char **argv)
     TestSwitches();
     TestSwitchesPump();
     TestSwitchesLua();
+    TestNoShippedArt();
     TestSwitchesPath();
     if (argc > 2) {
         FireBarRealClient(argv[2]);

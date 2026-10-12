@@ -44,7 +44,23 @@ CL.fades = { { value = "zone", text = "Per zone, whole zone" }, { value = "third
 CL.range = { thick = { 50, 200, 5 }, width = { 20, 100, 5 } }
 -- with Neo picked, over Bar size: why its width is greyed (his, 11 Oct: Neo's ends have no metal caps)
 CL.NEOWIDE = "Neo: always whole width (no metal end caps)"
-CL.ART = "Interface\\CinderLoad\\"             -- the panel's pictures, in CinderLoad's pack (tools/make_panel_art.py)
+-- The window's pictures are made here, at run time, from the client's own textures and CinderLoad's own pack: none is
+-- shipped (his rules: the parchment's art is read from the player's own client, never shipped; no Blizzard assets).
+-- The parchment: the client's painting of the Eastern Kingdoms (12 tiles, 4 x 3 of 256, 1002 x 668 of it painted), by
+-- the candle's light as the DLL lights it (ParchMesh: 1, 0.84, 0.62 times the light). The living map: CinderLoad's own
+-- stitched world (CinderMap, in its pack). Retro's frame: the client's casting-bar frame, the nearest it has: vanilla's
+-- loading-bar frame is hidden in game by CinderLoad's pack (its Loading-BarBorder.blp is clear, so the game's own bar
+-- shows CinderLoad's fire); its art 432 x 60 of 512 x 128 from 40, 34, caps 40 wide, its channel 68 to 444 across and 57
+-- to 73 down. Neo's frame and logo: CinderLoad's own (CinderBar, bar.txt; CinderLogo, logo.txt). The fills: drawn.
+CL.PAINTING = "Interface\\WorldMap\\Azeroth\\Azeroth"
+CL.LIVING = "Interface\\Glues\\LoadingScreens\\CinderMap"
+CL.RETROFRAME = "Interface\\CastingBar\\UI-CastingBar-Border"
+CL.NEOFRAME, CL.NEOLOGO = "Interface\\Glues\\LoadingScreens\\CinderBar", "Interface\\Glues\\LoadingScreens\\CinderLogo"
+-- what each picture shows: the parchment's in its painting's pixels (x0, y0, x1, y1), the living map's in its texture's
+-- (u0, u1, v0, v1): the map's picture, the bar's ground and the preview's (the bottom of a loading screen)
+CL.CROP = { parchment = { card = { 380, 430, 620, 555 }, bar = { 380, 440, 680, 496 }, strip = { 300, 520, 800, 659 } },
+            satellite = { card = { 0.6982, 0.7959, 0.5469, 0.5977 }, bar = { 0.708, 0.7959, 0.6055, 0.6218 },
+                          strip = { 0.6836, 0.8301, 0.6348, 0.6755 } } }
 
 -- everything as it begins (his defaults, 11 Oct: the parchment, the full map, each zone fading whole; Retro)
 function CL.Defaults()
@@ -269,9 +285,126 @@ function CL.Text(parent, x, y, s, size, gold, anchor, font)
     else fs:SetJustifyH("LEFT") end
     return fs
 end
--- a picture from CinderLoad's pack; the pack older than the window: a dark plate instead
-function CL.Picture(t, name)
-    if not t:SetTexture(CL.ART .. name) then t:SetTexture(0.08, 0.08, 0.09, 1) end
+-- ---- a scene: a picture made of textures (its ground, the bar's channel and fill, the bar's frame over them in a child
+-- frame, Neo's logo over all), each from a pool; a picture not in the client (an older pack): a dark plate instead ----
+function CL.Scene(parent, x, y, w, h, name, rel)
+    local f = CreateFrame("Frame", name, parent)
+    CL.At(f, x, y, w, h, nil, rel or parent)
+    local over = CreateFrame("Frame", nil, f)
+    CL.At(over, 0, 0, w, h, nil, f)
+    return { frame = f, over = over, w = w, h = h, pools = {} }
+end
+function CL.SceneBegin(s) for _, p in pairs(s.pools) do p.n = 0 end end
+function CL.SceneEnd(s)
+    for _, p in pairs(s.pools) do
+        for i = p.n + 1, table.getn(p.list) do p.list[i]:Hide() end
+    end
+end
+function CL.Tex(s, pool, layer)
+    local p = s.pools[pool]
+    if not p then
+        p = { n = 0, list = {} }
+        s.pools[pool] = p
+    end
+    p.n = p.n + 1
+    local t = p.list[p.n]
+    if not t then
+        local owner = s.frame
+        if pool == "frame" or pool == "logo" then owner = s.over end
+        t = owner:CreateTexture(nil, layer)
+        p.list[p.n] = t
+    end
+    t:Show()
+    return t
+end
+-- part u0..u1, v0..v1 of a picture (file, or a colour { r, g, b, a }) at x, y, w x h in the scene, cut to the scene's
+-- edges (its picture cut the same), in colour c; the texture, or nil when none of it is in the scene
+function CL.Quad(s, pool, layer, file, x, y, w, h, u0, u1, v0, v1, c)
+    if not (w > 0 and h > 0) then return end
+    local ax, ay, bx, by = math.max(x, 0), math.max(y, 0), math.min(x + w, s.w), math.min(y + h, s.h)
+    if bx <= ax or by <= ay then return end
+    local t = CL.Tex(s, pool, layer)
+    if type(file) == "table" then t:SetTexture(file[1], file[2], file[3], file[4])
+    elseif not t:SetTexture(file) then t:SetTexture(0.08, 0.08, 0.09, 1) end
+    local du, dv = (u1 - u0) / w, (v1 - v0) / h
+    t:SetTexCoord(u0 + (ax - x) * du, u0 + (bx - x) * du, v0 + (ay - y) * dv, v0 + (by - y) * dv)
+    CL.At(t, ax, ay, bx - ax, by - ay, nil, s.frame)
+    c = c or CL.WHITE
+    t:SetVertexColor(c[1], c[2], c[3])
+    return t
+end
+-- the ground: the parchment's painting (its crop in the painting's pixels) or the living map (its crop of CinderMap), at
+-- light (1 bright, 0.7 the foot of a loading screen, as dim as the window's preview has always shown it)
+function CL.Ground(s, map, crop, light)
+    if map ~= "parchment" then
+        CL.Quad(s, "ground", "BACKGROUND", CL.LIVING, 0, 0, s.w, s.h, crop[1], crop[2], crop[3], crop[4], { light, light, light })
+        return
+    end
+    local c, sx, sy = { light, light * 0.84, light * 0.62 }, s.w / (crop[3] - crop[1]), s.h / (crop[4] - crop[2])
+    for i = 1, 12 do
+        local ty = math.floor((i - 1) / 4)
+        local tx = i - 1 - ty * 4
+        local ax, ay = math.max(crop[1], tx * 256), math.max(crop[2], ty * 256)
+        local bx, by = math.min(crop[3], tx * 256 + 256), math.min(crop[4], ty * 256 + 256)
+        if bx > ax and by > ay then
+            CL.Quad(s, "ground", "BACKGROUND", CL.PAINTING .. tostring(i), (ax - crop[1]) * sx, (ay - crop[2]) * sy, (bx - ax) * sx,
+                    (by - ay) * sy, (ax - tx * 256) / 256, (bx - tx * 256) / 256, (ay - ty * 256) / 256, (by - ty * 256) / 256, c)
+        end
+    end
+end
+-- the fill (drawn: the bar's own effect in the chosen colour) in a channel at x, y, w x h, to share of its length, the way
+-- still to go dark: Heat dark at its tail to the colour at its tip, Smooth even, Blade light the colour round a near-white core
+function CL.Fill(s, x, y, w, h, share, effect, c)
+    local fw = w * share
+    local t = CL.Quad(s, "fill", "ARTWORK", CL.FILL, x, y, fw, h, 0, 1, 0, 1, c)
+    if t and effect == "heat" and t.SetGradient then
+        t:SetGradient("HORIZONTAL", c[1] * 0.35, c[2] * 0.35, c[3] * 0.35, c[1], c[2], c[3])
+    end
+    CL.Quad(s, "fill", "ARTWORK", { 0.03, 0.03, 0.035, 1 }, x + fw, y, w - fw, h, 0, 1, 0, 1)
+    if effect == "blade" then
+        CL.Quad(s, "fill", "OVERLAY", CL.FILL, x, y + h * 0.3, fw, h * 0.4, 0, 1, 0, 1, { 0.75 + c[1] / 4, 0.75 + c[2] / 4, 0.75 + c[3] / 4 })
+    end
+    return t
+end
+-- Retro at x0, top, bw x bh (its frame as seen), its fill to share
+function CL.RetroBar(s, x0, top, bw, bh, share, effect, c)
+    local k = bh / 60
+    local cap = 40 * k
+    if cap * 2 > bw then cap = bw / 2 end
+    s.channel = { x0 + 28 * k, top + 23 * k, bw - 56 * k, 16 * k }
+    CL.Fill(s, s.channel[1], s.channel[2], s.channel[3], s.channel[4], share, effect, c)
+    local F, v0, v1 = CL.RETROFRAME, 34 / 128, 94 / 128
+    CL.Quad(s, "frame", "ARTWORK", F, x0, top, cap, bh, 40 / 512, 80 / 512, v0, v1)
+    CL.Quad(s, "frame", "ARTWORK", F, x0 + cap, top, bw - 2 * cap, bh, 80 / 512, 432 / 512, v0, v1)
+    CL.Quad(s, "frame", "ARTWORK", F, x0 + bw - cap, top, cap, bh, 432 / 512, 472 / 512, v0, v1)
+end
+-- Neo from x0 to x1 standing on bottom, its rail band band tall (its pieces 313 rows of the sheet's 512, the band their
+-- rows 223 to 313, its channel 236 to 301; caps 422 wide, the rail 128 repeated, the centre 40), its fill to share; its
+-- logo logoH tall, its foot foot up, centred (logo.txt: 4, 4 to 1020, 484 of 1024 x 512)
+function CL.NeoBar(s, x0, x1, bottom, band, share, effect, c, logoH, foot)
+    local k = band / 90
+    local top, ph = bottom - 313 * k, 313 * k
+    s.channel = { x0, top + 236 * k, x1 - x0, 65 * k }
+    CL.Fill(s, x0, top + 236 * k, x1 - x0, 65 * k, share, effect, c)
+    local F, v1, cap, rail, mid = CL.NEOFRAME, 313 / 512, 422 * k, 128 * k, 40 * k
+    local cx = (x0 + x1 - mid) / 2
+    for side = 0, 1 do                                  -- (the rails: the left cap to the centre, the centre to the right cap)
+        local a, b = x0 + cap, cx
+        if side == 1 then a, b = cx + mid, x1 - cap end
+        local x = a
+        while x < b - 0.01 do
+            local w = math.min(rail, b - x)
+            CL.Quad(s, "frame", "ARTWORK", F, x, top, w, ph, 426.5 / 1024, (426.5 + 127 * w / rail) / 1024, 0, v1)
+            x = x + rail
+        end
+    end
+    CL.Quad(s, "frame", "ARTWORK", F, x0, top, cap, ph, 0.5 / 1024, 421.5 / 1024, 0, v1)
+    CL.Quad(s, "frame", "ARTWORK", F, cx, top, mid, ph, 558.5 / 1024, 597.5 / 1024, 0, v1)
+    CL.Quad(s, "frame", "ARTWORK", F, x1 - cap, top, cap, ph, 602.5 / 1024, 1023.5 / 1024, 0, v1)
+    if logoH then
+        local lw = logoH * 2.117
+        CL.Quad(s, "logo", "OVERLAY", CL.NEOLOGO, (x0 + x1 - lw) / 2, bottom - foot - logoH, lw, logoH, 4 / 1024, 1020 / 1024, 4 / 512, 484 / 512)
+    end
 end
 -- a section's box (the tooltip's border, darker inside) and its gold title over it; what follows is made in it (its
 -- child: a child frame is drawn over its parent's own art, so nothing in the box is ever under the box's backdrop)
@@ -291,22 +424,20 @@ function CL.Line(x, y, w)
     l:SetBackdrop(CL.LINE)
     l:SetBackdropBorderColor(0.5, 0.5, 0.5)
 end
--- a picture in a thin frame, clicked to choose it; chosen, its frame gold (CL.Card's frame redrawn by CL.Refresh)
-function CL.Card(x, y, w, h, art, key, value)
+-- a picture in a thin frame, clicked to choose it; chosen, its frame gold (CL.Card's frame and its picture, draw(scene),
+-- redrawn by CL.Refresh)
+function CL.Card(x, y, w, h, draw, key, value)
     local b = CreateFrame("Button", nil, CL.host)
     CL.At(b, x, y, w, h)
     b:EnableMouse(1)
-    local t = b:CreateTexture(nil, "ARTWORK")
-    t:SetPoint("TOPLEFT", b, "TOPLEFT", 2, -2)
-    t:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -2, 2)
-    CL.Picture(t, art)
+    local sc = CL.Scene(b, 2, 2, w - 4, h - 4)
     local f = CreateFrame("Frame", nil, b)
     f:SetBackdrop(CL.FRAME8)
     b:SetScript("OnClick", CL.Safe("card", function()
         PlaySound("igMainMenuOptionCheckBoxOn")
         CL.Set(key, value)
     end))
-    local c = { button = b, picture = t, frame = f, key = key, value = value }
+    local c = { button = b, scene = sc, draw = draw, frame = f, key = key, value = value }
     table.insert(CL.ui.cards, c)
     return c
 end
@@ -447,8 +578,10 @@ function CL.Build()
 
     -- Loading map, with Map areas and how the zones nearby fade under it
     CL.Box(L, 82, CW, 274, "Loading map")
-    CL.Card(L + 14, 96, 150, 80, "PanelParchment", "map", "parchment")
-    CL.Card(L + 176, 96, 150, 80, "PanelSatellite", "map", "satellite")
+    for i, m in ipairs({ "parchment", "satellite" }) do
+        local map = m
+        CL.Card(L + 14 + (i - 1) * 162, 96, 150, 80, function(sc) CL.Ground(sc, map, CL.CROP[map].card, 1) end, "map", map)
+    end
     CL.Radio(L + 14, 184, "map", "parchment", "Parchment")
     CL.Radio(L + 176, 184, "map", "satellite", "Satellite")
     CL.Line(L + 10, 214, CW - 20)
@@ -466,8 +599,14 @@ function CL.Build()
 
     -- Loading bar: Retro's words, or Neo's four qualities
     CL.Box(L, 386, CW, 162, "Loading bar")
-    CL.Card(L + 14, 400, 150, 31, "PanelRetro", "bar", "retro")
-    CL.Card(L + 176, 400, 150, 31, "PanelNeo", "bar", "neo")
+    CL.Card(L + 14, 400, 150, 31, function(sc)                       -- (Retro on the parchment, Neo on the living map)
+        CL.Ground(sc, "parchment", CL.CROP.parchment.bar, 1)
+        CL.RetroBar(sc, 7, 3.5, sc.w - 14, 20, 0.6, CL.retrofx, CL.LightOf("retro", CL.retrofx))
+    end, "bar", "retro")
+    CL.Card(L + 176, 400, 150, 31, function(sc)
+        CL.Ground(sc, "satellite", CL.CROP.satellite.bar, 1)
+        CL.NeoBar(sc, sc.w / 2 - 300, sc.w / 2 + 300, sc.h, 11, 0.6, CL.neofx, CL.LightOf("neo", CL.neofx), 11 * 0.085 / 0.066, 11 * 0.004 / 0.066)
+    end, "bar", "neo")
     CL.Radio(L + 14, 440, "bar", "retro", "Retro")
     CL.Radio(L + 176, 440, "bar", "neo", "Neo")
     CL.ui.words = {
@@ -499,7 +638,8 @@ function CL.Build()
     CL.Box(R, 300, CW, 96, "Texture / effect")
     for i, o in ipairs(CL.effects) do
         local x = R + 16 + (i - 1) * 106
-        CL.ui.effects[o.value] = CL.Card(x, 312, 96, 24, "Panel" .. string.upper(string.sub(o.value, 1, 1)) .. string.sub(o.value, 2), "effect", o.value)
+        local fx = o.value
+        CL.ui.effects[fx] = CL.Card(x, 312, 96, 24, function(sc) CL.Fill(sc, 0, 0, sc.w, sc.h, 1, fx, CL.LightOf(CL.bar, fx)) end, "effect", fx)
         CL.Text(CL.host, x + 48, 342, o.text, 12, nil, "ma")
     end
     CL.ui.colour = CL.Check(R + 14, 362, 28, "Colour", "In my class's colour", function(on) CL.Set("ember", not on or nil) end)
@@ -507,17 +647,10 @@ function CL.Build()
     -- Preview: the bottom of the screen in miniature, the bar at the chosen thickness and width (a still for now)
     CL.Box(R, 436, CW, 112, "Preview")
     CL.Text(p, R + CW - 4, 432, "a still here; it moves in game", 12, nil, "rd")
-    local strip = CreateFrame("Frame", "CinderLoadPanelPreview", CL.host)
-    CL.At(strip, R + 12, 448, CW - 24, 88)
-    local ground = strip:CreateTexture(nil, "BACKGROUND")
-    ground:SetAllPoints(strip)
-    CL.ui.preview = { strip = strip, ground = ground, bar = {} }
-    for i = 1, 3 do CL.ui.preview.bar[i] = strip:CreateTexture(nil, "ARTWORK") end
-    local over = CreateFrame("Frame", nil, strip)                    -- (the fill: a child, so drawn over the bar's art)
-    CL.At(over, 0, 0, CW - 24, 88, nil, strip)
-    CL.ui.preview.fill = over:CreateTexture(nil, "ARTWORK")
-    CL.ui.preview.rest = over:CreateTexture(nil, "ARTWORK")
-    CL.ui.preview.core = over:CreateTexture(nil, "OVERLAY")
+    local sc = CL.Scene(CL.host, R + 12, 448, CW - 24, 88, "CinderLoadPanelPreview", p)
+    local strip = sc.frame
+    CL.ui.preview = sc
+    CL.ui.previewFrame = strip
     local edge = CreateFrame("Frame", nil, strip)
     CL.At(edge, -2, -2, CW - 20, 92, nil, strip)
     edge:SetBackdrop(CL.FRAME8)
@@ -547,51 +680,27 @@ end
 -- width; its pictures cut from real loading screens
 function CL.Preview()
     local v = CL.ui.preview
-    local sw, sh = 316, 88
+    local sw, sh = v.w, v.h
     local aspect = 0.4219
     local w, h = GetScreenWidth(), GetScreenHeight()
     if w and h and w > 0 then aspect = h / w end
-    local H = sw * aspect                                -- the screen's height at the strip's scale
-    CL.Picture(v.ground, CL.map == "parchment" and "PreviewParchment" or "PreviewSatellite")
-    local neo = CL.bar == "neo"
-    local bh, cy, cap, ucap, art = 42 / 720 * H, 0.075 * H, 34 / 42, 34 / 476, "PreviewRetro"
-    if neo then bh, cap, ucap, art = 0.066 * H, 40 / 48, 40 / 1704, "PreviewNeo" end
-    bh = bh * CL.thick / 100
-    local bw = sw * CL.width / 100
-    if CL.whole or neo then bw = sw                          -- (Neo: always the whole width)
-    elseif CL.width == 0 then bw = sw * CL.OwnWidth() / 100 end
-    local cw = bh * cap
-    if cw * 2 > bw then cw = bw / 2 end
-    local x0, top = (sw - bw) / 2, sh - bh                   -- (Neo: its band's foot on the screen's, as FrameLayout stands it)
-    if not neo then top = sh - cy - bh / 2 end
-    local parts = { { x0, cw, 0, ucap }, { x0 + cw, bw - 2 * cw, ucap, 1 - ucap }, { x0 + bw - cw, cw, 1 - ucap, 1 } }
-    for i, q in ipairs(parts) do
-        local t = v.bar[i]
-        CL.Picture(t, art)
-        t:SetTexCoord(q[3], q[4], 0, 1)
-        CL.At(t, q[1], top, q[2], bh, nil, v.strip)
+    local H, t = sw * aspect, CL.thick / 100             -- the screen's height at the strip's scale; the thickness
+    CL.SceneBegin(v)
+    CL.Ground(v, CL.map, CL.CROP[CL.map].strip, 0.7)
+    local c = CL.LightOf(CL.bar, CL.effect)
+    if CL.bar == "neo" then                               -- (always the whole width, standing on the bottom: FrameLayout)
+        local band = 0.066 * H * t
+        CL.NeoBar(v, 0, sw, sh, band, 0.6, CL.effect, c, 0.085 * H * t, 0.004 * H * t)
+        v.size = { 0, sh - band, sw, band }
+    else                                                  -- (as the loading screen lays it: its centre 0.075 of the height up)
+        local bh = 42 / 720 * H * t
+        local bw = sw * CL.width / 100
+        if CL.whole then bw = sw elseif CL.width == 0 then bw = sw * CL.OwnWidth() / 100 end
+        local x0, top = (sw - bw) / 2, sh - 0.075 * H - bh / 2
+        CL.RetroBar(v, x0, top, bw, bh, 0.6, CL.effect, c)
+        v.size = { x0, top, bw, bh }
     end
-    v.size = { x0, top, bw, bh }
-    -- the fill in the bar's channel (retro: its art's texels 28 to 449 of 476 across, 9 to 34 of 42 down; neo: inside its
-    -- frame's rails, rows 11 to 45 of 48, from 8 texels into each cap, where the blade's light lies), to 60% (a still), the
-    -- way still to go dark
-    local cl, cr, ct, ch
-    if neo then cl, cr, ct, ch = x0 + cw * 8 / 40, x0 + bw - cw * 8 / 40, top + bh * 11 / 48, bh * 34 / 48
-    else cl, cr, ct, ch = x0 + cw * 28 / 34, x0 + bw - cw * 27 / 34, top + bh * 9 / 42, bh * 25 / 42 end
-    local c, fw = CL.FillColour(), (cr - cl) * 0.6
-    v.fill:SetTexture(CL.FILL)
-    if CL.effect == "heat" and v.fill.SetGradient then
-        v.fill:SetGradient("HORIZONTAL", c[1] * 0.35, c[2] * 0.35, c[3] * 0.35, c[1], c[2], c[3])
-    else
-        v.fill:SetVertexColor(c[1], c[2], c[3])
-    end
-    CL.At(v.fill, cl, ct, fw, ch, nil, v.strip)
-    v.rest:SetTexture(0.03, 0.03, 0.035, 1)
-    CL.At(v.rest, cl + fw, ct, cr - cl - fw, ch, nil, v.strip)
-    v.core:SetTexture(CL.FILL)
-    v.core:SetVertexColor(0.75 + c[1] / 4, 0.75 + c[2] / 4, 0.75 + c[3] / 4)
-    CL.At(v.core, cl, ct + ch * 0.3, fw, ch * 0.4, nil, v.strip)
-    if CL.effect == "blade" then v.core:Show() else v.core:Hide() end
+    CL.SceneEnd(v)
     v.colour = c
 end
 
@@ -604,6 +713,24 @@ function CL.FillColour()
     if CL.ember or not UnitClass then return CL.EMBER end
     local _, token = UnitClass("player")
     return CL.CLASS[token or ""] or CL.EMBER
+end
+-- a light's colour from a class's, as the DLL's SaberVivid makes it for the blade: the same hue, richer (its saturation
+-- 45% of the way to whole) and as bright as it goes; white stays white
+function CL.Vivid(c)
+    local hi, lo = math.max(c[1], c[2], c[3]), math.min(c[1], c[2], c[3])
+    if hi <= 0 then return { 1, 1, 1 } end
+    local sat, k = (hi - lo) / hi, 1
+    if sat > 0 then k = 1 + (1 - sat) * 0.45 / sat end
+    local out = {}
+    for i = 1, 3 do out[i] = math.min(1, math.max(0, (hi - (hi - c[i]) * k) / hi)) end
+    return out
+end
+-- the colour a bar's fill is drawn in, as the loading screen draws it: Retro's Heat and Smooth the colour itself, the
+-- blade's light (Neo's, and Blade light on Retro) the colour made vivid
+function CL.LightOf(bar, effect)
+    local c = CL.FillColour()
+    if bar == "neo" or effect == "blade" then return CL.Vivid(c) end
+    return c
 end
 
 -- every control shows the choice
@@ -619,6 +746,9 @@ function CL.Refresh()
         c.frame:SetPoint("BOTTOMRIGHT", c.button, "BOTTOMRIGHT", g, -g)
         if on then c.frame:SetBackdropBorderColor(1, 0.85, 0.15) else c.frame:SetBackdropBorderColor(0.6, 0.6, 0.6) end
         c.on = on
+        CL.SceneBegin(c.scene)
+        c.draw(c.scene)
+        CL.SceneEnd(c.scene)
     end
     for _, r in ipairs(CL.ui.radios) do r.button:SetChecked(CL[r.key] == r.value) end
     local neo = CL.bar == "neo"

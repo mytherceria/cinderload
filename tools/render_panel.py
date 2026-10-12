@@ -1,7 +1,8 @@
 r"""Draws the /cinderload window as the stubbed 1.12 UI holds it (tests/test_lua.lua layout=<tree>: every region's
 place, size, texture, texture coordinates, colours, words, font and backdrop, as dll/switches.lua made them), with the
-client's own art and fonts read out of its archives (the highest patch winning, as the game reads them) and the
-window's pictures read out of CinderLoad's pack by the paths the window loads them by. A picture of what the code
+client's own art and fonts read out of its archives (the highest patch winning, as the game reads them) and, over
+them, CinderLoad's own pack (<pack mpq>: its Data/patch-~.MPQ, for the living map, Neo's frame and its logo), by the
+paths the window loads them by: the window ships no picture of its own. A picture of what the code
 makes, not a drawing of the mockup: where the stub's layout and the client's own drawing differ (font rasterising,
 the exact width of words), this is an approximation.
 
