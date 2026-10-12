@@ -5746,6 +5746,50 @@ static void TestBarSize(void)
     FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
     ok &= Near((132 + 130 + 100) * fs, 200, 1e-3) && Near(ftop + 123 * fs, 500, 1e-3) && fx0 >= fb0 && fx1 <= fb1;
     Check(ok, "Neo on a run too short for both caps and the diamond: each cap cut at its inner side (the left keeps its left end, the right its right end, read from the sheet at the same place), the diamond between, all inside the run, the logo no wider than half of it; caps that cannot be cut (their walls at their inner edges): the whole frame scaled down to fit the run");
+    /* a narrowed blade's light kept to its run, as the window's edges keep it at the whole width: with the blade's ends at
+     * the bar's very ends (as the pack's are), at its start, its middle, its end and full, through a second and a half
+     * of its clock, in his qualities and in all four, nothing of it (glow, orb, streak, embers, drops, bolts, the surges'
+     * light) drawn past either end; the light inside still drawn, cut where it meets an end */
+    {
+        static const char flush[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nends 0 130\n";
+        static const int kSize[4][2] = { { 125, 60 }, { 200, 20 }, { 100, 50 }, { 50, 20 } };
+        static const float kFill[7] = { 0.0f, 0.02f, 0.03f, 0.5f, 0.97f, 0.999f, 1.0f };
+        unsigned keepStyle = g_saberStyle;
+        FrameParse(flush, sizeof flush - 1);
+        g_viewTex[VT_SPARK] = 1;
+        int cases = 0, spilled = 0, lit = 0, cutAt = 0, left = 0;
+        for (int st = 0; st < 2; st++) {
+            g_saberStyle = st ? SABER_LIQUID | SABER_PULSE | SABER_UNSTABLE | SABER_RAW : keepStyle;
+            for (int z = 0; z < 4; z++)
+                for (int f = 0; f < 7; f++)
+                    for (int k = 0; k < 16; k++) {
+                        DWORD now = 3000 + 97 * (DWORD)k;
+                        BarSizeSet(kSize[z][0], kSize[z][1], 0);
+                        FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
+                        g_sbFullAt = kFill[f] >= 1 ? now - 60 * (DWORD)k : 0;          /* (full: from its last surge to after it) */
+                        ViewListStart(); SaberBuild(1000, 500, kFill[f], now);
+                        cases++;
+                        if (!BarInside(1000, 500, 0, g_vbN, fb0, fb1, 1)) spilled++;
+                        left |= g_sbClipOn;
+                        for (int b = 0; b < g_vbN; b++)                                  /* (the sparks' light: cut at an end) */
+                            for (int i = g_vb[b].first; g_vb[b].tex == VT_SPARK && i < g_vb[b].first + g_vb[b].count; i++) {
+                                if (g_vv[i].c[3] > 0 && (Near(g_vv[i].x, fb0, 1e-3) || Near(g_vv[i].x, fb1, 1e-3))) cutAt++;
+                                if (g_vv[i].c[3] > 0) lit++;
+                            }
+                    }
+        }
+        g_saberStyle = keepStyle;
+        /* the whole width: nothing cut, the light off the window's edges as before */
+        BarSizeSet(100, 0, 1);
+        ViewListStart(); SaberBuild(1000, 500, 0.02f, 3000);
+        int past = 0;
+        for (int i = 0; i < g_vvN; i++) past |= g_vv[i].x < 0;
+        g_viewTex[VT_SPARK] = 0;
+        FrameParse(bar, sizeof bar - 1);
+        printf("  a narrowed Neo's light: drawn past an end in %d of %d moments; its sparks' lit corners: %d on an end, %d in all\n", spilled, cases, cutAt, lit);
+        Check(cases == 2 * 4 * 7 * 16 && !spilled && !left && lit > 1000 && cutAt > 100 && past,
+              "Neo narrowed (1000 x 500 at 50% to 200% thick, 20% to 60% wide), its blade's ends at the bar's very ends: at its start, middle, end and full, through 1.5 s of its clock, in his qualities and all four, nothing of its light (glow, orb, streak, embers, drops, bolts, the surges' light) drawn past the bar's cut ends, the light reaching them cut there; at the whole width its light still runs off the window's edge as before");
+    }
     /* the view takes the size as each screen opens (StylePick), and says so */
     Fresh("bar-size-pick");
     GameDir();

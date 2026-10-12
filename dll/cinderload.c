@@ -5738,8 +5738,10 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define ARC_SEGS       6          /* each this many pieces */
 #define SURGE_GLOWS    8          /* the surges' light spilling over the metal (as many as can be on their way at once) */
 #define SABER_QUADS    ((6 + SABER_BANDS) * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + SABER_DROPS + SABER_BLOOMS + 2 + 1 + 5 * (256 + 3) + 3 + ORB_GLOWS + \
-                        SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS)   /* (the frame's: FRAME_TILES and the rest, and
-                                                                                    * its shine: four more a piece) */
+                        SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS + \
+                        SABER_DROPS + SABER_ARCS * 2 * ARC_SEGS)   /* (the frame's: FRAME_TILES and the rest, and its shine: four
+                                                                    * more a piece; and a slanted quad cut at a narrowed bar's
+                                                                    * end drawn as two) */
 #define VIEW_QUADS_MAX (2 + TITLE_QUADS_ROOM + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
 #define MAEL_QUADS_ROOM (2 + 200 * 14 + 90)   /* the Maelstrom's strokes (MAEL_QUADS, defined with them below) */
 #define TITLE_QUADS_ROOM (6 * 3 * TITLE_CHARS)  /* a name and its three-part line (the outgoing ones are gone before
@@ -6995,12 +6997,62 @@ static float SaberNoise(float x, float t, unsigned seed)
     return lo + (hi - lo) * at;
 }
 /* A quad round from its top left: corners x, y, each its own colour (a plain quad's u, v unused). */
+/* A narrowed blade's light held to its bar's run (g_sbClip[0] to [1] across, while g_sbClipOn: SaberBuild sets it), as
+ * the window's edges hold it at the whole width: no glow, orb, streak, ember, drop or bolt lights the map past the bar's
+ * cut ends. */
+static int g_sbClipOn;
+static float g_sbClip[2];
+typedef struct { float x, y, u, v, c[4]; } SaberPt;
+/* The polygon in[n] cut at x = at, the side kept where side * (x - at) >= 0 (its corners' picture and colour carried
+ * along the cut edges): into out[], how many corners returned. */
+static int SaberCut(const SaberPt *in, int n, SaberPt *out, float at, float side)
+{
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const SaberPt *a = &in[i], *b = &in[(i + 1) % n];
+        float da = side * (a->x - at), db = side * (b->x - at);
+        if (da >= 0) out[m++] = *a;
+        if ((da >= 0) != (db >= 0)) {
+            float k = da / (da - db);
+            SaberPt *p = &out[m++];
+            p->x = at; p->y = a->y + (b->y - a->y) * k; p->u = a->u + (b->u - a->u) * k; p->v = a->v + (b->v - a->v) * k;
+            for (int j = 0; j < 4; j++) p->c[j] = a->c[j] + (b->c[j] - a->c[j]) * k;
+        }
+    }
+    return m;
+}
+static DWORD SaberPtArgb(const SaberPt *p)
+{
+    DWORD out = 0;
+    for (int j = 0; j < 4; j++) out = out << 8 | (DWORD)(int)(FireClamp(p->c[j], 0, 255) + 0.5f);
+    return out;
+}
 static void SaberPut(int tex, int add, const float *x, const float *y, const DWORD *c, const float *uv)
 {
-    ViewVert *q = ViewQuadMode(tex, add);
-    if (!q) return;
     static const float kWhole[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
     if (!uv) uv = kWhole;
+    if (g_sbClipOn) {
+        int out = 0;
+        for (int j = 0; j < 4; j++) out |= x[j] < g_sbClip[0] || x[j] > g_sbClip[1];
+        if (out) {                                                     /* (past an end: cut there, the rest drawn) */
+            SaberPt a[8], b[8];
+            for (int j = 0; j < 4; j++) {
+                a[j].x = x[j]; a[j].y = y[j]; a[j].u = uv[2 * j]; a[j].v = uv[2 * j + 1];
+                for (int k = 0; k < 4; k++) a[j].c[k] = (float)(c[j] >> (24 - 8 * k) & 255);   /* (a, r, g, b) */
+            }
+            int n = SaberCut(a, 4, b, g_sbClip[0], 1);
+            n = SaberCut(b, n, a, g_sbClip[1], -1);
+            for (int f = 1; f + 1 < n; f += 2) {                       /* (as quads round its first corner: a fan) */
+                ViewVert *q = ViewQuadMode(tex, add);
+                if (!q) return;
+                const SaberPt *p[4] = { &a[0], &a[f], &a[f + 1], &a[f + 2 < n ? f + 2 : f + 1] };
+                for (int j = 0; j < 4; j++) ViewVertSet(q + j, p[j]->x, p[j]->y, p[j]->u, p[j]->v, SaberPtArgb(p[j]));
+            }
+            return;
+        }
+    }
+    ViewVert *q = ViewQuadMode(tex, add);
+    if (!q) return;
     for (int j = 0; j < 4; j++) ViewVertSet(q + j, x[j], y[j], uv[2 * j], uv[2 * j + 1], c[j]);
 }
 /* The soft spark, centred on x, y, rx by ry, colour argb. */
@@ -7317,6 +7369,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1, &bx0, &bx1);   /* the channel the frame holds it in, end to end */
     BarSize(&tk, &share);
     if (fs > 0) { float s2 = fs; FrameRun(W, share, &s2, &bx0, &bx1, &wl, &wr); }   /* (its caps as drawn) */
+    g_sbClipOn = share > 0 && share < 1; g_sbClip[0] = bx0; g_sbClip[1] = bx1;   /* (narrowed: its light kept to its run) */
     /* the light (his calls on his reference, 7 Oct: "a more uniform fill", "darker towards the edges and lighter white
      * towards the middle ... the light is more fully in the middle"; "no black area at the beginning or ending"): a
      * smooth fill the whole height of its channel, filled right up to the metal at both ends, its moving tip rounded; deeper in the class's
@@ -7586,6 +7639,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
         ViewRect(VT_LOGO, lx - lw / 2, ly - lh / 2, lx + lw / 2, ly + lh / 2, g_logo.tu0, g_logo.tv0, g_logo.tu1, g_logo.tv1,
                  0xFF000000u | grey << 16 | grey << 8 | grey);
     }
+    g_sbClipOn = 0;
 }
 
 /* ---- vanilla's own bar (the parchment style's, slice 1; his pick 10 Oct 2026, "b4", after four rounds of mocks) ----
