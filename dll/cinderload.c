@@ -5718,7 +5718,7 @@ static int TextHas(const char *list, const char *name)
  * premultiplied (add 2: the sky's, its colour already times its alpha). */
 enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO, VT_FRAME, VT_SHIPS, VT_SKY, VT_SPARK, VT_TIME,
        VT_TITLES, VT_VBORDER, VT_VGLASS, VT_PARCH, VT_PARCH2, VT_PWORLD, VT_PCONTM, VT_PZONEM, VT_PWORD0, VT_PWORD1, VT_PMARK,
-       VT_PGLOW, VT_PNOUT0, VT_PNOUT1, VT_PNEAR, VT_COUNT };
+       VT_PGLOW, VT_PNOUT0, VT_PNOUT1, VT_PNEAR, VT_PCITY, VT_COUNT };
                                                                 /* (VT_VBORDER, VT_VGLASS: vanilla's own bar, read from the client;
                                                                  * VT_PARCH, VT_PARCH2, VT_PWORLD: the parchment's zone, its
                                                                  * continent and the world, painted here from the client's map;
@@ -5729,7 +5729,8 @@ enum { VT_MAP, VT_SEA, VT_MARKS, VT_WAVES, VT_FLOW, VT_GLOW, VT_LABELS, VT_LOGO,
                                                                  * own arrow and the candle's glow, read from the client;
                                                                  * VT_PNOUT0, 1: the world's names painted out, laid over it
                                                                  * as each fades; VT_PNEAR: the zones nearby, one sheet about
-                                                                 * the arrival, under its zone) */
+                                                                 * the arrival, under its zone; VT_PCITY: in a capital, the
+                                                                 * city's own page, over its zone at the landing) */
 static unsigned g_viewTex[VT_COUNT];
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
@@ -7754,6 +7755,7 @@ static int g_parchForMap = -2;               /* the arrival taken (map, world x,
 static float g_parchForX, g_parchForY;
 static LONG g_parchForScreen = -1;
 static int g_parchWant = -1, g_parchWantCont = -1;   /* its zone (its continent, at sea) and its continent: rows of g_pz */
+static int g_parchCity = -1;                 /* in a capital: the city's own page (g_parchWant the zone round it), else -1 */
 
 /* A WDBC table whole: its rows, fields, row size and strings; 0 when it is not one. */
 static int DbcTable(const unsigned char *d, unsigned n, unsigned *rows, unsigned *fields, unsigned *size, const unsigned char **rec,
@@ -8580,9 +8582,10 @@ static int g_worldFrameOk;                             /* the client's world map
 static int g_parchFade;                                /* PARCH_FADE_A .. D */
 /* The camera as last drawn, for the harness's log: on, the view, the eased progress and its time, the character on the
  * screen. */
-static struct { int on; ParchView v; float e, tau, px, py, mc, mz, mk, rate; int c, z; } g_pcam;   /* (and the continent's, the zone's
-                                                       * and C's own colours' mixes, which continent and zone they were for, and
-                                                       * the zoom's pace: its log's change over the glide's time) */
+static struct { int on; ParchView v; float e, tau, px, py, mc, mz, mk, my, rate; int c, z, y; } g_pcam;   /* (and the continent's,
+                                                       * the zone's, C's own colours' and the city's mixes, which continent, zone
+                                                       * and city they were for, and the zoom's pace: its log's change over the
+                                                       * glide's time) */
 
 /* WorldMapContinent.dbc's rows for the two continents (map 0, 1): their offsets (fields 6, 7) and scale (8). */
 static void ParchConts(const unsigned char *d, unsigned n)
@@ -8794,13 +8797,22 @@ static DWORD g_nearAt;
 static float g_nearX, g_nearY;
 static ParchRect g_nearRect;
 static unsigned char g_nearBits[EXPLORED_BYTES];
+static int g_nearNone;                        /* the zones nearby's job for the arrival taken ended without a sheet (none, not */
+static DWORD g_nearNoneAt;                    /* made, or OpenGL would not take it), and when */
+/* in a capital, the city's own page as up (VT_PCITY): which (-1: none up), when, its texture's size and tiles over 256, and
+ * what it was made for (the areas found or the full map) */
+static int g_cityUp = -1, g_cityTW, g_cityK = 1, g_cmadeKnown = -1, g_cmadeFull = -1;
+static DWORD g_cityAt;
+static unsigned char g_cmadeBits[EXPLORED_BYTES];
+/* the zone shown with its zones nearby (ParchDraw): on which of the view's screens, which zone, and from when */
+static struct { LONG screen; int z; DWORD at; } g_reveal = { -1, -1, 0 };
 static LONG g_parchScrSeen = -1;              /* the view's screen the paper last drew for, and when it began */
 static DWORD g_parchScrAt;
 /* This screen's glide (one segment of it): the arrival it is for (g_parchAt) on the view's screen, the view it starts
  * from (the opening; the view as drawn when the arrival changed), its time on the bar from u0 (or on the clock from t0,
  * dur long, for an arrival taken late), never back; re-aimed (again): its time then (tr) and its pace then (v: ParchEaseOn
- * goes on from there in time), and the continent's, zone's and C's own colours' mixes it began with (never back). */
-static struct { DWORD at; LONG screen; ParchView from; float u0, tr, v, tau, mc0, mz0, mk0, dur; int clock, again, c, z; DWORD t0; } g_glide;
+ * goes on from there in time), and the continent's, zone's, C's own colours' and the city's mixes it began with (never back). */
+static struct { DWORD at; LONG screen; ParchView from; float u0, tr, v, tau, mc0, mz0, mk0, my0, dur; int clock, again, c, z; DWORD t0; } g_glide;
 static float ParchUp01(DWORD now, DWORD at) { return FireClamp((float)(LONG)(now - at) / PARCH_FADE_MS, 0, 1); }
 /* C, D: where their own colours come up over the copies (cs0..cs1 of the glide): once the finest of them is up (fin, its
  * span's end), over PARCH_COLOUR more zoom (per: 1 over the glide's log zoom), never starting past 0.95 so it is whole,
@@ -8829,10 +8841,11 @@ static void ParchGlideBegin(ParchView a, float shown, DWORD now, int c, int z)
         g_glide.mc0 = c == g_pcam.c ? g_pcam.mc : 0;
         g_glide.mz0 = z == g_pcam.z ? g_pcam.mz : 0;
         g_glide.mk0 = z == g_pcam.z && c == g_pcam.c ? g_pcam.mk : 0;
+        g_glide.my0 = z == g_pcam.z && g_parchCity >= 0 && g_parchCity == g_pcam.y ? g_pcam.my : 0;
         if (g_glide.tau >= 1 || done > PARCH_REAIM_MAX) { g_glide.clock = 1; g_glide.t0 = now; g_glide.tau = 0; g_glide.again = 0; }
         else { g_glide.again = 1; g_glide.tr = g_glide.tau; g_glide.v = -1; }   /* (its pace taken as it draws next: ParchDraw) */
     } else {
-        g_glide.from = a; g_glide.again = 0; g_glide.tau = 0; g_glide.mc0 = g_glide.mz0 = g_glide.mk0 = 0;
+        g_glide.from = a; g_glide.again = 0; g_glide.tau = 0; g_glide.mc0 = g_glide.mz0 = g_glide.mk0 = g_glide.my0 = 0;
         g_glide.u0 = shown; g_glide.t0 = now;
         g_glide.clock = left < PARCH_LATE_MS || shown > 0.999f;
     }
@@ -8908,9 +8921,22 @@ static void ParchMarkDraw(float x, float y, float W, float H, DWORD now, float a
         ViewVertSet(q + 2, x + h, cy + h, u1, v1, c); ViewVertSet(q + 3, x - h, cy + h, 0, v1, c);
     }
 }
+/* The later of two of the view's clock's times. */
+static DWORD ParchLater(DWORD a, DWORD b) { return (LONG)(b - a) > 0 ? b : a; }
 /* This frame's paper: dark, the world's painting coming up over it as a screen begins, the camera on the opening until
  * the arrival is taken, then gliding (above) on the even bar as shown (shown: never back), the finer paintings coming up
- * one of four ways (g_parchFade), all by candlelight. */
+ * one of four ways (g_parchFade), all by candlelight. In a capital (his, 11 Oct 2026, from his film of a login in
+ * Stormwind: the zone round it "with the surrounding zones ... all appearing at the same time"), the zone and its zones
+ * nearby come up together: the zone's painting is held, the glide going on over the coarser paintings, until this
+ * arrival's zones nearby are settled (their sheet up, their job ended without one, or none asked for), then the two come
+ * up as one from the later of their times; once shown on a screen the zone stays, wherever the view is aimed after (a
+ * re-aim's new sheet comes up on its own, as before); elsewhere, as before (HIS CALL: the same for every arrival). HIS TO
+ * CONFIRM: with the zones nearby still not settled as the last close-up begins (where the city's own page starts to come
+ * up over its zone; a first visit's terrain still being read: the verifiers' find, 11 Oct, that held to the bar's end it
+ * left the camera still over the continent's painting for seconds), the zone comes up alone there, its zones nearby after
+ * it when they are ready, so the landing is never on the continent's painting (no new number; a fixed wait would be the
+ * other way). And the city's own page comes up over its zone in that last close-up as the view lands, the way each finer
+ * painting comes up over the one under it. */
 static void ParchDraw(float W, float H, float shown, DWORD now)
 {
     ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);         /* the dark paper (while the paintings are made, and under them) */
@@ -8967,7 +8993,26 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         ParchColourSpan(haveZ && ze1 > ce1 ? ze1 : ce1, lb - la > 1e-3 ? 1 / (lb - la) : 0, &cs0, &cs1);
     }
     float mk = blend ? g_glide.mk0 + (1 - g_glide.mk0) * ParchMix(e, cs0, cs1) : 1;
-    g_pcam.mk = mk; g_pcam.mc = g_pcam.mz = 0;
+    int city = arrive ? g_parchCity : -1;                           /* (in a capital: its own page; its zone the one round it) */
+    g_pcam.mk = mk; g_pcam.mc = g_pcam.mz = g_pcam.my = 0; g_pcam.y = city;
+    float ye0 = 1, ye1 = 1;                                         /* (in a capital: where on this glide the city's own page */
+    if (city >= 0 && zoneUp) {                                      /* comes up over its zone, the last close-up) */
+        ParchRect zr = ParchBox(z);
+        ParchSpan(&a, &b, px * (float)(PARCH_MAP_W * g_zoneK) / (zr.x1 - zr.x0), PARCH_MAG0, mag1, &ye0, &ye1);
+    }
+    int revealed = g_reveal.screen == g_viewScreen && g_reveal.z == z;   /* (this screen's zone shown already: it stays) */
+    if (zoneUp && !revealed) {                                      /* in a capital, held for its zones nearby (never over bare paper) */
+        int settled = city < 0 || g_parchNearOn <= 0 || nearUp || g_nearNone || !(world || contUp);
+        if (settled || e >= ye0) {                                  /* (HIS TO CONFIRM: not settled by the last close-up, alone there) */
+            DWORD at = city < 0 ? g_zoneAt : !settled ? now : nearUp ? g_nearAt : g_nearNone && g_parchNearOn > 0 ? g_nearNoneAt : g_zoneAt;
+            g_reveal.screen = g_viewScreen; g_reveal.z = z; g_reveal.at = ParchLater(g_zoneAt, at);
+            revealed = 1;
+        }
+    }
+    int zoneShow = zoneUp && revealed;                              /* (elsewhere than a capital: as before, from its own time) */
+    DWORD zoneFrom = g_zoneAt, nearFrom = g_nearAt;
+    if (city >= 0) { zoneFrom = ParchLater(g_zoneAt, g_reveal.at); nearFrom = ParchLater(g_nearAt, g_reveal.at); }
+    float zoneUp01 = zoneShow ? ParchUp01(now, zoneFrom) : 0;
     float reach = ParchSqrt(W * W + H * H);
     /* the continent's name, the world's (its continent's own painted out of its painting), fading out once it is wider
      * than the window (his answer, 11 Oct: "yes the continent name should fade out"): whole up to as wide as the window, as
@@ -8993,13 +9038,13 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         ParchLayerT(VT_PNOUT0 + wc, (float)g_wordOutTW[wc], (float)g_wordOutTH[wc], (float)Q->w, (float)Q->h, qr, v, W, H, wup * (1 - named), 0, NULL, NULL);
     }
     for (int layer = 0; layer < 2; layer++) {                      /* its continent's, then its zone's */
-        int up = layer ? zoneUp : contUp, slot = layer ? VT_PARCH : VT_PARCH2, mslot = layer ? VT_PZONEM : VT_PCONTM;
+        int up = layer ? zoneShow : contUp, slot = layer ? VT_PARCH : VT_PARCH2, mslot = layer ? VT_PZONEM : VT_PCONTM;
         if (!up) continue;
         int base = layer ? !world && c < 0 : !world;               /* (the coarsest there is: whole, from the start) */
         float e0 = layer ? ze0 : ce0, e1 = layer ? ze1 : ce1;
         float tw = (float)(layer ? g_zoneTW : g_contTW), K = (float)(layer ? g_zoneK : g_contK), pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K;
         ParchRect r = layer ? ParchBox(z) : cr;
-        float up01 = ParchUp01(now, layer ? g_zoneAt : g_contAt), m0 = layer ? g_glide.mz0 : g_glide.mc0;
+        float up01 = layer ? zoneUp01 : ParchUp01(now, g_contAt), m0 = layer ? g_glide.mz0 : g_glide.mc0;
         float m = base ? 1 : m0 + (1 - m0) * ParchMix(e, e0, e1);   /* (re-aimed: on from where it was, never back) */
         if (layer) g_pcam.mz = m; else g_pcam.mc = m;
         const ParchRect *clip = !layer && world ? &wr : NULL;
@@ -9013,12 +9058,31 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
             m = m > 0 ? 1 : 0;
         }
         if (layer && nearUp)                                         /* the zones nearby under it, coming up with it, never over it */
-            ParchLayer(VT_PNEAR, (float)g_nearTW, (float)g_nearTW, (float)g_nearTW, g_nearRect, v, W, H, ParchUp01(now, g_nearAt) * m, 0, NULL, &bl);
+            ParchLayer(VT_PNEAR, (float)g_nearTW, (float)g_nearTW, (float)g_nearTW, g_nearRect, v, W, H, ParchUp01(now, nearFrom) * m, 0, NULL, &bl);
         if (matched) {                                               /* C, D: its detail on the coarser one's colours, then its own */
             ParchLayer(mslot, tw, pw, ph, r, v, W, H, up01 * m, 1, clip, &bl);
             ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m * mk, 1, clip, NULL);
         } else
             ParchLayer(slot, tw, pw, ph, r, v, W, H, up01 * m, !base, clip, &bl);
+    }
+    /* in a capital, the city's own page over its zone, coming up as the zone's own painting is drawn larger than its texels
+     * (ParchSpan over the zone's, as each finer painting over the one under it: the last close-up as the view lands, whole
+     * at the landing), in its own colours (C, D: no copy in the colours under it), blooming as the zone does with B and D */
+    if (zoneShow && city >= 0 && g_cityUp == city && g_viewTex[VT_PCITY]) {
+        ParchRect yr = ParchBox(city);
+        float K = (float)g_cityK;
+        float my = g_glide.my0 + (1 - g_glide.my0) * ParchMix(e, ye0, ye1);
+        g_pcam.my = my;
+        ParchBloom bl = { 0, 0, 0, 0, 0 };
+        if (bloom) {
+            bl.on = 1; bl.x = g_pcam.px; bl.y = g_pcam.py;
+            bl.edge = PARCH_BLOOM_MIN * H;
+            bl.r = my * (reach + bl.edge);
+            if (bl.r * PARCH_BLOOM_EDGE > bl.edge) bl.edge = bl.r * PARCH_BLOOM_EDGE;
+            my = my > 0 ? 1 : 0;
+        }
+        ParchLayer(VT_PCITY, (float)g_cityTW, PARCH_MAP_W * K, PARCH_MAP_H * K, yr, v, W, H,
+                   ParchUp01(now, ParchLater(g_cityAt, zoneFrom)) * my, 1, NULL, &bl);
     }
     /* the continent's name, the world's, over them all at its own place, as it fades (above) */
     if (named > 0) {
@@ -9026,7 +9090,7 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         ParchLayerT(VT_PWORD0 + wc, (float)g_wordTW[wc], (float)g_wordTH[wc], (float)P->w, (float)P->h, nr, v, W, H, wup * named, 0, NULL, NULL);
     }
     /* the player's marker over them all, coming up with the finest painting under it */
-    if (arrive) ParchMarkDraw(g_pcam.px, g_pcam.py, W, H, now, zoneUp ? g_pcam.mz : contUp && z < 0 ? g_pcam.mc : 0);
+    if (arrive) ParchMarkDraw(g_pcam.px, g_pcam.py, W, H, now, zoneUp ? g_pcam.mz * (city >= 0 ? zoneUp01 : 1) : contUp && z < 0 ? g_pcam.mc : 0);
 }
 
 /* ---- the paintings' making, a frame at a time (the view's thread) ---- */
@@ -9324,6 +9388,43 @@ static int LandTile(const char *dir, int tx, int ty, int *area, unsigned char *d
     HeapFree(GetProcessHeap(), 0, d);
     return 1;
 }
+/* The tiles read while the zones nearby are found, kept until they all are (the verifiers' find, 11 Oct: on a first visit
+ * to Thunder Bluff the zones nearby read 711 of the client's terrain files, about 8.7 s on his machine, the zone held over
+ * the continent's painting meanwhile): one tile lies in several zones' boxes (the Barrens' holds Mulgore's, and borders
+ * five more), and each zone's land read them all again; kept, each is read once a job. The worker's alone (one job at a
+ * time), on one map's folder at a time; a tile that could not be read is never kept (read again, as before). */
+typedef struct { int area[256]; unsigned char dry[256]; } LandKept;
+static struct { int on; const char *dir; LandKept *t[64 * 64]; unsigned char none[64 * 64 / 8]; int read, kept; } g_tileKeep;
+static void LandKeepEnd(void)
+{
+    for (int k = 0; k < 64 * 64; k++) if (g_tileKeep.t[k]) { HeapFree(GetProcessHeap(), 0, g_tileKeep.t[k]); g_tileKeep.t[k] = NULL; }
+    for (int k = 0; k < 64 * 64 / 8; k++) g_tileKeep.none[k] = 0;
+    g_tileKeep.on = 0; g_tileKeep.dir = NULL;
+}
+static void LandKeepBegin(void) { LandKeepEnd(); g_tileKeep.on = 1; g_tileKeep.read = g_tileKeep.kept = 0; }
+/* LandTile, kept while on (LandKeepBegin): 2 when the tile was read already this job (its chunks as then), else as
+ * LandTile. */
+static int LandTileKept(const char *dir, int tx, int ty, int *area, unsigned char *dry)
+{
+    if (!g_tileKeep.on || tx < 0 || ty < 0 || tx > 63 || ty > 63) return LandTile(dir, tx, ty, area, dry);
+    if (g_tileKeep.dir != dir) { LandKeepEnd(); g_tileKeep.on = 1; g_tileKeep.dir = dir; }
+    int k = ty * 64 + tx;
+    LandKept *t = g_tileKeep.t[k];
+    if (t) {
+        for (int c = 0; c < 256; c++) { area[c] = t->area[c]; dry[c] = t->dry[c]; }
+        g_tileKeep.kept++;
+        return 2;
+    }
+    if (g_tileKeep.none[k / 8] & (1 << (k % 8))) return 0;
+    int r = LandTile(dir, tx, ty, area, dry);
+    g_tileKeep.read += r > 0;
+    if (r == 0) g_tileKeep.none[k / 8] |= (unsigned char)(1 << (k % 8));
+    if (r > 0 && (t = (LandKept *)HeapAlloc(GetProcessHeap(), 0, sizeof *t)) != NULL) {
+        for (int c = 0; c < 256; c++) { t->area[c] = area[c]; t->dry[c] = dry[c]; }
+        g_tileKeep.t[k] = t;
+    }
+    return r;
+}
 /* The map's chunk grid at world x, y (yards): gx across (as the tiles' columns: from world y), gy down (from world x). */
 static void LandChunkAt(float x, float y, float *gx, float *gy)
 {
@@ -9456,9 +9557,15 @@ static float LandFeather(int i, float gx, float gy)
     if (eu <= 0 || ev <= 0) return 0;
     return ParchSmooth(eu / PARCH_FEATHER) * ParchSmooth(ev / PARCH_FEATHER);
 }
+static int g_warmRun, g_warmStop;            /* (preparing the land ahead, below: LandWarmTile at each tile; it said stop) */
+static int g_landKeptOnly;                    /* (preparing: only what is kept read back, nothing made) */
+static const char kLandNotKept[] = "not kept";
+static int LandWarmTile(void);
 /* Zone z's land (its row) into L: from its file when it is there whole and holds this box, the archives' print and its
  * body's sum, else from the tiles (and its file written when every tile was read): 1 when made (its land may be none: a
- * city inside its building, an instance's map), 0 and why not (a tile that could not be read among them: none kept). */
+ * city inside its building, an instance's map), 0 and why not (a tile that could not be read among them: none kept).
+ * While the land is prepared ahead (g_warmRun), it stops at a tile when told to (LandWarmTile: a loading screen, a job),
+ * none kept; with g_landKeptOnly, 0 for a land not kept. */
 static int ParchLandMake(int z, ParchLand *L, const char **why)
 {
     ParchLandFree(L);
@@ -9495,18 +9602,20 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
         HeapFree(GetProcessHeap(), 0, file);
         return 1;
     }
+    if (g_landKeptOnly) { HeapFree(GetProcessHeap(), 0, file); ParchLandFree(L); *why = kLandNotKept; return 0; }
     static int area[256];
     static unsigned char dry[256];
     static signed char theirs[PARCH_ZONES];
     for (int i = 0; i < PARCH_ZONES; i++) theirs[i] = -1;
-    int bad = 0, lastArea = 0, mark = 0, page = -1;                 /* (tiles, or buildings, that could not be read; the last
-                                                                     * area seen, what it is and its page) */
-    for (int ty = gy0 / 16; ty <= gy1 / 16; ty++)
+    int bad = 0, lastArea = 0, mark = 0, page = -1, stop = 0;      /* (tiles, or buildings, that could not be read; the last
+                                                                     * area seen, what it is and its page; told to stop) */
+    for (int ty = gy0 / 16; !stop && ty <= gy1 / 16; ty++)
         for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) {
-            int r = LandTile(dir, tx, ty, area, dry);
+            if (g_warmRun && (stop = LandWarmTile()) != 0) break;
+            int r = LandTileKept(dir, tx, ty, area, dry);
             bad += r < 0;
             if (r <= 0) continue;
-            L->tiles++;
+            L->tiles += r == 1;                                     /* (a tile kept from this job's reading: not read again) */
             for (int c = 0; c < 256; c++) {
                 int gx = tx * 16 + c % 16, gy = ty * 16 + c / 16;
                 if (gx < gx0 || gx > gx1 || gy < gy0 || gy > gy1 || !area[c]) continue;
@@ -9521,15 +9630,19 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
                 L->n += dry[c];
             }
         }
-    for (int ty = gy0 / 16; !L->n && ty <= gy1 / 16; ty++)           /* none: a city inside its building (Ironforge, Undercity):
+    for (int ty = gy0 / 16; !stop && !L->n && ty <= gy1 / 16; ty++)   /* none: a city inside its building (Ironforge, Undercity):
                                                                      * the chunks its building's placement covers */
-        for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) L->n += LandBuilding(dir, tx, ty, z, L, &bad);
-    if (bad) {                                                      /* (not all of it: neither kept nor used) */
+        for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) {
+            if (g_warmRun && (stop = LandWarmTile()) != 0) break;
+            L->n += LandBuilding(dir, tx, ty, z, L, &bad);
+        }
+    if (bad || stop) {                                              /* (not all of it: neither kept nor used) */
         HeapFree(GetProcessHeap(), 0, file);
         int tiles = L->tiles;
         ParchLandFree(L);
         L->tiles = tiles; L->unread = bad;
-        *why = "a tile of its terrain could not be read";
+        g_warmStop = stop;
+        *why = stop ? "stopped part way (made again whole next time)" : "a tile of its terrain could not be read";
         return 0;
     }
     for (int i = 0; i < w * h; i++) { file[LAND_HEAD + i / 4] |= (unsigned char)((L->m[i] & 3) << (2 * (i % 4))); file[LAND_HEAD + bytes - w * h + i] = L->pg[i]; }
@@ -11273,6 +11386,40 @@ static int ParchPaintedBy(int z, int i)
     }
     return 0;
 }
+/* ---- an arrival in a capital (his, 11 Oct 2026, from his film of a login in Stormwind's Trade District: "It should be the
+ * entire zone with the surrounding zones as they get more and more transparent as it gets further away from the
+ * character, all appearing at the same time. I do really like seeing Amber Shire north of Stormwind coming into view";
+ * then his pick: the city's own map only in the last close-up, at the landing) ----
+ * A capital's page (its area's capital flag) is the client's map of the city alone, and the zone round it paints the city
+ * too (Elwynn's map its Stormwind). An arrival in a capital takes the zone round it as its zone: painted whole, its zones
+ * nearby under it, the glide landing on it; the city's own page comes up over it as the view lands (ParchDraw). The zone
+ * round it: the zone page on its map whose own overlay pieces name the capital's area (ParchPaintedBy: Elwynn for
+ * Stormwind, Durotar for Orgrimmar, Tirisfal for the Undercity, Mulgore for Thunder Bluff, Teldrassil for Darnassus), the
+ * smallest when several; else the smallest open-world zone page whose box holds the capital's whole (Dun Morogh for
+ * Ironforge, whose own piece there names the Gates of Ironforge); else none, and the capital's page stays the arrival's
+ * zone, as before. No page but a capital's is changed (Mulgore, Moonglade and Hyjal inside others' boxes, an entrance's
+ * page, Blackrock Mountain, the Caverns of Time, Timbermaw's: his call). */
+static int ParchCityZone(int i)
+{
+    if (i < 0 || i >= g_pzN || g_pz[i].area <= 0) return -1;
+    int r = AreaRow(g_pz[i].area);
+    if (r < 0 || !(g_atFlags[r] & AREA_CAPITAL)) return -1;
+    for (int pass = 0; pass < 2; pass++) {                          /* (its painter first, then a box round it) */
+        int best = -1;
+        float ba = 0;
+        for (int j = 0; j < g_pzN; j++) {
+            if (j == i || g_pz[j].map != g_pz[i].map || g_pz[j].area <= 0 || g_pz[j].area == g_pz[i].area) continue;
+            int rj = AreaRow(g_pz[j].area), f = rj >= 0 ? g_atFlags[rj] : AREA_OPEN;
+            if (f & AREA_CAPITAL) continue;
+            if (!pass ? !ParchPaintedBy(j, i)
+                      : !((f & AREA_OPEN) && g_pz[i].t <= g_pz[j].t && g_pz[i].b >= g_pz[j].b && g_pz[i].l <= g_pz[j].l && g_pz[i].r >= g_pz[j].r)) continue;
+            float a = (g_pz[j].l - g_pz[j].r) * (g_pz[j].t - g_pz[j].b);
+            if (best < 0 || a < ba) { best = j; ba = a; }
+        }
+        if (best >= 0) return best;
+    }
+    return -1;
+}
 /* 1 when zone i may be one of arrival zone z's neighbours for an arrival at x, y: for a circle (reach, yards), its box
  * within the reach; for the per-zone fades (reach 0), its box within PARCH_NEAR_TOUCH chunks of z's; its land then
  * decides. */
@@ -11443,16 +11590,17 @@ static int ParchNearMake(int z, int c, int map, float x, float y, float reach, i
     *why = circle ? "no zone's land within the reach" : "no zone's land touches its own";
     if (z < 0 || z >= g_pzN || !(reach >= 0)) return 0;
     const char *lwhy = "";
+    LandKeepBegin();                                                /* (their lands read with each tile read once: LandTileKept) */
     if (!circle) {                                                  /* (the per-zone fades: its own land, for theirs to touch) */
         int got = ParchLandMake(z, &g_nlandZ, &lwhy) && g_nlandZ.n;
         N->tiles += g_nlandZ.tiles; N->unread += g_nlandZ.unread;
-        if (!got) { ParchLandFree(&g_nlandZ); *why = "its own land could not be read"; return 0; }
+        if (!got) { LandKeepEnd(); ParchLandFree(&g_nlandZ); *why = "its own land could not be read"; return 0; }
     }
     float reaches = 0;
     for (int i = 0; i < g_pzN; i++) {                              /* each zone near enough: its land's nearest chunk */
         yd[i] = -1;
         if (!ParchNearMay(z, i, x, y, reach)) continue;
-        if (ParchJobStale()) { ParchLandFree(&g_nlandZ); *why = "no longer wanted"; return 0; }   /* (stopped: another arrival, or the screen gone) */
+        if (ParchJobStale()) { LandKeepEnd(); ParchLandFree(&g_nlandZ); *why = "no longer wanted"; return 0; }   /* (stopped: another arrival, or the screen gone) */
         if (ParchLandMake(i, &g_nland, &lwhy) && g_nland.n && (circle || LandTouch(&g_nlandZ, &g_nland))) {
             yd[i] = LandNearYd(&g_nland, x, y);
             if (!circle) {                                          /* (how far its runs go: the sheet's reach) */
@@ -11464,6 +11612,7 @@ static int ParchNearMake(int z, int c, int map, float x, float y, float reach, i
         N->tiles += g_nland.tiles; N->unread += g_nland.unread;
         ParchLandFree(&g_nland);
     }
+    LandKeepEnd();                                                  /* (all read: each laid one's land from its file below) */
     ParchLandFree(&g_nlandZ);
     N->n = ParchNearPick(yd, g_pzN, reach, N->row, N->yd);
     if (!N->n) return 0;
@@ -11518,7 +11667,7 @@ static int ParchNearMake(int z, int c, int map, float x, float y, float reach, i
     if (!ParchMips()) { ParchFree(); *why = "no memory for its smaller copies"; return 0; }
     return 1;
 }
-static struct { int world, cont, zone, nearby; } g_ptry;   /* tried (once a session; this arrival's), so a failure is not tried again */
+static struct { int world, cont, zone, nearby, city; } g_ptry;   /* tried (once a session; this arrival's), so a failure is not tried again */
 static unsigned char g_pbits[EXPLORED_BYTES], g_pmadeBits[EXPLORED_BYTES];
 static LONG g_pbitsSeq = -1, g_pmadeKnown = -1;
 static int g_pmadeFull = -1;                         /* the map's areas the zone's painting up was made for */
@@ -11531,7 +11680,8 @@ static int g_pmadeFull = -1;                         /* the map's areas the zone
  * PARCH_UP_STEP), then takes the next. The painting is the worker's from a job's post until it is done, the view's from
  * then until it is up and freed: never both at once. Without a worker (the tests' build, the harness) a job runs at once
  * in the call that posts it and its painting goes up whole: one painting a call, as before. */
-enum { PJ_NONE, PJ_WORLD, PJ_FIND, PJ_CONT, PJ_ZONE, PJ_MATCH, PJ_NEAR };
+enum { PJ_NONE, PJ_WORLD, PJ_FIND, PJ_CONT, PJ_ZONE, PJ_MATCH, PJ_NEAR, PJ_CITY };   /* (PJ_NEAR the zones nearby; PJ_CITY in a capital,
+                                                                         * the city's own page) */
 static struct {
     volatile LONG state;                                  /* 0 none, 1 posted (the worker's), 2 done (the view's), 3 stale
                                                            * (the worker's still: freed as it is done, never up) */
@@ -11541,7 +11691,7 @@ static struct {
     LONG screen;
     unsigned char bits[EXPLORED_BYTES];
     int fade, K;                                          /* (PJ_NEAR: the zones nearby's fade, NEAR_*; K the zone's tiles over 256) */
-    int ok, way, want, wantCont, words, pieces, all;      /* what it made */
+    int ok, way, want, wantCont, city, words, pieces, all;   /* what it made (PJ_FIND: in a capital, city its own page) */
     ParchNear nearby;                                     /* (PJ_NEAR's sheet: its place and what went into it) */
     const char *why, *cwhy;
     DWORD posted, ran;                                    /* (the view's clock as it was posted; the job's ms, GetTickCount's) */
@@ -11553,6 +11703,7 @@ static volatile LONG g_pjWorker;                          /* a worker runs the j
 static HANDLE g_pjEvent;                                  /* woken by this as each is posted */
 static int g_pjUp = -1;                                   /* the slot going up to OpenGL a strip a frame (-1: none) */
 static void ParchWorkerStart(void);
+static void LandWarmQuiet(int busy, DWORD now);
 /* The job posted, run (the worker's thread, or at once without one), timed on its own clock: GetTickCount, never the
  * view's ViewNow, whose statics are the view's thread's alone (the skeptic's find on 61c66db: called from both threads
  * unlocked, its clock could be pushed 15 ms ahead and held, a frame hitched). */
@@ -11573,11 +11724,14 @@ static void ParchJobRun(void)
             ParchMips();
         }
         break;
-    case PJ_FIND:                                                 /* the arrival's zone, as the client finds it */
-        g_pj.want = ParchZoneAt(g_pj.map, g_pj.x, g_pj.y, g_pj.h, g_pj.zok, &g_pj.way);
+    case PJ_FIND: {                                               /* the arrival's zone, as the client finds it; in a capital, */
+        g_pj.want = ParchZoneAt(g_pj.map, g_pj.x, g_pj.y, g_pj.h, g_pj.zok, &g_pj.way);   /* the zone round it, the city's own */
+        int round = ParchCityZone(g_pj.want);                                              /* page over it at the landing */
+        g_pj.city = round >= 0 ? g_pj.want : -1;
+        if (round >= 0) g_pj.want = round;
         g_pj.wantCont = ParchContinent(g_pj.map);
         g_pj.ok = 1;
-        break;
+        break; }
     case PJ_CONT:                                                 /* its continent's: its lines, its own name painted out, its cut */
         g_pj.ok = ParchMake(g_pj.c, &why);
         if (g_pj.ok) {
@@ -11586,7 +11740,8 @@ static void ParchJobRun(void)
             ParchMips();
         }
         break;
-    case PJ_ZONE:                                                 /* its zone's: the pieces found (or the full map), its cut */
+    case PJ_ZONE:                                                 /* its zone's: the pieces found (or the full map), its cut; */
+    case PJ_CITY:                                                 /* in a capital, the city's own page, the same way */
         g_makeBits = g_pj.known && !g_pj.full ? g_pj.bits : NULL;
         g_pj.ok = ParchMake(g_pj.z, &why);
         g_makeBits = NULL;
@@ -11658,6 +11813,19 @@ static int ParchJobNext(DWORD now, int map, float x, float y, float h, int zok, 
         ParchJobPost(PJ_ZONE, now);
         return 1;
     }
+    int city = g_parchCity;                                          /* in a capital, the city's own page, once its zone is up and
+                                                                     * before its zones nearby (the verifiers' find, 12 Oct: behind
+                                                                     * their job, on a short first visit it never came up at all) */
+    if (city >= 0 && g_parchZone == z && !g_ptry.city && (city != g_cityUp || known != g_cmadeKnown || full != g_cmadeFull ||
+                                                          (known && !full && !Same(g_pbits, g_cmadeBits, EXPLORED_BYTES)))) {
+        g_ptry.city = 1;
+        g_cityUp = -1;
+        g_pj.z = city; g_pj.c = c; g_pj.C = 0; g_pj.known = known; g_pj.full = full;
+        for (int i = 0; i < EXPLORED_BYTES; i++) g_pj.bits[i] = g_pbits[i];
+        ParchSpot(map, x, y, &g_pj.fx, &g_pj.fy);
+        ParchJobPost(PJ_CITY, now);
+        return 1;
+    }
     int fade = g_parchNearOn - 1;                                    /* the zones nearby, once its zone is up (another arrival, */
     if (fade >= 0 && g_parchZone == z && !g_ptry.nearby && (g_nearZ != z || g_nearMap != map || g_nearX != x || g_nearY != y ||   /* fade, */
                                                           g_nearFadeUp != fade || g_nearKnown != known || g_nearFull != full ||    /* areas) */
@@ -11673,25 +11841,38 @@ static int ParchJobNext(DWORD now, int map, float x, float y, float h, int zok, 
     return 0;
 }
 static int ParchUpDone(DWORD now, int slot, int up);
+/* The zones nearby's job (g_pj's) ended without a sheet for the arrival taken: settled, so its zone comes up (ParchDraw). */
+static void ParchNearNone(DWORD now)
+{
+    if (g_pj.z != g_parchWant || g_pj.map != g_parchForMap || g_pj.x != g_parchForX || g_pj.y != g_parchForY) return;
+    g_nearNone = 1; g_nearNoneAt = now;
+}
 /* A job done (the view's thread): the arrival taken, or the painting's upload begun. 1 when work goes on in this call
  * (an upload begun, or the next job to take), 0 when this call is done. */
 static int ParchJobDone(DWORD now, int map, float x, float y, LONG screen)
 {
-    char m[300];
+    char m[600];
     int slot = g_pj.kind == PJ_WORLD ? VT_PWORLD : g_pj.kind == PJ_CONT ? VT_PARCH2 : g_pj.kind == PJ_ZONE ? VT_PARCH :
-               g_pj.kind == PJ_NEAR ? VT_PNEAR : g_pj.kind == PJ_MATCH ? g_pj.slot : -1;
+               g_pj.kind == PJ_NEAR ? VT_PNEAR : g_pj.kind == PJ_CITY ? VT_PCITY : g_pj.kind == PJ_MATCH ? g_pj.slot : -1;
     if (g_pj.kind == PJ_FIND) {
         if (g_pj.map != map || g_pj.x != x || g_pj.y != y || g_pj.screen != screen) return 1;   /* (moved meanwhile: found again) */
-        g_parchWant = g_pj.want; g_parchWantCont = g_pj.wantCont;
+        g_parchWant = g_pj.want; g_parchWantCont = g_pj.wantCont; g_parchCity = g_pj.want >= 0 ? g_pj.city : -1;
         g_parchForMap = map; g_parchForX = x; g_parchForY = y; g_parchForScreen = screen; g_parchAt = now;
-        g_ptry.cont = g_ptry.zone = g_ptry.nearby = 0;
+        g_ptry.cont = g_ptry.zone = g_ptry.nearby = g_ptry.city = 0;
+        g_nearNone = 0;
         if (g_parchWant < 0) { wsprintfA(m, "  the parchment: no zone or continent painting for map %d; the opening stays", map); Log(m); }
         else {
             static const char *const kWay[4] = { "the smallest box holding it (no terrain file to read)", "its terrain's area, as the client",
                                                  "the building's floor under it, as the client", "its terrain's zone has no page: its continent's" };
             char hb[24] = "";
             if (g_pj.zok) wsprintfA(hb, ", %d high", (int)g_pj.h);
-            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d%s) is in %s, by %s", map, (int)x, (int)y, hb, g_pz[g_parchWant].name, kWay[g_pj.way]);
+            wsprintfA(m, "  the parchment: the arrival (map %d, %d, %d%s) is in %s, by %s", map, (int)x, (int)y, hb,
+                      g_pz[g_parchCity >= 0 ? g_parchCity : g_parchWant].name, kWay[g_pj.way]);
+            if (g_parchCity >= 0) {
+                int n = lstrlenA(m);
+                wsprintfA(m + n, "; a capital: its zone the one round it, %s, whole with its zones nearby, %s's own map over it as the view lands",
+                          g_pz[g_parchWant].name, g_pz[g_parchCity].name);
+            }
             Log(m);
         }
         return 1;
@@ -11700,7 +11881,9 @@ static int ParchJobDone(DWORD now, int map, float x, float y, LONG screen)
         if (g_pj.kind == PJ_WORLD) { wsprintfA(m, "  the parchment: the world could not be painted (%s); each glide opens on its continent's painting", g_pj.why); Log(m); }
         else if (g_pj.kind == PJ_CONT) { wsprintfA(m, "  the parchment: %s could not be painted (%s); the glide goes on without it", g_pz[g_pj.c].name, g_pj.why); Log(m); }
         else if (g_pj.kind == PJ_ZONE) { wsprintfA(m, "  the parchment: %s could not be painted: %s; the glide ends on its continent's painting", g_pz[g_pj.z].name, g_pj.why); Log(m); }
-        else if (g_pj.kind == PJ_NEAR) { wsprintfA(m, "  the parchment: no zones nearby, fade %s (%s)", kNearWord[g_pj.fade], g_pj.why); Log(m); }
+        else if (g_pj.kind == PJ_NEAR) { wsprintfA(m, "  the parchment: no zones nearby, fade %s (%s)", kNearWord[g_pj.fade], g_pj.why); Log(m); ParchNearNone(now); }
+        else if (g_pj.kind == PJ_CITY) { wsprintfA(m, "  the parchment: %s's own map could not be painted: %s; the glide lands on %s's", g_pz[g_pj.z].name, g_pj.why,
+                                                   g_parchWant >= 0 ? g_pz[g_parchWant].name : "its zone"); Log(m); }
         else ParchUpDone(now, g_pj.slot, 0);                     /* (a copy not made: its painting's line, without it) */
         ParchFree();
         return 0;
@@ -11709,6 +11892,7 @@ static int ParchJobDone(DWORD now, int map, float x, float y, LONG screen)
     if (g_pj.kind == PJ_CONT) { g_contTW = g_parchTW; g_contK = g_parchK; }
     if (g_pj.kind == PJ_ZONE) { g_zoneTW = g_parchTW; g_zoneK = g_parchK; }
     if (g_pj.kind == PJ_NEAR) g_nearTW = g_parchTW;
+    if (g_pj.kind == PJ_CITY) { g_cityTW = g_parchTW; g_cityK = g_parchK; }
     if (!PARCH_UP_BEGIN(slot)) { ParchUpDone(now, slot, 0); ParchFree(); return 0; }
     g_pjUp = slot;
     return 1;
@@ -11736,7 +11920,7 @@ static int ParchUpDone(DWORD now, int slot, int up)
         return 0;
     }
     if (slot == VT_PNEAR) {                                      /* the zones nearby: drawn from now under their zone */
-        if (!up) { Log("  the parchment: OpenGL would not take the zones nearby; the zone alone over its continent"); return 0; }
+        if (!up) { Log("  the parchment: OpenGL would not take the zones nearby; the zone alone over its continent"); ParchNearNone(now); return 0; }
         const ParchNear *N = &g_pj.nearby;
         g_nearZ = g_pj.z; g_nearAt = now; g_nearRect = N->r; g_nearMap = g_pj.map; g_nearX = g_pj.x; g_nearY = g_pj.y;
         g_nearFadeUp = g_pj.fade; g_nearKnown = g_pj.known; g_nearFull = g_pj.full;
@@ -11764,6 +11948,23 @@ static int ParchUpDone(DWORD now, int slot, int up)
                       N->unread ? "; some could not be read, those zones left out" : "");
             Log(m);
         }
+        return 0;
+    }
+    if (slot == VT_PCITY) {                                      /* in a capital, the city's own page: over its zone as the view lands */
+        const char *zn = g_parchWant >= 0 ? g_pz[g_parchWant].name : "its zone";
+        if (!up) { wsprintfA(m, "  the parchment: OpenGL would not take %s's own map; the glide lands on %s's", g_pz[g_pj.z].name, zn); Log(m); return 0; }
+        g_cityUp = g_pj.z; g_cityAt = now; g_cmadeKnown = g_pj.known; g_cmadeFull = g_pj.full;
+        for (int i = 0; i < EXPLORED_BYTES; i++) g_cmadeBits[i] = g_pj.bits[i];
+        char cut[200];
+        if (g_zoneCut && g_cutLand) wsprintfA(cut, "cut to its land as its terrain gives it (%d chunks, %s, %d%% of its painting)", g_land.n,
+                                              g_land.fromFile ? "kept from before" : "read from the client's terrain", (int)(100 * g_zoneShare + 0.5f));
+        else if (g_zoneCut) wsprintfA(cut, "cut to its own area as its continent's painting draws it (%d%% of its painting)", (int)(100 * g_zoneShare + 0.5f));
+        else wsprintfA(cut, "not cut to its own area (%s): the plain band at its edges", g_pj.cwhy);
+        wsprintfA(m, "  the parchment: %s's own map painted from the client's map (%d-px tiles, %d of its %d overlay pieces%s) in %lu ms (up %lu ms after), %s; "
+                  "it comes up over %s as the view lands", g_pz[g_pj.z].name, 256 * g_cityK, g_pj.pieces, g_pj.all,
+                  g_pj.full ? ", the full map chosen" : g_pj.known ? ", the rest not found by this character" : ", its explored areas not known",
+                  (unsigned long)ms, (unsigned long)(now - g_pj.posted), cut, zn);
+        Log(m);
         return 0;
     }
     int cont = slot == VT_PARCH2 || slot == VT_PCONTM, c = g_pj.c, z = g_pj.z;
@@ -11943,6 +12144,21 @@ static void ParchRead(void)
     wsprintfA(m, "  the parchment: an arrival's zone by its terrain, as the client: %d maps' folders (Map.dbc %s %s), %d buildings' areas "
               "(WMOAreaTable.dbc %s %s)", g_mapDirN, ok5 ? "from" : "not read:", f5, g_waN, ok6 ? "from" : "not read:", f6);
     Log(m);
+    char caps[700], one[100];                                    /* the capitals and the zones round them (ParchCityZone) */
+    caps[0] = 0;                                                 /* (no initializer: the 32-bit build has no memset) */
+    int nc = 0;
+    for (int i = 0; i < g_pzN; i++) {
+        int round = ParchCityZone(i);
+        if (round < 0) continue;
+        wsprintfA(one, "%s%s in %s", nc++ ? ", " : "", g_pz[i].name, g_pz[round].name);
+        if (lstrlenA(caps) + lstrlenA(one) < (int)sizeof caps - 140) lstrcatA(caps, one);
+    }
+    if (!nc) lstrcpyA(caps, "none found");
+    {
+        char line[900];
+        wsprintfA(line, "  the parchment: an arrival in a capital takes the zone round it, the city's own map over it as the view lands: %s", caps);
+        Log(line);
+    }
 }
 /* W x H pixels at the view's clock now: the world map as the zoom has it (g_bgUV, the game's own corners: [4], [5] its
  * top left, [2], [3] its bottom right), the overlay over it, and the blade, its tip the bar as shown. */
@@ -12620,6 +12836,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
         while (g_view.win && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
         int screen = *(volatile const unsigned int *)(base + FIRE_LAYER_RVA) != 0;
         DWORD now = ViewNow();
+        LandWarmQuiet(screen || showing || waitAt || fadeAt, GetTickCount());   /* (the land prepared ahead only when quiet) */
         if (!screen) { seen = g_gameSeq; skip = 0; }
         if ((fadeAt || waitAt) && screen) { fadeAt = waitAt = 0; ShowWindow(g_view.win, SW_HIDE); }   /* a new screen */
         if (waitAt) {                                       /* the screen has gone: its last frame, until the world shows */
@@ -12780,22 +12997,137 @@ static int ParchUpStep(SIZE_T budget)
  * posted (woken by g_pjEvent) and says it is done (ParchWorkerTurn, a pass of its loop); never touching OpenGL. Started
  * with the view, once the parchment's tables are read; the tests run its loop by hand between frames (their shim's
  * thread is never run). */
+static void LandWarmPause(void);
 static int ParchWorkerTurn(void)
 {
     LONG s = g_pj.state;
     if (s == 3) { ParchFree(); InterlockedExchange(&g_pj.state, 0); return 1; }   /* (stale before it ran) */
     if (s != 1) return 0;
+    LandWarmPause();                                      /* (the land prepared ahead gives way: its tiles kept freed) */
     ParchJobRun();
     if (InterlockedCompareExchange(&g_pj.state, 2, 1) == 3) { ParchFree(); InterlockedExchange(&g_pj.state, 0); }   /* (stale as it ran) */
     return 1;
 }
+/* ---- the land prepared once, ahead (his design, 10 Oct 2026, "yes all of this": CinderLoad builds and caches, from the
+ * player's own files, on their own disk, what it needs, once; the verifiers' find, 12 Oct: on a first visit to a capital
+ * the zones nearby waited on their lands read from the terrain, about 4 s for Stormwind's and 9 s for Orgrimmar's at his
+ * machine's pace, so the zone came up alone and its neighbours seconds after) ----
+ * At a quiet moment (no loading screen for LAND_WARM_QUIET_MS: the character list, or idle in the world), the parchment's
+ * worker, between its jobs and at the lowest priority, makes the land file of each zone page not kept yet (land-<zone>.bin,
+ * ParchLandMake: the same bytes a first visit makes), a map at a time, each terrain tile read once (LandTileKept), a zone
+ * a turn. It stops at the next tile as a loading screen begins or a job is posted (the job then runs as ever) and goes on
+ * at the next quiet moment, this session or the next; a zone stopped part way is made again whole, and a file cut short
+ * (the game closed) is not trusted (its sum). What is kept is only read back (the first turn of each session, a few ms),
+ * so once all is made it does nothing; a LAND_VERSION change, or the client's terrain archives changing (their print),
+ * makes them again. Only while the parchment is chosen; style.txt's "prepare off" turns it off (on unless the file says:
+ * his to confirm). Logged as it starts and as it ends. */
+#define LAND_WARM_QUIET_MS 10000
+static volatile LONG g_warmBusy = 1;          /* a loading screen up, or the view still on one (the view's thread: LandWarmQuiet) */
+static volatile LONG g_warmQuietAt;           /* since when not (GetTickCount) */
+static int g_prepareOn = 1, g_prepareNamed;   /* style.txt's prepare line (StyleLoad); named: written back */
+static struct {
+    int state;                                /* 0 not looked this session, 1 going, 2 done (or off, or nothing to make) */
+    int n, at, made, failed, tiles, keep, longest;   /* the zones to make, the next; made, not made; tiles read; tiles kept
+                                               * between turns; the longest step between two looks (ms) */
+    unsigned bytes;
+    DWORD ms, last;                           /* its time at work (ms), the last look's */
+    short order[PARCH_ZONES];
+} g_warm;
+static ParchLand g_wland;
+/* The view's thread, each pass of its loop: busy while a loading screen is up or the view is still on one. */
+static void LandWarmQuiet(int busy, DWORD now)
+{
+    if (busy == (int)g_warmBusy) return;
+    if (!busy) InterlockedExchange(&g_warmQuietAt, (LONG)now);
+    InterlockedExchange(&g_warmBusy, busy);
+}
+/* The worker's, at each tile while preparing: 1 when it must stop (a loading screen, a job posted); its longest step kept. */
+static int LandWarmTile(void)
+{
+    DWORD t = GetTickCount();
+    if (t - g_warm.last > (DWORD)g_warm.longest) g_warm.longest = (int)(t - g_warm.last);
+    g_warm.last = t;
+    return g_warmBusy || g_pj.state == 1;
+}
+/* The worker's, before a job: the tiles kept between its turns freed (the job reads its own). */
+static void LandWarmPause(void)
+{
+    if (g_warm.keep) { LandKeepEnd(); g_warm.keep = 0; }
+}
+/* The worker's, between jobs (ParchWorker): when it is time (above), the zones not kept found (the first turn), or one
+ * zone's land made. 1 when it worked and may go on at once, 0 when not now. */
+static int LandWarmTurn(void)
+{
+    char m[400];
+    if (g_warm.state == 2 || g_pj.state != 0 || !g_parchTablesOk || !*(volatile int *)&g_parchAsked) return 0;
+    DWORD now = GetTickCount();
+    if (g_warmBusy || now - (DWORD)g_warmQuietAt < LAND_WARM_QUIET_MS) return 0;
+    if (!g_prepareOn) {
+        Log("  the parchment: the land of its zones not prepared ahead (style.txt: prepare off); each is read from the terrain on its first visit");
+        g_warm.state = 2;
+        return 0;
+    }
+    if (g_warm.state == 0) {                                     /* the zones not kept, a map at a time (the continents first) */
+        const char *why = "";
+        int k = 0, pages = 0;
+        g_landKeptOnly = 1;
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < g_pzN; i++) {
+                if (g_pz[i].area <= 0 || (g_pz[i].map == 0 || g_pz[i].map == 1) != !pass) continue;
+                int at = k;                                      /* (by map, in the order the rows come) */
+                while (at > 0 && g_pz[g_warm.order[at - 1]].map > g_pz[i].map) at--;
+                pages++;
+                why = "";
+                if (ParchLandMake(i, &g_wland, &why)) { ParchLandFree(&g_wland); continue; }
+                if (why != kLandNotKept) continue;               /* (none to make: no map folder, its box off the map) */
+                for (int j = k; j > at; j--) g_warm.order[j] = g_warm.order[j - 1];
+                g_warm.order[at] = (short)i;
+                k++;
+            }
+        g_landKeptOnly = 0;
+        g_warm.n = k; g_warm.at = 0; g_warm.state = k ? 1 : 2;
+        if (!k) return 0;                                        /* (all kept: nothing to do, nothing said) */
+        wsprintfA(m, "  the parchment: preparing once, off the game's thread at quiet moments, the land of %d of its %d zone pages "
+                  "not kept yet, from the client's terrain into Data\\CinderLoad\\land-<zone>.bin, so a first visit waits on none "
+                  "(style.txt: prepare off turns it off)", k, pages);
+        Log(m);
+        return 1;
+    }
+    if (!g_warm.keep || !g_tileKeep.on) { LandKeepBegin(); g_warm.keep = 1; }   /* (each tile read once, a map at a time) */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+    int z = g_warm.order[g_warm.at];
+    const char *why = "";
+    g_warm.last = now;
+    g_warmRun = 1; g_warmStop = 0;
+    int ok = ParchLandMake(z, &g_wland, &why);
+    g_warmRun = 0;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    g_warm.tiles += g_wland.tiles;
+    if (ok) g_warm.bytes += LAND_HEAD + (unsigned)(g_wland.w * g_wland.h + 3) / 4;
+    ParchLandFree(&g_wland);
+    g_warm.ms += GetTickCount() - now;
+    if (g_warmStop) { LandWarmPause(); return 0; }               /* (stopped: this zone again, whole, next time) */
+    g_warm.made += ok; g_warm.failed += !ok;
+    if (++g_warm.at < g_warm.n) return 1;
+    LandWarmPause();
+    g_warm.state = 2;
+    wsprintfA(m, "  the parchment: the land of %d zone pages prepared in %lu.%lu s at work (%d terrain files read, the longest step "
+              "%d ms), %lu KB kept", g_warm.made, (unsigned long)(g_warm.ms / 1000), (unsigned long)(g_warm.ms % 1000 / 100), g_warm.tiles,
+              g_warm.longest, (unsigned long)((g_warm.bytes + 1023) / 1024));
+    if (g_warm.failed) wsprintfA(m + lstrlenA(m), "; %d could not be read, tried again next session", g_warm.failed);
+    Log(m);
+    return 0;
+}
 static DWORD WINAPI ParchWorker(LPVOID arg)
 {
     (void)arg;
+    int warm = 0;
     while (g_pjWorker) {
-        WaitForSingleObject(g_pjEvent, 100);
-        ParchWorkerTurn();
-    }
+        WaitForSingleObject(g_pjEvent, warm ? 0 : 100);          /* (preparing: straight on, unless a job is posted) */
+        warm = !ParchWorkerTurn() && LandWarmTurn();
+        if (!warm) LandWarmPause();                              /* (not now: the tiles it keeps freed, never held through */
+    }                                                            /* a loading screen) */
+    LandWarmPause();
     return 0;
 }
 static void ParchWorkerStart(void)
@@ -13156,6 +13488,32 @@ static int StyleFade(const char *text, int *fade)
     }
     return named;
 }
+/* The text's "prepare on" or "prepare off" (case aside; '#' to the line's end is a note; the word after spaces, '=' or
+ * ':'): whether the parchment's land is prepared ahead (LandWarmTurn), into *on; another word is passed over; the last
+ * one named counts. 1 when one was named. */
+static int StylePrepare(const char *text, int *on)
+{
+    int named = 0;
+    for (const char *s = text; s && *s;) {
+        if (*s == '#') { while (*s && *s != '\n') s++; continue; }
+        if (!StyleLetter(*s)) { s++; continue; }
+        const char *w = s;
+        while (StyleLetter(*s)) s++;
+        static const char kKey[] = "prepare";
+        int i = 0;
+        while (i < (int)(s - w) && kKey[i] && (w[i] | 0x20) == kKey[i]) i++;
+        if (i != (int)(s - w) || kKey[i]) continue;
+        const char *p = s;
+        while (*p == ' ' || *p == '\t' || *p == '=' || *p == ':') p++;
+        const char *v = p;
+        while (StyleLetter(*p)) p++;
+        int n = (int)(p - v);
+        if (n == 2 && (v[0] | 0x20) == 'o' && (v[1] | 0x20) == 'n') { *on = 1; named = 1; }
+        if (n == 3 && (v[0] | 0x20) == 'o' && (v[1] | 0x20) == 'f' && (v[2] | 0x20) == 'f') { *on = 0; named = 1; }
+        s = p;
+    }
+    return named;
+}
 static const char *StyleMapName(int map) { return map ? "parchment" : "satellite"; }
 static const char *StyleBarName(int bar) { return bar ? "retro" : "neo"; }
 static const char *StyleAreasName(int full) { return full ? "full" : "discovered"; }
@@ -13191,6 +13549,7 @@ static int StyleSave(int map, int bar, int full)
     lstrcatA(text, StyleAreasName(full));
     int fade = *(volatile int *)&g_nearFade;
     if (*(volatile int *)&g_nearFadeNamed && fade >= 0 && fade < NEAR_FADES) { lstrcatA(text, "\r\nfade "); lstrcatA(text, kNearWord[fade]); }
+    if (*(volatile int *)&g_prepareNamed) { lstrcatA(text, "\r\nprepare "); lstrcatA(text, *(volatile int *)&g_prepareOn ? "on" : "off"); }
     lstrcatA(text, "\r\n");
     HANDLE f = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return 0;
@@ -13221,13 +13580,14 @@ static char *StyleText(char *text, DWORD n)
 static void StyleLoad(void)
 {
     char path[MAX_PATH], m[300];
-    int map = 1, bar = 1, full = 0, fade = PARCH_NEAR_FADE, fadeNamed = 0;
+    int map = 1, bar = 1, full = 0, fade = PARCH_NEAR_FADE, fadeNamed = 0, prepare = 1, prepareNamed = 0;
     const char *from = "the defaults (no choice made in game yet)";
     DWORD n = 0;
     char *text = Join(path, g_dir, STYLE_PATH) ? ReadTextN(path, 4096, &n) : NULL;
     if (text) {
         StyleParse(StyleText(text, n), &map, &bar, &full);
         fadeNamed = StyleFade(text, &fade);
+        prepareNamed = StylePrepare(text, &prepare);
         HeapFree(GetProcessHeap(), 0, text);
         from = "Data\\CinderLoad\\style.txt (chosen in game)";
     } else {
@@ -13240,6 +13600,8 @@ static void StyleLoad(void)
     *(volatile int *)&g_mapFull = full;
     *(volatile int *)&g_nearFade = fade;
     *(volatile int *)&g_nearFadeNamed = fadeNamed;
+    *(volatile int *)&g_prepareOn = prepare;
+    *(volatile int *)&g_prepareNamed = prepareNamed;
     wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game on the world map (M) or with /cinderload",
               StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
     Log(m);
