@@ -5757,8 +5757,7 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_QUADS    ((6 + SABER_BANDS) * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + SABER_DROPS + SABER_BLOOMS + 2 + 1 + 5 * (256 + 3) + 3 + ORB_GLOWS + \
                         SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS + \
                         SABER_DROPS + SABER_ARCS * 2 * ARC_SEGS)   /* (the frame's: FRAME_TILES and the rest, and its shine: four
-                                                                    * more a piece; and a slanted quad cut at a narrowed bar's
-                                                                    * end drawn as two) */
+                                                                    * more a piece) */
 #define VIEW_QUADS_MAX (2 + TITLE_QUADS_ROOM + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
 #define MAEL_QUADS_ROOM (2 + 200 * 14 + 90)   /* the Maelstrom's strokes (MAEL_QUADS, defined with them below) */
 #define TITLE_QUADS_ROOM (6 * 3 * TITLE_CHARS)  /* a name and its three-part line (the outgoing ones are gone before
@@ -11646,7 +11645,7 @@ static int ViewWorldBlind(LONG seen)
 }
 
 /* At start (ViewStart; here so the tests reach it): the view, as ViewWanted says (on by default since slice 5), while the
- * pack's world map zoom is on; then the style chosen (style.txt) and the world map's switches for it. start: the view's
+ * pack's world map zoom is on; then the style chosen (style.txt) and the /cinderload window for it. start: the view's
  * thread started, 1 when it was. 1 when the view is on. */
 static int ViewStartFrom(const unsigned char *base, int (*start)(const unsigned char *base))
 {
@@ -11661,7 +11660,7 @@ static int ViewStartFrom(const unsigned char *base, int (*start)(const unsigned 
     InterlockedExchange(&g_viewOn, 1);                     /* before any loading frame: the game's thread locks from now */
     InterlockedExchange(&g_viewLive, 1);
     if (!start(base)) { InterlockedExchange(&g_viewOn, 0); InterlockedExchange(&g_viewLive, 0); Log("view off: its thread could not be started"); return 0; }
-    LuaStart();                                            /* the world map's switches for them */
+    LuaStart();                                            /* the /cinderload window for them */
     if (!wine && !g_gameWindowed)
         Log("view on although the game holds the whole screen (Data\\CinderLoad\\view.txt asks for it): on world map "
             "screens, its own window over the game; if a loading screen shows without its fire, labels and sea, delete "
@@ -12691,7 +12690,7 @@ static void ModeTurnStart(void)
  * overlay pieces this character has found, as the client's world map shows them) | Full map (every piece, as though all
  * were found: his words, 11 Oct, "we could have a switch that turns on the full map as though it were fully discovered,
  * but it should default to only what they've discovered"). Defaults: the parchment, retro, discovered. Chosen in game
- * (the world map's switches and /cinderload, below) and kept in Data\CinderLoad\style.txt, written here, so it holds over
+ * (the /cinderload window and its words, below) and kept in Data\CinderLoad\style.txt, written here, so it holds over
  * restarts; a choice counts from the next loading screen. Until a choice is made in game (no style.txt), the old switch
  * files still say what they said: parchment.txt the parchment with vanilla's bar, bar-vanilla.txt vanilla's bar on the
  * living map; with neither, the defaults. style.txt wins over them; nothing removes them. g_parchAsked (1: the
@@ -12964,12 +12963,12 @@ static void StyleLoad(void)
     wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game with /cinderload (its panel)",
               StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
     Log(m);
-    if (reach) wsprintfA(m, "style: the parchment's zones nearby out to %d yards of the arrival (whole to %d), from %s", reach, reach / 2,
-                         reachNamed ? "Data\\CinderLoad\\style.txt" : "the default");
-    else lstrcpyA(m, "style: the parchment's zones nearby off (style.txt's nearby 0)");
-    Log(m);
-    wsprintfA(m, "style: the zones nearby's fade %s, from %s", kNearWord[fade], fadeNamed ? "Data\\CinderLoad\\style.txt" : "the default");
-    Log(m);
+    if (reach) wsprintfA(m, "style: the parchment's zones nearby out to %d yards of the arrival (whole to %d), from %s; fade %s, from %s", reach,
+                         reach / 2, reachNamed ? "Data\\CinderLoad\\style.txt" : "the default", kNearWord[fade],
+                         fadeNamed ? "Data\\CinderLoad\\style.txt" : "the default");
+    else wsprintfA(m, "style: the parchment's zones nearby off (style.txt's nearby 0); fade %s, from %s", kNearWord[fade],
+                   fadeNamed ? "Data\\CinderLoad\\style.txt" : "the default");
+    Log(m);                                                 /* (one line for the zones nearby: their reach and their fade) */
     char lk[200];
     StyleLookText(lk, &look, ", ");
     wsprintfA(m, "style: the bar's look: %s, from %s", lk, lookNamed ? "Data\\CinderLoad\\style.txt" : "the defaults");
@@ -13341,7 +13340,7 @@ static void LuaBreak(const char *why)
 {
     if (InterlockedExchange(&g_luaBroken, 1)) return;
     char m[400];
-    wsprintfA(m, "the world map's switches: off for this session, as %s; the world map is the game's own as ever, and "
+    wsprintfA(m, "the /cinderload window: off for this session, as %s; the game's own windows are as ever, and "
                  "Data\\CinderLoad\\style.txt still sets the style", why);
     Log(m);
 }
@@ -13379,7 +13378,7 @@ static void LuaTick(DWORD now)
         StyleValue(def, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked, *(volatile int *)&g_mapFull);
         cv = g_cvRegister(CV_NAME, NULL, 0, def, NULL, CV_CATEGORY, 0, NULL);
         if (!cv || g_cvLookup(CV_NAME) != cv) { LuaBreak("the client would not make its CVar (" CV_NAME ")"); g_luaBusy = 0; return; }
-        Log("the world map's switches: their CVar " CV_NAME " made, as the client's own RegisterCVar makes one");
+        Log("the /cinderload window: its CVar " CV_NAME " made, as the client's own RegisterCVar makes one");
     }
     g_luaCv = cv;
     if (StyleFromCvar(cv, "chosen in the /cinderload window or with its words") < 0) {
@@ -13400,14 +13399,14 @@ static void LuaTick(DWORD now)
         if (marked) DeleteFileA(mark);
         g_luaSetups++;
         if (!len || !CvText(cv, v, (int)sizeof v) || (v[0] == '?' && !v[1])) {
-            wsprintfA(m, "the world map's switches: made, but no word back from them (%d time%s)", g_luaFails + 1, g_luaFails ? "s" : "");
+            wsprintfA(m, "the /cinderload window: made, but no word back from it (%d time%s)", g_luaFails + 1, g_luaFails ? "s" : "");
             Log(m);
             if (++g_luaFails >= LUA_FAILS_MAX) LuaBreak("they did not run (twice made, no word back)");
         } else {
             g_luaFails = 0;
             g_luaSynced = 1;
             if (g_luaSetups <= 8) {
-                wsprintfA(m, "the world map's switches: made (%s: at a login or a /reload), set to %s", g_luaSetups == 1 ? "the first" : "again", v);
+                wsprintfA(m, "the /cinderload window: made (%s: at a login or a /reload), set to %s", g_luaSetups == 1 ? "the first" : "again", v);
                 Log(m);
             }
         }
@@ -13436,7 +13435,7 @@ static int LuaWanted(void)
     char path[MAX_PATH], m[400];
     const char *what = "";
     if (!LuaCodeOk(&what)) {
-        wsprintfA(m, "the world map's switches: off, as WoW.exe is not as read (%s); Data\\CinderLoad\\style.txt sets the style", what);
+        wsprintfA(m, "the /cinderload window: off, as WoW.exe is not as read (%s); Data\\CinderLoad\\style.txt sets the style", what);
         Log(m);
         return 0;
     }
@@ -13447,12 +13446,12 @@ static int LuaWanted(void)
                            "they were being made. Delete it to have them back. Data\\CinderLoad\\style.txt still sets the style "
                            "(map parchment or satellite, bar retro or neo).\r\n");
         DeleteFileA(path);
-        Log("the world map's switches: off, as the last session ended while they were being made (Data\\CinderLoad\\ui-off.txt "
+        Log("the /cinderload window: off, as the last session ended while it was being made (Data\\CinderLoad\\ui-off.txt "
             "keeps them off until it is deleted)");
         return 0;
     }
     if (Join(path, g_dir, LUA_OFF_PATH) && Exists(path)) {
-        Log("the world map's switches: off, as Data\\CinderLoad\\ui-off.txt is there (delete it to have them back)");
+        Log("the /cinderload window: off, as Data\\CinderLoad\\ui-off.txt is there (delete it to have it back)");
         return 0;
     }
     g_luaExec = (LuaExecFn)(void *)ClientAt(LUA_EXEC_VA);
@@ -13505,11 +13504,11 @@ static int LuaPumpStep(LuaPump *p, DWORD now)
         p->hook = SetWindowsHookExA(WH_GETMESSAGE, LuaHook, NULL, tid);
         p->hooked = p->hook ? tid : 0;
         if (!p->hook) { LuaBreak("the game's thread would not take a message hook"); return 0; }
-        Log("the world map's switches: on the game's own thread, in its message pump, between its frames");
+        Log("the /cinderload window: on the game's own thread, in its message pump, between its frames");
     }
     if (g_luaPosted && now - (DWORD)g_luaPostedAt >= LUA_POST_STALE_MS) {
         InterlockedExchange(&g_luaPosted, 0);
-        if (p->stale++ < 4) Log("the world map's switches: our message was not taken in 5 s (a long freeze, or its window gone); sent again");
+        if (p->stale++ < 4) Log("the /cinderload window: our message was not taken in 5 s (a long freeze, or the game's window gone); sent again");
     }
     unsigned layer, mgr, L;
     int ready = ClientWord(0x400000u + FIRE_LAYER_RVA, &layer) && !layer && ClientWord(OBJ_MGR_VA, &mgr) && mgr &&
@@ -13533,7 +13532,7 @@ static void LuaStart(void)
     if (!LuaWanted()) return;
     g_luaOn = 1;
     HANDLE t = CreateThread(NULL, 0, LuaThread, NULL, 0, NULL);
-    if (!t) { g_luaOn = 0; Log("the world map's switches: off, as their thread could not be started"); return; }
+    if (!t) { g_luaOn = 0; Log("the /cinderload window: off, as its thread could not be started"); return; }
     CloseHandle(t);
 }
 

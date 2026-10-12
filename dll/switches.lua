@@ -3,8 +3,9 @@
 -- screen's map (Parchment | Satellite) and the parchment's map areas (Discovered | Full map) and how its zones nearby
 -- fade (four ways, his pick of 11 Oct: each zone whole, each zone's nearest third, a circle of 3,600 or 1,800 yards), the
 -- loading bar (Retro | Neo), its thickness and width (sliders) or the whole width of the screen (Retro's alone: Neo is
--- always the whole width), its texture / effect (Heat | Smooth | Blade light) in the class's colour or not, Neo's four
--- qualities (Liquid, Pulse, Unstable, Raw: any of them), a moving preview, Defaults and Close; dragged by its title.
+-- always the whole width), its texture / effect (Heat | Smooth | Blade light, each bar its own) in the class's colour or
+-- not, Neo's four qualities (Liquid, Pulse, Unstable, Raw: any of them), a still preview, Defaults and Close; dragged by
+-- its title; its pictures made here from the client's own textures and CinderLoad's own pack, none shipped.
 -- Nothing on the world map: the map belongs to CinderMap. /cinderload map, bar and areas (and their values) work as
 -- before.
 -- Run inside the game by CinderLoad.dll, on the game's own thread while no Lua is running (no add-on folder: the release

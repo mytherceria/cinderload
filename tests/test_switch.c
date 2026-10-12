@@ -5991,7 +5991,7 @@ static void TestFadeStyle(void)
     Check(ok, "style.txt's fade line: zone, third, 3600 or 1800 (any case; a note after '#' passed over), the last one named counting; another word passed over; none of them one of the six choice words");
     Fresh("fade-style"); GameDir();
     StyleLoad();
-    ok = g_nearFade == NEAR_ZONE && !g_nearFadeNamed && LogSays("style: the zones nearby's fade zone, from the default");
+    ok = g_nearFade == NEAR_ZONE && !g_nearFadeNamed && LogSays("(whole to 800), from the default; fade zone, from the default");
     ok &= StyleSet(1, 0, 1, "the bar alone") == 1 && Get("Data/CinderLoad/style.txt") && !strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade ");
     Style st;
     StyleNow(&st);
@@ -6001,7 +6001,7 @@ static void TestFadeStyle(void)
     ok &= StyleApply(&st, "back") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade zone\r\n");
     ok &= StyleSet(1, 1, 1, "retro") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade zone\r\n");
     StyleLoad();
-    ok &= g_nearFade == NEAR_ZONE && g_nearFadeNamed && LogSays("style: the zones nearby's fade zone, from Data\\CinderLoad\\style.txt");
+    ok &= g_nearFade == NEAR_ZONE && g_nearFadeNamed && LogSays("; fade zone, from Data\\CinderLoad\\style.txt");
     Put("Data/CinderLoad/style.txt", "map parchment\r\nbar neo\r\nareas full\r\nfade third\r\n");
     StyleLoad();
     ok &= g_nearFade == NEAR_THIRD && g_nearFadeNamed && StyleSet(1, 1, 1, "retro") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade third\r\n");
@@ -8950,7 +8950,7 @@ static void TestNearbyMake(void)
     g_mapDirN = 0; g_waN = 0;
     TestGlideState();
 }
-/* ---- the style: the map and the bar, each the player's (his decision, 10 Oct 2026), and the world map's switches ---- */
+/* ---- the style: the map and the bar, each the player's (his decision, 10 Oct 2026), and the /cinderload window ---- */
 #define STYLE_REL "Data/CinderLoad/style.txt"
 static void TestStyle(void)
 {
@@ -9144,7 +9144,7 @@ static void TestSwitches(void)
          g_cvRegister == (CvRegisterFn)(void *)ClientAt(CV_REGISTER_VA);
     Put("Data/CinderLoad/ui-setup.tmp", "x");
     ok &= !LuaWanted() && Gone("Data/CinderLoad/ui-setup.tmp") && Get("Data/CinderLoad/ui-off.txt") &&
-          LogSays("the last session ended while they were being made");
+          LogSays("the last session ended while it was being made");
     ok &= !LuaWanted() && LogSays("Data\\CinderLoad\\ui-off.txt is there");
     Fresh("switches-unwritable"); GameDir();                           /* (the mark found, and ui-off.txt cannot be written: off still) */
     LuaPlant();
@@ -9159,7 +9159,7 @@ static void TestSwitches(void)
     Fresh("switches-other-exe"); GameDir();
     LuaPlant();
     shim_module[LUA_EXEC_VA - 0x400000u] = 0xC3;
-    ok &= !LuaWanted() && LogSays("the world map's switches: off, as WoW.exe is not as read (FrameScript_Execute");
+    ok &= !LuaWanted() && LogSays("the /cinderload window: off, as WoW.exe is not as read (FrameScript_Execute");
     Check(ok, "the switches at start: on with the client as read; off with another WoW.exe, or when the last session ended while they were being made (ui-off.txt then keeps them off until it is deleted)");
 
     /* the game's thread at a safe moment: a player in the world, no loading screen, the UI's Lua idle */
@@ -9200,7 +9200,7 @@ static void TestSwitches(void)
     ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro full") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
           !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
           !strncmp(g_fkHead, kHead, sizeof kHead - 1) && !strcmp(g_fkVal, "parchment retro full") &&
-          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro full");
+          g_luaSynced && LogSays("its CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro full");
     Check(ok, "a login: the CVar made as RegisterCVar makes one (no help, no flags, the choice its default, no callback, category 9, registered), the probe finds no switches, they are made from the choice held (the setup's mark there while it runs, gone after)");
     Tick();
     ok = g_fkProbes == 2 && g_fkSetups == 1 && g_fkRegisters == 1;
@@ -9260,7 +9260,7 @@ static void TestSwitches(void)
     g_luaBroken = 0; g_fkUp = 0; g_fkIgnore = 1;
     FkSet("parchment neo discovered");
     Tick();
-    ok &= !g_luaBroken && g_luaFails == 1 && LogSays("made, but no word back from them (1 time)");
+    ok &= !g_luaBroken && g_luaFails == 1 && LogSays("made, but no word back from it (1 time)");
     Tick();
     ok &= g_luaBroken && LogSays("as they did not run (twice made, no word back)");
     FkSet("satellite neo discovered");                                           /* off: not even a screen's start asks the client */
