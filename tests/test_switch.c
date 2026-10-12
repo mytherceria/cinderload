@@ -5614,6 +5614,18 @@ static void TestBarSize(void)
     ViewListStart(); VBarBuild(5120, 2160, 1.0f, 50000 + 800);
     ok = g_vbN == 4 && g_vb[3].tex == VT_VBORDER && g_vb[3].add && g_vb[3].count == 12;
     Check(ok, "Retro full at another width: the metal's flash is its frame again in three pieces, added");
+    /* a bar very long in texels (thin, the whole width of a very wide window): at most VBAR_COLS_MAX columns, wider, the
+     * fill still reaching its front and the frame still drawn (the view's list is shared with the map) */
+    BarSizeSet(50, 0, 1);
+    ViewListStart(); VBarBuild(15360, 1080, 1.0f, 50000 + 5000);
+    VBarLayout(15360, 1080, &s, &x0, &y0, &tw);
+    {
+        int fillQ = (g_vb[0].count / 4 - 1) / VBAR_ROWS;                 /* (full: no halo; the channel, then the columns) */
+        const ViewVert *ch = g_vv + g_vb[0].first, *lastq = ch + 4 * (fillQ * VBAR_ROWS);
+        ok = !g_vbFull && fillQ <= VBAR_COLS_MAX && fillQ >= VBAR_COLS_MAX - 1 && g_vbN >= 3 && g_vb[2].tex == VT_VBORDER &&
+             Near(lastq[1].x, x0 + (tw - 28) * s, 0.05) && tw > 4 * VBAR_COLS_MAX;
+    }
+    Check(ok, "Retro thin across the whole of a very wide window (15360 x 1080, over 10000 texels long): at most 1024 columns of fill, wider, still reaching the end of its channel, and the frame drawn; the view's list never runs out");
     g_barVanilla = 0; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 0; g_vbFullAt = 0;
 
     /* Neo: its rail band FRAME_BAND of the height times the thickness, on the bottom; its run edge to edge at its own

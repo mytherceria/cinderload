@@ -7611,7 +7611,8 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
 #define VBAR_C1       484           /* the fill's ends): left, right, */
 #define VBAR_R0       18            /* top, */
 #define VBAR_R1       46            /* bottom */
-#define VBAR_COL      4.0f          /* the fill's columns, this many texels wide, */
+#define VBAR_COL      4.0f          /* the fill's columns, this many texels wide (wider on a bar so long in texels that */
+#define VBAR_COLS_MAX 1024          /* there would be more than this many: the view's list is shared with the map), */
 #define VBAR_ROWS     7             /* and its bands, top to bottom */
 #define VBAR_DRIFT    20.0f         /* the heat drifts toward the tip this many texels a second */
 #define VBAR_MID      0.54f         /* the heat's middle, and how far its noise is spread either side of it (fitted to */
@@ -7730,8 +7731,9 @@ static void VBarBuild(float W, float H, float shown, DWORD now)
         SaberPut(-1, 0, x, y, c, NULL);
     }
     /* the fill: columns VBAR_COL texels wide up to the front, VBAR_ROWS bands each, each corner its own colour */
-    for (float xa = 0; xa < front - 0.001f; xa += VBAR_COL) {
-        float xb = xa + VBAR_COL < front ? xa + VBAR_COL : front;
+    float col = span / VBAR_COLS_MAX > VBAR_COL ? span / VBAR_COLS_MAX : VBAR_COL;
+    for (float xa = 0; xa < front - 0.001f; xa += col) {
+        float xb = xa + col < front ? xa + col : front;
         for (int r = 0; r < VBAR_ROWS; r++) {
             float ya = r * rh, yb = (r + 1) * rh;
             float x[4] = { cx0 + xa * s, cx0 + xb * s, cx0 + xb * s, cx0 + xa * s };
