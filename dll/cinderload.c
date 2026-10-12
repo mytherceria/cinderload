@@ -7604,7 +7604,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
 #define VBAR_TEX_H    64
 #define VBAR_UI_H     768.0f        /* a texel is the window's height over this (times the thickness) */
 #define VBAR_CAP_L    40            /* the frame's caps, in texels (the art's ends, its spike and its cup's wall): left, */
-#define VBAR_CAP_R    40            /* right; at any other width the middle between them is stretched or narrowed, */
+#define VBAR_CAP_R    40            /* right; at any other width the middle between them is stretched, or cut, */
 #define VBAR_MID_LEAST 16           /* never to less than this */
 #define VBAR_CY       0.075f        /* its centre this far up from the bottom, of the height (the client's table, VA 0x7FFD34) */
 #define VBAR_C0       28            /* the channel behind the frame, in texels (a little under the metal, which hides */
@@ -7629,7 +7629,7 @@ static int g_vbarAsked, g_barVanilla;   /* retro chosen (the style's bar); and i
 static DWORD g_vbFullAt;                /* the view's clock as it filled (0 while it is filling) */
 
 /* Where it sits in a W x H window: a texel's size (*s), its top left (*x0, *y0) and how many texels wide it is drawn
- * (*tw: the art's 512 at its own width; more or fewer, the caps kept and the middle stretched or narrowed). Its own: 512
+ * (*tw: the art's 512 at its own width; more or fewer, the caps kept and the middle stretched or cut). Its own: 512
  * texels at the UI's height scale, centred; the thickness scales the texel, the width (or the whole) sets *tw. Its
  * centre VBAR_CY of the height up, or higher when a thick bar would reach past the window's bottom. */
 static void VBarLayout(float W, float H, float *s, float *x0, float *y0, float *tw)
@@ -7646,22 +7646,38 @@ static void VBarLayout(float W, float H, float *s, float *x0, float *y0, float *
     *y0 = H - VBAR_CY * H - VBAR_TEX_H * sc / 2;
     if (*y0 + VBAR_TEX_H * sc > H) *y0 = H - VBAR_TEX_H * sc;
 }
+/* The part of the art's middle drawn in a bar tw texels wide (*m0 to *m1 across): all of it on a bar as wide as the art
+ * or wider (stretched); on a narrower one, a slice from its centre at the caps' own scale, cut, never squeezed (the
+ * middle is the same all along, and squeezed it would be sampled from a coarser mip level than the caps: a smeared box
+ * with a seam at each cap). */
+static void VBarMid(float tw, float *m0, float *m1)
+{
+    *m0 = (float)VBAR_CAP_L; *m1 = (float)(VBAR_TEX_W - VBAR_CAP_R);
+    if (tw < (float)VBAR_TEX_W) {
+        float half = (tw - (float)(VBAR_CAP_L + VBAR_CAP_R)) / 2, c = (*m0 + *m1) / 2;
+        *m0 = c - half; *m1 = c + half;
+    }
+}
 /* Where texel u of the art (0 to 512 across) is drawn, in a bar tw texels wide from x0 at s: the left cap as it is, the
- * middle stretched or narrowed to fill, the right cap as it is at the far end. */
+ * middle stretched to fill (or, narrower, its centre cut to fit: VBarMid), the right cap as it is at the far end. */
 static float VBarAt(float u, float x0, float s, float tw)
 {
-    float mid = (float)(VBAR_TEX_W - VBAR_CAP_L - VBAR_CAP_R), right = (float)(VBAR_TEX_W - VBAR_CAP_R);
+    float m0, m1, right = (float)(VBAR_TEX_W - VBAR_CAP_R);
     if (u <= VBAR_CAP_L) return x0 + u * s;
     if (u >= right) return x0 + (tw - ((float)VBAR_TEX_W - u)) * s;
-    return x0 + ((float)VBAR_CAP_L + (u - (float)VBAR_CAP_L) * (tw - (float)(VBAR_CAP_L + VBAR_CAP_R)) / mid) * s;
+    VBarMid(tw, &m0, &m1);
+    return x0 + ((float)VBAR_CAP_L + (u - m0) * (tw - (float)(VBAR_CAP_L + VBAR_CAP_R)) / (m1 - m0)) * s;
 }
 /* The art from texel u0 to u1 across and v0 to v1 down, its top at y0, in a bar tw texels wide from x0 at s: up to three
  * rectangles (the part over the left cap, over the middle, over the right cap), added when add (the flash). */
 static void VBarPiece(int tex, int add, float x0, float y0, float s, float tw, float u0, float v0, float u1, float v1, DWORD c)
 {
+    float m0, m1;
+    VBarMid(tw, &m0, &m1);
     float cut[4] = { u0, (float)VBAR_CAP_L, (float)(VBAR_TEX_W - VBAR_CAP_R), u1 };
     for (int i = 0; i < 3; i++) {
         float a = cut[i] > u0 ? cut[i] : u0, b = cut[i + 1] < u1 ? cut[i + 1] : u1;
+        if (i == 1) { if (a < m0) a = m0; if (b > m1) b = m1; }       /* (the middle: the part of it drawn) */
         if (!(b > a)) continue;
         ViewVert *q = ViewQuadMode(tex, add);
         if (!q) return;
