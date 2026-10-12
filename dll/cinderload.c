@@ -6947,7 +6947,8 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
 #define SABER_FILL   0.78f         /* its core's half height, of its channel's (the edge's jitter stays inside) */
 #define SABER_GLOW   0.024f        /* its glow beyond the core's edge, as it usually reaches (a flare goes further) */
 #define SABER_LOGO_H 0.085f        /* the logo on it, tall, */
-#define SABER_LOGO_FOOT 0.004f     /* and its foot this far up from the bottom of the window */
+#define SABER_LOGO_FOOT 0.004f     /* and its foot this far up from the bottom of the window (both times the thickness), */
+#define SABER_LOGO_RUN 0.5f        /* and at most this much of the bar's run wide (a narrow bar) */
 #define SABER_TRACK  0x5A000000u   /* the way still to go: a faint dark line, a little thinner than the core */
 /* The classes' colours, 0xRRGGBB: the game's own (Blizzard's), the shaman's the TBC blue RavenCraft uses (his call,
  * 5 Oct); a character whose class the badge does not know gets CinderLoad's ember. */
@@ -7010,21 +7011,74 @@ static void SaberGlowAt(float x, float y, float rx, float ry, DWORD argb)
     SaberPut(VT_SPARK, 1, xs, ys, c, NULL);
 }
 /* (the frame's table and its parser are with the logo's, above: FrameParse) */
-/* Where the bar sits in a W x H window: its pieces' scale (*s, 0 with no frame) and top, the channel's centre line and
- * half height, and its ends (*x0 inside the left cap, *x1 inside the right: the blade runs between them). */
-static void FrameLayout(float W, float H, float *s, float *top, float *cy, float *ch, float *x0, float *x1)
+/* ---- the bar's size, chosen in the /cinderload panel (his design, 11 Oct 2026: "choose the thickness of the bar and
+ * whether or not it stretches the entire width of the screen"): style.txt's "thick" (percent of each bar's own
+ * thickness), "width" (percent of the screen, or each bar's own: retro its art's 512 texels at the UI's scale, neo edge
+ * to edge) and "whole" (the screen's whole width, over the width; retro too). StylePick hands them to the view as each
+ * screen opens; each is held to its range here as well, so no number can put a bar off the window. The defaults draw
+ * each bar exactly as before. ---- */
+#define LOOK_THICK_LEAST 50
+#define LOOK_THICK_MOST  200
+#define LOOK_WIDTH_LEAST 20
+#define LOOK_WIDTH_MOST  100
+static int g_barThick = 100, g_barWidth, g_barWhole;    /* the view's, this screen's (width 0: the bar's own) */
+/* The size as the view draws it: the thickness a multiplier (*tk, 1 at 100), the width a share of the screen (0: the
+ * bar's own; the whole width 1). */
+static void BarSize(float *tk, float *share)
 {
+    int t = g_barThick, w = g_barWidth;
+    if (t < LOOK_THICK_LEAST) t = LOOK_THICK_LEAST;
+    if (t > LOOK_THICK_MOST) t = LOOK_THICK_MOST;
+    if (w && w < LOOK_WIDTH_LEAST) w = LOOK_WIDTH_LEAST;
+    if (w > LOOK_WIDTH_MOST) w = LOOK_WIDTH_MOST;
+    *tk = t == 100 ? 1.0f : (float)t / 100.0f;
+    *share = g_barWhole ? 1.0f : (float)w / 100.0f;
+}
+/* The blade's run across a W-wide window at piece scale s: its outer ends *bx0, *bx1 (the window's edges at its own
+ * width or the whole; else centred at the chosen share of it) and how wide its caps are drawn there (*cl, *cr: their
+ * own widths, cut at their inner sides when the run is too short for both and the diamond, never past their cups' back
+ * walls or lit lips). s comes back smaller only when even that will not fit. Edge to edge (its own width or the whole)
+ * the caps are always whole, as before. */
+static void FrameRun(float W, float share, float *s, float *bx0, float *bx1, float *cl, float *cr)
+{
+    *bx0 = 0; *bx1 = W;
+    if (share > 0 && share < 1) { float bw = W * share; *bx0 = (W - bw) / 2; *bx1 = *bx0 + bw; }
+    if (*s <= 0) { *cl = *cr = 0; return; }
+    int lw = g_frame.r[FR_LEFT][2] - g_frame.r[FR_LEFT][0], rw = g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0];
+    int wc = g_frame.r[FR_CENTRE][2] - g_frame.r[FR_CENTRE][0];
+    int ml = g_frame.ends[0] > g_frame.lips[0] ? g_frame.ends[0] : g_frame.lips[0];          /* (texels each cap keeps) */
+    int mr = rw - (g_frame.ends[1] < g_frame.lips[1] ? g_frame.ends[1] : g_frame.lips[1]);
+    float run = *bx1 - *bx0;
+    *cl = (float)lw * *s; *cr = (float)rw * *s;
+    if (!(share > 0 && share < 1)) return;                         /* (edge to edge: the caps whole, as they always were) */
+    if ((float)(ml + mr + wc) * *s > run) *s = run / (float)(ml + mr + wc);
+    float room = (run - (float)wc * *s) / 2;                       /* (each side of the diamond) */
+    *cl = (float)lw * *s; *cr = (float)rw * *s;
+    if (*cl > room) *cl = room > (float)ml * *s ? room : (float)ml * *s;
+    if (*cr > room) *cr = room > (float)mr * *s ? room : (float)mr * *s;
+}
+/* Where the bar sits in a W x H window: its pieces' scale (*s, 0 with no frame) and top, the channel's centre line and
+ * half height, its ends (*x0 inside the left cap, *x1 inside the right: the blade runs between them) and its outer
+ * ends (*bx0, *bx1). Its rail band FRAME_BAND of the height times the thickness, on the bottom of the window. */
+static void FrameLayout(float W, float H, float *s, float *top, float *cy, float *ch, float *x0, float *x1, float *bx0, float *bx1)
+{
+    float tk, share, cl, cr;
+    BarSize(&tk, &share);
     if (g_frameOn && g_frame.ok && g_viewTex[VT_FRAME]) {
-        *s = FRAME_BAND * H / (float)(g_frame.band[1] - g_frame.band[0]);
+        *s = FRAME_BAND * H * tk / (float)(g_frame.band[1] - g_frame.band[0]);
+        FrameRun(W, share, s, bx0, bx1, &cl, &cr);
         *top = H - (float)g_frame.band[1] * *s;
         *cy = *top + (float)(g_frame.chan[0] + g_frame.chan[1]) * 0.5f * *s;
         *ch = (float)(g_frame.chan[1] - g_frame.chan[0]) * 0.5f * *s;
-        *x0 = (float)g_frame.ends[0] * *s;
-        *x1 = W - (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0] - g_frame.ends[1]) * *s;
+        *x0 = *bx0 + (float)g_frame.ends[0] * *s;
+        *x1 = *bx1 - (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0] - g_frame.ends[1]) * *s;
     } else {
-        *s = 0; *top = H - FRAME_BAND * H;
-        *cy = H - FRAME_BAND * H * 0.5f; *ch = FRAME_BAND * H * 0.27f;
-        *x0 = 0; *x1 = W;
+        float band = FRAME_BAND * H * tk;
+        *s = 0;
+        FrameRun(W, share, s, bx0, bx1, &cl, &cr);
+        *top = H - band;
+        *cy = H - band * 0.5f; *ch = band * 0.27f;
+        *x0 = *bx0; *x1 = *bx1;
     }
 }
 /* The blade's light on the metal (7 Oct 2026, his ask: "make it look cooler"): the frame drawn a second time over itself,
@@ -7053,15 +7107,19 @@ static float ShineAt(float x)
     float b = 1 - d * d / 9;                                     /* the tip's light: a smooth bump three reaches each way */
     return lit + s + (b > 0 ? SHINE_TIP * b * b : 0);
 }
-/* Piece p from x0 to x1 at scale s, its top at top; cut, when x1 falls short of its width, at the same place on the sheet. */
-static void FramePiece(int p, float x0, float x1, float s, float top)
+/* Piece p from x0 to x1 at scale s, its top at top; cut, when x1 falls short of its width, at the same place on the sheet
+ * (tail: cut at its left instead, its right end kept: the right cap on a short run). */
+static void FramePiece(int p, float x0, float x1, float s, float top, int tail)
 {
     const int *r = g_frame.r[p];
     /* (half a texel in from the piece's own edges: the sheet's filtering would otherwise reach the clear gap beside it,
      * a dark seam wherever two pieces meet, at every repeat of the rail) */
     float w = (float)(r[2] - r[0]) * s, u0 = ((float)r[0] + 0.5f) / (float)g_frame.sw, u1 = ((float)r[2] - 0.5f) / (float)g_frame.sw;
     float v0 = (float)r[1] / (float)g_frame.sh, v1 = (float)r[3] / (float)g_frame.sh, y1 = top + (float)(r[3] - r[1]) * s;
-    if (x1 < x0 + w) u1 = u0 + (u1 - u0) * (x1 - x0) / w;
+    if (x1 < x0 + w) {
+        if (tail) u0 = u1 - (u1 - u0) * (x1 - x0) / w;
+        else u1 = u0 + (u1 - u0) * (x1 - x0) / w;
+    }
     if (!g_shine.on) {
         ViewRect(VT_FRAME, x0, top, x1, y1, u0, v0, u1, v1, 0xFFFFFFFFu);
         return;
@@ -7083,19 +7141,19 @@ static void FramePiece(int p, float x0, float x1, float s, float top)
         ViewVertSet(q + 3, x0, yb, u0, vb, SaberArgb(g_shine.rgb, lit[k + 1] * al));
     }
 }
-/* The frame over a W-wide window: the caps, the diamond, the rail repeated between (each run cut where it meets). */
-static void FrameBuild(float W, float s, float top)
+/* The frame from bx0 to bx1 (the window's edges at its own width): the caps (wl, wr wide: their own, or cut on a short
+ * run), the diamond at its centre, the rail repeated between (each run cut where it meets). */
+static void FrameBuild(float bx0, float bx1, float s, float top, float wl, float wr)
 {
-    float wl = (float)(g_frame.r[FR_LEFT][2] - g_frame.r[FR_LEFT][0]) * s, wr = (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0]) * s;
     float wc = (float)(g_frame.r[FR_CENTRE][2] - g_frame.r[FR_CENTRE][0]) * s, wt = (float)(g_frame.r[FR_RAIL][2] - g_frame.r[FR_RAIL][0]) * s;
-    float cx = (W - wc) / 2, run[2][2] = { { wl, cx }, { cx + wc, W - wr } };
+    float cx = (bx0 + bx1 - wc) / 2, run[2][2] = { { bx0 + wl, cx }, { cx + wc, bx1 - wr } };
     int tiles = 0;
     for (int k = 0; k < 2; k++)
         for (float x = run[k][0]; x < run[k][1] - 0.01f && tiles < FRAME_TILES; x += wt, tiles++)
-            FramePiece(FR_RAIL, x, x + wt < run[k][1] ? x + wt : run[k][1], s, top);
-    FramePiece(FR_LEFT, 0, wl, s, top);
-    FramePiece(FR_CENTRE, cx, cx + wc, s, top);
-    FramePiece(FR_RIGHT, W - wr, W, s, top);
+            FramePiece(FR_RAIL, x, x + wt < run[k][1] ? x + wt : run[k][1], s, top, 0);
+    FramePiece(FR_LEFT, bx0, bx0 + wl, s, top, 0);
+    FramePiece(FR_CENTRE, cx, cx + wc, s, top, 0);
+    FramePiece(FR_RIGHT, bx1 - wr, bx1, s, top, 1);
 }
 /* The channel, dark, under the blade, from x0 to x1. */
 static void FrameChannel(float x0, float x1, float cy, float ch)
@@ -7255,14 +7313,16 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     LONG cl = g_class;
     unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0], rgb = SaberVivid(base);
     unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), boltRgb = SaberMix(rgb, 0xFFFFFF, 0.7f);
-    float fs, ftop, cy, ch, fx0, fx1;
-    FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1);            /* the channel the frame holds it in, end to end */
+    float fs, ftop, cy, ch, fx0, fx1, bx0, bx1, tk, share, wl = 0, wr = 0;
+    FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1, &bx0, &bx1);   /* the channel the frame holds it in, end to end */
+    BarSize(&tk, &share);
+    if (fs > 0) { float s2 = fs; FrameRun(W, share, &s2, &bx0, &bx1, &wl, &wr); }   /* (its caps as drawn) */
     /* the light (his calls on his reference, 7 Oct: "a more uniform fill", "darker towards the edges and lighter white
      * towards the middle ... the light is more fully in the middle"; "no black area at the beginning or ending"): a
      * smooth fill the whole height of its channel, filled right up to the metal at both ends, its moving tip rounded; deeper in the class's
      * colour at its top and bottom edges and toward the bar's ends, near white along its centre and in its middle; the
      * light breathing slowly so it is never quite still, and churning and surging (above: alive) */
-    float t = (float)(now % 3600000u) / 1000.0f, hc = ch, g = SABER_GLOW * H;
+    float t = (float)(now % 3600000u) / 1000.0f, hc = ch, g = SABER_GLOW * H * tk;
     float span = fx1 - fx0, front = fx0 + FireClamp(shown, 0, 1) * span, round = ch * 1.2f, line = H / 1440.0f;
     float xc = fx0 + span / 2, breath = 0.94f + 0.06f * SaberNoise(0, t * 0.6f, 21);
     unsigned style = g_saberStyle, deep = SaberMix(rgb, 0, style & SABER_RAW ? 0.72f : 0.42f);
@@ -7389,22 +7449,22 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             SaberLine(lx, ly, la, np, sw, boltRgb, rgb);
         }
     }
-    if (fs > 0) FrameBuild(W, fs, ftop);                            /* the frame over it, the light spilling past */
+    if (fs > 0) FrameBuild(bx0, bx1, fs, ftop, wl, wr);             /* the frame over it, the light spilling past */
     if (fs > 0 && shown > 0) {                                      /* and the blade's light on its metal */
-        g_shine.front = front; g_shine.reach = SHINE_REACH * W; g_shine.rgb = rgb;
+        g_shine.front = front; g_shine.reach = SHINE_REACH * (bx1 - bx0); g_shine.rgb = rgb;
         g_shine.mid = (float)(g_frame.chan[0] + g_frame.chan[1]) * 0.5f;
         g_shine.full = shown >= 1 ? SHINE_FULL * breath + SHINE_FLASH * flash : 0;
         g_shine.ns = ns; g_shine.sw = ch * 4;
         for (int i = 0; i < ns; i++) { g_shine.sx[i] = sx[i]; g_shine.sa[i] = sa[i]; }
         g_shine.on = 1;
-        FrameBuild(W, fs, ftop);
+        FrameBuild(bx0, bx1, fs, ftop, wl, wr);
         g_shine.on = 0; g_shine.ns = 0;
     }
     if (shown > 0) {                                                /* its lips lit where the blade has reached: along */
         float lx0 = fx0, lx1 = fx1;                                 /* the rails, from cup rim to cup rim (bar.txt's lips) */
         if (fs > 0) {
-            lx0 = (float)g_frame.lips[0] * fs;
-            lx1 = W - (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0] - g_frame.lips[1]) * fs;
+            lx0 = bx0 + (float)g_frame.lips[0] * fs;
+            lx1 = bx1 - (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0] - g_frame.lips[1]) * fs;
         }
         if (front > lx0) FrameLips(lx0, front < lx1 ? front : lx1, cy, ch, line, hotRgb, 1 + 0.35f * flare + 0.5f * flash + 0.4f * P);
     }
@@ -7510,11 +7570,13 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
         for (int i = 0; i < na; i++) SaberGlowAt(tipX[i], tipY[i], ch * 0.35f, ch * 0.35f, SaberArgb(hotRgb, 0.7f * tipA[i]));
     }
     /* the logo on it at the centre, its halfway mark, standing on the bottom of the window (the bar is flush with it):
-     * lit in the class's colour as the tip reaches it */
+     * lit in the class's colour as the tip reaches it; its size and its foot with the bar's thickness, at most
+     * SABER_LOGO_RUN of the bar's run wide */
     if (g_logoOn && g_logo.ok && g_viewTex[VT_LOGO]) {
-        float lh = SABER_LOGO_H * H, lw = lh * g_logo.aspect;
-        if (lw > LOGO_W * W) { lh *= LOGO_W * W / lw; lw = LOGO_W * W; }
-        float lx = W / 2, ly = H - SABER_LOGO_FOOT * H - lh / 2, lit = FireClamp((shown - 0.47f) / 0.06f, 0, 1);
+        float lh = SABER_LOGO_H * H * tk, lw = lh * g_logo.aspect, most = LOGO_W * W * tk;
+        if (most > SABER_LOGO_RUN * (bx1 - bx0)) most = SABER_LOGO_RUN * (bx1 - bx0);
+        if (lw > most) { lh *= most / lw; lw = most; }
+        float lx = (bx0 + bx1) / 2, ly = H - SABER_LOGO_FOOT * H * tk - lh / 2, lit = FireClamp((shown - 0.47f) / 0.06f, 0, 1);
         if (lit > 0 && g_viewTex[VT_SPARK]) {
             float flick = 0.85f + 0.15f * SaberNoise(0, t * 9, 10);
             SaberGlowAt(lx, ly, lw * 0.85f, lh * 0.9f, SaberArgb(rgb, 0.55f * lit * flick));
@@ -7540,7 +7602,10 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
 #define VBAR_GLASS_PATH  "Interface\\Glues\\LoadingBar\\Loading-BarGlass.blp"
 #define VBAR_TEX_W    512           /* the frame and the glass: 512 x 64 texels */
 #define VBAR_TEX_H    64
-#define VBAR_UI_H     768.0f        /* a texel is the window's height over this */
+#define VBAR_UI_H     768.0f        /* a texel is the window's height over this (times the thickness) */
+#define VBAR_CAP_L    40            /* the frame's caps, in texels (the art's ends, its spike and its cup's wall): left, */
+#define VBAR_CAP_R    40            /* right; at any other width the middle between them is stretched or narrowed, */
+#define VBAR_MID_LEAST 16           /* never to less than this */
 #define VBAR_CY       0.075f        /* its centre this far up from the bottom, of the height (the client's table, VA 0x7FFD34) */
 #define VBAR_C0       28            /* the channel behind the frame, in texels (a little under the metal, which hides */
 #define VBAR_C1       484           /* the fill's ends): left, right, */
@@ -7562,12 +7627,48 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
 static int g_vbarAsked, g_barVanilla;   /* retro chosen (the style's bar); and its pictures on OpenGL: the view draws it */
 static DWORD g_vbFullAt;                /* the view's clock as it filled (0 while it is filling) */
 
-/* Where it sits in a W x H window: a texel's size (*s) and its top left (*x0, *y0). */
-static void VBarLayout(float W, float H, float *s, float *x0, float *y0)
+/* Where it sits in a W x H window: a texel's size (*s), its top left (*x0, *y0) and how many texels wide it is drawn
+ * (*tw: the art's 512 at its own width; more or fewer, the caps kept and the middle stretched or narrowed). Its own: 512
+ * texels at the UI's height scale, centred; the thickness scales the texel, the width (or the whole) sets *tw. Its
+ * centre VBAR_CY of the height up, or higher when a thick bar would reach past the window's bottom. */
+static void VBarLayout(float W, float H, float *s, float *x0, float *y0, float *tw)
 {
-    float k = H / VBAR_UI_H;
+    float k = H / VBAR_UI_H, tk, share;
     if (VBAR_TEX_W * k > 0.96f * W) k = 0.96f * W / VBAR_TEX_W;   /* (a window narrower than 2:3: as wide as fits) */
-    *s = k; *x0 = (W - VBAR_TEX_W * k) / 2; *y0 = H - VBAR_CY * H - VBAR_TEX_H * k / 2;
+    BarSize(&tk, &share);
+    float sc = k * tk, bw = share > 0 ? W * share : VBAR_TEX_W * k;
+    float least = (float)(VBAR_CAP_L + VBAR_CAP_R + VBAR_MID_LEAST);
+    if (least * sc > bw) sc = bw / least;                          /* (too thick for so narrow a bar: as thick as fits) */
+    *s = sc;
+    *tw = sc == k && share <= 0 ? (float)VBAR_TEX_W : bw / sc;
+    *x0 = (W - *tw * sc) / 2;
+    *y0 = H - VBAR_CY * H - VBAR_TEX_H * sc / 2;
+    if (*y0 + VBAR_TEX_H * sc > H) *y0 = H - VBAR_TEX_H * sc;
+}
+/* Where texel u of the art (0 to 512 across) is drawn, in a bar tw texels wide from x0 at s: the left cap as it is, the
+ * middle stretched or narrowed to fill, the right cap as it is at the far end. */
+static float VBarAt(float u, float x0, float s, float tw)
+{
+    float mid = (float)(VBAR_TEX_W - VBAR_CAP_L - VBAR_CAP_R), right = (float)(VBAR_TEX_W - VBAR_CAP_R);
+    if (u <= VBAR_CAP_L) return x0 + u * s;
+    if (u >= right) return x0 + (tw - ((float)VBAR_TEX_W - u)) * s;
+    return x0 + ((float)VBAR_CAP_L + (u - (float)VBAR_CAP_L) * (tw - (float)(VBAR_CAP_L + VBAR_CAP_R)) / mid) * s;
+}
+/* The art from texel u0 to u1 across and v0 to v1 down, its top at y0, in a bar tw texels wide from x0 at s: up to three
+ * rectangles (the part over the left cap, over the middle, over the right cap), added when add (the flash). */
+static void VBarPiece(int tex, int add, float x0, float y0, float s, float tw, float u0, float v0, float u1, float v1, DWORD c)
+{
+    float cut[4] = { u0, (float)VBAR_CAP_L, (float)(VBAR_TEX_W - VBAR_CAP_R), u1 };
+    for (int i = 0; i < 3; i++) {
+        float a = cut[i] > u0 ? cut[i] : u0, b = cut[i + 1] < u1 ? cut[i + 1] : u1;
+        if (!(b > a)) continue;
+        ViewVert *q = ViewQuadMode(tex, add);
+        if (!q) return;
+        float xa = VBarAt(a, x0, s, tw), xb = VBarAt(b, x0, s, tw), y1 = y0 + (v1 - v0) * s;
+        float ua = a / VBAR_TEX_W, ub = b / VBAR_TEX_W, va = v0 / VBAR_TEX_H, vb = v1 / VBAR_TEX_H;
+        ViewVertSet(q, xa, y0, ua, va, c); ViewVertSet(q + 1, xb, y0, ub, va, c);
+        ViewVertSet(q + 2, xb, y1, ub, vb, c); ViewVertSet(q + 3, xa, y1, ua, vb, c);
+    }
 }
 /* The heat at x texels along the channel and y down it, t s on: two octaves of value noise, drifting toward the tip,
  * about 0 to 1 (nine tenths of it between a fifth and 0.86, as in his mock). */
@@ -7612,9 +7713,10 @@ static void VBarBuild(float W, float H, float shown, DWORD now)
     float tint[3] = { (float)(base >> 16 & 255) / 255, (float)(base >> 8 & 255) / 255, (float)(base & 255) / 255 }, hot[3], glow[3], dark[3] = { 0.05f, 0.05f, 0.05f };
     float glow2[3];                                                  /* (the flash: the edge's light, a little brighter) */
     for (int i = 0; i < 3; i++) { hot[i] = FireClamp(tint[i] * 0.55f + 0.50f, 0, 1); glow[i] = FireClamp(tint[i] * 1.1f, 0, 1); glow2[i] = FireClamp(hot[i] * 1.1f, 0, 1); }
-    float s, bx, by, t = (float)(now % 3600000u) / 1000.0f;
-    VBarLayout(W, H, &s, &bx, &by);
-    float span = (float)(VBAR_C1 - VBAR_C0), front = FireClamp(shown, 0, 1) * span;   /* (texels along the channel) */
+    float s, bx, by, tw, t = (float)(now % 3600000u) / 1000.0f;
+    VBarLayout(W, H, &s, &bx, &by, &tw);
+    int own = tw == (float)VBAR_TEX_W;                               /* (its own width: drawn as it always was) */
+    float span = (float)(VBAR_C1 - VBAR_C0) + (tw - VBAR_TEX_W), front = FireClamp(shown, 0, 1) * span;   /* (texels along the channel) */
     float cx0 = bx + VBAR_C0 * s, ry0 = by + VBAR_R0 * s, rh = (float)(VBAR_R1 - VBAR_R0) / VBAR_ROWS;
     if (shown >= 1) { if (!g_vbFullAt) g_vbFullAt = now ? now : 1; } else g_vbFullAt = 0;
     float age = g_vbFullAt ? (float)(LONG)(now - g_vbFullAt) / 1000.0f : -1;
@@ -7653,13 +7755,19 @@ static void VBarBuild(float W, float H, float shown, DWORD now)
     /* the glass over the channel only (its faint haze past the metal is no part of the bar), then the frame over it, then
      * (full) the frame again, added, in the class's light: the flash */
     float ex = bx + VBAR_TEX_W * s, ey = by + VBAR_TEX_H * s;
-    ViewRect(VT_VGLASS, cx0, ry0, cx0 + span * s, by + VBAR_R1 * s, (float)VBAR_C0 / VBAR_TEX_W, (float)VBAR_R0 / VBAR_TEX_H,
-             (float)VBAR_C1 / VBAR_TEX_W, (float)VBAR_R1 / VBAR_TEX_H, 0xFFFFFFFFu);
-    ViewRect(VT_VBORDER, bx, by, ex, ey, 0, 0, 1, 1, 0xFFFFFFFFu);
+    if (own) {
+        ViewRect(VT_VGLASS, cx0, ry0, cx0 + span * s, by + VBAR_R1 * s, (float)VBAR_C0 / VBAR_TEX_W, (float)VBAR_R0 / VBAR_TEX_H,
+                 (float)VBAR_C1 / VBAR_TEX_W, (float)VBAR_R1 / VBAR_TEX_H, 0xFFFFFFFFu);
+        ViewRect(VT_VBORDER, bx, by, ex, ey, 0, 0, 1, 1, 0xFFFFFFFFu);
+    } else {                                                            /* (another width: caps and a stretched middle) */
+        VBarPiece(VT_VGLASS, 0, bx, ry0, s, tw, (float)VBAR_C0, (float)VBAR_R0, (float)VBAR_C1, (float)VBAR_R1, 0xFFFFFFFFu);
+        VBarPiece(VT_VBORDER, 0, bx, by, s, tw, 0, 0, (float)VBAR_TEX_W, (float)VBAR_TEX_H, 0xFFFFFFFFu);
+    }
     for (float f = flash; f > 0.004f; f -= 1) {                         /* (past 1: the frame added once more) */
+        DWORD c = SaberArgb(VBarRgb(glow2), f < 1 ? f : 1);
+        if (!own) { VBarPiece(VT_VBORDER, 1, bx, by, s, tw, 0, 0, (float)VBAR_TEX_W, (float)VBAR_TEX_H, c); continue; }
         ViewVert *q = ViewQuadMode(VT_VBORDER, 1);
         if (!q) break;
-        DWORD c = SaberArgb(VBarRgb(glow2), f < 1 ? f : 1);
         ViewVertSet(q, bx, by, 0, 0, c); ViewVertSet(q + 1, ex, by, 1, 0, c);
         ViewVertSet(q + 2, ex, ey, 1, 1, c); ViewVertSet(q + 3, bx, ey, 0, 1, c);
     }
@@ -12542,10 +12650,6 @@ static int StyleNearby(const char *text, int *yd)
  * own: retro its art's, neo edge to edge), "whole on" or "whole off", "effect heat", "effect smooth" or "effect blade",
  * "colour class" or "colour ember", "quality" and any of liquid, pulse, unstable and raw (or none). A line missing: its
  * default, today's look. g_look holds them (the game's thread writes it, the view's reads it as each screen opens). ---- */
-#define LOOK_THICK_LEAST 50
-#define LOOK_THICK_MOST  200
-#define LOOK_WIDTH_LEAST 20
-#define LOOK_WIDTH_MOST  100
 enum { LOOK_HEAT, LOOK_SMOOTH, LOOK_BLADE, LOOK_EFFECTS };
 typedef struct { int thick, width, whole, effect, ember, quality; } Look;    /* (width 0: each bar's own) */
 #define LOOK_DEFAULT { 100, 0, 0, LOOK_HEAT, 0, SABER_PULSE | SABER_RAW }
@@ -12810,6 +12914,15 @@ static void StylePick(void)
                   q & SABER_UNSTABLE ? " unstable" : "", q & SABER_RAW ? " raw" : "", q ? "" : " none");
         Log(qm);
         g_saberStyle = q;
+    }
+    int thick = *(volatile int *)&g_look.thick, width = *(volatile int *)&g_look.width, whole = *(volatile int *)&g_look.whole != 0;
+    if (thick != g_barThick || width != g_barWidth || whole != g_barWhole) {   /* the bar's size, as chosen in the panel */
+        char sm[160];
+        if (whole) wsprintfA(sm, "  the view: the bar %d%% of its own thickness, the whole width of the screen", thick);
+        else if (width) wsprintfA(sm, "  the view: the bar %d%% of its own thickness, %d%% of the screen's width", thick, width);
+        else wsprintfA(sm, "  the view: the bar %d%% of its own thickness, its own width", thick);
+        Log(sm);
+        g_barThick = thick; g_barWidth = width; g_barWhole = whole;
     }
     int nearYd = *(volatile int *)&g_nearYd;
     if (nearYd != g_parchNearOn) {

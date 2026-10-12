@@ -3345,8 +3345,8 @@ static void ViewTests(void)
         Check(parsed && g_frame.ok, "the frame's table read (CRLF, comments, an unknown line skipped); one missing a piece, with a piece off its sheet, its channel outside its band, an end or a lip past its cap is no frame; no ends line, the channel's ends at the caps' inner edges; no lips line, the lips lit from cap to cap");
         g_frameOn = 1; g_viewTex[VT_FRAME] = 1;
         float s = FRAME_BAND * 500 / 90, top = 500 - 123 * s, cy = top + 78.5f * s, ch = 22.5f * s;
-        float fs, ftop, fcy, fch, fx0, fx1, x0 = 82 * s, x1 = 1000 - (130 - 20) * s, span = x1 - x0;
-        FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1);
+        float fs, ftop, fcy, fch, fx0, fx1, fb0, fb1, x0 = 82 * s, x1 = 1000 - (130 - 20) * s, span = x1 - x0;
+        FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
         Check(Near(fs, s, 1e-5) && Near(ftop, top, 1e-3) && Near(fcy, cy, 1e-3) && Near(fch, ch, 1e-3) && Near(ftop + 123 * fs, 500, 1e-3) &&
               Near(90 * fs, FRAME_BAND * 500, 1e-3) && Near(fx0, x0, 1e-3) && Near(fx1, x1, 1e-3),
               "the frame's place: its rail band a fifteenth of the screen tall, its bottom ON the bottom of the screen (his call: no gap), the channel the blade runs in where the table says, from inside the left cap to inside the right (his call, 7 Oct: 'inside of the metal')");
@@ -3668,7 +3668,7 @@ static void ViewTests(void)
         Check(ok, "without its spark the blade has no orb or light, and the rest is drawn (the lightning too)");
         g_viewTex[VT_FRAME] = 0;                                         /* no frame: a channel of its size, flush, no metal */
         ViewBuild(1000, 500, 0.6f, 3000);
-        FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1);
+        FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
         ok = fs == 0 && Near(fcy, 500 - FRAME_BAND * 500 / 2, 1e-3) && fx0 == 0 && fx1 == 1000;
         for (int i = 0; i < g_vbN; i++) ok &= g_vb[i].tex != VT_FRAME;
         Check(ok, "without its frame's sheet the blade runs in a channel of the same size at the bottom, edge to edge, and no frame is drawn");
@@ -5355,14 +5355,16 @@ static int VBarPure(const ViewVert *v, unsigned rgb, float *k)       /* a corner
     for (int i = 0; i < 3; i++) if (fabsf(c[i] - t[i] * *k) > 1.6f || c[i] > t[i] * 1.06f + 1) return 0;   /* (hot: up to 1.05 of it, as his mock) */
     return 1;
 }
+static void BarSizeSet(int thick, int width, int whole) { g_barThick = thick; g_barWidth = width; g_barWhole = whole; }
 static void TestVanillaBar(void)
 {
-    float s, bx, by;
-    VBarLayout(1920, 1080, &s, &bx, &by);
+    float s, bx, by, tw;
+    BarSizeSet(100, 0, 0);                                           /* (its own size: an earlier screen's choice put back) */
+    VBarLayout(1920, 1080, &s, &bx, &by, &tw);
     int ok = Near(s, 1080.0 / 768, 1e-5) && Near(bx, 600, 1e-3) && Near(by + 32 * s, 1080 - 81, 1e-3);
-    VBarLayout(5120, 2160, &s, &bx, &by);
+    VBarLayout(5120, 2160, &s, &bx, &by, &tw);
     ok &= Near(512 * s, 1440, 1e-2) && Near(64 * s, 180, 1e-2) && Near(bx, 1840, 1e-2) && Near(by + 32 * s, 2160 - 162, 1e-2);
-    VBarLayout(600, 1000, &s, &bx, &by);
+    VBarLayout(600, 1000, &s, &bx, &by, &tw);
     ok &= Near(512 * s, 576, 1e-2) && Near(bx, 12, 1e-2);
     Check(ok, "vanilla's bar: the art's own proportions at the UI's height scale (720 x 90 at 1080, 1440 x 180 on his 2160), centred, its centre the client's own 0.075 of the height up; a window narrower than 2:3, as wide as it fits");
 
@@ -5387,7 +5389,7 @@ static void TestVanillaBar(void)
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
     g_barVanilla = 1; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1; g_vbFullAt = 0;
     ViewBuild(1920, 1080, 0.6f, 5000);
-    VBarLayout(1920, 1080, &s, &bx, &by);
+    VBarLayout(1920, 1080, &s, &bx, &by, &tw);
     float front = 0.6f * 456, cx0 = bx + 28 * s;
     int cols = (int)(front / 4) + 1, fillQ = cols * VBAR_ROWS, haloQ = 15;
     const ViewVert *gl = g_vv + g_vb[2].first, *bd = g_vv + g_vb[3].first, *ch = g_vv + g_vb[1].first;
@@ -5495,6 +5497,234 @@ static void TestVanillaBar(void)
     VBarRead(vblp, vlen);
     ok &= !vblp[VT_VBORDER] && !vblp[VT_VGLASS] && LogSays("not read: in none of the client's archives");
     Check(ok, "vanilla's bar read as the view starts, whichever bar is chosen (no switch file needed); the client's newest copy of each picture (patch-5 over the base), ours and a zero-length stub passed over; none of the client's: not read, and the log says so");
+}
+
+/* The bar's size (his design, 11 Oct 2026: "choose the thickness of the bar and whether or not it stretches the entire
+ * width of the screen"): style.txt's thick, width and whole, handed to the view as each screen opens, drawn by both
+ * bars; the defaults exactly as before; every number held to its range and no bar off the window. */
+/* batches from..to of the view's list within x0..x1 and the window (below: past its bottom allowed, as the blade's frame
+ * hangs its prongs past it by design) */
+static int BarInside(float W, float H, int from, int to, float x0, float x1, int below)
+{
+    int ok = 1;
+    for (int b = from; b < to && b < g_vbN; b++)
+        for (int i = g_vb[b].first; i < g_vb[b].first + g_vb[b].count; i++)
+            ok &= g_vv[i].x >= x0 - 1e-3f && g_vv[i].x <= x1 + 1e-3f && g_vv[i].x >= -1e-3f && g_vv[i].x <= W + 1e-3f &&
+                  g_vv[i].y >= -1e-3f && (below || g_vv[i].y <= H + 1e-3f);
+    return ok;
+}
+/* Neo's glow at the bar's size: how far its first layer reaches past the core's edge, on average along the blade */
+static float BarGlowReach(int thick, int width)
+{
+    BarSizeSet(thick, width, 0);
+    ViewListStart(); SaberBuild(1000, 500, 0.6f, 3000);
+    for (int b = 0; b < g_vbN; b++)
+        if (g_vb[b].tex == -1 && g_vb[b].add) {                         /* (the glow: the first plain added batch) */
+            const ViewVert *v = g_vv + g_vb[b].first;
+            int n = g_vb[b].count / 4, m = 0;
+            float sum = 0;
+            for (int q = 0; q < n; q += 4) { sum += v[4 * q + 3].y - v[4 * q].y; m++; }   /* (a column's top, its near layer) */
+            return m ? sum / m : -1;
+        }
+    return -1;
+}
+static void TestBarSize(void)
+{
+    static const int kThick[3] = { 50, 100, 200 }, kWidth[3] = { 20, 0, 100 }, kWhole[3] = { 0, 0, 1 };   /* (100: the whole, by width) */
+    static const float kWin[5][2] = { { 5120, 2160 }, { 1920, 1080 }, { 1024, 768 }, { 7680, 2160 }, { 600, 1000 } };
+    float s, x0, y0, tw;
+    /* the defaults: exactly today's formula, to the bit */
+    int ok = 1;
+    BarSizeSet(100, 0, 0);
+    for (int w = 0; w < 5; w++) {
+        float W = kWin[w][0], H = kWin[w][1], k = H / VBAR_UI_H;
+        if (VBAR_TEX_W * k > 0.96f * W) k = 0.96f * W / VBAR_TEX_W;
+        VBarLayout(W, H, &s, &x0, &y0, &tw);
+        ok &= s == k && tw == (float)VBAR_TEX_W && x0 == (W - VBAR_TEX_W * k) / 2 && y0 == H - VBAR_CY * H - VBAR_TEX_H * k / 2;
+    }
+    Check(ok, "the bar's size at its defaults (100%, its own width, not the whole): Retro laid out by exactly the old formula, to the bit, on five shapes of screen");
+    /* Retro at each setting: the texel the thickness's share, the width the screen's share (its own: the art's 512 texels
+     * at the UI's scale; the whole: edge to edge), centred, inside the window, its centre the client's 0.075 up unless a
+     * thick bar would reach past the bottom */
+    ok = 1;
+    int lifted = 0;
+    for (int w = 0; w < 4; w++)
+        for (int a = 0; a < 3; a++)
+            for (int b = 0; b < 3; b++) {
+                float W = kWin[w][0], H = kWin[w][1], k = H / VBAR_UI_H;
+                if (VBAR_TEX_W * k > 0.96f * W) k = 0.96f * W / VBAR_TEX_W;
+                BarSizeSet(kThick[a], kWidth[b], kWhole[b]);
+                VBarLayout(W, H, &s, &x0, &y0, &tw);
+                float bw = kWhole[b] || kWidth[b] == 100 ? W : kWidth[b] ? W * kWidth[b] / 100 : VBAR_TEX_W * k;
+                ok &= Near(s, k * kThick[a] / 100, 1e-5) && Near(tw * s, bw, 1e-2) && Near(x0, (W - bw) / 2, 1e-2) && x0 >= -1e-3f &&
+                      x0 + tw * s <= W + 1e-2f && y0 >= 0 && y0 + VBAR_TEX_H * s <= H + 1e-3f && tw >= VBAR_CAP_L + VBAR_CAP_R + VBAR_MID_LEAST;
+                float cy = H - VBAR_CY * H;
+                if (Near(y0 + VBAR_TEX_H * s, H, 1e-3) && y0 + VBAR_TEX_H * s / 2 < cy - 1e-3f) lifted++;
+                else ok &= Near(y0 + VBAR_TEX_H * s / 2, cy, 1e-3);
+            }
+    Check(ok && lifted == 12, "Retro at thin, its own and thick (50%, 100%, 200%) by narrow (20%), its own and the whole width, on four screens: the texel the thickness's share of the UI's, the width the screen's share (its own the art's 512 texels, the whole edge to edge), centred, inside the window; its centre the client's 0.075 of the height up, a 200% bar lifted to stand on the bottom instead of reaching past it");
+    /* clamps: numbers off the range held to it; a bar too thick for so narrow a width as thick as fits */
+    float s2, x2, y2, t2;
+    ok = 1;
+    BarSizeSet(10, 5, 0);  VBarLayout(1920, 1080, &s, &x0, &y0, &tw);
+    BarSizeSet(50, 20, 0); VBarLayout(1920, 1080, &s2, &x2, &y2, &t2);
+    ok &= s == s2 && tw == t2 && x0 == x2;
+    BarSizeSet(1000, 400, 0); VBarLayout(1920, 1080, &s, &x0, &y0, &tw);
+    BarSizeSet(200, 100, 0);  VBarLayout(1920, 1080, &s2, &x2, &y2, &t2);
+    ok &= s == s2 && tw == t2 && x0 == x2 && x0 == 0 && Near(tw * s, 1920, 1e-2);
+    BarSizeSet(-5, -40, 7); VBarLayout(1920, 1080, &s, &x0, &y0, &tw);
+    ok &= Near(s, 1080.0 / 768 / 2, 1e-5) && x0 == 0 && Near(tw * s, 1920, 1e-2);   /* (a negative width: the least; whole: any but 0) */
+    BarSizeSet(200, 20, 0); VBarLayout(600, 1000, &s, &x0, &y0, &tw);           /* 120 px wide: 96 texels at most 1.25 px */
+    ok &= tw == VBAR_CAP_L + VBAR_CAP_R + VBAR_MID_LEAST && Near(tw * s, 120, 1e-3) && Near(x0, 240, 1e-3) && y0 + VBAR_TEX_H * s <= 1000;
+    Check(ok, "the bar's size held to its range in the view too (thickness 50% to 200%, width 20% to 100%, any whole on), and a bar too thick for so narrow a width drawn as thick as its caps and the least of its middle allow, never wider than asked");
+    /* Retro drawn at a width: its frame and glass each three pieces, the caps at their own size at the ends, the middle
+     * stretched between with no gap; its channel, fill and halo along the longer channel, in texels as ever */
+    g_ovOn = 0; g_logoOn = 0; g_frameOn = 0; g_class = 9; g_parchOn = 0;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    g_barVanilla = 1; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1; g_vbFullAt = 0;
+    ok = 1;
+    for (int a = 0; a < 3; a++)
+        for (int b = 0; b < 3; b++) {
+            BarSizeSet(kThick[a], kWidth[b], kWhole[b]);
+            VBarLayout(5120, 2160, &s, &x0, &y0, &tw);
+            ViewListStart();
+            VBarBuild(5120, 2160, 0.6f, 5000);
+            int own = kWidth[b] == 0 && !kWhole[b] && kThick[a] == 100, n = own ? 1 : 3;
+            const ViewVert *gl = g_vv + g_vb[1].first, *bd = g_vv + g_vb[2].first, *ch = g_vv + g_vb[0].first;
+            float right = x0 + tw * s, span = tw - 56;
+            ok &= g_vbN == 3 && g_vb[1].tex == VT_VGLASS && g_vb[2].tex == VT_VBORDER && g_vb[1].count == 4 * n && g_vb[2].count == 4 * n &&
+                  Near(bd[0].x, x0, 1e-2) && Near(bd[4 * n - 3].x, right, 1e-2) && Near(bd[0].y, y0, 1e-3) && Near(bd[2].y, y0 + 64 * s, 1e-3) &&
+                  bd[0].u == 0 && bd[4 * n - 3].u == 1 && Near(gl[0].x, x0 + 28 * s, 1e-2) && Near(gl[4 * n - 3].x, right - 28 * s, 1e-2) &&
+                  Near(ch[0].x, x0 + 28 * s, 1e-2) && Near(ch[1].x, right - 28 * s, 1e-2) && BarInside(5120, 2160, 0, 3, x0, right, 0);
+            float tip = x0 + 28 * s + 0.6f * span * s, most = 0;             /* (the fill's front: its furthest corner) */
+            int fillQ = ((int)((0.6f * span - 0.001f) / 4) + 1) * VBAR_ROWS;
+            for (int q = 1; q <= fillQ && q < g_vb[0].count / 4; q++) for (int j = 0; j < 4; j++) if (ch[4 * q + j].x > most) most = ch[4 * q + j].x;
+            ok &= Near(most, tip, 0.05);
+            if (n == 3) {
+                ok &= Near(bd[1].x, x0 + 40 * s, 1e-2) && Near(bd[1].u, 40.0 / 512, 1e-6) && bd[4].x == bd[1].x && Near(bd[5].u, 472.0 / 512, 1e-6) &&
+                      Near(bd[5].x, right - 40 * s, 1e-2) && bd[8].x == bd[5].x && Near(bd[8].u, 472.0 / 512, 1e-6) &&
+                      Near(gl[0].u, 28.0 / 512, 1e-6) && Near(gl[1].x, x0 + 40 * s, 1e-2) && gl[4].x == gl[1].x && gl[8].x == gl[5].x &&
+                      Near(gl[9].u, 484.0 / 512, 1e-6) && Near(gl[2].v, 46.0 / 64, 1e-6);
+            }
+        }
+    Check(ok, "Retro drawn at each setting on his 5120 x 2160: its frame from the bar's left to its right and the glass over its channel, each as the art's caps at their own size (40 texels) with the middle stretched or narrowed between them, no gap; the dark channel, the fill (to 60% of the longer channel) and all of it inside the bar and the window; at its own size one rectangle each, as before");
+    /* full, at a width: the flash is the three pieces added */
+    BarSizeSet(125, 60, 0);
+    ViewListStart(); VBarBuild(5120, 2160, 1.0f, 50000);
+    ViewListStart(); VBarBuild(5120, 2160, 1.0f, 50000 + 800);
+    ok = g_vbN == 4 && g_vb[3].tex == VT_VBORDER && g_vb[3].add && g_vb[3].count == 12;
+    Check(ok, "Retro full at another width: the metal's flash is its frame again in three pieces, added");
+    g_barVanilla = 0; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 0; g_vbFullAt = 0;
+
+    /* Neo: its rail band FRAME_BAND of the height times the thickness, on the bottom; its run edge to edge at its own
+     * width or the whole, else centred at the width; the blade between its caps' back walls */
+    static const char bar[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nends 82 20\n";
+    FrameParse(bar, sizeof bar - 1);
+    g_frameOn = 1; g_viewTex[VT_FRAME] = 1;
+    float fs, ftop, fcy, fch, fx0, fx1, fb0, fb1;
+    BarSizeSet(100, 0, 0);
+    FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
+    ok = fs == FRAME_BAND * 500 / 90 && fb0 == 0 && fb1 == 1000 && fx0 == 82 * fs && fx1 == 1000 - 110 * fs && ftop == 500 - 123 * fs;
+    for (int a = 0; a < 3; a++)
+        for (int b = 0; b < 3; b++) {
+            BarSizeSet(kThick[a], kWidth[b] ? kWidth[b] : 0, kWhole[b]);
+            if (kWidth[b] == 20) BarSizeSet(kThick[a], 60, 0);              /* (the test's frame: its caps want 60% here) */
+            FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
+            float bw = kWidth[b] == 20 ? 600 : 1000;
+            ok &= Near(90 * fs, FRAME_BAND * 500 * kThick[a] / 100, 1e-3) && Near(ftop + 123 * fs, 500, 1e-3) && Near(fb1 - fb0, bw, 1e-3) &&
+                  Near(fb0, (1000 - bw) / 2, 1e-3) && Near(fx0, fb0 + 82 * fs, 1e-3) && Near(fx1, fb1 - 110 * fs, 1e-3) &&
+                  Near(fcy, ftop + 78.5f * fs, 1e-3) && Near(fch, 22.5f * fs, 1e-3);
+        }
+    Check(ok, "Neo laid out at each setting: its rail band the thickness's share of a fifteenth of the height, its bottom on the window's; edge to edge at its own width and the whole, centred at a narrower width; the blade between its caps' back walls; at its defaults exactly the old formula, to the bit");
+    /* Neo drawn at a width: the caps at the run's ends, the diamond at its centre, the rails between with no gap, the
+     * channel, shine and lips along the run, the logo centred on it at the thickness's size; nothing past the run */
+    g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2.0f; g_logo.tu0 = g_logo.tv0 = 0; g_logo.tu1 = g_logo.tv1 = 1;
+    g_viewTex[VT_LOGO] = 1; g_viewTex[VT_SPARK] = 0; g_class = 9;
+    BarSizeSet(150, 60, 0);
+    FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
+    ViewListStart(); SaberBuild(1000, 500, 0.6f, 3000);
+    int frame = -1, logo = -1;
+    for (int i = 0; i < g_vbN; i++) { if (g_vb[i].tex == VT_FRAME && frame < 0) frame = i; if (g_vb[i].tex == VT_LOGO) logo = i; }
+    ok = frame >= 0 && logo >= 0;
+    if (ok) {
+        const ViewVert *fr = g_vv + g_vb[frame].first, *lg = g_vv + g_vb[logo].first;
+        int nq = g_vb[frame].count / 4;
+        const ViewVert *L = fr + 4 * (nq - 3), *C = fr + 4 * (nq - 2), *R = fr + 4 * (nq - 1);
+        float wl = 132 * fs, wr = 130 * fs, wc = 100 * fs, lh = SABER_LOGO_H * 500 * 1.5f, lw = lh * 2;
+        if (lw > LOGO_W * 1000 * 1.5f) { lh *= LOGO_W * 1000 * 1.5f / lw; lw = LOGO_W * 1000 * 1.5f; }
+        ok &= Near(L[0].x, 200, 1e-3) && Near(L[1].x, 200 + wl, 1e-3) && Near(R[0].x, 800 - wr, 1e-3) && Near(R[1].x, 800, 1e-3) &&
+              Near((C[0].x + C[1].x) / 2, 500, 1e-3) && Near(C[1].x - C[0].x, wc, 1e-3) && BarInside(1000, 500, frame, frame + 1, 200, 800, 1) && BarInside(1000, 500, logo, logo + 1, 200, 800, 0);
+        float at = 200 + wl;                                              /* the rails: from the left cap to the diamond, then on to the right cap */
+        int joined = 1;
+        for (int q = 0; q < nq - 3; q++) {
+            if (!Near(fr[4 * q].x, at, 1e-3)) { if (Near(at, C[0].x, 1e-3)) at = C[1].x; joined &= Near(fr[4 * q].x, at, 1e-3); }
+            at = fr[4 * q + 1].x;
+        }
+        ok &= joined && Near(at, R[0].x, 1e-3) && Near(lg[0].x, 500 - lw / 2, 1e-3) && Near(lg[1].x, 500 + lw / 2, 1e-3) &&
+              Near(lg[2].y, 500 - SABER_LOGO_FOOT * 500 * 1.5f, 1e-3) && Near(lg[2].y - lg[0].y, lh, 1e-3);
+        const ViewVert *chq = g_vv + g_vb[0].first;
+        ok &= Near(chq[0].x, fx0, 1e-3) && Near(chq[1].x, fx1, 1e-3);
+    }
+    Check(ok, "Neo drawn at 150% and 60% of the screen: its caps at the run's ends (not the window's), the diamond at its centre, the rails counted from the width with no gap, all inside the run; its channel between the back walls; the logo at 150% of its size, centred on the run, its foot raised with it");
+    /* its lit lips from the left cap's lip (the test's: cap to cap) along the run to the tip; its glow with the thickness */
+    ok = 0;
+    for (int i = 0, shine = 0; i < g_vbN; i++) {
+        if (g_vb[i].tex == VT_FRAME && g_vb[i].add) shine = 1;
+        else if (shine && g_vb[i].tex == -1 && g_vb[i].add) {            /* (the lips: the first two quads after the shine) */
+            const ViewVert *lp = g_vv + g_vb[i].first;
+            float front = fx0 + 0.6f * (fx1 - fx0);
+            ok = Near(lp[0].x, 200 + 132 * fs, 1e-3) && Near(lp[1].x, front, 1e-2) && Near(lp[4].x, 200 + 132 * fs, 1e-3);
+            break;
+        }
+    }
+    float g100 = BarGlowReach(100, 0), g200 = BarGlowReach(200, 0), g50 = BarGlowReach(50, 0);
+    ok &= g100 > 0 && g200 / g100 > 1.7f && g200 / g100 < 2.4f && g50 / g100 > 0.4f && g50 / g100 < 0.6f;
+    Check(ok, "Neo's lit lips run from the cap's lip at the run's end (not the window's) to the tip; its glow reaches past the core twice as far at 200% and half as far at 50%, the bar's light scaled with it");
+    /* a run too short for both caps: cut at their inner sides (the right cap keeps its right end), never past the cups'
+     * back walls and lit lips; the logo no wider than half the run. With the test's caps, whose walls are their whole
+     * width, the scale gives instead. */
+    static const char cut[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nends 30 100\nlips 30 100\n";
+    FrameParse(cut, sizeof cut - 1);
+    BarSizeSet(200, 20, 0);
+    FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
+    ViewListStart(); SaberBuild(1000, 500, 0.6f, 3000);
+    frame = logo = -1;
+    for (int i = 0; i < g_vbN; i++) { if (g_vb[i].tex == VT_FRAME && frame < 0) frame = i; if (g_vb[i].tex == VT_LOGO) logo = i; }
+    ok = frame >= 0 && logo >= 0 && Near(fs, FRAME_BAND * 500 * 2 / 90, 1e-5) && Near(fb0, 400, 1e-3) && Near(fb1, 600, 1e-3);
+    if (ok) {
+        const ViewVert *fr = g_vv + g_vb[frame].first, *lg = g_vv + g_vb[logo].first;
+        int nq = g_vb[frame].count / 4;
+        const ViewVert *L = fr + 4 * (nq - 3), *C = fr + 4 * (nq - 2), *R = fr + 4 * (nq - 1);
+        float room = (200 - 100 * fs) / 2;
+        ok &= nq == 3 && Near(L[0].x, 400, 1e-3) && Near(L[1].x, 400 + room, 1e-3) && Near(L[0].u, 0.5 / 1024, 1e-6) &&
+              Near(L[1].u, (0.5 + (131.0) * room / (132 * fs)) / 1024, 1e-5) && Near(R[1].x, 600, 1e-3) && Near(R[0].x, 600 - room, 1e-3) &&
+              Near(R[1].u, 469.5 / 1024, 1e-6) && Near(R[0].u, (469.5 - 129.0 * room / (130 * fs)) / 1024, 1e-5) && Near(C[0].x, 400 + room, 1e-3) &&
+              room >= 30 * fs && room >= (130 - 100) * fs && BarInside(1000, 500, frame, frame + 1, 400, 600, 1) &&
+              lg[1].x - lg[0].x <= SABER_LOGO_RUN * 200 + 1e-3f && Near((lg[0].x + lg[1].x) / 2, 500, 1e-3);
+    }
+    FrameParse(bar, sizeof bar - 1);
+    BarSizeSet(200, 20, 0);
+    FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
+    ok &= Near((132 + 130 + 100) * fs, 200, 1e-3) && Near(ftop + 123 * fs, 500, 1e-3) && fx0 >= fb0 && fx1 <= fb1;
+    Check(ok, "Neo on a run too short for both caps and the diamond: each cap cut at its inner side (the left keeps its left end, the right its right end, read from the sheet at the same place), the diamond between, all inside the run, the logo no wider than half of it; caps that cannot be cut (their walls at their inner edges): the whole frame scaled down to fit the run");
+    /* the view takes the size as each screen opens (StylePick), and says so */
+    Fresh("bar-size-pick");
+    GameDir();
+    Look keep = g_look;
+    BarSizeSet(100, 0, 0);
+    g_look.thick = 175; g_look.width = 45; g_look.whole = 0;
+    StylePick();
+    ok = g_barThick == 175 && g_barWidth == 45 && g_barWhole == 0 && LogSays("the view: the bar 175% of its own thickness, 45% of the screen's width");
+    g_look.whole = 1;
+    StylePick();
+    ok &= g_barWhole == 1 && LogSays("the view: the bar 175% of its own thickness, the whole width of the screen");
+    g_look = keep;
+    StylePick();
+    ok &= g_barThick == 100 && g_barWidth == 0 && g_barWhole == 0 && LogSays("the view: the bar 100% of its own thickness, its own width");
+    Check(ok, "each screen takes the bar's size as it opens (thick, width, whole from style.txt), the log saying so; back at the defaults, the defaults");
+    BarSizeSet(100, 0, 0);
+    g_logoOn = 0; g_logo.ok = 0; g_frameOn = 0; g_frame.ok = 0; g_class = 0;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
 }
 
 /* The parchment (his "fix it", 10 Oct 2026: he had seen only the living map under the new bar): the client's world map
@@ -9663,6 +9893,7 @@ int main(int argc, char **argv)
     TestTimeOfDay();
     TestViewDefault();
     TestVanillaBar();
+    TestBarSize();
     TestParchment();
     TestZoneRule();
     TestCut();
