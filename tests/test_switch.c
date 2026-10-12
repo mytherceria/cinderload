@@ -6599,6 +6599,78 @@ static void TestLandPaint(void)
     TestPaintNew(1);
     TestPaintFill(0, 0, 1002, 668, 0x80C040);
 }
+/* ---- the paper past a zone's border, found (ParchPaper; his pick, 12 Oct: only the paper gives way) ----
+ * On made-up paintings at the map's own size: plain parchment past the border, faintly fibred and mottled as the client's
+ * is, is paper; a mountain range drawn on that parchment (strokes a few texels apart) is not, nor the gaps between its
+ * strokes; a piece's own art in the paper's colour (not what the tiles draw there) is not; nor what is not the page's
+ * paper's colour (green land, a grey river); and the paper's colour is the page's own, sampled where its tiles draw a
+ * neighbour's land. */
+static void TestPaperPaint(int x, int y, const unsigned char *c, int piece)
+{
+    unsigned char *p = g_parchPx + 4 * ((size_t)y * g_parchTW + x);
+    p[0] = c[0]; p[1] = c[1]; p[2] = c[2]; p[3] = 255;
+    if (piece) g_pieceA[(size_t)y * g_parchTW + x] = 255;
+}
+static int TestPaperFind(const unsigned char *tone)
+{
+    int W = PARCH_MAP_W, H = PARCH_MAP_H;
+    g_parchK = 1; g_parchTW = 1024;
+    g_parchPx = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)1024 * 1024 * 4);
+    g_pieceA = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)1024 * 1024);
+    g_parchBaseL = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)W * H);
+    unsigned seed = 12345;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            seed = seed * 1103515245u + 12345u;
+            int fib = (int)((seed >> 16) % 9) - 4, mot = (int)(12.0f * ParchSmooth((float)((x / 40 + y / 30) % 5) / 4.0f)) - 6;   /* (fibres, mottling) */
+            unsigned char c[3] = { (unsigned char)(tone[0] + fib + mot), (unsigned char)(tone[1] + fib + mot), (unsigned char)(tone[2] + fib / 2 + mot / 2) };
+            int piece = x >= 300;                                                  /* (its pieces over the right of the page) */
+            if (x >= 600 && x < 800 && y >= 100 && y < 300 && (x + y / 2) % 6 < 2) { c[0] = 40; c[1] = 25; c[2] = 10; }   /* (a mountain range's strokes, dark as ink) */
+            if (x >= 300 && x < 450 && y >= 400 && y < 500) { c[0] = 90; c[1] = 140; c[2] = 40; }                      /* (green land) */
+            TestPaperPaint(x, y, c, piece);
+            g_parchBaseL[y * W + x] = (unsigned char)(int)(0.30f * c[0] + 0.59f * c[1] + 0.11f * c[2] + 0.5f);
+            if (x >= 850 && x < 950 && y >= 400 && y < 500) {                     /* (a piece's own art in the paper's colour: the
+                                                                                    * tiles draw it darker) */
+                g_parchBaseL[y * W + x] = (unsigned char)(g_parchBaseL[y * W + x] - 40);
+            }
+        }
+    static unsigned char m[64 * 64], pg[64 * 64];                           /* (a neighbour's land everywhere, 16 x 16 texels a
+                                                                             * chunk) */
+    for (int i = 0; i < 64 * 64; i++) { m[i] = LAND_THEIRS; pg[i] = 0; }
+    ParchLand L = { 0 };
+    L.m = m; L.pg = pg; L.w = L.h = 64;
+    static int gc[1024], gr[1024];
+    for (int i = 0; i < 1024; i++) gc[i] = gr[i] = i / 16;
+    unsigned char *p = ParchPaper(&L, gc, gr);
+    int ok = p != NULL;
+    long paper = 0, plain = 0, range = 0, rangeP = 0, own = 0, ownP = 0, green = 0, greenP = 0;
+    for (int y = 0; ok && y < H; y++)
+        for (int x = 0; x < W; x++) {
+            int v = p[y * W + x] == 1, r = x >= 600 && x < 800 && y >= 100 && y < 300, o = x >= 850 && x < 950 && y >= 400 && y < 500;
+            int g = x >= 300 && x < 450 && y >= 400 && y < 500;
+            if (r) { range++; rangeP += v; }
+            else if (o) { own++; ownP += v; }
+            else if (g) { green++; greenP += v; }
+            else if (x >= 20 && x < W - 20 && y >= 20 && y < H - 20 &&            /* (the plain parchment, clear of those by 20) */
+                     !(x >= 580 && x < 820 && y >= 80 && y < 320) && !(x >= 830 && x < 970 && y >= 380 && y < 520) && !(x >= 280 && x < 470 && y >= 380 && y < 520)) {
+                plain++; paper += v;
+            }
+        }
+    printf("  the paper found: plain parchment %ld of %ld texels, a mountain range %ld of %ld, a piece's own art in the paper's colour %ld of %ld, green land %ld of %ld\n",
+           paper, plain, rangeP, range, ownP, own, greenP, green);
+    ok &= paper >= plain * 99 / 100 && rangeP == 0 && ownP <= own / 20 && greenP == 0;
+    if (p) HeapFree(GetProcessHeap(), 0, p);
+    ParchFree();
+    return ok;
+}
+static void TestPaperUnit(void)
+{
+    static const unsigned char tones[3][3] = { { 150, 110, 38 }, { 110, 85, 70 }, { 160, 125, 60 } };   /* (Elwynn's, a greyer
+                                                                         * plague page's, a paler one) */
+    int ok = 1;
+    for (int t = 0; t < 3; t++) ok &= TestPaperFind(tones[t]);
+    Check(ok, "the paper past a zone's border found on its painting (ParchPaper): plain parchment, fibred and mottled, 99% of it paper at three pages' own tones; a mountain range drawn on it (strokes six texels apart) none of it, its gaps included; a piece's own art in the paper's colour (not what the tiles draw there) under 5%; green land none");
+}
 static void TestLand(void)
 {
     Fresh("land");
@@ -6657,7 +6729,8 @@ static void TestLand(void)
     {
         static const char lrel[] = "Data/CinderLoad/land-Elwynn.bin";
         static unsigned char lf[4096], lf2[4096];
-        int n = TestBytes(lrel, lf, sizeof lf), bytes = (L.w * L.h + 3) / 4;
+        int n = TestBytes(lrel, lf, sizeof lf), bytes = (L.w * L.h + 3) / 4 + L.w * L.h;   /* (its marks, 2 bits a chunk; each
+                                                                                   * chunk's neighbour's page) */
         ParchLand L3 = { 0 };
         int okf = n == LAND_HEAD + bytes && Rd32(lf + 4) == LAND_VERSION && Rd32(lf + 36) == LandSum(lf + LAND_HEAD, bytes) && lf[n - 1] == 0;
         memcpy(lf2, lf, (size_t)n); lf2[LAND_HEAD + 20] ^= 0x04;          /* (a chunk's bits changed under the header as made) */
@@ -8736,6 +8809,160 @@ static void TestNearbyClient(const char *client)
     ParchLandFree(&g_land);
     TestGlideState();
 }
+/* ---- only the paper gives way (his pick, 12 Oct, of two fixes for his find in the film from Eastvale Logging Camp: a blank
+ * band along the whole northern edge of Duskwood, by the river) ----
+ * The arrival zone's painting is drawn over the zones nearby, and past its own land its map shows the land round it as
+ * plain parchment with the neighbours' names on it: Elwynn's overlay pieces carry that paper 100 to 250 yards onto
+ * Duskwood, whole, over Duskwood's own painting. Only that paper, and the names on it, may give way: the art a zone's map
+ * draws past its border (mountains, rivers, its places' names) stays whole as before. Measured on the client's own
+ * files: each zone's painting with every piece (the full map), cut as the parchment's work cuts it, at the map's own size
+ * (its texels K x K of the painting's). */
+static unsigned char *g_ppA, *g_ppP;                 /* (the zone's cut's alpha and its pieces' alpha, at the painting's size) */
+static int g_ppW, g_ppH, g_ppK, g_ppMap;
+static ParchRect g_ppR;
+/* zone name on map made with every piece and cut as from an arrival at x, y: 1 when made */
+static int TestPaperCut(const char *name, int map, float x, float y)
+{
+    free(g_ppA); free(g_ppP); g_ppA = g_ppP = NULL;
+    int z = TestZoneRow(name, map), cont = ParchContinent(map);
+    if (z < 0 || cont < 0) { printf("  only the paper: no %s page\n", name); return 0; }
+    const char *why = "", *cwhy = "";
+    int ok = ParchMake(cont, &why);                                    /* (its continent's lines, for the zone's outline) */
+    if (ok) ParchContMade(cont, &cwhy);
+    ParchFree();
+    float fx, fy;
+    ParchSpot(map, x, y, &fx, &fy);
+    ok &= ParchMake(z, &why);
+    if (ok) ParchZoneMade(z, cont, fx, fy, &cwhy);
+    ok &= g_zoneCut && g_cutLand && g_pieceA;
+    g_ppK = g_parchK; g_ppW = PARCH_MAP_W * g_ppK; g_ppH = PARCH_MAP_H * g_ppK; g_ppR = ParchBox(z); g_ppMap = map;
+    g_ppA = (unsigned char *)malloc((size_t)g_ppW * g_ppH); g_ppP = (unsigned char *)malloc((size_t)g_ppW * g_ppH);
+    for (int j = 0; ok && j < g_ppH; j++)
+        for (int i = 0; i < g_ppW; i++) {
+            g_ppA[(size_t)j * g_ppW + i] = g_parchPx[4 * ((size_t)j * g_parchTW + i) + 3];
+            g_ppP[(size_t)j * g_ppW + i] = g_pieceA[(size_t)j * g_parchTW + i];
+        }
+    ParchFree();
+    ParchLandFree(&g_land);
+    if (g_linesCont.m) HeapFree(GetProcessHeap(), 0, g_linesCont.m);
+    g_linesCont.m = NULL;
+    if (!ok) printf("  only the paper: %s not made and cut (%s %s)\n", name, why, cwhy);
+    return ok;
+}
+/* the cut over x0..x1, y0..y1 (the map's own texels): its texels, those whole, their mean and the most of any (0..1) */
+static void TestPaperBox(int x0, int y0, int x1, int y1, long *n, long *whole, float *mean, float *most)
+{
+    double sum = 0;
+    int mx = 0;
+    *n = *whole = 0;
+    for (int j = y0 * g_ppK; g_ppA && j < y1 * g_ppK; j++)
+        for (int i = x0 * g_ppK; i < x1 * g_ppK; i++) {
+            int a = g_ppA[(size_t)j * g_ppW + i];
+            (*n)++; *whole += a == 255; sum += a;
+            if (a > mx) mx = a;
+        }
+    *mean = *n ? (float)(sum / 255.0 / (double)*n) : 0; *most = (float)mx / 255.0f;
+}
+/* the cut at world x, y (0..1; -1 outside its box), *piece: an overlay piece there (alpha half or more) */
+static float TestPaperAt(float x, float y, int *piece)
+{
+    float fx, fy;
+    ParchSpot(g_ppMap, x, y, &fx, &fy);
+    float u = (fx - g_ppR.x0) / (g_ppR.x1 - g_ppR.x0), v = (fy - g_ppR.y0) / (g_ppR.y1 - g_ppR.y0);
+    *piece = 0;
+    if (!g_ppA || !(u >= 0 && u < 1 && v >= 0 && v < 1)) return -1;
+    size_t at = (size_t)(int)(v * (float)g_ppH) * g_ppW + (size_t)(int)(u * (float)g_ppW);
+    *piece = g_ppP[at] >= 128;
+    return g_ppA[at] / 255.0f;
+}
+/* page i's painting's own softness at its box's edge (PARCH_FEATHER, as it is laid among the zones nearby) at world x, y */
+static float TestPaperSoft(int i, float x, float y)
+{
+    float ax, ay, bx, by, gx, gy;
+    LandChunkAt(g_pz[i].t, g_pz[i].l, &ax, &ay);
+    LandChunkAt(g_pz[i].b, g_pz[i].r, &bx, &by);
+    LandChunkAt(x, y, &gx, &gy);
+    float u = (gx - ax) / (bx - ax), v = (gy - ay) / (by - ay), eu = u < 1 - u ? u : 1 - u, ev = v < 1 - v ? v : 1 - v;
+    return eu <= 0 || ev <= 0 ? 0 : ParchSmooth(eu / PARCH_FEATHER) * ParchSmooth(ev / PARCH_FEATHER);
+}
+/* over x from x0 by dx (nx) and y from y0 by dy (ny): the arrival's cut at points on its pieces over page i's land (*n), and
+ * the most the continent could show there under it and page i's own softness (1 - cut) x (1 - softness) */
+static float TestPaperEdge(int i, float x0, float dx, int nx, float y0, float dy, int ny, int *n)
+{
+    float worst = 0;
+    *n = 0;
+    for (int a = 0; a < nx; a++)
+        for (int b = 0; b < ny; b++) {
+            int piece;
+            float x = x0 + dx * (float)a, y = y0 + dy * (float)b, c = TestPaperAt(x, y, &piece), f = TestPaperSoft(i, x, y);
+            if (c < 0 || !piece || f <= 0 || f >= 0.99f) continue;
+            (*n)++;
+            if ((1 - c) * (1 - f) > worst) worst = (1 - c) * (1 - f);
+        }
+    return worst;
+}
+static void TestPaperClient(const char *client)
+{
+    Fresh("paper-client");
+    if (!LinkClient(client)) return;
+    GameDir();
+    TestGlideState();
+    g_landPrint = 0;
+    ParchRead();
+    long n, whole, n2, w2, n3, w3;
+    float mean, most, mean2, most2, mean3, most3;
+    /* the band, from Eastvale Logging Camp: the paper south of the river along Duskwood's northern edge (the map's x 450 to
+     * 950, y 615 to 640) and the name DUSKWOOD on it (x 575 to 752, y 606 to 628) */
+    int ok = TestPaperCut("Elwynn", 0, -9454, -1404);
+    TestPaperBox(450, 615, 950, 640, &n, &whole, &mean, &most);
+    TestPaperBox(575, 606, 752, 628, &n2, &w2, &mean2, &most2);
+    TestPaperBox(123, 127, 353, 167, &n3, &w3, &mean3, &most3);
+    ParchNear *N = &g_pj.nearby;
+    const char *why = "";
+    int dusk = TestZoneRow("Duskwood", 0), laid = 0;
+    ok &= dusk >= 0 && ParchNearMake(TestZoneRow("Elwynn", 0), ParchContinent(0), 0, -9454, -1404, 0, 0, NULL, 2, N, &why) && N->laid == N->n;
+    for (int k = 0; k < N->n; k++) laid |= N->row[k] == dusk;
+    float s1 = TestSheetA(-10100, -300), s2 = TestSheetA(-10100, -700), s3 = TestSheetA(-10100, -1100);
+    ParchFree();
+    printf("  only the paper: Elwynn's painting from Eastvale Logging Camp over the band along Duskwood's northern edge, mean %.3f (%ld of %ld texels whole); over the name DUSKWOOD, the most %.2f (mean %.3f); Duskwood laid under it %d, its sheet there %.2f %.2f %.2f; the STORMWIND banner %ld of %ld whole\n",
+           mean, whole, n, most2, mean2, laid, s1, s2, s3, w3, n3);
+    Check(ok && n > 40000 && mean < 0.15f && n2 > 10000 && most2 < 0.5f && laid && s1 > 0.75f && s2 > 0.9f && s3 > 0.9f,
+          "only the paper gives way (his find: a blank band along the whole northern edge of Duskwood from Eastvale Logging Camp, Elwynn's own picture of Duskwood as plain parchment over Duskwood's painting): on the client's files, Elwynn's painting with every piece, cut as from Eastvale Logging Camp, is gone from the paper along Duskwood's northern edge (under 15% there on the whole) and from the name DUSKWOOD on it (no letter over half there), and Duskwood is laid there under it (over 75% at the river, over 90% east of it)");
+    Check(ok && n3 > 30000 && w3 == n3, "only the paper: the STORMWIND banner on Elwynn's map whole, every texel of it (a capital's piece on its zone's map, never paper)");
+    /* the places' names across a border, at the landings his verifiers checked: whole */
+    ok = TestPaperCut("DunMorogh", 0, -5900, -2250);
+    TestPaperBox(822, 427, 892, 455, &n, &whole, &mean, &most);
+    ok &= TestPaperCut("Tanaris", 1, -6700, -4213);
+    TestPaperBox(547, 72, 610, 90, &n2, &w2, &mean2, &most2);
+    printf("  only the paper: RUGFORD'S MOUNTAIN REST on Dun Morogh's map %ld of %ld texels whole (mean %.3f); SANDMOON VILLAGE on Tanaris's %ld of %ld (mean %.3f)\n",
+           whole, n, mean, w2, n2, mean2);
+    Check(ok && n > 5000 && n2 > 3000 && whole >= n * 99 / 100 && w2 >= n2 * 99 / 100 && mean > 0.99f && mean2 > 0.99f,
+          "only the paper: a place's name across its zone's border stays whole (the verifiers' find on the other fix: 'RUGFORD'S MOUNTAIN REST' cut to 'RUGFOR / MOUNT / RES' at the Dun Morogh landing, 'SANDMOON VILLAGE' to 'ANDMOON VILLAGE' at Tanaris's): on the client's files, each label's box 99% whole or more");
+    /* Northwind's mountains over the Burning Steppes, where the other fix let a pale strip into the film from Eastvale */
+    ok = TestPaperCut("Northwind", 0, -7417, 650);
+    int pts = 0, wpts = 0;
+    for (int c = 0; c < 2; c++)
+        for (int a = 0; a < 5; a++)
+            for (int b = 0; b < 5; b++) {
+                int piece;
+                float v = TestPaperAt((c ? -8112.0f : -7475.0f) + 25 * (float)a, (c ? -720.0f : -767.0f) + 25 * (float)b, &piece);
+                if (v < 0 || !piece) continue;
+                pts++; wpts += v >= 1;
+            }
+    printf("  only the paper: Northwind's mountains over the Burning Steppes, %d of %d points on its pieces whole\n", wpts, pts);
+    Check(ok && pts >= 40 && wpts == pts, "only the paper: a zone's art past its border stays whole (the verifiers' find on the other fix: Northwind's mountains over the Burning Steppes gave way, and with the Burning Steppes faded there a pale strip ran along that border in the film from Eastvale Logging Camp): on the client's files, Northwind's painting whole at every point of its pieces about (-7425, -717) and (-8062, -670)");
+    /* a neighbour's box's soft edge: where the arrival's map lies over it, never a strip of the continent */
+    int ne1 = 0, ne2 = 0;
+    ok = TestPaperCut("SearingGorge", 0, -6900, -1300);
+    float e1 = TestPaperEdge(TestZoneRow("Badlands", 0), -7228, 20, 3, -2085, -15, 6, &ne1);
+    ok &= TestPaperCut("ThousandNeedles", 1, -5400, -2500);
+    float e2 = TestPaperEdge(TestZoneRow("Barrens", 1), -5130, 30, 8, -2737, 20, 3, &ne2);
+    printf("  only the paper: over a neighbour's box's soft edge, the most the continent could show (1 - the arrival's cut) x (1 - the neighbour's softness): Searing Gorge over the Badlands %.2f (%d points), Thousand Needles over the Barrens %.2f (%d points)\n",
+           e1, ne1, e2, ne2);
+    Check(ok && ne1 >= 10 && ne2 >= 6 && e1 <= 0.26f && e2 <= 0.26f, "only the paper: no strip of the continent along a neighbour's box (the verifiers' find on the other fix: where a neighbour's painting is soft within the last 6% of its box, the arrival's map had covered it, and once that gave way the continent showed in a straight band, Searing Gorge over the Badlands, Thousand Needles over the Barrens): on the client's files, where the arrival's pieces lie over that soft edge, the continent could show a quarter at most");
+    free(g_ppA); free(g_ppP); g_ppA = g_ppP = NULL;
+    TestGlideState();
+}
 /* ---- the style: the map and the bar, each the player's (his decision, 10 Oct 2026), and the world map's switches ---- */
 #define STYLE_REL "Data/CinderLoad/style.txt"
 static void TestStyle(void)
@@ -9911,6 +10138,7 @@ int main(int argc, char **argv)
     TestZoneRule();
     TestCut();
     TestLand();
+    TestPaperUnit();
     TestWords();
     TestGlide();
     TestModeTurn();
@@ -9920,6 +10148,7 @@ int main(int argc, char **argv)
     TestNearbyMake();
     TestNearbyStyle();
     if (g_client) TestNearbyClient(g_client);
+    if (g_client) TestPaperClient(g_client);
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
