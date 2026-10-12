@@ -3785,7 +3785,7 @@ __attribute__((used)) unsigned g_blackCol[4];
  * parchment, in his recording): with the parchment on, the game's own frames of a screen, the ones before the view takes
  * it over, show nothing of the living map's picture, so the screen goes black, then the dark paper. */
 static int g_parchAsked;                         /* (the style's map, below: 1 the parchment, 0 the living map) */
-static int g_mapFull;                             /* (the style's map areas: 1 the full map, 0 only what was discovered) */
+static int g_mapFull = 1;                         /* (the style's map areas: 1 the full map, his default; 0 only what was discovered) */
 static int g_parchFullOn;                         /* (the view's, as this screen opened: StylePick) */
 #ifndef PARCH_NEAR_YD
 #define PARCH_NEAR_YD   1600                        /* the zones nearby: the reach, yards, unless style.txt says (0: none) */
@@ -3794,6 +3794,21 @@ static int g_nearYd = PARCH_NEAR_YD;                /* (the style's reach for th
 static int g_nearNamed;                             /* (1 when style.txt named the reach: only then written back, so a
                                                      * choice made in game never pins the default into the file) */
 static int g_parchNearOn;                           /* (the view's, as this screen opened: StylePick) */
+/* How the zones nearby fade (his pick, 11 Oct 2026 ~16:35, from the fade mockups: "OFFER ALL OF THESE IN THE MENU, BUT DO
+ * THE PER ZONE, WHOLE ZONE AS THE DEFAULT"), style.txt's fade line, chosen in the /cinderload window: zone, each neighbour
+ * fading across its own land, whole where a line out from the arrival enters it and gone where that line leaves it; third,
+ * the same line's nearest third whole, then fading to nothing where it leaves; 3600 and 1800, a circle about the arrival,
+ * whole to half that many yards and gone at them. Kept here, written back and said to the window (StyleFade, StyleSave,
+ * the CVar); the parchment's drawing of the four fades is the zones nearby's own. */
+enum { NEAR_ZONE, NEAR_THIRD, NEAR_C3600, NEAR_C1800, NEAR_FADES };
+#ifndef PARCH_NEAR_FADE
+#define PARCH_NEAR_FADE NEAR_ZONE                   /* the zones nearby's fade unless style.txt says (his default) */
+#endif
+static int g_nearFade = PARCH_NEAR_FADE;            /* (the style's fade for the zones nearby) */
+static int g_nearFadeNamed;                         /* (1 when style.txt named the fade, or it was chosen in the window: only
+                                                     * then written back, so a choice of the map, the bar or the areas never
+                                                     * pins the default into the file) */
+static const char *const kNearWord[NEAR_FADES] = { "zone", "third", "3600", "1800" };   /* (style.txt's and the CVar's words) */
 static void ParchBlackBuild(void)
 {
     static const float x[4] = { 0, 1, 0, 1 }, y[4] = { 0, 0, 1, 1 };
@@ -6952,7 +6967,6 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
 #define SABER_GLOW   0.024f        /* its glow beyond the core's edge, as it usually reaches (a flare goes further) */
 #define SABER_LOGO_H 0.085f        /* the logo on it, tall, */
 #define SABER_LOGO_FOOT 0.004f     /* and its foot this far up from the bottom of the window (both times the thickness), */
-#define SABER_LOGO_RUN 0.5f        /* and at most this much of the bar's run wide (a narrow bar) */
 #define SABER_TRACK  0x5A000000u   /* the way still to go: a faint dark line, a little thinner than the core */
 /* The classes' colours, 0xRRGGBB: the game's own (Blizzard's), the shaman's the TBC blue RavenCraft uses (his call,
  * 5 Oct); a character whose class the badge does not know gets CinderLoad's ember. */
@@ -6998,61 +7012,11 @@ static float SaberNoise(float x, float t, unsigned seed)
     float lo = a + (b - a) * ax, hi = c + (d - c) * ax;
     return lo + (hi - lo) * at;
 }
-/* A narrowed blade's light held to its bar's run (g_sbClip[0] to [1] across, while g_sbClipOn: SaberBuild sets it), as
- * the window's edges hold it at the whole width: no glow, orb, streak, ember, drop or bolt lights the map past the bar's
- * cut ends. */
-static int g_sbClipOn;
-static float g_sbClip[2];
-typedef struct { float x, y, u, v, c[4]; } SaberPt;
-/* The polygon in[n] cut at x = at, the side kept where side * (x - at) >= 0 (its corners' picture and colour carried
- * along the cut edges): into out[], how many corners returned. */
-static int SaberCut(const SaberPt *in, int n, SaberPt *out, float at, float side)
-{
-    int m = 0;
-    for (int i = 0; i < n; i++) {
-        const SaberPt *a = &in[i], *b = &in[(i + 1) % n];
-        float da = side * (a->x - at), db = side * (b->x - at);
-        if (da >= 0) out[m++] = *a;
-        if ((da >= 0) != (db >= 0)) {
-            float k = da / (da - db);
-            SaberPt *p = &out[m++];
-            p->x = at; p->y = a->y + (b->y - a->y) * k; p->u = a->u + (b->u - a->u) * k; p->v = a->v + (b->v - a->v) * k;
-            for (int j = 0; j < 4; j++) p->c[j] = a->c[j] + (b->c[j] - a->c[j]) * k;
-        }
-    }
-    return m;
-}
-static DWORD SaberPtArgb(const SaberPt *p)
-{
-    DWORD out = 0;
-    for (int j = 0; j < 4; j++) out = out << 8 | (DWORD)(int)(FireClamp(p->c[j], 0, 255) + 0.5f);
-    return out;
-}
 /* A quad round from its top left: corners x, y, each its own colour (a plain quad's u, v unused). */
 static void SaberPut(int tex, int add, const float *x, const float *y, const DWORD *c, const float *uv)
 {
     static const float kWhole[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
     if (!uv) uv = kWhole;
-    if (g_sbClipOn) {
-        int out = 0;
-        for (int j = 0; j < 4; j++) out |= x[j] < g_sbClip[0] || x[j] > g_sbClip[1];
-        if (out) {                                                     /* (past an end: cut there, the rest drawn) */
-            SaberPt a[8], b[8];
-            for (int j = 0; j < 4; j++) {
-                a[j].x = x[j]; a[j].y = y[j]; a[j].u = uv[2 * j]; a[j].v = uv[2 * j + 1];
-                for (int k = 0; k < 4; k++) a[j].c[k] = (float)(c[j] >> (24 - 8 * k) & 255);   /* (a, r, g, b) */
-            }
-            int n = SaberCut(a, 4, b, g_sbClip[0], 1);
-            n = SaberCut(b, n, a, g_sbClip[1], -1);
-            for (int f = 1; f + 1 < n; f += 2) {                       /* (as quads round its first corner: a fan) */
-                ViewVert *q = ViewQuadMode(tex, add);
-                if (!q) return;
-                const SaberPt *p[4] = { &a[0], &a[f], &a[f + 1], &a[f + 2 < n ? f + 2 : f + 1] };
-                for (int j = 0; j < 4; j++) ViewVertSet(q + j, p[j]->x, p[j]->y, p[j]->u, p[j]->v, SaberPtArgb(p[j]));
-            }
-            return;
-        }
-    }
     ViewVert *q = ViewQuadMode(tex, add);
     if (!q) return;
     for (int j = 0; j < 4; j++) ViewVertSet(q + j, x[j], y[j], uv[2 * j], uv[2 * j + 1], c[j]);
@@ -7067,18 +7031,20 @@ static void SaberGlowAt(float x, float y, float rx, float ry, DWORD argb)
 /* (the frame's table and its parser are with the logo's, above: FrameParse) */
 /* ---- the bar's size, chosen in the /cinderload panel (his design, 11 Oct 2026: "choose the thickness of the bar and
  * whether or not it stretches the entire width of the screen"): style.txt's "thick" (percent of each bar's own
- * thickness), "width" (percent of the screen, or each bar's own: retro its art's 512 texels at the UI's scale, neo edge
- * to edge) and "whole" (the screen's whole width, over the width; retro too). StylePick hands them to the view as each
- * screen opens; each is held to its range here as well, so no number can put a bar off the window. The defaults draw
- * each bar exactly as before. ---- */
+ * thickness), "width" (percent of the screen, or retro's own: its art's 512 texels at the UI's scale) and "whole" (the
+ * screen's whole width, over the width). Thickness for both bars; the width and the whole for retro alone: Neo is always
+ * the whole width (his, 11 Oct 2026 evening: "it always needs to be full 100% width because the edges of it don't have a
+ * left and right hand bar end made of metal textures"), whatever the width line says. StylePick hands them to the view
+ * as each screen opens; each is held to its range here as well, so no number can put a bar off the window. The defaults
+ * draw each bar exactly as before. ---- */
 #define LOOK_THICK_LEAST 50
 #define LOOK_THICK_MOST  200
 #define LOOK_WIDTH_LEAST 20
 #define LOOK_WIDTH_MOST  100
 static int g_barThick = 100, g_barWidth, g_barWhole;    /* the view's, this screen's (width 0: the bar's own) */
 /* The size as the view draws it: the thickness a multiplier (*tk, 1 at 100), the width a share of the screen (0: the
- * bar's own; the whole width 1). */
-static void BarSize(float *tk, float *share)
+ * bar's own; the whole width 1). Neo's (neo): always its own, edge to edge. */
+static void BarSize(int neo, float *tk, float *share)
 {
     int t = g_barThick, w = g_barWidth;
     if (t < LOOK_THICK_LEAST) t = LOOK_THICK_LEAST;
@@ -7086,41 +7052,42 @@ static void BarSize(float *tk, float *share)
     if (w && w < LOOK_WIDTH_LEAST) w = LOOK_WIDTH_LEAST;
     if (w > LOOK_WIDTH_MOST) w = LOOK_WIDTH_MOST;
     *tk = t == 100 ? 1.0f : (float)t / 100.0f;
-    *share = g_barWhole ? 1.0f : (float)w / 100.0f;
+    *share = neo ? 0.0f : g_barWhole ? 1.0f : (float)w / 100.0f;
 }
-/* The blade's run across a W-wide window at piece scale s: its outer ends *bx0, *bx1 (the window's edges at its own
- * width or the whole; else centred at the chosen share of it) and how wide its caps are drawn there (*cl, *cr: their
- * own widths, cut at their inner sides when the run is too short for both and the diamond, never past their cups' back
- * walls or lit lips). s comes back smaller only when even that will not fit. Edge to edge (its own width or the whole)
- * the caps are always whole, as before. */
-static void FrameRun(float W, float share, float *s, float *bx0, float *bx1, float *cl, float *cr)
+/* ---- the bar's fill and colour, chosen in the /cinderload panel (his design and his pick, 11 Oct 2026: Heat, Smooth or
+ * Blade light on both bars, inside Neo's frame on Neo, "in my class's colour" or CinderLoad's ember): style.txt's
+ * "effect" and "colour", handed to the view as each screen opens (StylePick). Heat: retro's own fill, a slow heat
+ * drifting toward the tip in the colour (VBarFill); Smooth: the same fill, even, its heat held at its middle; Blade
+ * light: the blade's own light (SaberBuild's fill), on Neo as it always was, on retro in its channel. ---- */
+enum { LOOK_HEAT, LOOK_SMOOTH, LOOK_BLADE, LOOK_EFFECTS };
+static int g_barEffect = LOOK_HEAT, g_barEmber;          /* the view's, this screen's: the fill, and the ember for the class */
+#define BAR_EMBER 0xFF8A2Au                               /* CinderLoad's ember (the colour of a class not known, too) */
+/* The bar's colour, 0xRRGGBB: the class's, or CinderLoad's ember when so chosen. */
+static unsigned BarColour(void)
+{
+    LONG cl = g_class;
+    return g_barEmber ? BAR_EMBER : kClassColour[cl > 0 && cl < 12 ? cl : 0];
+}
+/* The blade's run across a W-wide window at piece scale s: edge to edge, its outer ends *bx0, *bx1 the window's, its
+ * caps whole (*cl, *cr: their own widths at s; 0 with no frame). */
+static void FrameRun(float W, const float *s, float *bx0, float *bx1, float *cl, float *cr)
 {
     *bx0 = 0; *bx1 = W;
-    if (share > 0 && share < 1) { float bw = W * share; *bx0 = (W - bw) / 2; *bx1 = *bx0 + bw; }
     if (*s <= 0) { *cl = *cr = 0; return; }
-    int lw = g_frame.r[FR_LEFT][2] - g_frame.r[FR_LEFT][0], rw = g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0];
-    int wc = g_frame.r[FR_CENTRE][2] - g_frame.r[FR_CENTRE][0];
-    int ml = g_frame.ends[0] > g_frame.lips[0] ? g_frame.ends[0] : g_frame.lips[0];          /* (texels each cap keeps) */
-    int mr = rw - (g_frame.ends[1] < g_frame.lips[1] ? g_frame.ends[1] : g_frame.lips[1]);
-    float run = *bx1 - *bx0;
-    *cl = (float)lw * *s; *cr = (float)rw * *s;
-    if (!(share > 0 && share < 1)) return;                         /* (edge to edge: the caps whole, as they always were) */
-    if ((float)(ml + mr + wc) * *s > run) *s = run / (float)(ml + mr + wc);
-    float room = (run - (float)wc * *s) / 2;                       /* (each side of the diamond) */
-    *cl = (float)lw * *s; *cr = (float)rw * *s;
-    if (*cl > room) *cl = room > (float)ml * *s ? room : (float)ml * *s;
-    if (*cr > room) *cr = room > (float)mr * *s ? room : (float)mr * *s;
+    *cl = (float)(g_frame.r[FR_LEFT][2] - g_frame.r[FR_LEFT][0]) * *s;
+    *cr = (float)(g_frame.r[FR_RIGHT][2] - g_frame.r[FR_RIGHT][0]) * *s;
 }
 /* Where the bar sits in a W x H window: its pieces' scale (*s, 0 with no frame) and top, the channel's centre line and
  * half height, its ends (*x0 inside the left cap, *x1 inside the right: the blade runs between them) and its outer
- * ends (*bx0, *bx1). Its rail band FRAME_BAND of the height times the thickness, on the bottom of the window. */
+ * ends (*bx0, *bx1: the window's edges, whatever the width). Its rail band FRAME_BAND of the height times the
+ * thickness, on the bottom of the window. */
 static void FrameLayout(float W, float H, float *s, float *top, float *cy, float *ch, float *x0, float *x1, float *bx0, float *bx1)
 {
     float tk, share, cl, cr;
-    BarSize(&tk, &share);
+    BarSize(1, &tk, &share);
     if (g_frameOn && g_frame.ok && g_viewTex[VT_FRAME]) {
         *s = FRAME_BAND * H * tk / (float)(g_frame.band[1] - g_frame.band[0]);
-        FrameRun(W, share, s, bx0, bx1, &cl, &cr);
+        FrameRun(W, s, bx0, bx1, &cl, &cr);
         *top = H - (float)g_frame.band[1] * *s;
         *cy = *top + (float)(g_frame.chan[0] + g_frame.chan[1]) * 0.5f * *s;
         *ch = (float)(g_frame.chan[1] - g_frame.chan[0]) * 0.5f * *s;
@@ -7129,7 +7096,7 @@ static void FrameLayout(float W, float H, float *s, float *top, float *cy, float
     } else {
         float band = FRAME_BAND * H * tk;
         *s = 0;
-        FrameRun(W, share, s, bx0, bx1, &cl, &cr);
+        FrameRun(W, s, bx0, bx1, &cl, &cr);
         *top = H - band;
         *cy = H - band * 0.5f; *ch = band * 0.27f;
         *x0 = *bx0; *x1 = *bx1;
@@ -7361,17 +7328,26 @@ static void SaberArc(float ax, float ay, float bx, float by, float a, float t, u
     SaberLine(x, y, al, ARC_SEGS + 1, w, mid, rim);
 }
 
-/* The blade for a W x H window, its tip at the bar as shown, at the view's clock now. */
+/* The blade's light in retro's channel (its fill Blade light: VBarBuild), from x0 to x1 across, its centre line cy and
+ * half height ch: while on, SaberBuild draws only the light's fill and its filaments there (retro's own channel, halo,
+ * glass and frame round it; none of Neo's frame, glow, orb, lightning or logo), with none of Neo's qualities. */
+static struct { int on; float x0, x1, cy, ch; } g_sbRetro;
+/* (retro's fill, below: Heat and Smooth inside Neo's frame) */
+static void VBarFillIn(float x0, float x1, float cy, float ch, float shown, float t, float age, unsigned rgb);
+/* The blade for a W x H window, its tip at the bar as shown, at the view's clock now: its fill the chosen one (Heat and
+ * Smooth retro's, in its channel; Blade light its own), the rest of it (its frame, glow, orb, lightning, logo) Neo's. */
 static void SaberBuild(float W, float H, float shown, DWORD now)
 {
-    LONG cl = g_class;
-    unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0], rgb = SaberVivid(base);
+    unsigned base = BarColour(), rgb = SaberVivid(base);
     unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), boltRgb = SaberMix(rgb, 0xFFFFFF, 0.7f);
     float fs, ftop, cy, ch, fx0, fx1, bx0, bx1, tk, share, wl = 0, wr = 0;
-    FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1, &bx0, &bx1);   /* the channel the frame holds it in, end to end */
-    BarSize(&tk, &share);
-    if (fs > 0) { float s2 = fs; FrameRun(W, share, &s2, &bx0, &bx1, &wl, &wr); }   /* (its caps as drawn) */
-    g_sbClipOn = share > 0 && share < 1; g_sbClip[0] = bx0; g_sbClip[1] = bx1;   /* (narrowed: its light kept to its run) */
+    int in = g_sbRetro.on, blade = in || g_barEffect == LOOK_BLADE;   /* (in retro's channel: its fill Blade light) */
+    BarSize(1, &tk, &share);
+    if (in) { fs = 0; ftop = 0; cy = g_sbRetro.cy; ch = g_sbRetro.ch; fx0 = bx0 = g_sbRetro.x0; fx1 = bx1 = g_sbRetro.x1; }
+    else {
+        FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1, &bx0, &bx1);   /* the channel the frame holds it in, end to end */
+        if (fs > 0) FrameRun(W, &fs, &bx0, &bx1, &wl, &wr);     /* (its caps as drawn) */
+    }
     /* the light (his calls on his reference, 7 Oct: "a more uniform fill", "darker towards the edges and lighter white
      * towards the middle ... the light is more fully in the middle"; "no black area at the beginning or ending"): a
      * smooth fill the whole height of its channel, filled right up to the metal at both ends, its moving tip rounded; deeper in the class's
@@ -7380,7 +7356,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     float t = (float)(now % 3600000u) / 1000.0f, hc = ch, g = SABER_GLOW * H * tk;
     float span = fx1 - fx0, front = fx0 + FireClamp(shown, 0, 1) * span, round = ch * 1.2f, line = H / 1440.0f;
     float xc = fx0 + span / 2, breath = 0.94f + 0.06f * SaberNoise(0, t * 0.6f, 21);
-    unsigned style = g_saberStyle, deep = SaberMix(rgb, 0, style & SABER_RAW ? 0.72f : 0.42f);
+    unsigned style = in ? 0 : g_saberStyle, deep = SaberMix(rgb, 0, style & SABER_RAW ? 0.72f : 0.42f);
     unsigned hotX = SaberMix(rgb, 0xFFFFFF, style & SABER_RAW ? 0.55f : 0.4f);
     /* the metal either side of the channel, for the lightning to strike (a little of the channel's own without a frame) */
     float railUp = fs > 0 ? cy - ch - (ftop + (float)g_frame.band[0] * fs) : ch * 0.35f;
@@ -7446,9 +7422,9 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
                 }
             if (x >= front) { b++; break; }
         }
-    FrameChannel(fx0, fx1, cy, ch);                                 /* the dark channel, cup to cup */
+    if (!in) FrameChannel(fx0, fx1, cy, ch);                        /* the dark channel, cup to cup */
     /* the glow, added: a narrow bright one and a wide faint one beyond the core's edge, above and below */
-    for (int k = 0; k + 1 < b; k++)
+    for (int k = 0; k + 1 < b && !in; k++)
         for (int s = 0; s < 2; s++) {
             float d = s ? 1.0f : -1.0f, x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
             for (int layer = 0; layer < 2; layer++) {
@@ -7461,12 +7437,14 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             }
         }
     /* the way still to go, then the fill: two quads a column (its top half and its bottom), each corner its own light */
-    if (front < fx1) {
+    if (front < fx1 && !in) {
         float x[4] = { front, fx1, fx1, front }, y[4] = { cy - hc * 0.4f, cy - hc * 0.4f, cy + hc * 0.4f, cy + hc * 0.4f };
         DWORD c[4] = { SABER_TRACK, SABER_TRACK, SABER_TRACK, SABER_TRACK };
         SaberPut(-1, 0, x, y, c, NULL);
     }
-    for (int k = 0; k + 1 < b && (style & SABER_LIQUID); k++)     /* liquid: SABER_BANDS rows a column, top to bottom */
+    if (!blade && shown > 0)                                        /* Heat or Smooth: retro's fill in the channel */
+        VBarFillIn(fx0, fx1, cy, ch, shown, t, g_sbFullAt ? (float)(LONG)(now - g_sbFullAt) / 1000.0f : -1, rgb);
+    for (int k = 0; k + 1 < b && blade && (style & SABER_LIQUID); k++)   /* liquid: SABER_BANDS rows a column, top to bottom */
         for (int r = 0; r < SABER_BANDS; r++) {
             float x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
             float v0 = -1 + 2.0f * (float)r / SABER_BANDS, v1 = -1 + 2.0f * (float)(r + 1) / SABER_BANDS;
@@ -7475,7 +7453,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
                            SaberArgb(g_sbStop[r + 1][k + 1], 0.97f), SaberArgb(g_sbStop[r + 1][k], 0.97f) };
             SaberPut(-1, 0, x, y, c, NULL);
         }
-    for (int k = 0; k + 1 < b && !(style & SABER_LIQUID); k++) {
+    for (int k = 0; k + 1 < b && blade && !(style & SABER_LIQUID); k++) {
         float x[4] = { g_sbX[k], g_sbX[k + 1], g_sbX[k + 1], g_sbX[k] };
         float yt[4] = { cy - g_sbCore[0][k], cy - g_sbCore[0][k + 1], cy, cy };
         float yb[4] = { cy, cy, cy + g_sbCore[1][k + 1], cy + g_sbCore[1][k] };
@@ -7487,7 +7465,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     }
     /* the filaments: faint threads of its light wandering along inside the fill toward the tip, brighter in a surge */
     float stop = shown >= 1 ? fx1 - ch * 0.5f : front - ch * 0.8f, step = ch * 0.45f, from = fx0 + ch * 0.5f;
-    if (shown > 0 && stop > fx0 + ch * 2 && step > 0) {
+    if (blade && shown > 0 && stop > fx0 + ch * 2 && step > 0) {
         static float lx[STRAND_PTS], ly[STRAND_PTS], la[STRAND_PTS];
         int np = (int)((stop - from) / step) + 1;
         if (np > STRAND_PTS) { np = STRAND_PTS; step = (stop - from) / (STRAND_PTS - 1); }
@@ -7504,6 +7482,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
             SaberLine(lx, ly, la, np, sw, boltRgb, rgb);
         }
     }
+    if (in) return;                                                 /* (in retro's channel: its fill alone) */
     if (fs > 0) FrameBuild(bx0, bx1, fs, ftop, wl, wr);             /* the frame over it, the light spilling past */
     if (fs > 0 && shown > 0) {                                      /* and the blade's light on its metal */
         g_shine.front = front; g_shine.reach = SHINE_REACH * (bx1 - bx0); g_shine.rgb = rgb;
@@ -7625,11 +7604,9 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
         for (int i = 0; i < na; i++) SaberGlowAt(tipX[i], tipY[i], ch * 0.35f, ch * 0.35f, SaberArgb(hotRgb, 0.7f * tipA[i]));
     }
     /* the logo on it at the centre, its halfway mark, standing on the bottom of the window (the bar is flush with it):
-     * lit in the class's colour as the tip reaches it; its size and its foot with the bar's thickness, at most
-     * SABER_LOGO_RUN of the bar's run wide */
+     * lit in the class's colour as the tip reaches it; its size and its foot with the bar's thickness */
     if (g_logoOn && g_logo.ok && g_viewTex[VT_LOGO]) {
         float lh = SABER_LOGO_H * H * tk, lw = lh * g_logo.aspect, most = LOGO_W * W * tk;
-        if (most > SABER_LOGO_RUN * (bx1 - bx0)) most = SABER_LOGO_RUN * (bx1 - bx0);
         if (lw > most) { lh *= most / lw; lw = most; }
         float lx = (bx0 + bx1) / 2, ly = H - SABER_LOGO_FOOT * H * tk - lh / 2, lit = FireClamp((shown - 0.47f) / 0.06f, 0, 1);
         if (lit > 0 && g_viewTex[VT_SPARK]) {
@@ -7641,7 +7618,6 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
         ViewRect(VT_LOGO, lx - lw / 2, ly - lh / 2, lx + lw / 2, ly + lh / 2, g_logo.tu0, g_logo.tv0, g_logo.tu1, g_logo.tv1,
                  0xFF000000u | grey << 16 | grey << 8 | grey);
     }
-    g_sbClipOn = 0;
 }
 
 /* ---- vanilla's own bar (the parchment style's, slice 1; his pick 10 Oct 2026, "b4", after four rounds of mocks) ----
@@ -7687,12 +7663,14 @@ static DWORD g_vbFullAt;                /* the view's clock as it filled (0 whil
 /* Where it sits in a W x H window: a texel's size (*s), its top left (*x0, *y0) and how many texels wide it is drawn
  * (*tw: the art's 512 at its own width; more or fewer, the caps kept and the middle stretched or cut). Its own: 512
  * texels at the UI's height scale, centred; the thickness scales the texel, the width (or the whole) sets *tw. Its
- * centre VBAR_CY of the height up, or higher when a thick bar would reach past the window's bottom. */
+ * centre VBAR_CY of the height up at every thickness: its frame's art is seen only in its rows 7 to 55 of 64 (the rest
+ * clear), so even at 200% the frame seen stands inside the window (it was lifted to keep its clear rows in too: a 200%
+ * bar stood higher than the others, and higher than the panel's preview showed it). */
 static void VBarLayout(float W, float H, float *s, float *x0, float *y0, float *tw)
 {
     float k = H / VBAR_UI_H, tk, share;
     if (VBAR_TEX_W * k > 0.96f * W) k = 0.96f * W / VBAR_TEX_W;   /* (a window narrower than 2:3: as wide as fits) */
-    BarSize(&tk, &share);
+    BarSize(0, &tk, &share);
     float sc = k * tk, bw = share > 0 ? W * share : VBAR_TEX_W * k;
     float least = (float)(VBAR_CAP_L + VBAR_CAP_R + VBAR_MID_LEAST);
     if (least * sc > bw) sc = bw / least;                          /* (too thick for so narrow a bar: as thick as fits) */
@@ -7700,7 +7678,6 @@ static void VBarLayout(float W, float H, float *s, float *x0, float *y0, float *
     *tw = sc == k && share <= 0 ? (float)VBAR_TEX_W : bw / sc;
     *x0 = (W - *tw * sc) / 2;
     *y0 = H - VBAR_CY * H - VBAR_TEX_H * sc / 2;
-    if (*y0 + VBAR_TEX_H * sc > H) *y0 = H - VBAR_TEX_H * sc;
 }
 /* Where texel u of the art (0 to 512 across) is drawn, in a bar tw texels wide from x0 at s. As wide as the art or
  * wider: the left cap as it is, the middle stretched to fill, the right cap as it is at the far end. Narrower: the art's
@@ -7761,11 +7738,11 @@ static unsigned VBarRgb(const float *c)
     for (int i = 0; i < 3; i++) out = out << 8 | (unsigned)(int)(FireClamp(c[i], 0, 1) * 255 + 0.5f);
     return out;
 }
-/* The fill's colour at x texels along the channel, y down it: its heat in the class's colour, the lit edge near the
- * front, and full, the last sweep (sw: its place, or a long way off). */
-static unsigned VBarFill(float x, float y, float t, float front, float sw, const float *tint, const float *hot, float edgeK)
+/* The fill's colour at x texels along the channel, y down it: its heat in the class's colour (smooth: even, its heat
+ * held at its middle, VBAR_MID), the lit edge near the front, and full, the last sweep (sw: its place, or a long way off). */
+static unsigned VBarFill(float x, float y, float t, float front, float sw, const float *tint, const float *hot, float edgeK, int smooth)
 {
-    float l = VBarLevel(VBarHeat(x, y, t)), c[3];
+    float l = VBarLevel(smooth ? VBAR_MID : VBarHeat(x, y, t)), c[3];
     float d = (x - front) / VBAR_EDGE, e = (float)FireExp(-(double)(d * d)) * edgeK;
     float q = (x - sw) / VBAR_SWEEP_W, S = FireClamp(0.7f * 1.2f * (float)FireExp(-(double)(q * q)), 0, 0.9f);
     for (int i = 0; i < 3; i++) {
@@ -7776,18 +7753,57 @@ static unsigned VBarFill(float x, float y, float t, float front, float sw, const
     }
     return VBarRgb(c);
 }
+/* The fill's colour rgb (0xRRGGBB) as VBarFill takes it: its tint, 0 to 1, and its lit edge's hot. */
+static void VBarTints(unsigned rgb, float *tint, float *hot)
+{
+    tint[0] = (float)(rgb >> 16 & 255) / 255; tint[1] = (float)(rgb >> 8 & 255) / 255; tint[2] = (float)(rgb & 255) / 255;
+    for (int i = 0; i < 3; i++) hot[i] = FireClamp(tint[i] * 0.55f + 0.50f, 0, 1);
+}
+/* The fill (Heat; smooth: Smooth) in a channel from x0 across and y0 down, s pixels a texel of retro's art (its channel
+ * VBAR_R1 - VBAR_R0 texels high; on Neo, its own channel's height over that), up to front texels along it (span: all of
+ * it): columns VBAR_COL texels wide (wider on a channel so long in texels that there would be more than VBAR_COLS_MAX:
+ * the view's list is shared with the map), VBAR_ROWS bands each, each corner its own colour. */
+static void VBarFillRun(float x0, float y0, float s, float span, float front, float t, float sw, const float *tint, const float *hot,
+                        float edgeK, int smooth)
+{
+    float rh = (float)(VBAR_R1 - VBAR_R0) / VBAR_ROWS, col = span / VBAR_COLS_MAX > VBAR_COL ? span / VBAR_COLS_MAX : VBAR_COL;
+    for (float xa = 0; xa < front - 0.001f; xa += col) {
+        float xb = xa + col < front ? xa + col : front;
+        for (int r = 0; r < VBAR_ROWS; r++) {
+            float ya = r * rh, yb = (r + 1) * rh;
+            float x[4] = { x0 + xa * s, x0 + xb * s, x0 + xb * s, x0 + xa * s };
+            float y[4] = { y0 + ya * s, y0 + ya * s, y0 + yb * s, y0 + yb * s };
+            DWORD c[4] = { 0xFF000000u | VBarFill(xa, ya, t, front, sw, tint, hot, edgeK, smooth),
+                           0xFF000000u | VBarFill(xb, ya, t, front, sw, tint, hot, edgeK, smooth),
+                           0xFF000000u | VBarFill(xb, yb, t, front, sw, tint, hot, edgeK, smooth),
+                           0xFF000000u | VBarFill(xa, yb, t, front, sw, tint, hot, edgeK, smooth) };
+            SaberPut(-1, 0, x, y, c, NULL);
+        }
+    }
+}
+/* Retro's fill (Heat; Smooth when so chosen) in Neo's channel from x0 to x1, its centre line cy and half height ch: a
+ * texel the channel's height over retro's, the lit edge at its front, rgb its colour; age: s since it filled (its last
+ * sweep), or below 0 while it fills. */
+static void VBarFillIn(float x0, float x1, float cy, float ch, float shown, float t, float age, unsigned rgb)
+{
+    float u = 2 * ch / (float)(VBAR_R1 - VBAR_R0), span = (x1 - x0) / u, tint[3], hot[3];
+    float sw = age >= 0 && age < VBAR_SWEEP_S * 1.25f ? age / VBAR_SWEEP_S * span : -1e6f;
+    VBarTints(rgb, tint, hot);
+    VBarFillRun(x0, cy - ch, u, span, FireClamp(shown, 0, 1) * span, t, sw, tint, hot, 0.62f + 0.08f * SeaSin(t * 2 * 3.14159265f / 1.7f),
+                g_barEffect == LOOK_SMOOTH);
+}
 static void VBarBuild(float W, float H, float shown, DWORD now)
 {
-    LONG cl = g_class;
-    unsigned base = kClassColour[cl > 0 && cl < 12 ? cl : 0];
-    float tint[3] = { (float)(base >> 16 & 255) / 255, (float)(base >> 8 & 255) / 255, (float)(base & 255) / 255 }, hot[3], glow[3], dark[3] = { 0.05f, 0.05f, 0.05f };
+    unsigned base = BarColour();
+    float tint[3], hot[3], glow[3], dark[3] = { 0.05f, 0.05f, 0.05f };
     float glow2[3];                                                  /* (the flash: the edge's light, a little brighter) */
-    for (int i = 0; i < 3; i++) { hot[i] = FireClamp(tint[i] * 0.55f + 0.50f, 0, 1); glow[i] = FireClamp(tint[i] * 1.1f, 0, 1); glow2[i] = FireClamp(hot[i] * 1.1f, 0, 1); }
+    VBarTints(base, tint, hot);
+    for (int i = 0; i < 3; i++) { glow[i] = FireClamp(tint[i] * 1.1f, 0, 1); glow2[i] = FireClamp(hot[i] * 1.1f, 0, 1); }
     float s, bx, by, tw, t = (float)(now % 3600000u) / 1000.0f;
     VBarLayout(W, H, &s, &bx, &by, &tw);
     int own = tw == (float)VBAR_TEX_W;                               /* (its own width: drawn as it always was) */
     float span = (float)(VBAR_C1 - VBAR_C0) + (tw - VBAR_TEX_W), front = FireClamp(shown, 0, 1) * span;   /* (texels along the channel) */
-    float cx0 = bx + VBAR_C0 * s, ry0 = by + VBAR_R0 * s, rh = (float)(VBAR_R1 - VBAR_R0) / VBAR_ROWS;
+    float cx0 = bx + VBAR_C0 * s, ry0 = by + VBAR_R0 * s;
     if (shown >= 1) { if (!g_vbFullAt) g_vbFullAt = now ? now : 1; } else g_vbFullAt = 0;
     float age = g_vbFullAt ? (float)(LONG)(now - g_vbFullAt) / 1000.0f : -1;
     float sw = age >= 0 && age < VBAR_SWEEP_S * 1.25f ? age / VBAR_SWEEP_S * span : -1e6f;
@@ -7799,19 +7815,13 @@ static void VBarBuild(float W, float H, float shown, DWORD now)
         DWORD c[4] = { 0xFF0D0D0Du, 0xFF0D0D0Du, 0xFF0D0D0Du, 0xFF0D0D0Du };
         SaberPut(-1, 0, x, y, c, NULL);
     }
-    /* the fill: columns VBAR_COL texels wide up to the front, VBAR_ROWS bands each, each corner its own colour */
-    float col = span / VBAR_COLS_MAX > VBAR_COL ? span / VBAR_COLS_MAX : VBAR_COL;
-    for (float xa = 0; xa < front - 0.001f; xa += col) {
-        float xb = xa + col < front ? xa + col : front;
-        for (int r = 0; r < VBAR_ROWS; r++) {
-            float ya = r * rh, yb = (r + 1) * rh;
-            float x[4] = { cx0 + xa * s, cx0 + xb * s, cx0 + xb * s, cx0 + xa * s };
-            float y[4] = { ry0 + ya * s, ry0 + ya * s, ry0 + yb * s, ry0 + yb * s };
-            DWORD c[4] = { 0xFF000000u | VBarFill(xa, ya, t, front, sw, tint, hot, edgeK), 0xFF000000u | VBarFill(xb, ya, t, front, sw, tint, hot, edgeK),
-                           0xFF000000u | VBarFill(xb, yb, t, front, sw, tint, hot, edgeK), 0xFF000000u | VBarFill(xa, yb, t, front, sw, tint, hot, edgeK) };
-            SaberPut(-1, 0, x, y, c, NULL);
-        }
-    }
+    /* the fill: Heat or Smooth, retro's own (VBarFillRun); or Blade light, the blade's fill in the channel (SaberBuild) */
+    if (g_barEffect == LOOK_BLADE) {
+        g_sbRetro.on = 1; g_sbRetro.x0 = cx0; g_sbRetro.x1 = cx0 + span * s;
+        g_sbRetro.ch = (float)(VBAR_R1 - VBAR_R0) * 0.5f * s; g_sbRetro.cy = ry0 + g_sbRetro.ch;
+        SaberBuild(W, H, shown, now);
+        g_sbRetro.on = 0;
+    } else VBarFillRun(cx0, ry0, s, span, front, t, sw, tint, hot, edgeK, g_barEffect == LOOK_SMOOTH);
     /* (b): the halo past the front, into the dark channel, in columns two texels wide */
     float reach = span - front < VBAR_HALO_MAX ? span - front : VBAR_HALO_MAX;
     for (float xa = 0; xa < reach - 0.001f; xa += 2) {
@@ -12746,8 +12756,8 @@ static int StyleNearby(const char *text, int *yd)
  * those anywhere): "thick 125" (percent of the bar's own), "width 50" (percent of the screen) or "width own" (each bar's
  * own: retro its art's, neo edge to edge), "whole on" or "whole off", "effect heat", "effect smooth" or "effect blade",
  * "colour class" or "colour ember", "quality" and any of liquid, pulse, unstable and raw (or none). A line missing: its
- * default, today's look. g_look holds them (the game's thread writes it, the view's reads it as each screen opens). ---- */
-enum { LOOK_HEAT, LOOK_SMOOTH, LOOK_BLADE, LOOK_EFFECTS };
+ * default, today's look. g_look holds them (the game's thread writes it, the view's reads it as each screen opens; the
+ * effects' words LOOK_HEAT and the rest are the view's, with the bar's fill). ---- */
 typedef struct { int thick, width, whole, effect, ember, quality; } Look;    /* (width 0: each bar's own) */
 #define LOOK_DEFAULT { 100, 0, 0, LOOK_HEAT, 0, SABER_PULSE | SABER_RAW }
 static Look g_look = LOOK_DEFAULT;
@@ -12813,6 +12823,23 @@ static int StyleLook(const char *text, Look *lk)
     }
     return named;
 }
+/* The text's "fade" line: "fade zone", "fade third", "fade 3600" or "fade 1800" (case aside; '#' to the line's end is a
+ * note), the zones nearby's fade into *fade (NEAR_ZONE and the rest); the last one named counts, one not as said is
+ * passed over. 1 when one was named. */
+static int StyleFade(const char *text, int *fade)
+{
+    char w[16], x[16];
+    int named = 0, k;
+    const char *s = text;
+    while (s && (k = LookWord(&s, w, (int)sizeof w))) {
+        if (k != 1 || lstrcmpiA(w, "fade")) continue;
+        const char *at = s;
+        int kx = LookWord(&at, x, (int)sizeof x);
+        if (kx != 1 && kx != 2) continue;
+        for (int f = 0; f < NEAR_FADES; f++) if (!lstrcmpiA(x, kNearWord[f])) { *fade = f; named = 1; s = at; }
+    }
+    return named;
+}
 /* The look's lines as style.txt and the CVar carry them, one after another with sep between ("\r\n" or " "). */
 static void StyleLookText(char *out, const Look *lk, const char *sep)
 {
@@ -12845,14 +12872,16 @@ static void StyleValue(char *out, int map, int bar, int full)
 /* style.txt written whole (a file beside it, then moved over it): 1 when it was. */
 static int StyleSave(int map, int bar, int full)
 {
-    char path[MAX_PATH], tmp[MAX_PATH], text[1200];
+    char path[MAX_PATH], tmp[MAX_PATH], text[1500];
     if (!Join(path, g_dir, STYLE_PATH) || !Join(tmp, g_dir, STYLE_TMP_PATH)) return 0;
     lstrcpyA(text, "# CinderLoad's loading screens, as chosen in game (the /cinderload panel); from the next "
                    "loading screen.\r\n# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade). areas: "
                    "discovered (the parchment shows only what you have discovered) or full (all of it).\r\n# nearby: how far round "
-                   "where you arrive the parchment shows the zones nearby, in yards (0: none).\r\n# thick: the bar's thickness, "
-                   "percent of its own (50 to 200). width: percent of the screen (20 to 100), or own (each bar's own). whole: on "
-                   "(the whole width of the screen) or off.\r\n# effect: heat, smooth or blade (blade light). colour: class (your "
+                   "where you arrive the parchment shows the zones nearby, in yards (0: none). fade: how they fade, zone (each "
+                   "zone across the whole of it), third (each zone, its nearest third whole), 3600 or 1800 (a circle round where "
+                   "you arrive, that many yards).\r\n# thick: the bar's thickness, percent of its own (50 to 200). width: percent "
+                   "of the screen (20 to 100), or own (its own); retro's alone, Neo is always the whole width. whole: on (the whole "
+                   "width of the screen) or off.\r\n# effect: heat, smooth or blade (blade light). colour: class (your "
                    "class's) or ember. quality: Neo's, any of liquid, pulse, unstable and raw, or none.\r\nmap ");
     lstrcatA(text, StyleMapName(map));
     lstrcatA(text, "\r\nbar ");
@@ -12863,6 +12892,12 @@ static int StyleSave(int map, int bar, int full)
     if (*(volatile int *)&g_nearNamed) wsprintfA(nearby, "\r\nnearby %d\r\n", *(volatile int *)&g_nearYd);
     else lstrcpyA(nearby, "\r\n");
     lstrcatA(text, nearby);
+    int fade = *(volatile int *)&g_nearFade;
+    if (*(volatile int *)&g_nearFadeNamed) {                       /* (named in the file, or chosen in the window) */
+        lstrcatA(text, "fade ");
+        lstrcatA(text, kNearWord[fade >= 0 && fade < NEAR_FADES ? fade : 0]);
+        lstrcatA(text, "\r\n");
+    }
     char look[200];
     StyleLookText(look, &g_look, "\r\n");
     lstrcatA(text, look);
@@ -12896,7 +12931,7 @@ static char *StyleText(char *text, DWORD n)
 static void StyleLoad(void)
 {
     char path[MAX_PATH], m[300];
-    int map = 1, bar = 1, full = 0, reach = PARCH_NEAR_YD, reachNamed = 0, lookNamed = 0;
+    int map = 1, bar = 1, full = 1, reach = PARCH_NEAR_YD, reachNamed = 0, lookNamed = 0, fade = PARCH_NEAR_FADE, fadeNamed = 0;
     Look look = LOOK_DEFAULT;
     const char *from = "the defaults (no choice made in game yet)";
     DWORD n = 0;
@@ -12904,6 +12939,7 @@ static void StyleLoad(void)
     if (text) {
         StyleParse(StyleText(text, n), &map, &bar, &full);
         reachNamed = StyleNearby(text, &reach);
+        fadeNamed = StyleFade(text, &fade);
         lookNamed = StyleLook(text, &look);
         HeapFree(GetProcessHeap(), 0, text);
         from = "Data\\CinderLoad\\style.txt (chosen in game)";
@@ -12917,6 +12953,8 @@ static void StyleLoad(void)
     *(volatile int *)&g_mapFull = full;
     *(volatile int *)&g_nearYd = reach;
     *(volatile int *)&g_nearNamed = reachNamed;
+    *(volatile int *)&g_nearFade = fade;
+    *(volatile int *)&g_nearFadeNamed = fadeNamed;
     g_look = look;
     wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game with /cinderload (its panel)",
               StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
@@ -12925,6 +12963,8 @@ static void StyleLoad(void)
                          reachNamed ? "Data\\CinderLoad\\style.txt" : "the default");
     else lstrcpyA(m, "style: the parchment's zones nearby off (style.txt's nearby 0)");
     Log(m);
+    wsprintfA(m, "style: the zones nearby's fade %s, from %s", kNearWord[fade], fadeNamed ? "Data\\CinderLoad\\style.txt" : "the default");
+    Log(m);
     char lk[200];
     StyleLookText(lk, &look, ", ");
     wsprintfA(m, "style: the bar's look: %s, from %s", lk, lookNamed ? "Data\\CinderLoad\\style.txt" : "the defaults");
@@ -12932,28 +12972,32 @@ static void StyleLoad(void)
 }
 /* The game's thread: the choice changed to map, bar, full (how: where it came from, for the log), kept in style.txt. 1
  * when it changed. */
-typedef struct { int map, bar, full, nearYd; Look look; } Style;    /* the whole choice: the three, the reach, the look */
+typedef struct { int map, bar, full, nearYd, fade; Look look; } Style;   /* the whole choice: the three, the reach, the fade, the look */
 static void StyleNow(Style *st)
 {
     st->map = *(volatile int *)&g_parchAsked;
     st->bar = *(volatile int *)&g_vbarAsked;
     st->full = *(volatile int *)&g_mapFull;
     st->nearYd = *(volatile int *)&g_nearYd;
+    st->fade = *(volatile int *)&g_nearFade;
     st->look = g_look;
 }
 static int StyleApply(const Style *st, const char *how)
 {
     Style was;
     StyleNow(&was);
-    int three = st->map != was.map || st->bar != was.bar || st->full != was.full, rest = st->nearYd != was.nearYd || !LookSame(&st->look, &was.look);
+    int three = st->map != was.map || st->bar != was.bar || st->full != was.full;
+    int rest = st->nearYd != was.nearYd || st->fade != was.fade || !LookSame(&st->look, &was.look);
     if (!three && !rest) return 0;
     *(volatile int *)&g_parchAsked = st->map;
     *(volatile int *)&g_vbarAsked = st->bar;
     *(volatile int *)&g_mapFull = st->full;
     *(volatile int *)&g_nearYd = st->nearYd;
     if (st->nearYd != was.nearYd) *(volatile int *)&g_nearNamed = 1;   /* (the reach chosen in game: kept in the file) */
+    *(volatile int *)&g_nearFade = st->fade;
+    if (st->fade != was.fade) *(volatile int *)&g_nearFadeNamed = 1;   /* (the fade chosen in the window: kept in the file) */
     g_look = st->look;
-    char m[400];
+    char m[512];
     int saved = StyleSave(st->map, st->bar, st->full);
     const char *kept = saved ? "kept in Data\\CinderLoad\\style.txt" : "Data\\CinderLoad\\style.txt could NOT be written, so it holds only "
                                                                      "until the game closes";
@@ -12965,7 +13009,9 @@ static int StyleApply(const Style *st, const char *how)
     if (rest) {
         char lk[200];
         StyleLookText(lk, &st->look, ", ");
-        wsprintfA(m, "style: the zones nearby out to %d yards, the bar's look %s (%s), from the next loading screen; %s", st->nearYd, lk, how, kept);
+        int fd = st->fade >= 0 && st->fade < NEAR_FADES ? st->fade : 0;
+        wsprintfA(m, "style: the zones nearby out to %d yards, their fade %s, the bar's look %s (%s), from the next loading screen; %s", st->nearYd,
+                  kNearWord[fd], lk, how, kept);
         Log(m);
     }
     return 1;
@@ -13023,6 +13069,15 @@ static void StylePick(void)
         else wsprintfA(sm, "  the view: the bar %d%% of its own thickness, its own width", thick);
         Log(sm);
         g_barThick = thick; g_barWidth = width; g_barWhole = whole;
+    }
+    int effect = *(volatile int *)&g_look.effect, ember = *(volatile int *)&g_look.ember != 0;
+    if (effect < 0 || effect >= LOOK_EFFECTS) effect = LOOK_HEAT;
+    if (effect != g_barEffect || ember != g_barEmber) {             /* the bar's fill and colour, as chosen in the panel */
+        char em[160];
+        wsprintfA(em, "  the view: the bar's fill %s, in %s", effect == LOOK_BLADE ? "blade light" : kLookEffect[effect],
+                  ember ? "CinderLoad's ember" : "the class's colour");
+        Log(em);
+        g_barEffect = effect; g_barEmber = ember;
     }
     int nearYd = *(volatile int *)&g_nearYd;
     if (nearYd != g_parchNearOn) {
@@ -13164,7 +13219,8 @@ static int CvText(const void *cv, char *out, int size)
     if (size > 0) out[size - 1] = 0;
     return v != NULL;
 }
-/* The rest of the CVar's value after its three words, as the panel writes it (CL.Save): " nearby <yards>", then the look
+/* The rest of the CVar's value after its three words, as the panel writes it (CL.Save): " fade <zone, third, 3600 or
+ * 1800>" (the zones nearby's reach is style.txt's alone: the window no longer has it), then the look
  * as StyleLookText spells it with single spaces, each part at most once and in that order, and " fault" last when they
  * met an error; any part may be missing (kept as *st has it). 1 when the whole of it is that; else 0, *st untouched. */
 /* The quality word at v (its length into *len): 0 to 3 as kLookQuality, 4 "none", else -1. */
@@ -13180,7 +13236,7 @@ static int LookQualityAt(const char *v, int *len)
 }
 static int StyleCvarTail(const char *v, Style *st, int *fault)
 {
-    static const char *const kKeys[7] = { "nearby", "thick", "width", "whole", "effect", "colour", "quality" };
+    static const char *const kKeys[7] = { "fade", "thick", "width", "whole", "effect", "colour", "quality" };
     Style out = *st;
     int next = 0;
     *fault = 0;
@@ -13217,7 +13273,9 @@ static int StyleCvarTail(const char *v, Style *st, int *fault)
         for (int i = 0; i < n; i++) { if (x[i] < '0' || x[i] > '9') digits = 0; else letters = 0; }
         if (digits && x[0] == '0' && n > 1) return 0;
         int val = digits ? LookNumber(x, 0, 99999) : 0;
-        if (k == 0 && digits && val <= PARCH_NEAR_MOST) out.nearYd = val;
+        int fd = -1;
+        for (int f = 0; k == 0 && f < NEAR_FADES; f++) if (!lstrcmpiA(x, kNearWord[f])) fd = f;
+        if (k == 0 && fd >= 0) out.fade = fd;
         else if (k == 1 && digits && val >= LOOK_THICK_LEAST && val <= LOOK_THICK_MOST) out.look.thick = val;
         else if (k == 2 && digits && val >= LOOK_WIDTH_LEAST && val <= LOOK_WIDTH_MOST) out.look.width = val;
         else if (k == 2 && letters && !lstrcmpiA(x, "own")) out.look.width = 0;
@@ -13231,7 +13289,7 @@ static int StyleCvarTail(const char *v, Style *st, int *fault)
     return 1;
 }
 /* The CVar's value as the switches set it (CL.Save): exactly "<map> <bar> <areas>", each word as StyleMapName,
- * StyleBarName and StyleAreasName spell it, then the rest as StyleCvarTail reads it (the panel's reach and look, " fault"
+ * StyleBarName and StyleAreasName spell it, then the rest as StyleCvarTail reads it (the panel's fade and look, " fault"
  * when they met an error). Anything else (the probe's "?", a value from Config.wtf, an older two-word one, a value cut
  * short or run on) is not theirs: 0. *st: the whole choice, its parts not named kept. */
 static int StyleCvarRead(const char *v, Style *st, int *fault)
@@ -13282,7 +13340,7 @@ static void LuaBreak(const char *why)
                  "Data\\CinderLoad\\style.txt still sets the style", why);
     Log(m);
 }
-/* The chunk the switches are made by: the choice held (the three, then the reach and the look as the CVar carries them),
+/* The chunk the switches are made by: the choice held (the three, then the fade and the look as the CVar carries them),
  * then dll/switches.lua. Its length, or 0 when out is too small. */
 static int LuaChunk(char *out, int size, int map, int bar, int full)
 {
@@ -13297,7 +13355,8 @@ static int LuaChunk(char *out, int size, int map, int bar, int full)
     lstrcatA(out, StyleAreasName(full));
     char look[260], lk[200];
     StyleLookText(lk, &g_look, " ");
-    wsprintfA(look, "\"\nlocal CL_LOOK = \"nearby %d %s\"\n", *(volatile int *)&g_nearYd, lk);
+    int fade = *(volatile int *)&g_nearFade;
+    wsprintfA(look, "\"\nlocal CL_LOOK = \"fade %s %s\"\n", kNearWord[fade >= 0 && fade < NEAR_FADES ? fade : 0], lk);
     lstrcatA(out, look);
     lstrcatA(out, kSwitchesLua);
     return lstrlenA(out);

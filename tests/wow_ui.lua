@@ -284,6 +284,22 @@ function R:SetFont(file, size)
     if size then self.size = size end
 end
 function R:GetFont() return "Fonts\\FRIZQT__.TTF", self.size or 10, "" end
+-- ---- font objects (1.12's CreateFont, a button's font for each state) ----
+local FontMeta = { __index = {} }
+function FontMeta.__index:SetFont(file, size) self.file = file; if size then self.size = size end end
+function FontMeta.__index:SetTextColor(r, g, b) self.color = { r, g, b } end
+function FontMeta.__index:GetFont() return self.file or "Fonts\\FRIZQT__.TTF", self.size, "" end
+local function FontObject(name, size, color)
+    return setmetatable({ kind = "Font", name = name, size = size, color = { color[1], color[2], color[3] } }, FontMeta)
+end
+-- a font object's look put on a font string (as the client does when a button changes state)
+local function FontOn(fs, f)
+    if not (fs and f) then return end
+    fs.size, fs.color = f.size, { f.color[1], f.color[2], f.color[3] }
+    if f.file then fs.fontFile = f.file end
+end
+function R:SetTextFontObject(f) self.fontNormal = f; if not self.over then FontOn(self.textRegion, f) end end
+function R:SetHighlightFontObject(f) self.fontHigh = f; if self.over then FontOn(self.textRegion, f) end end
 -- ---- buttons ----
 function R:SetHighlightTextColor(r, g, b) self.highlightColor = { r, g, b } end
 function R:SetDisabledTextColor(r, g, b) self.disabledColor = { r, g, b } end
@@ -371,6 +387,10 @@ UI.templates.UIPanelButtonTemplate = function(f)
     t.justifyH = "CENTER"
     t.points = { { p = "CENTER", rel = f, relp = "CENTER", x = 0, y = 0 } }
     f.textRegion = t
+    -- its <NormalFont inherits="GameFontNormal"/> and <HighlightFont inherits="GameFontHighlight"/>: the words take the
+    -- one for the button's state as the mouse comes and goes (a size set on the words themselves is lost then)
+    f.fontNormal = FontObject("GameFontNormal", 12, { 1, 0.82, 0 })
+    f.fontHigh = FontObject("GameFontHighlight", 12, { 1, 1, 1 })
 end
 UI.templates.UIPanelCloseButton = function(f)
     f.w, f.h = 32, 32
@@ -786,7 +806,7 @@ function UI.Fresh(opts)
                    len = string.len, sub = string.sub, rep = string.rep, byte = string.byte, char = string.char, gfind = string.gmatch }
     env.table = { insert = table.insert, remove = table.remove, getn = table.getn, concat = table.concat, sort = table.sort,
                   setn = function() end }
-    env.math = { floor = math.floor, ceil = math.ceil, abs = math.abs, max = math.max, min = math.min, mod = math.fmod }
+    env.math = { floor = math.floor, ceil = math.ceil, abs = math.abs, max = math.max, min = math.min, mod = math.fmod, pow = math.pow }
     env._G = env
     env.getglobal = function(n) return env[n] end
     env.setglobal = function(n, v) env[n] = v end
@@ -796,6 +816,11 @@ function UI.Fresh(opts)
     env.wipe = function(t) for k in pairs(t) do t[k] = nil end; return t end
     env.tContains = function(t, x) for _, v in pairs(t) do if v == x then return 1 end end end
     env.message = function(m) error("message(): " .. tostring(m)) end
+    env.CreateFont = function(name)                        -- (1.12's: a font object, named, global)
+        local f = FontObject(name, 12, { 1, 1, 1 })
+        if name then env[name] = f end
+        return f
+    end
     env.CreateFrame = function(kind, name, parent, template)
         if kind ~= "Frame" and kind ~= "Button" and kind ~= "CheckButton" and kind ~= "Slider" then error("CreateFrame: " .. tostring(kind)) end
         if template and not name then error("a template's $parent names need a name") end
@@ -916,8 +941,14 @@ function UI.Click(b, button)                -- the client's click: only on a vis
     UI.Run(b, "OnClick", button or "LeftButton")
     return true
 end
-function UI.Enter(f) UI.Run(f, "OnEnter") end
-function UI.Leave(f) UI.Run(f, "OnLeave") end
+function UI.Enter(f)                       -- the mouse over it: a button's words take its highlight font
+    if f.kind == "Button" and f.textRegion and f.fontHigh then f.over = 1; FontOn(f.textRegion, f.fontHigh) end
+    UI.Run(f, "OnEnter")
+end
+function UI.Leave(f)
+    if f.kind == "Button" and f.textRegion and f.fontNormal then f.over = nil; FontOn(f.textRegion, f.fontNormal) end
+    UI.Run(f, "OnLeave")
+end
 function UI.Frame(elapsed)                  -- one frame: OnUpdate on every visible frame
     local list = {}
     for _, f in ipairs(world.made) do if f.scripts and f.scripts.OnUpdate and f:IsVisible() then table.insert(list, f) end end

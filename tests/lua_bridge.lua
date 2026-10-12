@@ -7,7 +7,7 @@
 --   openmap, closemap, minimize, maximize
 --   open, close           /cinderload alone (the window); the window shut
 --   pick <key> <value>    a radio of the window's clicked (map, bar, areas), or an effect's picture (effect heat)
---   slide <key> <value>   a slider of the window's dragged (nearby, thick, width)
+--   slide <key> <value>   a slider of the window's dragged (thick, width)
 --   tick <name>           a check box of the window's clicked (Whole, Colour, QualityLiquid ...)
 --   drag                  the window dragged by its title
 --   slash <words>         /cinderload <words>

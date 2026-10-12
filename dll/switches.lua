@@ -1,20 +1,22 @@
 -- CinderLoad's choices in game: /cinderload opens a window of its own (his design, 11 Oct 2026: "you type that and a
 -- moveable vanilla-plus looking menu pops up on screen"), the mockup he approved (PANEL-MOCKUP, 11 Oct): the loading
--- screen's map (Parchment | Satellite) and the parchment's map areas (Discovered | Full map) and its zones nearby (a
--- slider, in yards), the loading bar (Retro | Neo), its thickness and width (sliders) or the whole width of the screen,
--- its texture / effect (Heat | Smooth | Blade light) in the class's colour or not, Neo's four qualities (Liquid, Pulse,
--- Unstable, Raw: any of them), a still preview, Defaults and Close; dragged by its title. Nothing on the world map: the
--- map belongs to CinderMap. /cinderload map, bar and areas (and their values) work as before.
+-- screen's map (Parchment | Satellite) and the parchment's map areas (Discovered | Full map) and how its zones nearby
+-- fade (four ways, his pick of 11 Oct: each zone whole, each zone's nearest third, a circle of 3,600 or 1,800 yards), the
+-- loading bar (Retro | Neo), its thickness and width (sliders) or the whole width of the screen (Retro's alone: Neo is
+-- always the whole width), its texture / effect (Heat | Smooth | Blade light) in the class's colour or not, Neo's four
+-- qualities (Liquid, Pulse, Unstable, Raw: any of them), a moving preview, Defaults and Close; dragged by its title.
+-- Nothing on the world map: the map belongs to CinderMap. /cinderload map, bar and areas (and their values) work as
+-- before.
 -- Run inside the game by CinderLoad.dll, on the game's own thread while no Lua is running (no add-on folder: the release
 -- is the DLL and its packs). The DLL puts two lines before this text, the choice it holds:
---   local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"
---   local CL_LOOK = "nearby 1600 thick 100 width own whole off effect heat colour class quality pulse raw"
+--   local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "full"
+--   local CL_LOOK = "fade zone thick 100 width own whole off effect heat colour class quality pulse raw"
 -- Written for the client's Lua 5.0: no #, no %, no ... in a body, no string methods, no string.match.
 -- If this breaks, the game's own UI is unharmed: only frames of its own are made, every handler runs inside pcall, a
 -- fault switches it all off (CL.broken, the CVar told "fault"), no function of Blizzard's is replaced or hooked and no
 -- frame of the game's is changed (its one entry in UISpecialFrames lets Escape close it, as every panel's does).
--- The DLL hears a choice through one CVar of its own, CinderLoadStyle ("parchment retro discovered nearby 1200 thick
--- 100 ..."), and keeps it in Data\CinderLoad\style.txt: a DLL cannot give this client's Lua a function of its own (each
+-- The DLL hears a choice through one CVar of its own, CinderLoadStyle ("parchment retro full fade zone thick 100 ..."),
+-- and keeps it in Data\CinderLoad\style.txt: a DLL cannot give this client's Lua a function of its own (each
 -- C function's address is checked against WoW.exe's code before it is called, 0x42A320 from luaD_precall 0x6F61A1).
 local CL = CinderLoad
 if type(CL) ~= "table" then CL = {}; CinderLoad = CL end
@@ -35,16 +37,19 @@ CL.settings = {
 CL.effects = { { value = "heat", text = "Heat" }, { value = "smooth", text = "Smooth" }, { value = "blade", text = "Blade light" } }
 CL.qualities = { { value = "liquid", text = "Liquid" }, { value = "pulse", text = "Pulse" }, { value = "unstable", text = "Unstable" },
                  { value = "raw", text = "Raw" } }
--- the sliders: least, most, step (the numbers are his to change); nearby is the DLL's (0 none, 4000 at most)
-CL.range = { nearby = { 0, 4000, 100 }, thick = { 50, 200, 5 }, width = { 20, 100, 5 } }
--- the bar's effect and colour are kept in style.txt, but no loading screen draws them yet: said over their box (nil once
--- the DLL draws them); the bar's size is drawn (thickness, width, the whole width)
-CL.COMING = "kept; drawn in a later version"
+-- how the zones nearby fade (style.txt's fade line): his four, the first his default
+CL.fades = { { value = "zone", text = "Per zone, whole zone" }, { value = "third", text = "Per zone, nearest third" },
+             { value = "3600", text = "Circle, 3,600 yd" }, { value = "1800", text = "Circle, 1,800 yd" } }
+-- the sliders: least, most, step (the numbers are his to change)
+CL.range = { thick = { 50, 200, 5 }, width = { 20, 100, 5 } }
+-- with Neo picked, over Bar size: why its width is greyed (his, 11 Oct: Neo's ends have no metal caps)
+CL.NEOWIDE = "Neo: always whole width (no metal end caps)"
 CL.ART = "Interface\\CinderLoad\\"             -- the panel's pictures, in CinderLoad's pack (tools/make_panel_art.py)
 
+-- everything as it begins (his defaults, 11 Oct: the parchment, the full map, each zone fading whole; Retro)
 function CL.Defaults()
-    CL.map, CL.bar, CL.areas = "parchment", "retro", "discovered"
-    CL.nearby, CL.thick, CL.width, CL.whole, CL.effect, CL.ember = 1600, 100, 0, nil, "heat", nil
+    CL.map, CL.bar, CL.areas, CL.fade = "parchment", "retro", "full", "zone"
+    CL.thick, CL.width, CL.whole, CL.effect, CL.ember = 100, 0, nil, "heat", nil
     CL.quality = { pulse = 1, raw = 1 }
 end
 
@@ -62,9 +67,9 @@ function CL.Clamp(v, key)
     return CL.Hold(math.floor((v - r[1]) / r[3] + 0.5) * r[3] + r[1], key)
 end
 
--- the look as the DLL sends it (CL_LOOK) or as the CVar carries it: "nearby 1200 thick 100 width own whole off effect
--- heat colour class quality pulse raw"; a part missing or not ours: as it was. Numbers are held to their range only, never
--- put on a slider's step: Setup sends back what it read, so a login never rewrites style.txt (a hand-set "nearby 40" stays)
+-- the look as the DLL sends it (CL_LOOK) or as the CVar carries it: "fade zone thick 100 width own whole off effect heat
+-- colour class quality pulse raw"; a part missing or not ours: as it was. Numbers are held to their range only, never
+-- put on a slider's step: Setup sends back what it read, so a login never rewrites style.txt (a hand-set "thick 123" stays)
 function CL.ReadLook(s)
     local w = {}
     for t in string.gfind(s or "", "[^%s]+") do table.insert(w, t) end
@@ -73,7 +78,7 @@ function CL.ReadLook(s)
         local k, v = w[i], w[i + 1]
         local num = tonumber(v or "")
         i = i + 1
-        if k == "nearby" and num then CL.nearby = CL.Hold(num, "nearby"); i = i + 1
+        if k == "fade" and CL.Find(CL.fades, v) then CL.fade = v; i = i + 1
         elseif k == "thick" and num then CL.thick = CL.Hold(num, "thick"); i = i + 1
         elseif k == "width" and num then CL.width = CL.Hold(num, "width"); i = i + 1
         elseif k == "width" and v == "own" then CL.width = 0; i = i + 1
@@ -124,7 +129,7 @@ function CL.Describe()
     return t
 end
 
--- The CVar's value: the three, then the reach and the look, in the order the DLL reads them (StyleCvarTail)
+-- The CVar's value: the three, then the fade and the look, in the order the DLL reads them (StyleCvarTail)
 function CL.Value()
     local q = ""
     for _, o in ipairs(CL.qualities) do
@@ -136,7 +141,7 @@ function CL.Value()
     if q == "" then q = "none" end
     local width = "own"
     if CL.width ~= 0 then width = tostring(CL.width) end
-    return CL.map .. " " .. CL.bar .. " " .. CL.areas .. " nearby " .. tostring(CL.nearby) .. " thick " .. tostring(CL.thick) ..
+    return CL.map .. " " .. CL.bar .. " " .. CL.areas .. " fade " .. CL.fade .. " thick " .. tostring(CL.thick) ..
            " width " .. width .. " whole " .. (CL.whole and "on" or "off") .. " effect " .. CL.effect .. " colour " ..
            (CL.ember and "ember" or "class") .. " quality " .. q
 end
@@ -363,12 +368,22 @@ function CL.Slider(x, y, w, key, label, low, high)
     CL.ui.sliders[key] = { slider = s, value = v }
     return s
 end
+-- the red buttons' words at the window's size in each state: font objects of the window's own, gold at rest and white
+-- under the mouse as the template's are (a size set on the words alone gives way to the template's GameFontHighlight
+-- when the mouse is over it, and stays at its 12)
+function CL.ButtonFont(name, c)
+    local f = getglobal(name)
+    if not f then f = CreateFont(name) end
+    f:SetFont(CL.FONT, 13)
+    f:SetTextColor(c[1], c[2], c[3])
+    return f
+end
 function CL.PanelButton(x, y, name, label, fn)
     local b = CreateFrame("Button", "CinderLoadPanel" .. name, CL.host, "UIPanelButtonTemplate")
     CL.At(b, x, y, 120, 26)
+    b:SetTextFontObject(CL.ButtonFont("CinderLoadButtonFont", CL.GOLD))
+    b:SetHighlightFontObject(CL.ButtonFont("CinderLoadButtonFontHighlight", CL.WHITE))
     b:SetText(label)
-    local fs = getglobal(b:GetName() .. "Text")
-    if fs then fs:SetFont(CL.FONT, 13) end
     b:SetScript("OnClick", CL.Safe(name, fn))
     return b
 end
@@ -419,7 +434,7 @@ function CL.Build()
     close:SetScript("OnClick", CL.Safe("close", function() p:Hide() end))
     CL.Text(p, W / 2, 40, "Drag the title to move this window.  Each change shows from your next loading screen.", 12, nil, "ma")
 
-    -- Loading map, with Map areas and Nearby zones under it
+    -- Loading map, with Map areas and how the zones nearby fade under it
     CL.Box(L, 82, CW, 274, "Loading map")
     CL.Card(L + 14, 96, 150, 80, "PanelParchment", "map", "parchment")
     CL.Card(L + 176, 96, 150, 80, "PanelSatellite", "map", "satellite")
@@ -430,7 +445,13 @@ function CL.Build()
     CL.Radio(L + 14, 250, "areas", "discovered", "Discovered")
     CL.Radio(L + 176, 250, "areas", "full", "Full map")
     CL.Line(L + 10, 278, CW - 20)
-    CL.Slider(L + 16, 288, CW - 32, "nearby", "Nearby zones, faded with distance", "Short", "Long")
+    CL.Text(CL.host, L + 14, 286, "Nearby zones, faded with distance", 13, 1)
+    for i, o in ipairs(CL.fades) do                              -- (each zone's two down the left, the circles' on the right)
+        local x, y = L + 14, 306
+        if i > 2 then x = L + 200 end
+        if i == 2 or i == 4 then y = 328 end
+        CL.Radio(x, y, "fade", o.value, o.text)
+    end
 
     -- Loading bar: Retro's words, or Neo's four qualities
     CL.Box(L, 386, CW, 162, "Loading bar")
@@ -461,10 +482,10 @@ function CL.Build()
     CL.Slider(R + 16, 94, CW - 32, "thick", "Bar thickness", "Thin", "Thick")
     CL.Slider(R + 16, 158, CW - 32, "width", "Bar width", "Narrow", "Wide")
     CL.ui.whole = CL.Check(R + 14, 222, 28, "Whole", "Whole width of the screen", function(on) CL.Set("whole", on) end)
+    CL.ui.neoWide = CL.Text(p, R + CW - 4, 78, CL.NEOWIDE, 12, nil, "rd")     -- (shown with Neo: its width greyed)
 
     -- Texture / effect
     CL.Box(R, 300, CW, 96, "Texture / effect")
-    if CL.COMING then CL.ui.coming = { CL.Text(p, R + CW - 4, 296, CL.COMING, 12, nil, "rd") } end
     for i, o in ipairs(CL.effects) do
         local x = R + 16 + (i - 1) * 106
         CL.ui.effects[o.value] = CL.Card(x, 312, 96, 24, "Panel" .. string.upper(string.sub(o.value, 1, 1)) .. string.sub(o.value, 2), "effect", o.value)
@@ -510,8 +531,9 @@ function CL.OwnWidth()
 end
 
 -- the preview: the bottom of the screen at the strip's width (316 for the screen's whole width), the bar on it as the
--- loading screen lays it (retro: 42 of 720 tall, centred 0.075 of the height up; neo: its frame band, 0.066 of the height,
--- on the bottom), at the chosen thickness and width; its pictures cut from real loading screens
+-- loading screen lays it (retro: 42 of 720 tall, centred 0.075 of the height up at every thickness; neo: its frame band,
+-- 0.066 of the height, standing on the bottom at every thickness, always the whole width), at the chosen thickness and
+-- width; its pictures cut from real loading screens
 function CL.Preview()
     local v = CL.ui.preview
     local sw, sh = 316, 88
@@ -522,14 +544,15 @@ function CL.Preview()
     CL.Picture(v.ground, CL.map == "parchment" and "PreviewParchment" or "PreviewSatellite")
     local neo = CL.bar == "neo"
     local bh, cy, cap, ucap, art = 42 / 720 * H, 0.075 * H, 34 / 42, 34 / 476, "PreviewRetro"
-    if neo then bh, cy, cap, ucap, art = 0.066 * H, 0.04 * H, 40 / 48, 40 / 1704, "PreviewNeo" end
+    if neo then bh, cap, ucap, art = 0.066 * H, 40 / 48, 40 / 1704, "PreviewNeo" end
     bh = bh * CL.thick / 100
     local bw = sw * CL.width / 100
-    if CL.whole then bw = sw
-    elseif CL.width == 0 then if neo then bw = sw else bw = sw * CL.OwnWidth() / 100 end end
+    if CL.whole or neo then bw = sw                          -- (Neo: always the whole width)
+    elseif CL.width == 0 then bw = sw * CL.OwnWidth() / 100 end
     local cw = bh * cap
     if cw * 2 > bw then cw = bw / 2 end
-    local x0, top = (sw - bw) / 2, sh - cy - bh / 2
+    local x0, top = (sw - bw) / 2, sh - bh                   -- (Neo: its band's foot on the screen's, as FrameLayout stands it)
+    if not neo then top = sh - cy - bh / 2 end
     local parts = { { x0, cw, 0, ucap }, { x0 + cw, bw - 2 * cw, ucap, 1 - ucap }, { x0 + bw - cw, cw, 1 - ucap, 1 } }
     for i, q in ipairs(parts) do
         local t = v.bar[i]
@@ -587,37 +610,34 @@ function CL.Refresh()
         c.on = on
     end
     for _, r in ipairs(CL.ui.radios) do r.button:SetChecked(CL[r.key] == r.value) end
+    local neo = CL.bar == "neo"
     for key, s in pairs(CL.ui.sliders) do
         local value = CL[key]
         local text
-        if key == "nearby" then
-            text = tostring(value) .. " yards"
-            if value == 0 then text = "off" end
-        elseif key == "thick" then
+        if key == "thick" then
             text = tostring(value) .. "%"
         else
             text = tostring(value) .. "% of the screen"
-            if value == 0 then
-                value = CL.Clamp(CL.OwnWidth(), "width")
-                if CL.bar == "neo" then value = 100 end
-                text = "each bar's own"
-            end
-            if CL.whole then value, text = 100, "the whole screen" end
+            if value == 0 then value, text = CL.Clamp(CL.OwnWidth(), "width"), "each bar's own" end
+            if CL.whole or neo then value, text = 100, "the whole screen" end    -- (Neo: always)
         end
         s.slider:SetValue(value)
         s.value:SetText(text)
     end
-    CL.ui.whole:SetChecked(CL.whole)
+    -- the width: Retro's alone; with Neo picked, its slider and the whole width greyed and still, the note saying why
+    CL.ui.whole:SetChecked(CL.whole or neo)
     local ws = CL.ui.sliders.width.slider
-    if CL.whole then
-        if ws.Disable then ws:Disable() end
-        ws:SetAlpha(0.5)
-    else
-        if ws.Enable then ws:Enable() end
-        ws:SetAlpha(1)
+    for _, c in ipairs({ { ws, CL.whole or neo }, { CL.ui.whole, neo } }) do
+        if c[2] then
+            if c[1].Disable then c[1]:Disable() end
+            c[1]:SetAlpha(0.5)
+        else
+            if c[1].Enable then c[1]:Enable() end
+            c[1]:SetAlpha(1)
+        end
     end
+    if neo then CL.ui.neoWide:Show() else CL.ui.neoWide:Hide() end
     CL.ui.colour:SetChecked(not CL.ember)
-    local neo = CL.bar == "neo"
     for _, fs in ipairs(CL.ui.words) do if neo then fs:Hide() else fs:Show() end end
     if neo then CL.ui.neoTitle:Show() else CL.ui.neoTitle:Hide() end
     for value, c in pairs(CL.ui.qualities) do

@@ -78,11 +78,11 @@ Check(Lex50(probeSrc) == nil, "the probe: Lua 5.0's syntax only (" .. tostring(L
 Check(string.find(setupSrc, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"\n') ~= nil and
       string.find(setupSN, '^local CL_MAP, CL_BAR, CL_AREAS = "satellite", "neo", "discovered"\n') ~= nil and
       string.find(setupFull, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "full"\n') ~= nil, "the chunk begins with the choice the DLL holds")
-local DEF = "nearby 1600 thick 100 width own whole off effect heat colour class quality pulse raw"
-local LOOK = "nearby 600 thick 150 width 60 whole on effect blade colour ember quality liquid unstable"
+local DEF = "fade zone thick 100 width own whole off effect heat colour class quality pulse raw"
+local LOOK = "fade third thick 150 width 60 whole on effect blade colour ember quality liquid unstable"
 Check(string.find(setupSrc, '^[^\n]*\nlocal CL_LOOK = "' .. DEF .. '"\n%-%- CinderLoad') ~= nil and
       string.find(setupLook, '\nlocal CL_LOOK = "' .. LOOK .. '"\n', 1, true) ~= nil,
-      "and its second line the zones nearby and the bar's look the DLL holds, as the CVar carries them")
+      "and its second line the zones nearby's fade and the bar's look the DLL holds, as the CVar carries them")
 
 -- string widths, as the client's font gives them (the look's measure, else about 5.5 a letter at 10)
 if opt.widths then
@@ -178,7 +178,7 @@ Fresh({ cvar = "?" })
 local fns, scripts = Functions(), Scripts()
 ok, err = Run(setupSrc)
 Check(ok and NoErrors(), "the chunk runs whole (" .. tostring(err) .. table.concat(world.errors, "; ") .. ")")
-Check(CV() == Value("parchment retro discovered"), "made: the CVar told the whole choice held, the reach and the look with it (the DLL hears that it ran): " .. tostring(CV()))
+Check(CV() == Value("parchment retro discovered"), "made: the CVar told the whole choice held, the fade and the look with it (the DLL hears that it ran): " .. tostring(CV()))
 Check(type(env.CinderLoad) == "table" and env.CinderLoad.up == 1 and not env.CinderLoad.broken, "made: CinderLoad.up, not broken")
 Check(not P() and env.SLASH_CINDERLOAD1 == "/cinderload" and type(env.SlashCmdList.CINDERLOAD) == "function" and table.getn(world.chat) == 0,
       "made quietly: /cinderload, and no window until it is asked for")
@@ -237,14 +237,13 @@ Check(small == 0 and texts["Loading map"] and texts["Loading map"].size == 14 an
       texts["Loading bar"] and texts["Loading map"].color[2] == 0.82 and texts["Parchment"] and texts["Parchment"].size == 13 and
       texts["a still here; it moves in game"] and texts["Drag the title to move this window.  Each change shows from your next loading screen."],
       "its words as the mockup's: the sections' titles gold at 14, the choices white at 13, nothing under 12 (larger type: the plus)")
-local coming = env.CinderLoad.ui.coming
-local saidOver = 0
-for _, f in ipairs(world.made) do if f.kind == "FontString" and f.text == "kept; drawn in a later version" then saidOver = saidOver + 1 end end
-Check(coming and table.getn(coming) == 1 and saidOver == 1 and coming[1].text == "kept; drawn in a later version" and coming[1]:IsVisible() and
-      coming[1].size == 12 and coming[1].color[1] == 1 and PB(coming[1]).l > PB(texts["Texture / effect"]).r + 8 and
-      PB(coming[1]).b < 300 and PB(coming[1]).b > 260 and Near(PB(coming[1]).r, 730) and
+local later = 0
+for _, f in ipairs(world.made) do if f.kind == "FontString" and f.text and string.find(f.text, "later version", 1, true) then later = later + 1 end end
+local nw = env.CinderLoad.ui.neoWide
+Check(later == 0 and not env.CinderLoad.ui.coming and nw and nw.text == "Neo: always whole width (no metal end caps)" and not nw:IsVisible() and
+      nw.size == 12 and nw.color[1] == 1 and Near(PB(nw).r, 730) and PB(nw).b < 82 and PB(nw).b > 62 and
       texts["Drag the title to move this window.  Each change shows from your next loading screen."],
-      "over Texture / effect only, at its right, clear of its title: kept, drawn in a later version (no loading screen draws the effect or colour yet); Bar size says nothing, since the loading screens draw it now, so the header's line stays true")
+      "no box says \"kept; drawn in a later version\" any more (the loading screens draw the bar's effect and colour now, so the header's line is true of everything); over Bar size, at its right, a note for Neo, hidden with Retro")
 -- where everything is (the mockup's units)
 local u = env.CinderLoad.ui
 local cards = {}
@@ -255,11 +254,17 @@ Check(At(cards["map parchment"], 40, 96, 150, 80) and At(cards["map satellite"],
 Check(At(P("mapparchment"), 40, 184, 18, 18) and At(P("mapsatellite"), 202, 184, 18, 18) and At(P("areasdiscovered"), 40, 250, 18, 18) and
       At(P("areasfull"), 202, 250, 18, 18) and At(P("barretro"), 40, 440, 18, 18) and At(P("barneo"), 202, 440, 18, 18),
       "the radio buttons where the mockup has them (the client's UIRadioButtonTemplate)")
-Check(At(P("nearbySlider"), 42, 308, 308, 17) and At(P("thickSlider"), 410, 114, 308, 17) and At(P("widthSlider"), 410, 178, 308, 17) and
+Check(At(P("thickSlider"), 410, 114, 308, 17) and At(P("widthSlider"), 410, 178, 308, 17) and
       At(P("Whole"), 408, 222, 28, 28) and At(P("Colour"), 408, 362, 28, 28) and At(P("Preview"), 406, 448, 316, 88) and
       At(P("Defaults"), 30, 568, 120, 26) and At(P("CloseButton"), 610, 568, 120, 26),
       "the sliders, check boxes, preview and the two buttons where the mockup has them")
-Check(P("nearbySlider").backdrop.edgeFile == "Interface\\Buttons\\UI-SliderBar-Border" and env[P("nearbySlider").name .. "Thumb"].texture ==
+Check(At(P("fadezone"), 40, 306, 18, 18) and At(P("fadethird"), 40, 328, 18, 18) and At(P("fade3600"), 226, 306, 18, 18) and
+      At(P("fade1800"), 226, 328, 18, 18) and texts["Nearby zones, faded with distance"] and At(texts["Nearby zones, faded with distance"], 40, 286) and
+      env[P("fadezone").name .. "Text"].text == "Per zone, whole zone" and env[P("fadethird").name .. "Text"].text == "Per zone, nearest third" and
+      env[P("fade3600").name .. "Text"].text == "Circle, 3,600 yd" and env[P("fade1800").name .. "Text"].text == "Circle, 1,800 yd" and
+      not P("nearbySlider") and PB(P("fade1800")).b < 352,
+      "in place of the Nearby zones slider (his pick, 11 Oct: all four fades in the menu), four radio buttons under the mockup's words, each zone's two down the left and the circles' on the right, inside the Loading map box")
+Check(P("thickSlider").backdrop.edgeFile == "Interface\\Buttons\\UI-SliderBar-Border" and env[P("thickSlider").name .. "Thumb"].texture ==
       "Interface\\Buttons\\UI-SliderBar-Button-Horizontal" and env[P("Defaults").name .. "Text"].text == "Defaults" and
       env[P("CloseButton").name .. "Text"].text == "Close" and env[P("Whole").name .. "Text"].text == "Whole width of the screen",
       "the client's own: OptionsSliderTemplate's bar and thumb, UIPanelButtonTemplate's red buttons, UICheckButtonTemplate's box")
@@ -299,10 +304,14 @@ local function SliderSays(key, v, text)
     local s = u.sliders[key]
     return Near(s.slider:GetValue(), v) and s.value.text == text
 end
+local function Fades(v)                                     -- its radio alone checked
+    for _, o in ipairs({ "zone", "third", "3600", "1800" }) do if (P("fade" .. o):GetChecked() and 1 or 0) ~= (o == v and 1 or 0) then return false end end
+    return true
+end
 Check(Shows("parchment", "discovered", "retro") and Gold("map", "parchment") and Gold("bar", "retro") and Gold("effect", "heat") and
-      SliderSays("nearby", 1600, "1600 yards") and SliderSays("thick", 100, "100%") and SliderSays("width", 30, "each bar's own") and
+      Fades("zone") and SliderSays("thick", 100, "100%") and SliderSays("width", 30, "each bar's own") and
       not P("Whole"):GetChecked() and P("Colour"):GetChecked() and u.words[1]:IsVisible() and not u.neoTitle:IsVisible() and
-      not P("QualityPulse"):IsVisible(), "the choice held shows: Parchment, Discovered, 1600 yards, Retro (its words), 100%, each bar's own width (Retro's on this screen), Heat in my class's colour")
+      not P("QualityPulse"):IsVisible(), "the choice held shows: Parchment, Discovered, each zone fading whole, Retro (its words), 100%, each bar's own width (Retro's on this screen), Heat in my class's colour")
 
 -- ---- every control, as a player uses it ----
 world.sounds = {}
@@ -317,21 +326,27 @@ UI.Click(P("areasfull"))
 Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retro"), "Full map's radio again: still full (a radio, not a switch)")
 UI.Click(P("areasdiscovered"))
 Check(CV() == Value("parchment retro discovered"), "Discovered's radio: back")
-UI.Slide(P("nearbySlider"), 600)
-Check(CV() == Value("parchment retro discovered", "nearby 600 thick 100 width own whole off effect heat colour class quality pulse raw") and
-      SliderSays("nearby", 600, "600 yards"), "the zones nearby's slider to 600: \"600 yards\", the CVar's nearby 600")
-UI.Slide(P("nearbySlider"), 0)
-Check(string.find(CV(), " nearby 0 ", 1, true) and SliderSays("nearby", 0, "off"), "to its left end: off (nearby 0)")
-UI.Slide(P("nearbySlider"), 9000)
-Check(string.find(CV(), " nearby 4000 ", 1, true) and SliderSays("nearby", 4000, "4000 yards"), "past its right end: 4000 yards, the most")
-UI.Slide(P("nearbySlider"), 1634)
-Check(string.find(CV(), " nearby 1600 ", 1, true) and SliderSays("nearby", 1600, "1600 yards"), "between its steps: the nearest hundred yards (1634: 1600)")
+UI.Click(P("fadethird"))
+Check(CV() == Value("parchment retro discovered", "fade third thick 100 width own whole off effect heat colour class quality pulse raw") and
+      Fades("third") and NoErrors(), "the zones nearby's \"Per zone, nearest third\": the CVar's fade third (one line of style.txt), its radio alone checked")
+UI.Click(P("fade3600"))
+Check(string.find(CV(), " fade 3600 ", 1, true) and Fades("3600"), "\"Circle, 3,600 yd\": fade 3600")
+UI.Click(P("fade1800"))
+Check(string.find(CV(), " fade 1800 ", 1, true) and Fades("1800"), "\"Circle, 1,800 yd\": fade 1800")
+UI.Click(P("fade1800"))
+Check(string.find(CV(), " fade 1800 ", 1, true) and Fades("1800"), "\"Circle, 1,800 yd\" again: still 1800 (a radio, not a switch)")
+UI.Click(P("fadezone"))
+Check(CV() == Value("parchment retro discovered") and Fades("zone"), "\"Per zone, whole zone\": back to fade zone")
 UI.Click(P("barneo"))
 Check(CV() == Value("parchment neo discovered") and Shows("parchment", "discovered", "neo") and Gold("bar", "neo") and not u.words[1]:IsVisible() and
       u.neoTitle:IsVisible() and P("QualityPulse"):IsVisible() and P("QualityRaw"):GetChecked() and P("QualityPulse"):GetChecked() and
       not P("QualityLiquid"):GetChecked() and not P("QualityUnstable"):GetChecked(), "Neo's radio: chosen; Retro's words give way to Neo's four qualities, Pulse and Raw ticked (today's)")
 Check(At(P("QualityLiquid"), 40, 490, 26, 26) and At(P("QualityPulse"), 202, 490, 26, 26) and At(P("QualityUnstable"), 40, 516, 26, 26) and
       At(P("QualityRaw"), 202, 516, 26, 26), "the four in the bar's box, two by two, where Retro's words were")
+Check(SliderSays("width", 100, "the whole screen") and P("widthSlider").alpha == 0.5 and not P("widthSlider"):IsEnabled() and
+      P("Whole"):GetChecked() and P("Whole").alpha == 0.5 and not P("Whole"):IsEnabled() and u.neoWide:IsVisible() and
+      not UI.Click(P("Whole")) and CV() == Value("parchment neo discovered") and not env.CinderLoad.whole,
+      "with Neo picked (his, 11 Oct: always the whole width, its ends having no metal caps): the width slider at its end, \"the whole screen\", greyed and still; Whole width of the screen ticked, greyed and still; the note over Bar size says why; nothing of Retro's width changed")
 UI.Click(P("QualityLiquid"))
 Check(string.find(CV(), " quality liquid pulse raw$") and P("QualityLiquid"):GetChecked(), "Liquid ticked: quality liquid pulse raw")
 UI.Click(P("QualityPulse"))
@@ -344,6 +359,8 @@ UI.Click(P("QualityLiquid")); UI.Click(P("QualityUnstable"))
 UI.Click(cards["bar retro"])
 Check(CV() == Value("parchment retro discovered") and u.words[1]:IsVisible() and not P("QualityPulse"):IsVisible() and Gold("bar", "retro"),
       "Retro's picture: chosen, its words back, Neo's qualities kept as they were (pulse raw)")
+Check(SliderSays("width", 30, "each bar's own") and P("widthSlider").alpha == 1 and P("widthSlider"):IsEnabled() and not P("Whole"):GetChecked() and
+      P("Whole").alpha == 1 and P("Whole"):IsEnabled() and not u.neoWide:IsVisible(), "and Retro's width live again, its own as it was, the note gone")
 UI.Slide(P("thickSlider"), 125)
 Check(string.find(CV(), " thick 125 ", 1, true) and SliderSays("thick", 125, "125%"), "the thickness slider to 125: \"125%\", thick 125")
 UI.Slide(P("thickSlider"), 10)
@@ -389,11 +406,24 @@ Check(pv.ground.texture == "Interface\\CinderLoad\\PreviewParchment" and pv.bar[
 UI.Click(P("Whole"))
 a1, a2, a3 = Bar()
 Check(Near(a3.r - a1.l, 316) and Near(a1.l, 406), "whole width: the bar across the strip")
+UI.Slide(P("thickSlider"), 200)
+a1 = Bar()
+Check(Near(a1.t + (a1.b - a1.t) / 2 - 448, 88 - 0.075 * H), "Retro at 200%: its centre 0.075 of the screen's height up, where the loading screen now puts it (no longer lifted)")
+UI.Slide(P("thickSlider"), 125)
 UI.Click(P("Whole"))
 UI.Click(P("mapsatellite")); UI.Click(P("barneo"))
 a1, a2, a3 = Bar()
 Check(pv.ground.texture == "Interface\\CinderLoad\\PreviewSatellite" and pv.bar[2].texture == "Interface\\CinderLoad\\PreviewNeo" and
       Near(a1.b - a1.t, 0.066 * H * 1.25), "Satellite and Neo: the living map's foot and the blade's frame band (0.066 of the screen's height)")
+local stands = Near(a1.b, 536) and Near(a3.r - a1.l, 316) and Near(a1.l, 406)
+for _, t in ipairs({ 50, 100, 150, 200 }) do
+    UI.Slide(P("thickSlider"), t)
+    a1, a2, a3 = Bar()
+    stands = stands and Near(a1.b, 536) and a1.t >= 448 and Near(a1.b - a1.t, 0.066 * H * t / 100)
+end
+UI.Slide(P("thickSlider"), 125)
+a1, a2, a3 = Bar()
+Check(stands, "Neo in the preview stands on the strip's foot at 50% to 200% (as the loading screen stands its band on the screen's bottom), never hanging below it, and across the whole strip though the width says 50% (Neo is always the whole width)")
 -- the preview's fill: the chosen effect in the chosen colour (this player a mage), in the bar's channel to 60%, the rest dark
 local MAGE, EMBER = { 0.412, 0.8, 0.941 }, { 1, 0.541, 0.165 }
 local function Is3(t, c, k) k = k or 1; return t and Near(t[1], c[1] * k) and Near(t[2], c[2] * k) and Near(t[3], c[3] * k) end
@@ -424,15 +454,25 @@ UI.Click(cards["effect heat"])
 UI.Click(P("Colour"))
 -- Defaults (the class's colour unticked before it)
 world.sounds = {}
+UI.Click(P("fade1800")); UI.Click(P("mapsatellite")); UI.Click(P("barneo")); UI.Slide(P("thickSlider"), 150)
 UI.Click(P("Defaults"))
-Check(CV() == Value("parchment retro discovered") and Shows("parchment", "discovered", "retro") and SliderSays("thick", 100, "100%") and
-      SliderSays("width", 30, "each bar's own") and SliderSays("nearby", 1600, "1600 yards") and P("Colour"):GetChecked() and not P("Whole"):GetChecked() and
-      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it began (the parchment, Discovered, 1600 yards, Retro, 100%, each bar's own, Heat, the class's colour, Pulse and Raw)")
+Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retro") and Fades("zone") and SliderSays("thick", 100, "100%") and
+      SliderSays("width", 30, "each bar's own") and P("Colour"):GetChecked() and not P("Whole"):GetChecked() and
+      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it begins (his, 11 Oct: the parchment, the Full map, each zone fading whole, Retro; 100%, each bar's own width, Heat, the class's colour, Pulse and Raw)")
 UI.Click(P("barneo"))
 a1, a2, a3 = Bar()
-Check(Near(a3.r - a1.l, 316) and Near(a1.l, 406) and SliderSays("width", 100, "each bar's own"),
-      "Neo at its own width: the bar across the whole strip, the width slider's thumb at its end (Neo's own is the screen's)")
+Check(Near(a3.r - a1.l, 316) and Near(a1.l, 406) and SliderSays("width", 100, "the whole screen"),
+      "Neo: the bar across the whole strip, the width slider's thumb at its end (Neo is always the whole width)")
 UI.Click(P("barretro"))
+-- the red buttons keep the window's size of words under the mouse (their own font objects, not the template's 12)
+local dt = env[P("Defaults").name .. "Text"]
+local atRest = dt.size == 13 and Near(dt.color[2], 0.82)
+UI.Enter(P("Defaults"))
+local over = dt.size == 13 and dt.color[1] == 1 and dt.color[2] == 1 and dt.fontFile == "Fonts\\FRIZQT__.TTF"
+UI.Leave(P("Defaults"))
+Check(atRest and over and dt.size == 13 and Near(dt.color[2], 0.82) and env[P("CloseButton").name .. "Text"].size == 13 and NoErrors(),
+      "Defaults and Close: their words at 13 at rest (gold) and with the mouse over them (white), as the template's colours go, never back to its 12")
+UI.Click(P("areasdiscovered"))                              -- (the words below begin from Discovered)
 -- moved by its title
 local l0, t0 = p:GetLeft(), p:GetTop()
 Check(UI.Drag(P("Title"), 100, -50) and Near(p:GetLeft(), l0 + 100 / 0.82) and Near(p:GetTop(), t0 - 50 / 0.82) and NoErrors(),
@@ -508,23 +548,23 @@ Run(setupLook)
 Check(CV() == Value("parchment retro discovered", LOOK) and NoErrors(), "made with a look held (style.txt's): the CVar says it back word for word")
 Slash("")
 u = env.CinderLoad.ui
-Check(SliderSays("nearby", 600, "600 yards") and SliderSays("thick", 150, "150%") and SliderSays("width", 100, "the whole screen") and
+Check(Fades("third") and SliderSays("thick", 150, "150%") and SliderSays("width", 100, "the whole screen") and
       env.CinderLoad.width == 60 and P("Whole"):GetChecked() and not P("Colour"):GetChecked() and Gold("effect", "blade") and NoErrors(),
-      "the window shows it: 600 yards, 150%, the whole screen (its thumb at the end, 60% kept under it), Blade light, not the class's colour")
+      "the window shows it: each zone's nearest third, 150%, the whole screen (its thumb at the end, 60% kept under it), Blade light, not the class's colour")
 UI.Click(P("barneo"))
 Check(P("QualityLiquid"):GetChecked() and P("QualityUnstable"):GetChecked() and not P("QualityPulse"):GetChecked() and not P("QualityRaw"):GetChecked(),
       "and Neo's qualities held: Liquid and Unstable")
 -- a look set by hand in style.txt, off the sliders' steps: said back exactly at a login (no click), so style.txt is never
 -- rewritten by a login; only the slider a player moves puts its own value on a step
-for _, odd in ipairs({ "nearby 1250 thick 123 width 33 whole off effect heat colour class quality pulse raw",
-                       "nearby 40 thick 51 width 99 whole off effect smooth colour class quality raw" }) do
+for _, odd in ipairs({ "fade 1800 thick 123 width 33 whole off effect heat colour class quality pulse raw",
+                       "fade 3600 thick 51 width 99 whole off effect smooth colour class quality raw" }) do
     Fresh({ cvar = "?" })
     Run((string.gsub(setupSrc, 'local CL_LOOK = "[^"]*"', 'local CL_LOOK = "' .. odd .. '"', 1)))
     local said = CV()
     Slash("")
     u = env.CinderLoad.ui
-    local _, _, yd = string.find(odd, "^nearby (%d+)")
-    local held = CV() == said and SliderSays("nearby", tonumber(yd), yd .. " yards")
+    local _, _, fd = string.find(odd, "^fade (%w+)")
+    local held = CV() == said and Fades(fd) and SliderSays("thick", tonumber((string.gsub(odd, "^.* thick (%d+).*$", "%1"))), (string.gsub(odd, "^.* thick (%d+).*$", "%1")) .. "%")
     UI.Slide(P("thickSlider"), 127)
     Check(said == Value("parchment retro discovered", odd) and held and
           CV() == Value("parchment retro discovered", (string.gsub(odd, "thick %d+", "thick 125"))) and NoErrors(),
@@ -534,8 +574,8 @@ Fresh({ cvar = "?" })
 Run(setupLook)
 Slash("")
 u = env.CinderLoad.ui
-env.CinderLoad.ReadLook("thick 9999 width 3 nearby -5 whole maybe effect fire colour red quality raw pulse banana thick")
-Check(env.CinderLoad.thick == 200 and env.CinderLoad.width == 20 and env.CinderLoad.nearby == 0 and env.CinderLoad.whole and env.CinderLoad.effect == "blade" and
+env.CinderLoad.ReadLook("thick 9999 width 3 fade 900 whole maybe effect fire colour red quality raw pulse banana thick fade")
+Check(env.CinderLoad.thick == 200 and env.CinderLoad.width == 20 and env.CinderLoad.fade == "third" and env.CinderLoad.whole and env.CinderLoad.effect == "blade" and
       env.CinderLoad.ember and env.CinderLoad.quality.raw and env.CinderLoad.quality.pulse and not env.CinderLoad.quality.liquid,
       "a look read with numbers out of range held to them, words not ours passed over (kept as they were)")
 
@@ -627,7 +667,6 @@ if opt.layout then
     Fresh({ cvar = "?" })
     Run(setupSrc)
     Slash("")
-    UI.Slide(P("nearbySlider"), 600)
     UI.Slide(P("thickSlider"), 125)
     UI.Slide(P("widthSlider"), 50)
     Dump(opt.layout)

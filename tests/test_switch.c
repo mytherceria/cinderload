@@ -3224,6 +3224,7 @@ static int Px(const unsigned char *o, int i, int r, int g, int b, int a)
 }
 static void ViewTests(void)
 {
+    g_barEffect = LOOK_BLADE; g_barEmber = 0;                    /* (the blade's own tests: its own fill, Blade light) */
     /* the picture's file: every level found and checked against the file's length, from the whole picture down */
     {
         unsigned n;
@@ -5362,6 +5363,7 @@ static void BarSizeSet(int thick, int width, int whole) { g_barThick = thick; g_
 static void TestVanillaBar(void)
 {
     float s, bx, by, tw;
+    g_barEffect = LOOK_HEAT; g_barEmber = 0;                     /* (retro's own fill, Heat, in the class's colour) */
     BarSizeSet(100, 0, 0);                                           /* (its own size: an earlier screen's choice put back) */
     VBarLayout(1920, 1080, &s, &bx, &by, &tw);
     int ok = Near(s, 1080.0 / 768, 1e-5) && Near(bx, 600, 1e-3) && Near(by + 32 * s, 1080 - 81, 1e-3);
@@ -5536,6 +5538,7 @@ static void TestBarSize(void)
     static const int kThick[3] = { 50, 100, 200 }, kWidth[3] = { 20, 0, 100 }, kWhole[3] = { 0, 0, 1 };   /* (100: the whole, by width) */
     static const float kWin[5][2] = { { 5120, 2160 }, { 1920, 1080 }, { 1024, 768 }, { 7680, 2160 }, { 600, 1000 } };
     float s, x0, y0, tw;
+    g_barEffect = LOOK_HEAT; g_barEmber = 0;
     /* the defaults: exactly today's formula, to the bit */
     int ok = 1;
     BarSizeSet(100, 0, 0);
@@ -5547,8 +5550,8 @@ static void TestBarSize(void)
     }
     Check(ok, "the bar's size at its defaults (100%, its own width, not the whole): Retro laid out by exactly the old formula, to the bit, on five shapes of screen");
     /* Retro at each setting: the texel the thickness's share, the width the screen's share (its own: the art's 512 texels
-     * at the UI's scale; the whole: edge to edge), centred, inside the window, its centre the client's 0.075 up unless a
-     * thick bar would reach past the bottom */
+     * at the UI's scale; the whole: edge to edge), centred, inside the window (its frame as seen: the art's rows 7 to 55),
+     * its centre the client's 0.075 up at every thickness */
     ok = 1;
     int lifted = 0;
     for (int w = 0; w < 4; w++)
@@ -5560,12 +5563,11 @@ static void TestBarSize(void)
                 VBarLayout(W, H, &s, &x0, &y0, &tw);
                 float bw = kWhole[b] || kWidth[b] == 100 ? W : kWidth[b] ? W * kWidth[b] / 100 : VBAR_TEX_W * k;
                 ok &= Near(s, k * kThick[a] / 100, 1e-5) && Near(tw * s, bw, 1e-2) && Near(x0, (W - bw) / 2, 1e-2) && x0 >= -1e-3f &&
-                      x0 + tw * s <= W + 1e-2f && y0 >= 0 && y0 + VBAR_TEX_H * s <= H + 1e-3f && tw >= VBAR_CAP_L + VBAR_CAP_R + VBAR_MID_LEAST;
+                      x0 + tw * s <= W + 1e-2f && y0 >= 0 && y0 + 56 * s <= H + 1e-3f && tw >= VBAR_CAP_L + VBAR_CAP_R + VBAR_MID_LEAST;
                 float cy = H - VBAR_CY * H;
-                if (Near(y0 + VBAR_TEX_H * s, H, 1e-3) && y0 + VBAR_TEX_H * s / 2 < cy - 1e-3f) lifted++;
-                else ok &= Near(y0 + VBAR_TEX_H * s / 2, cy, 1e-3);
+                if (!Near(y0 + VBAR_TEX_H * s / 2, cy, 1e-3)) lifted++;
             }
-    Check(ok && lifted == 12, "Retro at thin, its own and thick (50%, 100%, 200%) by narrow (20%), its own and the whole width, on four screens: the texel the thickness's share of the UI's, the width the screen's share (its own the art's 512 texels, the whole edge to edge), centred, inside the window; its centre the client's 0.075 of the height up, a 200% bar lifted to stand on the bottom instead of reaching past it");
+    Check(ok && lifted == 0, "Retro at thin, its own and thick (50%, 100%, 200%) by narrow (20%), its own and the whole width, on four screens: the texel the thickness's share of the UI's, the width the screen's share (its own the art's 512 texels, the whole edge to edge), centred, its frame as seen inside the window; its centre the client's 0.075 of the height up at every thickness, a 200% bar too (no longer lifted for its art's clear rows: it stands where the panel's preview shows it)");
     /* clamps: numbers off the range held to it; a bar too thick for so narrow a width as thick as fits */
     float s2, x2, y2, t2;
     ok = 1;
@@ -5598,7 +5600,8 @@ static void TestBarSize(void)
             ok &= g_vbN == 3 && g_vb[1].tex == VT_VGLASS && g_vb[2].tex == VT_VBORDER && g_vb[1].count == 4 * n && g_vb[2].count == 4 * n &&
                   Near(bd[0].x, x0, 1e-2) && Near(bd[4 * n - 3].x, right, 1e-2) && Near(bd[0].y, y0, 1e-3) && Near(bd[2].y, y0 + 64 * s, 1e-3) &&
                   bd[0].u == 0 && bd[4 * n - 3].u == 1 && Near(gl[0].x, x0 + 28 * s, 1e-2) && Near(gl[4 * n - 3].x, right - 28 * s, 1e-2) &&
-                  Near(ch[0].x, x0 + 28 * s, 1e-2) && Near(ch[1].x, right - 28 * s, 1e-2) && BarInside(5120, 2160, 0, 3, x0, right, 0);
+                  Near(ch[0].x, x0 + 28 * s, 1e-2) && Near(ch[1].x, right - 28 * s, 1e-2) && BarInside(5120, 2160, 0, 3, x0, right, 1) &&
+                  y0 + 56 * s <= 2160 + 1e-3f;                           /* (its art's clear rows below 56 may pass the bottom) */
             float tip = x0 + 28 * s + 0.6f * span * s, most = 0;             /* (the fill's front: its furthest corner) */
             int fillQ = ((int)((0.6f * span - 0.001f) / 4) + 1) * VBAR_ROWS;
             for (int q = 1; q <= fillQ && q < g_vb[0].count / 4; q++) for (int j = 0; j < 4; j++) if (ch[4 * q + j].x > most) most = ch[4 * q + j].x;
@@ -5664,8 +5667,8 @@ static void TestBarSize(void)
     Check(ok, "Retro thin across the whole of a very wide window (15360 x 1080, over 10000 texels long): at most 1024 columns of fill, wider, still reaching the end of its channel, and the frame drawn; the view's list never runs out");
     g_barVanilla = 0; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 0; g_vbFullAt = 0;
 
-    /* Neo: its rail band FRAME_BAND of the height times the thickness, on the bottom; its run edge to edge at its own
-     * width or the whole, else centred at the width; the blade between its caps' back walls */
+    /* Neo: its rail band FRAME_BAND of the height times the thickness, on the bottom; always the whole width (his, 11 Oct
+     * evening: its ends have no metal caps), whatever the width or the whole; the blade between its caps' back walls */
     static const char bar[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nends 82 20\n";
     FrameParse(bar, sizeof bar - 1);
     g_frameOn = 1; g_viewTex[VT_FRAME] = 1;
@@ -5673,29 +5676,27 @@ static void TestBarSize(void)
     BarSizeSet(100, 0, 0);
     FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
     ok = fs == FRAME_BAND * 500 / 90 && fb0 == 0 && fb1 == 1000 && fx0 == 82 * fs && fx1 == 1000 - 110 * fs && ftop == 500 - 123 * fs;
+    static const int kNeoW[5] = { 20, 0, 60, 100, 0 }, kNeoWhole[5] = { 0, 0, 0, 0, 1 };
     for (int a = 0; a < 3; a++)
-        for (int b = 0; b < 3; b++) {
-            BarSizeSet(kThick[a], kWidth[b] ? kWidth[b] : 0, kWhole[b]);
-            if (kWidth[b] == 20) BarSizeSet(kThick[a], 60, 0);              /* (the test's frame: its caps want 60% here) */
+        for (int b = 0; b < 5; b++) {
+            BarSizeSet(kThick[a], kNeoW[b], kNeoWhole[b]);
             FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
-            float bw = kWidth[b] == 20 ? 600 : 1000;
-            ok &= Near(90 * fs, FRAME_BAND * 500 * kThick[a] / 100, 1e-3) && Near(ftop + 123 * fs, 500, 1e-3) && Near(fb1 - fb0, bw, 1e-3) &&
-                  Near(fb0, (1000 - bw) / 2, 1e-3) && Near(fx0, fb0 + 82 * fs, 1e-3) && Near(fx1, fb1 - 110 * fs, 1e-3) &&
-                  Near(fcy, ftop + 78.5f * fs, 1e-3) && Near(fch, 22.5f * fs, 1e-3);
+            ok &= Near(90 * fs, FRAME_BAND * 500 * kThick[a] / 100, 1e-3) && Near(ftop + 123 * fs, 500, 1e-3) && fb0 == 0 && fb1 == 1000 &&
+                  Near(fx0, 82 * fs, 1e-3) && Near(fx1, 1000 - 110 * fs, 1e-3) && Near(fcy, ftop + 78.5f * fs, 1e-3) && Near(fch, 22.5f * fs, 1e-3);
         }
-    Check(ok, "Neo laid out at each setting: its rail band the thickness's share of a fifteenth of the height, its bottom on the window's; edge to edge at its own width and the whole, centred at a narrower width; the blade between its caps' back walls; at its defaults exactly the old formula, to the bit");
-    /* without the frame's sheet: the band and the channel still the thickness's share, the run still the width's */
+    Check(ok, "Neo laid out at each setting: its rail band the thickness's share of a fifteenth of the height, its bottom on the window's; always edge to edge, at 20%, 60% and 100% of the screen, its own width and the whole (Neo is always the whole width); the blade between its caps' back walls; at its defaults exactly the old formula, to the bit");
+    /* without the frame's sheet: the band and the channel still the thickness's share, the run still edge to edge */
     g_viewTex[VT_FRAME] = 0;
     BarSizeSet(150, 60, 0);
     FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
     ok = fs == 0 && Near(ftop, 500 - FRAME_BAND * 500 * 1.5f, 1e-3) && Near(fcy, 500 - FRAME_BAND * 500 * 1.5f / 2, 1e-3) &&
-         Near(fch, FRAME_BAND * 500 * 1.5f * 0.27f, 1e-3) && Near(fb0, 200, 1e-3) && Near(fb1, 800, 1e-3) && fx0 == fb0 && fx1 == fb1;
+         Near(fch, FRAME_BAND * 500 * 1.5f * 0.27f, 1e-3) && fb0 == 0 && fb1 == 1000 && fx0 == fb0 && fx1 == fb1;
     g_viewTex[VT_FRAME] = 1;
-    Check(ok, "Neo without its frame's sheet at 150% and 60%: its band and channel 150% of their own, at the window's bottom, its run 60% of the width, centred");
-    /* Neo drawn at a width: the caps at the run's ends, the diamond at its centre, the rails between with no gap, the
-     * channel, shine and lips along the run, the logo centred on it at the thickness's size; nothing past the run */
+    Check(ok, "Neo without its frame's sheet at 150% and a width of 60%: its band and channel 150% of their own, at the window's bottom, its run still the whole width");
+    /* Neo drawn at a width line of 60%: the caps at the window's edges, the diamond at its centre, the rails between with
+     * no gap, the channel, shine and lips along the whole width, the logo centred at the thickness's size */
     g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2.0f; g_logo.tu0 = g_logo.tv0 = 0; g_logo.tu1 = g_logo.tv1 = 1;
-    g_viewTex[VT_LOGO] = 1; g_viewTex[VT_SPARK] = 0; g_class = 9;
+    g_viewTex[VT_LOGO] = 1; g_viewTex[VT_SPARK] = 0; g_class = 9; g_barEffect = LOOK_BLADE;
     BarSizeSet(150, 60, 0);
     FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
     ViewListStart(); SaberBuild(1000, 500, 0.6f, 3000);
@@ -5708,9 +5709,9 @@ static void TestBarSize(void)
         const ViewVert *L = fr + 4 * (nq - 3), *C = fr + 4 * (nq - 2), *R = fr + 4 * (nq - 1);
         float wl = 132 * fs, wr = 130 * fs, wc = 100 * fs, lh = SABER_LOGO_H * 500 * 1.5f, lw = lh * 2;
         if (lw > LOGO_W * 1000 * 1.5f) { lh *= LOGO_W * 1000 * 1.5f / lw; lw = LOGO_W * 1000 * 1.5f; }
-        ok &= Near(L[0].x, 200, 1e-3) && Near(L[1].x, 200 + wl, 1e-3) && Near(R[0].x, 800 - wr, 1e-3) && Near(R[1].x, 800, 1e-3) &&
-              Near((C[0].x + C[1].x) / 2, 500, 1e-3) && Near(C[1].x - C[0].x, wc, 1e-3) && BarInside(1000, 500, frame, frame + 1, 200, 800, 1) && BarInside(1000, 500, logo, logo + 1, 200, 800, 0);
-        float at = 200 + wl;                                              /* the rails: from the left cap to the diamond, then on to the right cap */
+        ok &= Near(L[0].x, 0, 1e-3) && Near(L[1].x, wl, 1e-3) && Near(R[0].x, 1000 - wr, 1e-3) && Near(R[1].x, 1000, 1e-3) &&
+              Near((C[0].x + C[1].x) / 2, 500, 1e-3) && Near(C[1].x - C[0].x, wc, 1e-3) && BarInside(1000, 500, frame, frame + 1, 0, 1000, 1);
+        float at = wl;                                                    /* the rails: from the left cap to the diamond, then on to the right cap */
         int joined = 1;
         for (int q = 0; q < nq - 3; q++) {
             if (!Near(fr[4 * q].x, at, 1e-3)) { if (Near(at, C[0].x, 1e-3)) at = C[1].x; joined &= Near(fr[4 * q].x, at, 1e-3); }
@@ -5721,21 +5722,21 @@ static void TestBarSize(void)
         const ViewVert *chq = g_vv + g_vb[0].first;
         ok &= Near(chq[0].x, fx0, 1e-3) && Near(chq[1].x, fx1, 1e-3);
     }
-    Check(ok, "Neo drawn at 150% and 60% of the screen: its caps at the run's ends (not the window's), the diamond at its centre, the rails counted from the width with no gap, all inside the run; its channel between the back walls; the logo at 150% of its size, centred on the run, its foot raised with it");
-    /* its lit lips from the left cap's lip (the test's: cap to cap) along the run to the tip; its glow with the thickness */
+    Check(ok, "Neo drawn at 150% with a width line of 60%: its caps at the window's edges, the diamond at its centre, the rails across the whole width with no gap; its channel between the back walls; the logo at 150% of its size, centred, its foot raised with it");
+    /* its lit lips from the left cap's lip along the bar to the tip; its glow with the thickness */
     ok = 0;
     for (int i = 0, shine = 0; i < g_vbN; i++) {
         if (g_vb[i].tex == VT_FRAME && g_vb[i].add) shine = 1;
         else if (shine && g_vb[i].tex == -1 && g_vb[i].add) {            /* (the lips: the first two quads after the shine) */
             const ViewVert *lp = g_vv + g_vb[i].first;
             float front = fx0 + 0.6f * (fx1 - fx0);
-            ok = Near(lp[0].x, 200 + 132 * fs, 1e-3) && Near(lp[1].x, front, 1e-2) && Near(lp[4].x, 200 + 132 * fs, 1e-3);
+            ok = Near(lp[0].x, 132 * fs, 1e-3) && Near(lp[1].x, front, 1e-2) && Near(lp[4].x, 132 * fs, 1e-3);
             break;
         }
     }
     float g100 = BarGlowReach(100, 0), g200 = BarGlowReach(200, 0), g50 = BarGlowReach(50, 0);
     ok &= g100 > 0 && g200 / g100 > 1.7f && g200 / g100 < 2.4f && g50 / g100 > 0.4f && g50 / g100 < 0.6f;
-    Check(ok, "Neo's lit lips run from the cap's lip at the run's end (not the window's) to the tip; its glow reaches past the core twice as far at 200% and half as far at 50%, the bar's light scaled with it");
+    Check(ok, "Neo's lit lips run from the cap's lip at the window's edge to the tip; its glow reaches past the core twice as far at 200% and half as far at 50%, the bar's light scaled with it");
     /* the logo grows with the thickness past its own width cap (that cap times the thickness too): the real logo's shape
      * at 200% across the whole of a 16:9 screen, twice as wide as at 100% */
     {
@@ -5749,76 +5750,41 @@ static void TestBarSize(void)
         g_logo.aspect = keepAsp;
         Check(lw2[0] > 0 && Near(lw2[1] / lw2[0], 2, 1e-3), "Neo's logo at 200% across the whole of a 16:9 screen twice as wide as at 100% (its width cap grows with the thickness)");
     }
-    /* a run too short for both caps: cut at their inner sides (the right cap keeps its right end), never past the cups'
-     * back walls and lit lips; the logo no wider than half the run. With the test's caps, whose walls are their whole
-     * width, the scale gives instead. */
-    static const char cut[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nends 30 100\nlips 30 100\n";
-    FrameParse(cut, sizeof cut - 1);
-    BarSizeSet(200, 20, 0);
-    FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
-    ViewListStart(); SaberBuild(1000, 500, 0.6f, 3000);
-    frame = logo = -1;
-    for (int i = 0; i < g_vbN; i++) { if (g_vb[i].tex == VT_FRAME && frame < 0) frame = i; if (g_vb[i].tex == VT_LOGO) logo = i; }
-    ok = frame >= 0 && logo >= 0 && Near(fs, FRAME_BAND * 500 * 2 / 90, 1e-5) && Near(fb0, 400, 1e-3) && Near(fb1, 600, 1e-3);
-    if (ok) {
-        const ViewVert *fr = g_vv + g_vb[frame].first, *lg = g_vv + g_vb[logo].first;
-        int nq = g_vb[frame].count / 4;
-        const ViewVert *L = fr + 4 * (nq - 3), *C = fr + 4 * (nq - 2), *R = fr + 4 * (nq - 1);
-        float room = (200 - 100 * fs) / 2;
-        ok &= nq == 3 && Near(L[0].x, 400, 1e-3) && Near(L[1].x, 400 + room, 1e-3) && Near(L[0].u, 0.5 / 1024, 1e-6) &&
-              Near(L[1].u, (0.5 + (131.0) * room / (132 * fs)) / 1024, 1e-5) && Near(R[1].x, 600, 1e-3) && Near(R[0].x, 600 - room, 1e-3) &&
-              Near(R[1].u, 469.5 / 1024, 1e-6) && Near(R[0].u, (469.5 - 129.0 * room / (130 * fs)) / 1024, 1e-5) && Near(C[0].x, 400 + room, 1e-3) &&
-              room >= 30 * fs && room >= (130 - 100) * fs && BarInside(1000, 500, frame, frame + 1, 400, 600, 1) &&
-              lg[1].x - lg[0].x <= SABER_LOGO_RUN * 200 + 1e-3f && Near((lg[0].x + lg[1].x) / 2, 500, 1e-3);
-    }
-    FrameParse(bar, sizeof bar - 1);
-    BarSizeSet(200, 20, 0);
-    FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
-    ok &= Near((132 + 130 + 100) * fs, 200, 1e-3) && Near(ftop + 123 * fs, 500, 1e-3) && fx0 >= fb0 && fx1 <= fb1;
-    Check(ok, "Neo on a run too short for both caps and the diamond: each cap cut at its inner side (the left keeps its left end, the right its right end, read from the sheet at the same place), the diamond between, all inside the run, the logo no wider than half of it; caps that cannot be cut (their walls at their inner edges): the whole frame scaled down to fit the run");
-    /* a narrowed blade's light kept to its run, as the window's edges keep it at the whole width: with the blade's ends at
-     * the bar's very ends (as the pack's are), at its start, its middle, its end and full, through a second and a half
-     * of its clock, in his qualities and in all four, nothing of it (glow, orb, streak, embers, drops, bolts, the surges'
-     * light) drawn past either end; the light inside still drawn, cut where it meets an end */
+    /* whatever the width line says, Neo is drawn as at its own width, byte for byte: at its start, middle, end and full,
+     * through 1.5 s of its clock, in his qualities and all four, at 50% to 200% (its blade's ends at the bar's very ends,
+     * as the pack's are: its light runs off the window's edges as it always did) */
     {
         static const char flush[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nends 0 130\n";
         static const int kSize[4][2] = { { 125, 60 }, { 200, 20 }, { 100, 50 }, { 50, 20 } };
         static const float kFill[7] = { 0.0f, 0.02f, 0.03f, 0.5f, 0.97f, 0.999f, 1.0f };
+        static ViewVert own[VIEW_QUADS_MAX * 4];
         unsigned keepStyle = g_saberStyle;
         FrameParse(flush, sizeof flush - 1);
         g_viewTex[VT_SPARK] = 1;
-        int cases = 0, spilled = 0, lit = 0, cutAt = 0, left = 0;
+        int cases = 0, same = 0, past = 0;
         for (int st = 0; st < 2; st++) {
             g_saberStyle = st ? SABER_LIQUID | SABER_PULSE | SABER_UNSTABLE | SABER_RAW : keepStyle;
             for (int z = 0; z < 4; z++)
                 for (int f = 0; f < 7; f++)
                     for (int k = 0; k < 16; k++) {
                         DWORD now = 3000 + 97 * (DWORD)k;
-                        BarSizeSet(kSize[z][0], kSize[z][1], 0);
-                        FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
-                        g_sbFullAt = kFill[f] >= 1 ? now - 60 * (DWORD)k : 0;          /* (full: from its last surge to after it) */
-                        ViewListStart(); SaberBuild(1000, 500, kFill[f], now);
+                        int n0, b0;
+                        for (int w = 0; w < 3; w++) {                                  /* its own width, then 60% or so, then the whole */
+                            BarSizeSet(kSize[z][0], w == 1 ? kSize[z][1] : 0, w == 2);
+                            g_sbFullAt = kFill[f] >= 1 ? now - 60 * (DWORD)k : 0;      /* (full: from its last surge to after it) */
+                            ViewListStart(); SaberBuild(1000, 500, kFill[f], now);
+                            if (!w) { n0 = g_vvN; b0 = g_vbN; memcpy(own, g_vv, sizeof(ViewVert) * (size_t)g_vvN); continue; }
+                            same += g_vvN == n0 && g_vbN == b0 && !memcmp(own, g_vv, sizeof(ViewVert) * (size_t)g_vvN);
+                        }
                         cases++;
-                        if (!BarInside(1000, 500, 0, g_vbN, fb0, fb1, 1)) spilled++;
-                        left |= g_sbClipOn;
-                        for (int b = 0; b < g_vbN; b++)                                  /* (the sparks' light: cut at an end) */
-                            for (int i = g_vb[b].first; g_vb[b].tex == VT_SPARK && i < g_vb[b].first + g_vb[b].count; i++) {
-                                if (g_vv[i].c[3] > 0 && (Near(g_vv[i].x, fb0, 1e-3) || Near(g_vv[i].x, fb1, 1e-3))) cutAt++;
-                                if (g_vv[i].c[3] > 0) lit++;
-                            }
+                        for (int i = 0; i < g_vvN; i++) if (g_vv[i].x < 0 || g_vv[i].x > 1000) { past++; break; }
                     }
         }
         g_saberStyle = keepStyle;
-        /* the whole width: nothing cut, the light off the window's edges as before */
-        BarSizeSet(100, 0, 1);
-        ViewListStart(); SaberBuild(1000, 500, 0.02f, 3000);
-        int past = 0;
-        for (int i = 0; i < g_vvN; i++) past |= g_vv[i].x < 0;
         g_viewTex[VT_SPARK] = 0;
         FrameParse(bar, sizeof bar - 1);
-        printf("  a narrowed Neo's light: drawn past an end in %d of %d moments; its sparks' lit corners: %d on an end, %d in all\n", spilled, cases, cutAt, lit);
-        Check(cases == 2 * 4 * 7 * 16 && !spilled && !left && lit > 1000 && cutAt > 100 && past,
-              "Neo narrowed (1000 x 500 at 50% to 200% thick, 20% to 60% wide), its blade's ends at the bar's very ends: at its start, middle, end and full, through 1.5 s of its clock, in his qualities and all four, nothing of its light (glow, orb, streak, embers, drops, bolts, the surges' light) drawn past the bar's cut ends, the light reaching them cut there; at the whole width its light still runs off the window's edge as before");
+        Check(cases == 2 * 4 * 7 * 16 && same == 2 * cases && past > cases / 4,
+              "Neo with a width line of 20% to 60% or the whole width ticked (1000 x 500, 50% to 200% thick): drawn exactly as at its own width, every vertex, at its start, middle, end and full, through 1.5 s of its clock, in his qualities and all four; its light running off the window's edges as it always did");
     }
     /* the view takes the size as each screen opens (StylePick), and says so */
     Fresh("bar-size-pick");
@@ -5843,6 +5809,218 @@ static void TestBarSize(void)
     BarSizeSet(100, 0, 0);
     g_logoOn = 0; g_logo.ok = 0; g_frameOn = 0; g_frame.ok = 0; g_class = 0;
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+}
+
+/* The bar's fill and colour, drawn (his design and his pick, 11 Oct 2026: Heat, Smooth or Blade light on both bars, inside
+ * Neo's frame on Neo; in the class's colour or CinderLoad's ember): handed to the view as each screen opens. */
+/* A corner k of rgb (k up to 1.05, as the heat's hottest), a channel at full clipped there: k from the brightest channel
+ * below full (a vivid colour, or the ember, has one at full) */
+static int FillOf(const ViewVert *v, unsigned rgb, float *k)
+{
+    float t[3] = { (float)(rgb >> 16 & 255), (float)(rgb >> 8 & 255), (float)(rgb & 255) }, m = 0;
+    int j = -1;
+    for (int i = 0; i < 3; i++) if (t[i] < 250 && t[i] > m) { m = t[i]; j = i; }
+    if (j < 0 || m < 20) return 0;
+    *k = v->c[j] / m;
+    for (int i = 0; i < 3; i++) {
+        float want = t[i] * *k;
+        if (want > 255) want = 255;
+        if (fabsf(v->c[i] - want) > 2.0f || *k > 1.07f) return 0;
+    }
+    return 1;
+}
+static void TestBarEffects(void)
+{
+    float s, bx, by, tw;
+    g_ovOn = 0; g_logoOn = 0; g_frameOn = 0; g_parchOn = 0; g_class = 9;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    BarSizeSet(100, 0, 0);
+    g_barVanilla = 1; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1; g_vbFullAt = 0; g_sbFullAt = 0; g_barEmber = 0;
+    VBarLayout(1920, 1080, &s, &bx, &by, &tw);
+    float front = 0.6f * 456, cx0 = bx + 28 * s, ry0 = by + 18 * s, ry1 = by + 46 * s, right = cx0 + 456 * s;
+    /* Retro, Smooth: retro's own fill, even (its heat held at its middle), in the class's colour; its lit edge and halo kept */
+    int pure = 1, n = 0;
+    float kmin = 9, kmax = 0, kmin2 = 9, kmax2 = 0;
+    for (int e = 0; e < 2; e++) {
+        g_barEffect = e ? LOOK_SMOOTH : LOOK_HEAT;
+        for (int f = 0; f < 4; f++) {
+            ViewListStart(); VBarBuild(1920, 1080, 0.6f, 5000 + 9000 * (DWORD)f);
+            const ViewVert *ch = g_vv + g_vb[0].first;
+            for (int q = 1; q < g_vb[0].count / 4; q++)
+                for (int j = 0; j < 4; j++) {
+                    const ViewVert *v = ch + 4 * q + j;
+                    float k, xt = (v->x - cx0) / s;
+                    if (xt > front - 3 * VBAR_EDGE) continue;
+                    pure &= VBarPure(v, 0x9482C9, &k);
+                    if (e) { if (k < kmin) kmin = k; if (k > kmax) kmax = k; n++; } else { if (k < kmin2) kmin2 = k; if (k > kmax2) kmax2 = k; }
+                }
+        }
+    }
+    Check(pure && n > 1000 && kmax - kmin < 0.01f && Near(kmin, VBarLevel(VBAR_MID), 0.01) && kmax2 - kmin2 > 0.5f && g_vbN == 3,
+          "Retro, Smooth: its fill the class's colour, even all along (its heat held at its middle: the same at every moment), where Heat runs from dark to full; its frame, glass, lit edge and halo as ever");
+    /* Retro, Blade light: the blade's own light in retro's channel (deeper at its top and bottom, near white along its
+     * centre, its filaments), none of Neo's frame, glow, orb, lightning or logo; retro's halo, glass and frame over it */
+    g_barEffect = LOOK_BLADE; g_viewTex[VT_SPARK] = 1;
+    ViewListStart(); VBarBuild(1920, 1080, 0.6f, 5000);
+    int inside = 1, whiteMid = 0, deepEdge = 0, neo = 0;
+    float far = 0;
+    for (int b = 0; b < g_vbN; b++) {
+        neo |= g_vb[b].tex == VT_FRAME || g_vb[b].tex == VT_SPARK || g_vb[b].tex == VT_LOGO;
+        if (g_vb[b].tex != -1) continue;
+        for (int i = g_vb[b].first; i < g_vb[b].first + g_vb[b].count; i++) {
+            const ViewVert *v = g_vv + i;
+            inside &= v->x >= cx0 - 1e-3f && v->x <= right + 1e-3f && v->y >= ry0 - 1e-3f && v->y <= ry1 + 1e-3f;
+            if (b == 0 && v->x < cx0 + front * s * 0.9f) {
+                int lo = v->c[0] < v->c[1] ? (v->c[0] < v->c[2] ? v->c[0] : v->c[2]) : (v->c[1] < v->c[2] ? v->c[1] : v->c[2]);
+                if (Near(v->y, (ry0 + ry1) / 2, 0.5) && lo > 200) whiteMid++;
+                if ((Near(v->y, ry0, 0.5) || Near(v->y, ry1, 0.5)) && lo < 150 && v->c[3] > 200) deepEdge++;
+                if (v->x > far) far = v->x;
+            }
+        }
+
+    }
+    int framed = g_vbN >= 4 && g_vb[g_vbN - 2].tex == VT_VGLASS && g_vb[g_vbN - 1].tex == VT_VBORDER && g_vb[1].add == 1;
+    Check(inside && whiteMid > 20 && deepEdge > 20 && !neo && framed && far > cx0 + front * s * 0.85f,
+          "Retro, Blade light: the blade's own light in its channel (near white along its centre, the class's colour deeper at its top and bottom, its filaments), all inside the channel, none of Neo's frame, orb, sparks or logo; retro's glass and frame over it");
+    /* the ember for the class's colour: retro's fill CinderLoad's ember, k of it */
+    g_barEffect = LOOK_HEAT; g_barEmber = 1;
+    ViewListStart(); VBarBuild(1920, 1080, 0.6f, 5000);
+    pure = 1;
+    {
+        const ViewVert *ch = g_vv + g_vb[0].first;
+        for (int q = 1; q < g_vb[0].count / 4; q++) {
+            float k, xt = (ch[4 * q].x - cx0) / s;
+            if (xt < front - 3 * VBAR_EDGE) pure &= FillOf(ch + 4 * q, BAR_EMBER, &k);
+        }
+    }
+    Check(pure && BarColour() == BAR_EMBER, "Retro, In my class's colour unticked: its fill CinderLoad's ember (0xFF8A2A), whatever the class");
+    g_barEmber = 0; g_barVanilla = 0; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 0;
+    /* Neo, Heat and Smooth: retro's fill inside Neo's frame (its channel between the caps' back walls), in the blade's
+     * colour; its frame, shine, orb, sparks and logo as ever; no blade fill */
+    static const char bar[] = "sheet 1024 256\nleft 0 0 132 180\nrail 136 0 232 180\ncentre 236 0 336 180\nright 340 0 470 180\nband 33 123\nchannel 56 101\nends 82 20\n";
+    FrameParse(bar, sizeof bar - 1);
+    g_frameOn = 1; g_viewTex[VT_FRAME] = 1; g_viewTex[VT_SPARK] = 1;
+    g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2.0f; g_logo.tu0 = g_logo.tv0 = 0; g_logo.tu1 = g_logo.tv1 = 1; g_viewTex[VT_LOGO] = 1;
+    float fs, ftop, fcy, fch, fx0, fx1, fb0, fb1;
+    FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
+    unsigned rgb = SaberVivid(kClassColour[9]);
+    int ok = 1;
+    for (int e = 0; e < 2; e++) {
+        g_barEffect = e ? LOOK_SMOOTH : LOOK_HEAT;
+        ViewListStart(); SaberBuild(1000, 500, 0.6f, 3000);
+        int cols = 0, nfill = 0, frame = 0, spark = 0, logo = 0;
+        float u = 2 * fch / 28, lo = 9, hi = 0, fr = fx0 + 0.6f * (fx1 - fx0);
+        for (int b = 0; b < g_vbN; b++) { frame |= g_vb[b].tex == VT_FRAME; spark |= g_vb[b].tex == VT_SPARK; logo |= g_vb[b].tex == VT_LOGO; }
+        for (int b = 0; b < g_vbN; b++)
+        for (int q = 0; g_vb[b].tex == -1 && !g_vb[b].add && q < g_vb[b].count / 4; q++) {
+            const ViewVert *v = g_vv + g_vb[b].first + 4 * q;
+            if (v[0].c[3] != 255) continue;                                /* (the fill's quads: opaque; the channel and the way to go not) */
+            nfill++;
+            ok &= v[0].x >= fx0 - 1e-3f && v[1].x <= fr + 1e-2f && v[0].y >= fcy - fch - 1e-3f && v[2].y <= fcy + fch + 1e-3f;
+            if (v[0].x < fr - 3 * VBAR_EDGE * u) {
+                float k;
+                ok &= FillOf(v, rgb, &k);
+                if (k < lo) lo = k;
+                if (k > hi) hi = k;
+            }
+            if (Near(v[0].y, fcy - fch, 1e-3)) cols++;
+        }
+        ok &= frame && spark && logo && nfill == cols * VBAR_ROWS && cols > 20 && (e ? hi - lo < 0.01f : hi - lo > 0.4f);
+    }
+    g_barEffect = LOOK_BLADE;
+    ViewListStart(); SaberBuild(1000, 500, 0.6f, 3000);
+    int opaque = 0;
+    for (int b = 0; b < g_vbN; b++)
+        for (int q = 0; g_vb[b].tex == -1 && !g_vb[b].add && q < g_vb[b].count / 4; q++) opaque += g_vv[g_vb[b].first + 4 * q].c[3] == 255;
+    Check(ok && opaque == 0, "Neo, Heat and Smooth: retro's fill inside Neo's frame, its channel between the caps' back walls, to the tip, in VBAR_ROWS bands, in the blade's colour (Heat dark to full, Smooth even); Neo's frame, orb, sparks and logo as ever; Blade light its own fill, as it always was");
+    /* the ember on Neo: the blade's light CinderLoad's ember made vivid */
+    g_barEmber = 1;
+    ViewListStart(); SaberBuild(1000, 500, 0.6f, 3000);
+    unsigned em = SaberVivid(BAR_EMBER);
+    int glowEmber = 0;
+    for (int b = 0; b < g_vbN; b++)
+        if (g_vb[b].tex == -1 && g_vb[b].add)
+            for (int i = g_vb[b].first; i < g_vb[b].first + g_vb[b].count; i++)
+                glowEmber |= g_vv[i].c[3] > 0 && (unsigned)(g_vv[i].c[0] << 16 | g_vv[i].c[1] << 8 | g_vv[i].c[2]) == em;
+    Check(glowEmber && em != rgb, "Neo, In my class's colour unticked: its light CinderLoad's ember, made vivid as the blade's colours are");
+    g_barEmber = 0; g_logoOn = 0; g_logo.ok = 0; g_frameOn = 0; g_frame.ok = 0; g_class = 0;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    /* the view takes the fill and the colour as each screen opens (StylePick), and says so */
+    Fresh("bar-effect-pick"); GameDir();
+    Look keep = g_look;
+    g_barEffect = LOOK_HEAT; g_barEmber = 0;
+    g_look.effect = LOOK_SMOOTH; g_look.ember = 1;
+    StylePick();
+    ok = g_barEffect == LOOK_SMOOTH && g_barEmber == 1 && LogSays("the view: the bar's fill smooth, in CinderLoad's ember");
+    g_look.effect = LOOK_BLADE; g_look.ember = 0;
+    StylePick();
+    ok &= g_barEffect == LOOK_BLADE && g_barEmber == 0 && LogSays("the view: the bar's fill blade light, in the class's colour");
+    g_look.effect = 77;
+    StylePick();
+    ok &= g_barEffect == LOOK_HEAT;
+    g_look = keep;
+    StylePick();
+    ok &= g_barEffect == LOOK_HEAT && g_barEmber == 0;
+    Check(ok, "each screen takes the bar's fill and colour as it opens (style.txt's effect and colour), the log saying so; a fill not ours: Heat");
+}
+
+/* The zones nearby's fade, his four (11 Oct 2026): style.txt's fade line read, kept, written back only when the file
+ * named it or the window chose it (a choice of the map, the bar or the areas never adds it), carried by the CVar. */
+static void TestFadeStyle(void)
+{
+    int f = 9, ok;
+    ok = StyleFade("fade third\r\n", &f) == 1 && f == NEAR_THIRD;
+    ok &= StyleFade("map parchment\nFADE 3600\n# fade zone\n", &f) == 1 && f == NEAR_C3600;
+    ok &= StyleFade("fade 1800\nfade zone\n", &f) == 1 && f == NEAR_ZONE;
+    f = 9;
+    ok &= StyleFade("fade circle\nfade 900\nfade\nzone\nfaded third\n", &f) == 0 && f == 9;
+    int map = 7, bar = 7, full = 7;
+    ok &= StyleParse("fade zone\nfade third\nfade 3600\nfade 1800\n", &map, &bar, &full) == 0 && map == 7;
+    Check(ok, "style.txt's fade line: zone, third, 3600 or 1800 (any case; a note after '#' passed over), the last one named counting; another word passed over; none of them one of the six choice words");
+    Fresh("fade-style"); GameDir();
+    StyleLoad();
+    ok = g_nearFade == NEAR_ZONE && !g_nearFadeNamed && LogSays("style: the zones nearby's fade zone, from the default");
+    ok &= StyleSet(1, 0, 1, "the bar alone") == 1 && Get("Data/CinderLoad/style.txt") && !strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade ");
+    Style st;
+    StyleNow(&st);
+    st.fade = NEAR_C1800;
+    ok &= StyleApply(&st, "the window") == 1 && g_nearFade == NEAR_C1800 && g_nearFadeNamed && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade 1800\r\n");
+    st.fade = NEAR_ZONE;
+    ok &= StyleApply(&st, "back") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade zone\r\n");
+    ok &= StyleSet(1, 1, 1, "retro") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade zone\r\n");
+    StyleLoad();
+    ok &= g_nearFade == NEAR_ZONE && g_nearFadeNamed && LogSays("style: the zones nearby's fade zone, from Data\\CinderLoad\\style.txt");
+    Put("Data/CinderLoad/style.txt", "map parchment\r\nbar neo\r\nareas full\r\nfade third\r\n");
+    StyleLoad();
+    ok &= g_nearFade == NEAR_THIRD && g_nearFadeNamed && StyleSet(1, 1, 1, "retro") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade third\r\n");
+    char chunk[sizeof kSwitchesLua + 420];
+    ok &= LuaChunk(chunk, (int)sizeof chunk, 1, 1, 1) > 0 && strstr(chunk, "\nlocal CL_LOOK = \"fade third thick 100 ");
+    g_nearFade = PARCH_NEAR_FADE; g_nearFadeNamed = 0;
+    Check(ok, "the fade kept: by default zone and not in style.txt (a choice of the map, the bar or the areas never adds it); chosen in the window, written as a line of its own and kept from then on; named by the file, written back as it is; read at the next start; said to the window in the chunk's look line");
+}
+
+/* The Retro frame's art as the client has it: seen only in its rows 7 to 55 of 64 (VBarLayout stands the bar's centre at
+ * 0.075 of the height at any thickness, its clear rows free to pass the window's bottom) */
+static void VBarArtRealClient(const char *client)
+{
+    Fresh("vbar-art"); GameDir();
+    if (!LinkClient(client)) { Check(0, "a real client's Loading-BarBorder.blp: its archives linked"); return; }
+    unsigned char *d = NULL;
+    unsigned n = 0;
+    const char *from;
+    BlpInfo b;
+    int ok = ClientPicture(VBAR_BORDER_PATH, "interface.MPQ", &d, &n, &from) && BlpParse(d, n, &b) && b.w == 512 && b.h == 64;
+    int top = 64, bottom = -1;
+    if (ok) {
+        static unsigned char px[512 * 64 * 4];
+        if (b.dxt) DxtDecode(d + b.off[0], 512, 64, b.dxt, px); else BlpPalDecode(d, &b, 0, 512, 64, px);
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 512; x++)
+                if (px[4 * (y * 512 + x) + 3]) { if (y < top) top = y; if (y > bottom) bottom = y; }
+    }
+    if (d) HeapFree(GetProcessHeap(), 0, d);
+    printf("  the client's Retro frame: seen in its rows %d to %d of 64\n", top, bottom);
+    Check(ok && top >= 7 && bottom <= 55, "a real client's Loading-BarBorder.blp: seen only in its rows 7 to 55 of 64, so a 200% Retro bar's frame as seen stands inside the window at its own centre");
 }
 
 /* The parchment (his "fix it", 10 Oct 2026: he had seen only the living map under the new bar): the client's world map
@@ -8787,7 +8965,7 @@ static void TestStyle(void)
     StyleLoad();
     g_mapFull = 7;
     StyleLoad();
-    ok = g_parchAsked == 1 && g_vbarAsked == 1 && g_mapFull == 0 && LogSays("style: the map parchment, the bar retro, the map's areas discovered, from the defaults");
+    ok = g_parchAsked == 1 && g_vbarAsked == 1 && g_mapFull == 1 && LogSays("style: the map parchment, the bar retro, the map's areas full, from the defaults");
     Fresh("style-old-parchment"); GameDir();
     Put("Data/CinderLoad/parchment.txt", "");
     StyleLoad();
@@ -9005,11 +9183,12 @@ static void TestSwitches(void)
     g_luaOn = 1; g_luaBroken = 0; g_luaBusy = 0; g_luaFails = 0; g_luaSetups = 0; g_luaSynced = 0;
     g_fkCv = NULL; g_fkUp = 0; g_fkRuns = g_fkProbes = g_fkSetups = g_fkIgnore = g_fkRegisters = g_fkRegFail = 0;
     Tick();
-    ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro discovered") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
+    static const char kHead[] = "local CL_MAP, CL_BAR, CL_AREAS = \"parchment\", \"retro\", \"full\"\nlocal CL_LOOK = \"fade zone thick 100 width own "
+                                "whole off effect heat colour class quality pulse raw\"\n-- CinderLoad";
+    ok &= g_fkRegisters == 1 && !strcmp(g_fkDef, "parchment retro full") && !g_fkArgs[0] && !g_fkArgs[1] && !g_fkArgs[2] && g_fkArgs[3] == 9 &&
           !g_fkArgs[4] && !g_fkArgs[5] && g_fkProbes == 1 && g_fkSetups == 1 && g_fkMarked && Gone("Data/CinderLoad/ui-setup.tmp") &&
-          !strncmp(g_fkHead, "local CL_MAP, CL_BAR, CL_AREAS = \"parchment\", \"retro\", \"discovered\"\nlocal CL_LOOK = \"nearby 1600 thick 100 width own "
-                             "whole off effect heat colour class quality pulse raw\"\n-- CinderLoad", 184) && !strcmp(g_fkVal, "parchment retro discovered") &&
-          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro discovered");
+          !strncmp(g_fkHead, kHead, sizeof kHead - 1) && !strcmp(g_fkVal, "parchment retro full") &&
+          g_luaSynced && LogSays("their CVar CinderLoadStyle made") && LogSays("made (the first: at a login or a /reload), set to parchment retro full");
     Check(ok, "a login: the CVar made as RegisterCVar makes one (no help, no flags, the choice its default, no callback, category 9, registered), the probe finds no switches, they are made from the choice held (the setup's mark there while it runs, gone after)");
     Tick();
     ok = g_fkProbes == 2 && g_fkSetups == 1 && g_fkRegisters == 1;
@@ -9228,21 +9407,24 @@ static void TestLookStyle(void)
     Style st;
     int fault = 7;
     StyleNow(&st);
-    st.look = def; st.nearYd = PARCH_NEAR_YD;
-    ok = StyleCvarRead("satellite neo full nearby 600 thick 125 width 50 whole on effect blade colour ember quality liquid raw", &st, &fault) &&
-         st.map == 0 && st.bar == 0 && st.full == 1 && st.nearYd == 600 && st.look.thick == 125 && st.look.width == 50 && st.look.whole == 1 &&
-         st.look.effect == LOOK_BLADE && st.look.ember == 1 && st.look.quality == (int)(SABER_LIQUID | SABER_RAW) && !fault;
-    ok &= StyleCvarRead("parchment retro discovered nearby 0 thick 50 width own whole off effect heat colour class quality none fault", &st, &fault) &&
-          st.map == 1 && st.nearYd == 0 && st.look.thick == 50 && st.look.width == 0 && st.look.quality == 0 && fault == 1;
-    ok &= StyleCvarRead("parchment retro discovered thick 75", &st, &fault) && st.look.thick == 75 && st.nearYd == 0 && st.look.width == 0 && !fault;
+    st.look = def; st.nearYd = PARCH_NEAR_YD; st.fade = NEAR_ZONE;
+    ok = StyleCvarRead("satellite neo full fade third thick 125 width 50 whole on effect blade colour ember quality liquid raw", &st, &fault) &&
+         st.map == 0 && st.bar == 0 && st.full == 1 && st.fade == NEAR_THIRD && st.look.thick == 125 && st.look.width == 50 && st.look.whole == 1 &&
+         st.look.effect == LOOK_BLADE && st.look.ember == 1 && st.look.quality == (int)(SABER_LIQUID | SABER_RAW) && !fault && st.nearYd == PARCH_NEAR_YD;
+    ok &= StyleCvarRead("parchment retro discovered fade 1800 thick 50 width own whole off effect heat colour class quality none fault", &st, &fault) &&
+          st.map == 1 && st.fade == NEAR_C1800 && st.look.thick == 50 && st.look.width == 0 && st.look.quality == 0 && fault == 1;
+    ok &= StyleCvarRead("parchment retro discovered fade 3600", &st, &fault) && st.fade == NEAR_C3600 && !fault;
+    ok &= StyleCvarRead("parchment retro discovered fade zone", &st, &fault) && st.fade == NEAR_ZONE && !fault;
+    ok &= StyleCvarRead("parchment retro discovered thick 75", &st, &fault) && st.look.thick == 75 && st.fade == NEAR_ZONE && st.look.width == 0 && !fault;
     Style before = st;
     static const char *const kNot[] = { "parchment retro discovered thick", "parchment retro discovered thick 49", "parchment retro discovered thick 201",
                                         "parchment retro discovered width 19", "parchment retro discovered width 0", "parchment retro discovered width 050",
-                                        "parchment retro discovered nearby 4001", "parchment retro discovered nearby -5",
+                                        "parchment retro discovered nearby 600", "parchment retro discovered fade 900",
+                                        "parchment retro discovered fade", "parchment retro discovered fade circle", "parchment retro discovered fade Zone",
                                         "parchment retro discovered whole yes", "parchment retro discovered effect fire",
                                         "parchment retro discovered colour red", "parchment retro discovered quality",
                                         "parchment retro discovered quality raw raw", "parchment retro discovered quality none raw",
-                                        "parchment retro discovered quality banana", "parchment retro discovered thick 100 nearby 600",
+                                        "parchment retro discovered quality banana", "parchment retro discovered thick 100 fade zone",
                                         "parchment retro discovered thick 100 thick 100", "parchment retro discovered  thick 100",
                                         "parchment retro discovered thick  100", "parchment retro discovered thick 100 ",
                                         "parchment retro discovered fault thick 100", "parchment retro discovered Thick 100",
@@ -9252,7 +9434,7 @@ static void TestLookStyle(void)
         if (!no) printf("  (the CVar's \"%s\" taken)\n", kNot[i]);
         ok &= no;
     }
-    Check(ok, "the CVar's whole value heard as the window writes it: the three, then nearby, thick, width, whole, effect, colour and quality in that order, each at most once, any missing (kept), \" fault\" last; out of range, out of order, twice, an extra space or a word not ours: not theirs, nothing changed");
+    Check(ok, "the CVar's whole value heard as the window writes it: the three, then fade (zone, third, 3600 or 1800), thick, width, whole, effect, colour and quality in that order, each at most once, any missing (kept), \" fault\" last; the reach (nearby) no longer the window's; out of range, out of order, twice, an extra space or a word not ours: not theirs, nothing changed");
 
     /* kept in style.txt as a choice is made; read back at the next start; an old file (no look) the defaults */
     Fresh("style-look"); GameDir();
@@ -9260,31 +9442,33 @@ static void TestLookStyle(void)
     ok = LookSame(&g_look, &def) && LogSays("style: the bar's look: thick 100, width own, whole off, effect heat, colour class, quality pulse raw, from the defaults");
     Style want;
     StyleNow(&want);
-    want.look.thick = 150; want.look.width = 40; want.look.effect = LOOK_SMOOTH; want.look.quality = (int)SABER_UNSTABLE; want.nearYd = 900;
+    want.look.thick = 150; want.look.width = 40; want.look.effect = LOOK_SMOOTH; want.look.quality = (int)SABER_UNSTABLE; want.nearYd = 900; want.fade = NEAR_THIRD;
     const char *t;
     ok &= StyleApply(&want, "a test") == 1 && (t = Get(STYLE_REL)) &&
-          strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas discovered\r\nnearby 900\r\nthick 150\r\nwidth 40\r\nwhole off\r\neffect smooth\r\n"
+          strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas full\r\nnearby 900\r\nfade third\r\nthick 150\r\nwidth 40\r\nwhole off\r\neffect smooth\r\n"
                     "colour class\r\nquality unstable\r\n") && StyleApply(&want, "again") == 0;
     want.look.ember = 1;                                                     /* (the look alone changed: kept too) */
     ok &= StyleApply(&want, "the colour alone") == 1 && g_look.ember == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\ncolour ember\r\n") &&
           LogSays("colour ember, quality unstable (the colour alone), from the next loading screen; kept in");
     want.look.ember = 0;
     ok &= StyleApply(&want, "back") == 1 && g_look.ember == 0;
-    g_look = def; g_nearYd = 7;
+    g_look = def; g_nearYd = 7; g_nearFade = 9; g_nearFadeNamed = 0;
     StyleLoad();
     ok &= g_look.thick == 150 && g_look.width == 40 && g_look.effect == LOOK_SMOOTH && g_look.quality == (int)SABER_UNSTABLE && g_nearYd == 900 &&
+          g_nearFade == NEAR_THIRD && g_nearFadeNamed &&
           LogSays("style: the bar's look: thick 150, width 40, whole off, effect smooth, colour class, quality unstable, from Data\\CinderLoad\\style.txt");
-    ok &= StyleSet(0, 0, 1, "the three alone") == 1 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo\r\nareas full\r\nnearby 900\r\nthick 150\r\n");
+    ok &= StyleSet(0, 0, 1, "the three alone") == 1 && (t = Get(STYLE_REL)) && strstr(t, "map satellite\r\nbar neo\r\nareas full\r\nnearby 900\r\nfade third\r\nthick 150\r\n");
     Put(STYLE_REL, "map satellite\r\nbar neo\r\nareas full\r\n");                             /* (0.3.0's three lines) */
     StyleLoad();
     ok &= LookSame(&g_look, &def) && g_parchAsked == 0 && g_mapFull == 1;
     Put(STYLE_REL, "map satellite\r\nbar neo\r\n");                                            /* (0.2.x's two) */
     StyleLoad();
-    ok &= LookSame(&g_look, &def) && g_parchAsked == 0 && g_vbarAsked == 0 && g_mapFull == 0 && g_nearYd == PARCH_NEAR_YD;
+    ok &= LookSame(&g_look, &def) && g_parchAsked == 0 && g_vbarAsked == 0 && g_mapFull == 1 && g_nearYd == PARCH_NEAR_YD && g_nearFade == NEAR_ZONE &&
+          !g_nearFadeNamed;
     Put(STYLE_REL, "map parchment\nthick 80\nsomething new 5\nbar retro\n");                    /* (a newer line: passed over) */
     StyleLoad();
     ok &= g_look.thick == 80 && g_look.width == 0 && g_parchAsked == 1 && g_vbarAsked == 1;
-    Check(ok, "the look kept in style.txt as a choice is made (its lines after nearby), the same choice again writes nothing, read back at the next start; a choice of the three alone keeps it; 0.3.0's and 0.2's files (no look) read as before with today's look; a line not ours passed over");
+    Check(ok, "the look kept in style.txt as a choice is made (its lines after nearby and fade), the same choice again writes nothing, read back at the next start; a choice of the three alone keeps it; 0.3.0's and 0.2's files (no look) read as before with today's look; a line not ours passed over");
 
     /* each screen takes Neo's qualities as it opens (the other parts of the look are drawn by a later stage) */
     g_look.quality = (int)(SABER_PULSE | SABER_RAW);
@@ -9394,7 +9578,7 @@ static void TestSwitchesPump(void)
     Put(STYLE_REL, "map satellite\r\nbar neo\r\n");
     g_parchAsked = g_vbarAsked = 1; g_luaOn = 0; g_vsStarts = 0; g_vsFail = 0; shim_threads = 0;
     ok = ViewStartFrom(shim_module, FakeViewThreadStart) && g_vsStarts == 1 && g_parchAsked == 0 && g_vbarAsked == 0 && g_viewOn &&
-         g_viewLive && g_luaOn && shim_threads == 1 && LogSays("style: the map satellite, the bar neo, the map's areas discovered, from Data\\CinderLoad\\style.txt") &&
+         g_viewLive && g_luaOn && shim_threads == 1 && LogSays("style: the map satellite, the bar neo, the map's areas full, from Data\\CinderLoad\\style.txt") &&
          LogSays("view on:");
     g_viewOn = 0; g_viewLive = 0; g_luaOn = 0;
     Fresh("view-start-no-thread"); GameDir();
@@ -9549,16 +9733,16 @@ static void TestSwitchesLua(void)
     const struct { const char *name; int map, bar, full, look; } kOut[4] = { { "setup.lua", 1, 1, 0, 0 }, { "setup-satellite-neo.lua", 0, 0, 0, 0 },
                                                                               { "setup-full.lua", 1, 1, 1, 0 }, { "setup-look.lua", 1, 1, 0, 1 } };
     Look was = g_look, held = LOOK_DEFAULT, other = { 150, 60, 1, LOOK_BLADE, 1, (int)(SABER_LIQUID | SABER_UNSTABLE) };
-    int near = g_nearYd;
-    for (int i = 0; i < 4; i++) {                        /* (the look and the reach the DLL holds: the defaults, or another) */
+    int fade = g_nearFade;
+    for (int i = 0; i < 4; i++) {                        /* (the look and the fade the DLL holds: the defaults, or another) */
         g_look = kOut[i].look ? other : held;
-        g_nearYd = kOut[i].look ? 600 : PARCH_NEAR_YD;
+        g_nearFade = kOut[i].look ? NEAR_THIRD : PARCH_NEAR_FADE;
         snprintf(p, sizeof p, "%s/%s", dir, kOut[i].name);
         f = fopen(p, "wb");
         int len = LuaChunk(chunk, (int)sizeof chunk, kOut[i].map, kOut[i].bar, kOut[i].full);
         if (f) { fwrite(chunk, 1, (size_t)len, f); fclose(f); }
     }
-    g_look = was; g_nearYd = near;
+    g_look = was; g_nearFade = fade;
     snprintf(p, sizeof p, "%s/probe.lua", dir);
     f = fopen(p, "wb");
     if (f) { fputs(kLuaProbe, f); fclose(f); }
@@ -9705,9 +9889,9 @@ static void TestSwitchesPath(void)
     /* a login: the first message taken makes the CVar, finds no switches, makes them in the game's UI */
     DWORD now = 20000;
     Pump(now);
-    static const char kDef[] = " nearby 1600 thick 100 width own whole off effect heat colour class quality pulse raw";
+    static const char kDef[] = " fade zone thick 100 width own whole off effect heat colour class quality pulse raw";
     char want[300];
-    snprintf(want, sizeof want, "parchment retro discovered%s", kDef);
+    snprintf(want, sizeof want, "parchment retro full%s", kDef);
     ok &= g_fkCv && g_luaSynced && g_fkSetups == 1 && !strcmp(g_fkVal, want);
     Bridge("open");
     Bridge("text map");
@@ -9718,7 +9902,7 @@ static void TestSwitchesPath(void)
 
     /* Satellite picked in the window: the CVar says so; the next message (a quarter second) keeps it; the next screen */
     Bridge("pick map satellite");
-    snprintf(want, sizeof want, "satellite retro discovered%s", kDef);
+    snprintf(want, sizeof want, "satellite retro full%s", kDef);
     ok = BridgeSaid("picked") && !strcmp(g_fkVal, want) && g_parchAsked == 1;
     now += LUA_POLL_MS;
     Pump(now);
@@ -9739,7 +9923,7 @@ static void TestSwitchesPath(void)
 
     /* /cinderload bar in the chat */
     Bridge("slash bar");
-    snprintf(want, sizeof want, "parchment neo discovered%s", kDef);
+    snprintf(want, sizeof want, "parchment neo full%s", kDef);
     ok = BridgeSaid("loading bar Neo") && !strcmp(g_fkVal, want);
     now += LUA_POLL_MS;
     Pump(now);
@@ -9750,55 +9934,59 @@ static void TestSwitchesPath(void)
     ok &= g_parchOn && !g_barVanilla;
     Check(ok, "the whole path: /cinderload bar in the chat, kept the same way; the next screen the parchment with the blade");
 
-    /* the full map picked in the window: the CVar, the next message keeps it, the next screen paints the whole map */
-    Bridge("pick areas full");
-    snprintf(want, sizeof want, "parchment neo full%s", kDef);
-    ok = BridgeSaid("picked") && !strcmp(g_fkVal, want) && !g_mapFull;
-    now += LUA_POLL_MS;
-    Pump(now);
-    ok &= g_mapFull == 1 && (t = Get(STYLE_REL)) && strstr(t, "areas full") && !g_parchFullOn;
-    g_dispNew = 1;
-    GameStep(0.0f, now + 10);
-    ViewOpenFirst(1920, 1080, now + 20);
-    ok &= g_parchOn && g_parchFullOn == 1 && LogSays("the parchment's map areas full");
-    Bridge("text areas");
-    ok &= BridgeSaid("Full map shown");
-    Bridge("slash areas");                                                /* (and back with /cinderload) */
+    /* Discovered picked in the window (the full map is the default): the CVar, the next message keeps it, the next screen
+     * paints only what was discovered; /cinderload areas back to the full map */
+    Bridge("pick areas discovered");
     snprintf(want, sizeof want, "parchment neo discovered%s", kDef);
-    ok &= BridgeSaid("map areas Discovered") && !strcmp(g_fkVal, want);
+    ok = BridgeSaid("picked") && !strcmp(g_fkVal, want) && g_mapFull == 1 && g_parchFullOn == 1;
+    now += LUA_POLL_MS;
+    Pump(now);
+    ok &= g_mapFull == 0 && (t = Get(STYLE_REL)) && strstr(t, "areas discovered") && g_parchFullOn == 1;
+    g_dispNew = 1;
+    GameStep(0.0f, now + 10);
+    ViewOpenFirst(1920, 1080, now + 20);
+    ok &= g_parchOn && g_parchFullOn == 0 && LogSays("the parchment's map areas as discovered");
+    Bridge("text areas");
+    ok &= BridgeSaid("Discovered shown");
+    Bridge("slash areas");                                                /* (and back with /cinderload) */
+    snprintf(want, sizeof want, "parchment neo full%s", kDef);
+    ok &= BridgeSaid("map areas Full map") && !strcmp(g_fkVal, want);
     now += LUA_POLL_MS;
     Pump(now);
     g_dispNew = 1;
     GameStep(0.0f, now + 10);
     ViewOpenFirst(1920, 1080, now + 20);
-    ok &= !g_mapFull && !g_parchFullOn && (t = Get(STYLE_REL)) && strstr(t, "areas discovered");
-    Check(ok, "the whole path, the map's areas: Full map picked in the window, the CVar says so, the game's next message keeps it in style.txt, the next loading screen paints the whole map; /cinderload areas back to what was discovered the same way");
+    ok &= g_mapFull == 1 && g_parchFullOn == 1 && (t = Get(STYLE_REL)) && strstr(t, "areas full");
+    Check(ok, "the whole path, the map's areas: the full map at the start (his default), Discovered picked in the window, the CVar says so, the game's next message keeps it in style.txt, the next loading screen paints only what was discovered; /cinderload areas back to the full map the same way");
 
     /* the bar's look in the window: each slider and check box, the CVar, the next message keeps it in style.txt and in
      * the DLL's own (g_look, g_nearYd), the next screen takes Neo's qualities */
     Bridge("slide thick 125");
     ok = BridgeSaid("slid");
     Bridge("slide width 50");
-    Bridge("slide nearby 600");
-    Bridge("tick Whole");
-    ok &= BridgeSaid("ticked");
+    Bridge("pick fade third");
+    ok &= BridgeSaid("picked");
+    Bridge("tick Whole");                                                 /* (greyed with Neo: always the whole width) */
+    ok &= BridgeSaid("not there");
     Bridge("pick effect blade");
     Bridge("tick Colour");
     ok &= BridgeSaid("unticked");
     Bridge("tick QualityLiquid");
     Bridge("tick QualityPulse");
-    ok &= !strcmp(g_fkVal, "parchment neo discovered nearby 600 thick 125 width 50 whole on effect blade colour ember quality liquid raw");
+    ok &= !strcmp(g_fkVal, "parchment neo full fade third thick 125 width 50 whole off effect blade colour ember quality liquid raw");
     now += LUA_POLL_MS;
     Pump(now);
-    ok &= g_look.thick == 125 && g_look.width == 50 && g_look.whole == 1 && g_look.effect == LOOK_BLADE && g_look.ember == 1 &&
-          g_look.quality == (int)(SABER_LIQUID | SABER_RAW) && g_nearYd == 600 && (t = Get(STYLE_REL)) &&
-          strstr(t, "\r\nnearby 600\r\nthick 125\r\nwidth 50\r\nwhole on\r\neffect blade\r\ncolour ember\r\nquality liquid raw\r\n") &&
-          LogSays("style: the zones nearby out to 600 yards, the bar's look thick 125, width 50, whole on, effect blade, colour ember, quality liquid raw");
+    ok &= g_look.thick == 125 && g_look.width == 50 && g_look.whole == 0 && g_look.effect == LOOK_BLADE && g_look.ember == 1 &&
+          g_look.quality == (int)(SABER_LIQUID | SABER_RAW) && g_nearFade == NEAR_THIRD && g_nearFadeNamed && g_nearYd == PARCH_NEAR_YD &&
+          (t = Get(STYLE_REL)) && !strstr(t, "\r\nnearby") &&
+          strstr(t, "\r\nareas full\r\nfade third\r\nthick 125\r\nwidth 50\r\nwhole off\r\neffect blade\r\ncolour ember\r\nquality liquid raw\r\n") &&
+          LogSays("style: the zones nearby out to 1600 yards, their fade third, the bar's look thick 125, width 50, whole off, effect blade, colour ember, quality liquid raw");
     g_dispNew = 1;
     GameStep(0.0f, now + 10);
     ViewOpenFirst(1920, 1080, now + 20);
-    ok &= g_saberStyle == (SABER_LIQUID | SABER_RAW) && g_parchNearOn == 600 && LogSays("  the view: the blade's qualities liquid raw");
-    Check(ok, "the whole path, the bar's look: the thickness, width and reach slid, the whole width and the class's colour ticked, Blade light and Neo's qualities picked in the window; the CVar carries them, the next message keeps them in style.txt and in the DLL's own; the next screen takes Neo's qualities and the reach");
+    ok &= g_saberStyle == (SABER_LIQUID | SABER_RAW) && g_barEffect == LOOK_BLADE && g_barEmber == 1 && LogSays("  the view: the blade's qualities liquid raw") &&
+          LogSays("  the view: the bar's fill blade light, in CinderLoad's ember");
+    Check(ok, "the whole path, the bar's look: the thickness and width slid, a fade picked, the class's colour ticked (the whole width greyed with Neo), Blade light and Neo's qualities picked in the window; the CVar carries them, the next message keeps them in style.txt (the fade a line of its own) and in the DLL's own; the next screen takes Neo's qualities, the fill and the ember");
 
     /* a /reload: the UI made anew; the probe finds no switches; made again from the choice held, showing it */
     Bridge("fresh");
@@ -9807,14 +9995,14 @@ static void TestSwitchesPath(void)
     Pump(now);
     Bridge("open");
     Bridge("text bar");
-    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo discovered nearby 600 thick 125 width 50 whole on effect blade colour ember quality liquid raw") &&
+    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo full fade third thick 125 width 50 whole off effect blade colour ember quality liquid raw") &&
          BridgeSaid("Neo shown");
     Bridge("text thick");
     ok &= BridgeSaid("125% shown");
     Bridge("text width");
     ok &= BridgeSaid("the whole screen shown");
-    Bridge("text nearby");
-    ok &= BridgeSaid("600 yards shown");
+    Bridge("text fade");
+    ok &= BridgeSaid("Per zone, nearest third shown");
     Bridge("drag");
     ok &= BridgeSaid("moved");
     Bridge("openmap");
@@ -9831,10 +10019,10 @@ static void TestSwitchesPath(void)
     Bridge("tick QualityLiquid");
     Bridge("tick QualityPulse");
     Bridge("slide thick 100");
-    Bridge("slide nearby 1200");
+    Bridge("pick fade zone");
     now += LUA_POLL_MS;
     Pump(now);
-    Check(ok, "the whole path: a /reload, the window made again from what the DLL holds (Neo, 125%, the whole screen, 600 yards: the look back from style.txt's own, through the chunk); dragged by its title; the world map minimised and maximised, nothing of ours on it");
+    Check(ok, "the whole path: a /reload, the window made again from what the DLL holds (Neo, 125%, the whole screen, each zone's nearest third: the look back from style.txt's own, through the chunk); dragged by its title; the world map minimised and maximised, nothing of ours on it");
 
     /* Retro picked in the game's last moment, then it quits: kept (its WM_QUIT) */
     Bridge("pick bar retro");
@@ -9862,7 +10050,8 @@ static void TestSwitchesPath(void)
     Bridge("open");
     Bridge("text map");
     ok &= g_parchAsked == 1 && g_vbarAsked == 1 && g_look.width == 70 && BridgeSaid("Parchment shown") &&
-          !strcmp(g_fkVal, "parchment retro discovered nearby 1200 thick 100 width 70 whole off effect heat colour class quality pulse raw");
+          !strcmp(g_fkVal, "parchment retro full fade zone thick 100 width 70 whole off effect heat colour class quality pulse raw") && g_nearFadeNamed &&
+          g_mapFull == 1;
     Bridge("text bar");
     ok &= BridgeSaid("Retro shown");
     Bridge("text width");
@@ -9873,7 +10062,7 @@ static void TestSwitchesPath(void)
     /* sessions whose style.txt was set by hand off the sliders' steps (README: nearby any yards 0 to 4000): a login, no
      * click, leaves style.txt and the DLL's reach and look exactly as they were (nearby 40 is never made 0, 1250 never 1300) */
     static const char *const kOdd[2] = { "map parchment\r\nbar retro\r\nareas discovered\r\nnearby 40\r\nthick 123\r\nwidth 33\r\n",
-                                         "map parchment\r\nbar retro\r\nareas discovered\r\nnearby 1250\r\nthick 100\r\nwidth own\r\n" };
+                                         "map parchment\r\nbar retro\r\nareas discovered\r\nnearby 1250\r\nfade 3600\r\nthick 100\r\nwidth own\r\n" };
     static const int kOddYd[2] = { 40, 1250 }, kOddThick[2] = { 123, 100 }, kOddWidth[2] = { 33, 0 };
     ok = 1;
     for (int i = 0; i < 2; i++) {
@@ -9891,7 +10080,7 @@ static void TestSwitchesPath(void)
         now += LUA_POLL_MS; Pump(now);
         now += LUA_POLL_MS; Pump(now);
         char said[40];
-        snprintf(said, sizeof said, " nearby %d thick %d ", kOddYd[i], kOddThick[i]);
+        snprintf(said, sizeof said, " fade %s thick %d ", i ? "3600" : "zone", kOddThick[i]);
         ok &= g_luaSynced && strstr(g_fkVal, said) && g_nearYd == kOddYd[i] && g_look.thick == kOddThick[i] && g_look.width == kOddWidth[i] &&
               Is(STYLE_REL, kOdd[i]);
         BridgeClose();
@@ -10117,6 +10306,7 @@ int main(int argc, char **argv)
         FireBarRealClient(argv[2]);
         FireRealClient(argv[2]);
         LuaRealClient(argv[2]);
+        VBarArtRealClient(argv[2]);
     }
 
     TestShips();
@@ -10127,6 +10317,8 @@ int main(int argc, char **argv)
     TestViewDefault();
     TestVanillaBar();
     TestBarSize();
+    TestBarEffects();
+    TestFadeStyle();
     TestParchment();
     TestZoneRule();
     TestCut();
