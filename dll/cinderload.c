@@ -963,6 +963,10 @@ static volatile LONG g_viewScreen;       /* the view's screens so far: the place
 static volatile LONG g_viewDrew;         /* the view has drawn this screen: the game's own bar under it stays dark, so its
                                           * fire never shows through the end's blur and dissolve (his 7 Oct load: "the old
                                           * lava loading bar" for half a second after the blade had faded) */
+static volatile LONG g_frmBlack, g_worldLaid;   /* this screen's: the game's frames laid black under the parchment; the
+                                                 * world's frames after it with the ending laid over them (the log) */
+static volatile LONG g_viewPicked;       /* the view has taken this screen (MapPick, before ViewOpen can fail): its pick,
+                                          * g_parchOn, is the screen's map to its end, the view opened or not, gone or not */
 static int g_settleView;                 /* the hold's glide in is the view's (HoldFrame): the push its last stretch, landing
                                           * with the world */
 static volatile LONG g_frmCount, g_frmGap, g_frmGapFrom, g_frmGapTo, g_frmDips, g_frmShown;   /* this screen's, for the log */
@@ -2461,6 +2465,7 @@ static DWORD StepNow(DWORD now)
 static void ExploreAtLoad(void);                               /* (the parchment's, below) */
 static void StyleAtLoad(void);                                 /* (the style's: the map and the bar, chosen in game; below) */
 static void StylePick(void);
+static int ViewTake(const char **why, int (*open)(const char **why));
 static void StyleLoad(void);
 static void LuaStart(void);
 /* The game's thread, each loading frame it draws: a new screen's start, and what only its own frames can tell (how many,
@@ -2472,6 +2477,8 @@ static void GameFacts(float p, DWORD now)
     if (InterlockedExchange(&g_dispNew, 0) || !g_gameAt || fallback) {
         InterlockedExchange(&g_viewSteps, 0);                         /* (the view takes them back after this frame) */
         InterlockedExchange(&g_viewDrew, 0);                          /* (a screen the view may not draw: the game's bar) */
+        InterlockedExchange(&g_frmBlack, 0); InterlockedExchange(&g_worldLaid, 0);
+        InterlockedExchange(&g_viewPicked, 0);                        /* (the view picks its map as it opens this one) */
         g_disp = g_dispMax = g_gameMax = p;
         g_dispV = g_dispRate = 0;
         g_dispAt = now;                                               /* the bar as shown starts here, without a step */
@@ -5060,6 +5067,34 @@ static int ViewWillDraw(DWORD now)
 {
     return g_viewLive && (g_viewDrew || (LONG)(now - g_dispAt) < VIEW_TAKE_MS);
 }
+/* What the game's own loading frame lays over the world map's picture (its thread, OverlayDraw), the view moving the zoom
+ * (viewSteps) or not yet: OV_ALL the overlay (the game's own living map), OV_NONE nothing (the view draws the living map
+ * over it), OV_BLACK black from corner to corner (a screen of the parchment's: ParchScreen, below). */
+enum { OV_NONE, OV_ALL, OV_BLACK };
+static int OverlayGameLays(int viewSteps, DWORD now);              /* (the style's, below; and the view's log of it) */
+static void ParchEndLog(char *m);
+/* The game's thread, each loading frame of a map screen (OverlayDraw): what it lays over the world map's picture, as
+ * OverlayGameLays says, drawn by the hook's own: all, the overlay whole (OverlayDrawAll); black, the whole frame black
+ * (OverlayBlack: 1 when it was drawn, counted for the log). While the view's thread moves the view, it builds and draws
+ * the overlay itself, so this frame builds none of it and only reads the class (the character list is the game's
+ * thread's alone): the two never build the same layer at once; under the parchment it is black all the same, to the
+ * screen's last frame. Otherwise all of it, under g_stepLock, so the view cannot take over halfway. */
+static void OverlayFrame(DWORD now, void (*all)(void), int (*black)(void))
+{
+    if (!g_viewSteps) {                                            /* (the view, once it moves them, keeps them) */
+        int held = StepLock();
+        if (!g_viewSteps) {
+            if (OverlayGameLays(0, now) != OV_BLACK) all();        /* the game's own living map */
+            else if (black()) InterlockedExchange(&g_frmBlack, g_frmBlack + 1);   /* the parchment's: none of it */
+            StepUnlock(held);
+            return;
+        }
+        StepUnlock(held);
+    }
+    if (OverlayGameLays(1, now) == OV_BLACK && black())             /* under the parchment: black to its last frame */
+        InterlockedExchange(&g_frmBlack, g_frmBlack + 1);           /* (the game's thread is its only writer) */
+    ClassStep();
+}
 #if defined(__i386__)
 typedef void (__attribute__((fastcall)) *OvSetup)(int, const float *, int, int, int, const unsigned *, int, int, int,
                                                   const float *, int, int, int);
@@ -5103,23 +5138,26 @@ static void OverlayStrips(void *dev, const float *pos, const float *uv, const un
     }
 }
 
-/* From RevealStub, on the game's thread, before the fill's own setup: the overlay's quads, the sea under the names.
- * While the view's thread moves the view, it builds and draws the overlay itself (ViewOverlayBuild), so this frame, hidden
- * under the view, only reads the class (the character list is the game's thread's alone) and builds nothing: the two
- * never build the same layer at once. Otherwise all of it, under g_stepLock, so the view cannot take over halfway. */
+/* From RevealStub, on the game's thread, before the fill's own setup: the overlay's quads, the sea under the names, or
+ * black (OverlayFrame says which; the tests run it). */
 void WINAPI OverlayDraw(void) __attribute__((used));
 static void OverlayDrawAll(void);
-static int ParchWillDraw(DWORD now);                              /* (the style's, below) */
+/* The whole frame black, the sea sheet's deep square (the game's thread only: the sheet and the quad are no other's): 1
+ * when drawn. */
+static int OverlayBlack(void)
+{
+    if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
+    if (!g_seaTex) return 0;
+    ParchBlackBuild();
+    OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_blackPos, g_blackUV, g_blackCol, 1);
+    return 1;
+}
 void WINAPI OverlayDraw(void)
 {
     if (!g_ovOn || !g_mapShown) return;
-    if (!g_viewSteps) {                                            /* (the view, once it moves them, keeps them) */
-        int held = StepLock();
-        if (!g_viewSteps) { OverlayDrawAll(); StepUnlock(held); return; }
-        StepUnlock(held);
-    }
-    ClassStep();
+    OverlayFrame(GetTickCount(), OverlayDrawAll, OverlayBlack);
 }
+/* The game's own living map over the world map's picture (OverlayFrame), g_stepLock held. */
 static void OverlayDrawAll(void)
 {
     DWORD now = GetTickCount();
@@ -5128,14 +5166,6 @@ static void OverlayDrawAll(void)
     static DWORD last;
     float dt = last ? (float)(now - last) / 1000.0f : 0;
     last = now;
-    if (ParchWillDraw(now)) {                                      /* the parchment coming: none of the living map, black */
-        if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
-        if (g_seaTex) {
-            ParchBlackBuild();
-            OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_seaTex, 1, 0), g_blackPos, g_blackUV, g_blackCol, 1);
-        }
-        return;
-    }
     if (g_lblOn && !g_lblTex && !g_lblTried) { g_lblTried = 1; g_lblTex = OverlayLoad(LABELS_PATH); }   /* the biggest: first */
     if (g_seaOn && !g_seaTex && !g_seaTried) { g_seaTried = 1; g_seaTex = OverlayLoad(SEA_PATH); }
     if (g_marksOn && !g_marksTex && !g_marksTried) { g_marksTried = 1; g_marksTex = OverlayLoad(MARKS_PATH); }
@@ -11865,6 +11895,28 @@ static void ParchStop(void)
     ParchScreenEnd();
     InterlockedExchange(&g_pjWorker, 0);
 }
+/* The view gone for the session (ViewOff, its thread; the tests run it): the game's thread moves the bar and the zoom
+ * again from its next frame and draws its own frames again, the parchment's job stale; logged, with what the
+ * parchment's screens show from now. Only the view draws the parchment, so with it chosen the screen the view had taken
+ * stays black to its end (ParchScreen), and every screen after it is the game's own, the living map, till the game
+ * restarts (his call to make: the 0.3.0 fallback kept, black screens the other way). */
+static void ViewGone(const char *why)
+{
+    char m[400];
+    int held = StepLock();
+    InterlockedExchange(&g_viewSteps, 0);
+    StepUnlock(held);
+    InterlockedExchange(&g_viewLive, 0);                    /* (the game's frames draw all their own again) */
+    ParchStop();                                            /* (the parchment's job and its painting freed) */
+    wsprintfA(m, "view off for this session: %s", why);
+    Log(m);
+    if (!*(volatile int *)&g_parchAsked) return;
+    Log(g_viewPicked && *(volatile int *)&g_parchOn
+        ? "  the parchment chosen, and only the view draws it: this screen black to its end, then the game's own loading "
+          "screens, the living map (satellite), for the rest of the session"
+        : "  the parchment chosen, and only the view draws it: the game's own loading screens, the living map (satellite), "
+          "from now to the end of the session");
+}
 /* A screen's first frame, made at once as the view opens (before its first step can be: his note, 10 Oct, "for a split
  * second ... you get the previous screen"): the dark paper and vanilla's bar empty, for the parchment; for the living map,
  * nothing (black). Never the last screen's frame. */
@@ -12572,20 +12624,14 @@ static DWORD ViewNow(void)
     last = now;
     return now;
 }
-/* The view gone for the session: the game's thread moves the bar and the zoom again from its next frame. */
+/* The view gone for the session (ViewGone): the game's thread moves the bar and the zoom again from its next frame; its
+ * window hidden, its pictures freed. */
 static DWORD ViewOff(const char *why)
 {
-    char m[200];
-    int held = StepLock();
-    InterlockedExchange(&g_viewSteps, 0);
-    StepUnlock(held);
-    InterlockedExchange(&g_viewLive, 0);                    /* (the game's frames draw all their own again) */
-    ParchStop();                                            /* (the parchment's job and its painting freed) */
+    ViewGone(why);
     if (g_view.win) ShowWindow(g_view.win, SW_HIDE);
     for (int i = 0; i < VT_COUNT; i++)
         if (g_view.blp[i]) { HeapFree(GetProcessHeap(), 0, g_view.blp[i]); g_view.blp[i] = NULL; }
-    wsprintfA(m, "view off for this session: %s", why);
-    Log(m);
     return 0;
 }
 static DWORD WINAPI ViewThread(LPVOID arg)
@@ -12631,6 +12677,7 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             wsprintfA(m, "  the view: the world showed %lu ms after the screen went%s", (unsigned long)(now - waitAt),
                       g_worldFrames != worldSeen ? "" : ", or no frame of it was seen and it faded anyway");
             Log(m);
+            if (g_parchOn) ParchEndLog(m);                  /* (the proof the parchment's ending showed no other map) */
             if (ViewWorldBlind(worldSeen))
                 Log("  the view: no frame of the game's has been seen all session (its frames go out another way than "
                     "the present hooked), so from now on it fades as each screen goes");
@@ -12653,8 +12700,8 @@ static DWORD WINAPI ViewThread(LPVOID arg)
             if (!ViewReady(seen, &ours)) { Sleep(1); continue; }
             if (!ours) { skip = 1; continue; }              /* not a world map screen: the game's own, as ever */
             const char *why = "";
-            int open = ViewOpen(&why);
-            if (open < 0) {                                 /* not this screen: the game's own, as ever */
+            int open = ViewTake(&why, ViewOpen);          /* (the screen's map picked first: its own to its end) */
+            if (open < 0) {                                 /* not this screen: the game's own (black, the parchment's) */
                 if (skips++ < 8) { wsprintfA(m, "  the view: not this screen, as %s", why); Log(m); }
                 skip = 1;
                 continue;
@@ -12821,6 +12868,18 @@ static void ParchWorkerStart(void)
  * the session; the game's frame is never left half-drawn. The blur's textures live only from the blur to the end of
  * the world's dissolve, so they are never there when the game resets its device. */
 #define BLUR_LEVELS 8          /* 1/2, 1/4, 1/8, 1/16, 1/32 down; 1/16, 1/8, 1/4 back up */
+/* The game's thread, just before each frame goes out (PrePresent; the tests run it): the explored areas' files once as
+ * the world shows (explore: ExploreAfterLoad, a login's), the ending over the frame (lay: PresentLay, drawn on the game's
+ * device; gx its device object), and a frame of the world counted for the view (it waits for one to fade) last, once
+ * our own work on it is done, so the view's fade begins as the frame goes out, not while that work still holds it back. */
+static void PresentOrder(unsigned char *gx, void (*explore)(void), void (*lay)(unsigned char *gx, int loading))
+{
+    int loading = g_loadFrame;
+    g_loadFrame = 0;
+    if (!loading && g_exPending && InterlockedExchange(&g_exPending, 0)) explore();   /* (once, as the world shows) */
+    lay(gx, loading);
+    if (!loading) InterlockedExchange(&g_worldFrames, g_worldFrames + 1);
+}
 #ifdef __i386__
 __attribute__((used)) void *g_presentBack;            /* VA 0x5A1A03: the present, after the six bytes */
 void WINAPI PrePresent(unsigned char *gx) __attribute__((used));
@@ -12941,16 +13000,13 @@ static void BlurDraw(IDirect3DDevice9 *dev, float a, float dark)
     }
 }
 
-/* From PresentStub, on the game's thread, just before the device presents the frame. */
-void WINAPI PrePresent(unsigned char *gx)
+static int PresentLays(int loading, DWORD now, float *amount);   /* (the style's, below) */
+/* The ending over this frame (PrePresent): what PresentLays says, drawn on the game's device. */
+static void PresentLay(unsigned char *gx, int loading)
 {
-    int loading = g_loadFrame;
-    g_loadFrame = 0;
-    if (!loading) InterlockedExchange(&g_worldFrames, g_worldFrames + 1);   /* (the view waits for one to fade) */
-    if (!loading && g_exPending && InterlockedExchange(&g_exPending, 0)) ExploreAfterLoad();   /* (once, as the world shows) */
     if (!g_blurOn || g_blurDead || !gx) return;
     float amount = 0;
-    int mode = BlurStep(loading, GetTickCount(), &amount);
+    int mode = PresentLays(loading, GetTickCount(), &amount);
     if (mode == 3) { BlurRelease(); return; }
     if (!mode || !Readable(gx + GX_D3D_OFF, 4) || !Readable(gx + GX_SCENE_OFF, 4) || *(volatile DWORD *)(gx + GX_SCENE_OFF))
         return;                                              /* (inside the game's scene: not this frame) */
@@ -12978,7 +13034,13 @@ void WINAPI PrePresent(unsigned char *gx)
         g_blurDead = 1;
         BlurRelease();
         Log("blur off: the device would not take it, so screens end as the game ends them");
-    }
+    } else if (mode == 2)
+        InterlockedExchange(&g_worldLaid, g_worldLaid + 1);             /* (the log's: the ending over the world) */
+}
+/* From PresentStub, on the game's thread, just before the device presents the frame (PresentOrder, above). */
+void WINAPI PrePresent(unsigned char *gx)
+{
+    PresentOrder(gx, ExploreAfterLoad, PresentLay);
 }
 #else
 static void PresentStub(void) {}                         /* the tests' stand-in: its address is all they use */
@@ -13271,12 +13333,80 @@ static int ParchCan(void) { return *(volatile int *)&g_pzN > 0; }
  * to be drawn, so the game's own frames under it show none of the living map, only black. Chosen but not drawable (no
  * zones): the view draws the living map, and so do the game's first frames. */
 static int ParchWillDraw(DWORD now) { return *(volatile int *)&g_parchAsked && ParchCan() && ViewWillDraw(now); }
+/* The game's thread: the screen showing is the parchment's, one map from its first frame to the world's first (his rule,
+ * 11 Oct 2026, from his login in Stormwind on fogtest: "at 15 seconds in, the map switches to the Neo satellite version
+ * ... It should either show the Retro map or the Neo map, but it shouldn't show you the opposite one from what you're
+ * loading, ever"): once the view has taken this screen, its pick as it took it (MapPick, before its opening can fail),
+ * even after the view has gone (ViewOff as it opens or mid-screen, its first frame of the loop too: black to the
+ * screen's end, never the living map); before, the parchment coming (ParchWillDraw). */
+static int ParchScreen(DWORD now)
+{
+    if (g_viewPicked) return *(volatile int *)&g_parchOn;
+    return ParchWillDraw(now);
+}
+/* (OV_*, above.) A screen of the parchment's is black under it from its first frame to its last, the view moving the zoom
+ * too: the game's own frames under the view are what shows as the view opens and as it fades, what the ending's blur
+ * took and laid whole over the world's first frames (his recording: the blurred satellite map rising through the
+ * parchment as it faded, still for a second through the game's pause after its first frame of the world, then the world
+ * all at once), and what shows if the view goes. Under the view's living map nothing; the game's own living map when the
+ * view has not taken the screen. */
+static int OverlayGameLays(int viewSteps, DWORD now)
+{
+    if (ParchScreen(now)) return OV_BLACK;
+    return viewSteps ? OV_NONE : OV_ALL;
+}
+/* What the present lays over this frame (the game's thread): BlurStep's ending (the blur, then the world's dissolve out
+ * of it), but none on a screen of the parchment's: its frames are black under the view (above), and the dissolve would
+ * lay them whole over the world's first frames to fade from, so the view's own fade goes straight into the world as the
+ * game draws it. A blur begun before the screen was the parchment's goes (3). */
+static int PresentLays(int loading, DWORD now, float *amount)
+{
+    if (!ParchScreen(now)) return BlurStep(loading, now, amount);
+    if (!g_blurUsed) return 0;
+    g_blurUsed = 0;
+    g_dissolveAt = 0;
+    return 3;
+}
+/* The view's thread, as the world shows after a screen of the parchment's (m: 400 bytes): how its ending went, for the
+ * log (the proof in game): the game's own frames under it black, all of them, and nothing laid over the world's. */
+static void ParchEndLog(char *m)
+{
+    LONG drawn = g_frmCount, black = g_frmBlack, laid = g_worldLaid;
+    if (black >= drawn && !laid)
+        wsprintfA(m, "  the parchment's ending: the game's own frames under it black, %ld of its %ld (none of the satellite "
+                  "map), and the world's first frames as the game drew them (0 with the old dissolve over them): the "
+                  "parchment fades straight into the world", (long)black, (long)drawn);
+    else
+        wsprintfA(m, "  the parchment's ending: the game's own frames under it black in only %ld of its %ld (%ld with the "
+                  "satellite map under the parchment), and %ld of the world's first frames with the old dissolve over them",
+                  (long)black, (long)drawn, (long)(drawn > black ? drawn - black : 0), (long)laid);
+    Log(m);
+}
+/* The view's thread, as it takes a screen of its own (ViewTake), before anything of its opening can fail: the screen's map,
+ * the player's choice as far as it can be (the parchment needs the client's world map tables), its map from here to its
+ * end, the view opened or not, gone or not (ParchScreen). Picked only once the view had opened the screen, a view that
+ * failed as it opened (its window, pixel format, OpenGL context or the world map's picture) left the parchment's screen
+ * black, then the satellite map for the rest of it, the old blur and dissolve at its end (the second review, 12 Oct). */
+static void MapPick(void)
+{
+    *(volatile int *)&g_parchOn = *(volatile int *)&g_parchAsked && ParchCan();
+    InterlockedExchange(&g_viewPicked, 1);                        /* (this screen's map from here to its end: ParchScreen) */
+}
+/* The view's thread, a screen of its own up (ViewReady): its map picked (MapPick), then the view opened over it (open:
+ * ViewOpen; 1 open, -1 not this screen, 0 not at all), so a screen of the parchment's is black under it to its end
+ * however the opening goes. */
+static int ViewTake(const char **why, int (*open)(const char **why))
+{
+    MapPick();
+    return open(why);
+}
 /* The view's thread, as each screen opens: what it draws, the choice as far as it can be (the parchment needs the client's
  * world map tables; vanilla's bar its two pictures on OpenGL), logged when it changes. */
 static void StylePick(void)
 {
+    if (!g_viewPicked) MapPick();                                 /* (the screen's map, picked as the view took it: ViewTake) */
     int map = *(volatile int *)&g_parchAsked, bar = *(volatile int *)&g_vbarAsked;
-    int parch = map && ParchCan(), retro = bar && g_viewTex[VT_VBORDER] && g_viewTex[VT_VGLASS];
+    int parch = *(volatile int *)&g_parchOn, retro = bar && g_viewTex[VT_VBORDER] && g_viewTex[VT_VGLASS];
     static int said = -1;
     int now = map << 3 | bar << 2 | parch << 1 | retro;
     if (now != said) {
@@ -13291,7 +13421,6 @@ static void StylePick(void)
         Log(m);
         said = now;
     }
-    g_parchOn = parch;
     g_barVanilla = retro;
     int fade = *(volatile int *)&g_nearFade;
     if (fade < 0 || fade >= NEAR_FADES) fade = PARCH_NEAR_FADE;

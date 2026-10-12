@@ -9041,21 +9041,21 @@ static void TestStyle(void)
     }
     Check(ok, "a choice made in game (the map, the bar, the map's areas): kept in style.txt (written beside it, then moved over it), read back the same at the next start; the same choice again writes nothing; a file that cannot be written: it holds until the game closes, and the log says so");
 
-    /* each screen as the view opens it: the choice, as far as it can be */
+    /* each screen as the view opens it: the choice, as far as it can be (each a new screen, its map to pick: GameFacts) */
     int pzN = g_pzN;
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
     g_pzN = 4; g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
     g_parchAsked = 1; g_vbarAsked = 1;
-    StylePick();
+    g_viewPicked = 0; StylePick();
     ok = g_parchOn == 1 && g_barVanilla == 1 && LogSays("  the view: the parchment (each screen, the world gliding in to where you arrive, in the client's own map paintings, by candlelight)") && LogSays("vanilla's own bar (retro");
     g_parchAsked = 0; g_vbarAsked = 0;
-    StylePick();
+    g_viewPicked = 0; StylePick();
     ok &= !g_parchOn && !g_barVanilla && LogSays("  the view: the living map (satellite), the blade for the bar (neo)");
     g_parchAsked = 1; g_pzN = 0;
-    StylePick();
+    g_viewPicked = 0; StylePick();
     ok &= !g_parchOn && LogSays("gave no zones: the living map");
     g_pzN = 4; g_vbarAsked = 1; g_viewTex[VT_VGLASS] = 0;
-    StylePick();
+    g_viewPicked = 0; StylePick();
     ok &= g_parchOn && !g_barVanilla && LogSays("did not reach OpenGL: the blade");
     Check(ok, "each screen as the view opens: the parchment when chosen and the client's tables were read, else the living map; vanilla's bar when chosen and its pictures are on OpenGL, else the blade; logged as it changes");
 
@@ -9077,7 +9077,7 @@ static void TestStyle(void)
         g_ovOn = 0; g_frameOn = 1; g_logoOn = 1; g_class = 4; g_vbFullAt = 0; g_sbFullAt = 0;
         g_pzN = 4; g_parchZone = -1; g_parchCont = -1;
         g_parchAsked = map; g_vbarAsked = bar;
-        StylePick();
+        g_viewPicked = 0; StylePick();
         int n[VT_COUNT + 1] = { 0 };
         ViewBuild(1920, 1080, 0.6f, 5000);
         for (int b = 0; b < g_vbN; b++) n[g_vb[b].tex >= 0 ? g_vb[b].tex : VT_COUNT]++;
@@ -9518,20 +9518,21 @@ static void TestSwitchesPump(void)
     g_map.ok = 0; g_driftOn = 0; shim_wine = wine; shim_threads = threads;
     Check(ok, "the view's start: past its gate, the style from style.txt, the view's thread, then the world map's switches (their thread); no thread for the view, no switches; the view off, neither");
 
-    /* each screen as the view opens it: the choice of this moment, and the first frame's list for it */
+    /* each screen as the view opens it: the choice of this moment, and the first frame's list for it (each a new screen,
+     * its map to pick: GameFacts) */
     {
         int pzN = g_pzN;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
         g_viewTex[VT_VBORDER] = g_viewTex[VT_VGLASS] = 1;
         g_pzN = 4; g_parchZone = -1; g_parchCont = -1; g_class = 4; g_vbFullAt = 0;
         g_parchAsked = 1; g_vbarAsked = 1;
-        ViewOpenFirst(1920, 1080, 5000);
+        g_viewPicked = 0; ViewOpenFirst(1920, 1080, 5000);
         ok = g_parchOn && g_barVanilla && g_vbN > 0;
         g_parchAsked = 0;
-        ViewOpenFirst(1920, 1080, 5000);
+        g_viewPicked = 0; ViewOpenFirst(1920, 1080, 5000);
         ok &= !g_parchOn && g_vbN == 0;
         g_parchAsked = 1; g_vbarAsked = 0;
-        ViewOpenFirst(1920, 1080, 5000);
+        g_viewPicked = 0; ViewOpenFirst(1920, 1080, 5000);
         ok &= g_parchOn && !g_barVanilla;
         g_parchOn = 0; g_barVanilla = 0; g_class = 0; g_parchAsked = 0; g_vbarAsked = 0; g_pzN = pzN;
         for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
@@ -9943,6 +9944,433 @@ static void LuaRealClient(const char *client)
     Check(checked, "a real client: its Lua checks each C function's address against its own code before calling it (so the switches speak through a CVar, never a function of the DLL's)");
 }
 
+/* ---- one map on the screen from a loading screen's first frame to the world's (his rule, 11 Oct 2026, from his login in
+ * Stormwind on fogtest: "at 15 seconds in, the map switches to the Neo satellite version ... It should either show the
+ * Retro map or the Neo map, but it shouldn't show you the opposite one from what you're loading, ever") ----
+ * The harness: a screen as the player sees it, a millisecond at a time. The game's thread draws its frames (the character
+ * list; the screen's loading frames through DisplayStep, the pack's world map with what OverlayFrame lays over it, as
+ * OverlayDraw has it; then the world's) and presents each through PresentOrder, as PrePresent does, the ending laid as
+ * PresentLay lays it. The view's thread opens the screen (StylePick, as ViewOpen shows its first frame), then in its loop
+ * steps it and marks it drawn once each frame is shown, or goes for the session (ViewGone) when one cannot be; once the
+ * screen goes it holds its last frame until ViewFadeDue, then fades its window over VIEW_FADE_MS, as ViewThread does.
+ * What shows is the view at its window's alpha over the game's last presented frame, each a mix of the parchment, the
+ * satellite map (the living map), black, the world and the character list. With old, the code before this (2f7e72b):
+ * the overlay black only before the view steps, BlurStep's ending on every screen and the world's frames counted first:
+ * the harness must see his find in it. */
+enum { LK_PARCH, LK_SAT, LK_BLACK, LK_WORLD, LK_LIST, LK_N };
+typedef struct { float w[LK_N]; } Look;
+static Look LookOne(int k) { Look l; memset(&l, 0, sizeof l); l.w[k] = 1; return l; }
+static Look LookMix(Look a, Look b, float t)            /* (1 - t) a + t b */
+{
+    Look l;
+    for (int k = 0; k < LK_N; k++) l.w[k] = (1 - t) * a.w[k] + t * b.w[k];
+    return l;
+}
+typedef struct {
+    const char *name;
+    int parch, blur;          /* the parchment chosen (else the living map); the present's hook (the ending, the world seen) */
+    LONG openAt;              /* ms after the screen's first frame: the view's thread first able to open it */
+    LONG loadEnd;             /* the game's last loading frame (one every 16 ms up to it, its bar full 1.5 s before) */
+    LONG goneAt;              /* the screen's layer clears */
+    LONG worldAt, stillTo;    /* the world's first frame; then nothing drawn until stillTo, then one every 16 ms */
+    LONG viewOffAt;           /* the view's loop cannot show its frame then, and the view goes for the session; 0 never */
+    int noSheet;              /* the pack's sea sheet not there: OverlayBlack draws nothing */
+    int openFail;             /* the view's opening fails (its window, pixel format, OpenGL context or picture): ViewOpen 0,
+                               * and the view goes for the session */
+} Scene;
+typedef struct {
+    float sat, parch;         /* the most of each on the screen, from its first frame to the end */
+    LONG satMs, satFrom;      /* ms with any of the satellite map showing, from the first */
+    LONG fadeAt, worldWholeAt;   /* the view's fade begun; the world whole on the screen (-1 never) */
+    float sum;                /* every ms's look, weighted by its time (two runs that saw the same, the same) */
+    LONG loading, black;      /* the screen's loading frames drawn, and of them black (the harness's own count) */
+    unsigned long long print; /* every ms's look, to 1/65535, hashed in order: two runs that saw the same, the same; one
+                               * frame different anywhere, not */
+} SceneSaw;
+/* The hooks' own drawing as the harness has it: OverlayFrame's all and black (black draws nothing without the sea sheet),
+ * PresentOrder's explore and lay (PresentLay's: what PresentLays says, laid over the frame). */
+static int g_hLaid, g_hNoSheet, g_hAllN, g_hBlackN, g_hExploreN, g_hLayN, g_hLayLoading;
+static LONG g_hFramesAtExplore, g_hFramesAtLay;
+static Look g_hContent, g_hCap;
+static void HarnessAll(void) { g_hLaid = OV_ALL; g_hAllN++; }
+static int HarnessBlack(void) { if (g_hNoSheet) return 0; g_hLaid = OV_BLACK; g_hBlackN++; return 1; }
+static void HarnessExplore(void) { g_hExploreN++; g_hFramesAtExplore = g_worldFrames; }
+/* ViewTake's open as the harness has it: ViewOpen shows its first frame (ViewOpenFirst: StylePick), or fails as it opens */
+static int HarnessOpen(const char **why) { (void)why; StylePick(); return 1; }
+static int HarnessOpenFail(const char **why) { *why = "its OpenGL context could not be made (a scene's)"; return 0; }
+static void HarnessLay(unsigned char *gx, int loading)
+{
+    (void)gx;
+    g_hLayN++; g_hLayLoading = loading; g_hFramesAtLay = g_worldFrames;
+    float a = 0, dim = (float)g_blurDim / 100.0f;
+    int mode = PresentLays(loading, GetTickCount(), &a);
+    if (mode == 1) { g_hCap = g_hContent; g_hContent = LookMix(g_hContent, LookOne(LK_BLACK), a * dim); }
+    else if (mode == 2) {
+        g_hContent = LookMix(LookMix(g_hContent, g_hCap, a), LookOne(LK_BLACK), a * dim);
+        InterlockedExchange(&g_worldLaid, g_worldLaid + 1);
+    }
+}
+static SceneSaw SceneRun(const Scene *s, int old, const char *csv)
+{
+    static DWORD base = 300000;
+    base += 100000;                                          /* (each run later than the last: the clocks never go back) */
+    SceneSaw saw;
+    memset(&saw, 0, sizeof saw);
+    saw.satFrom = saw.fadeAt = saw.worldWholeAt = -1;
+    saw.print = 1469598103934665603ULL;
+    g_parchAsked = s->parch; g_pzN = 3; g_parchTablesOk = 0;
+    g_blurOn = s->blur; g_blurDim = BLUR_DIM;
+    g_viewLive = 1; g_viewDrew = 0; g_viewSteps = 0; g_worldBlind = 0;
+    g_blurUsed = 0; g_dissolveAt = 0; g_blurFrom = g_blurTo = 0; g_loadFrame = 0; g_exPending = 0;
+    g_dispNew = 1;
+    g_hNoSheet = s->noSheet;
+    Look front = LookOne(LK_LIST);
+    g_hCap = front;
+    float alpha = 0;
+    int view = 0;                                            /* 0 not open, 1 showing, 2 its screen gone, 3 fading, 4 gone */
+    DWORD waitAt = 0, fadeAt = 0;
+    LONG worldSeen = 0, end = s->stillTo + 1500;
+    FILE *f = csv ? fopen(csv, "w") : NULL;
+    if (f) fprintf(f, "t,view_alpha,parchment,satellite,black,world,character_list\n");
+    for (LONG t = -300; t <= end; t++) {
+        DWORD now = base + (DWORD)t;
+        shim_ticks = now;
+        int screen = t >= 0 && t < s->goneAt, frame = 0;
+        Look content = front;
+        /* the game's thread: a frame, presented */
+        if (t < 0) {
+            if (!(t % 16)) { frame = 1; content = LookOne(LK_LIST); }
+        } else if (t <= s->loadEnd) {
+            if (!(t % 16) || t == s->loadEnd) {
+                frame = 1;
+                LONG full = s->loadEnd - 1500;
+                DisplayStep(t >= full ? 1.0f : (float)t / (float)full, now);   /* (a screen begins at its first; a loading frame) */
+                if (!g_blurTo && t >= s->loadEnd - 1000) {   /* the hold's ending, as HoldFrame sets it: its last half second */
+                    g_blurFrom = base + (DWORD)(s->loadEnd - BLUR_LEAD_MS - BLUR_MS);
+                    g_blurTo = base + (DWORD)s->loadEnd;
+                }
+                int black;
+                if (old) {                                   /* (2f7e72b's OverlayDraw) */
+                    int lays = g_viewSteps ? OV_NONE : ParchWillDraw(now) ? OV_BLACK : OV_ALL;
+                    black = lays == OV_BLACK && !s->noSheet;
+                    if (black) InterlockedExchange(&g_frmBlack, g_frmBlack + 1);
+                } else {
+                    g_hLaid = OV_NONE;
+                    OverlayFrame(now, HarnessAll, HarnessBlack);
+                    black = g_hLaid == OV_BLACK;
+                }
+                content = LookOne(black ? LK_BLACK : LK_SAT);   /* the pack's world map, unless black over it */
+                saw.loading++;
+                saw.black += black;
+            }
+        } else if (t == s->worldAt || (t >= s->stillTo && !((t - s->stillTo) % 16))) {
+            frame = 1;
+            content = LookOne(LK_WORLD);
+        }
+        if (frame) {                                         /* (PrePresent: only with its hook) */
+            if (s->blur && old) {                            /* (2f7e72b's: the world's frame counted first) */
+                int loading = g_loadFrame;
+                g_loadFrame = 0;
+                if (!loading) InterlockedExchange(&g_worldFrames, g_worldFrames + 1);
+                float a = 0, dim = (float)g_blurDim / 100.0f;
+                int mode = BlurStep(loading, now, &a);
+                if (mode == 1) { g_hCap = content; content = LookMix(content, LookOne(LK_BLACK), a * dim); }
+                else if (mode == 2) content = LookMix(LookMix(content, g_hCap, a), LookOne(LK_BLACK), a * dim);
+            } else if (s->blur) {
+                g_hContent = content;
+                PresentOrder(NULL, HarnessExplore, HarnessLay);
+                content = g_hContent;
+            } else
+                g_loadFrame = 0;
+            front = content;
+        }
+        /* the view's thread */
+        if (!view && screen && t >= s->openAt) {             /* ViewThread: ViewTake, then the view off when it fails */
+            const char *why = "";
+            if (ViewTake(&why, s->openFail ? HarnessOpenFail : HarnessOpen) > 0) { alpha = 1; view = 1; }   /* (its first frame shown, whole) */
+            else { ViewGone(why); alpha = 0; view = 4; }
+        }
+        else if (view == 1 && screen) {                      /* its loop: a step, then its frame shown and the screen drawn */
+            InterlockedExchange(&g_viewSteps, 1);
+            if (s->viewOffAt && t >= s->viewOffAt) { ViewGone("its OpenGL frame could not be shown"); alpha = 0; view = 4; }
+            else InterlockedExchange(&g_viewDrew, 1);
+        } else if (view == 1) {                              /* the screen gone: its last frame held */
+            InterlockedExchange(&g_viewSteps, 0);
+            waitAt = now; worldSeen = g_worldFrames; view = 2;
+        }
+        if (view == 2 && ViewFadeDue(now, waitAt, worldSeen)) {
+            fadeAt = now; view = 3; saw.fadeAt = t;
+            if (g_parchOn) { char m[400]; ParchEndLog(m); }
+        }
+        if (view == 3) {
+            LONG ft = (LONG)(now - fadeAt);
+            if (ft < VIEW_FADE_MS) alpha = (float)(255 - 255 * ft / VIEW_FADE_MS) / 255.0f;
+            else { alpha = 0; view = 4; }
+        }
+        /* what shows */
+        Look on = LookMix(front, LookOne(g_parchOn ? LK_PARCH : LK_SAT), alpha);
+        if (t >= 0) {
+            if (on.w[LK_SAT] > saw.sat) saw.sat = on.w[LK_SAT];
+            if (on.w[LK_PARCH] > saw.parch) saw.parch = on.w[LK_PARCH];
+            if (on.w[LK_SAT] > 0.5f / 255) { saw.satMs++; if (saw.satFrom < 0) saw.satFrom = t; }
+            if (saw.worldWholeAt < 0 && t >= s->worldAt && on.w[LK_WORLD] > 0.999f) saw.worldWholeAt = t;
+            for (int k = 0; k < LK_N; k++) saw.sum += on.w[k] * (float)(k + 1) * (float)(t % 977 + 1) * 1e-6f;
+        }
+        for (int k = 0; k < LK_N; k++) {                     /* (FNV-1a, the time and each look's share) */
+            unsigned q = (unsigned)(on.w[k] * 65535.0f + 0.5f) ^ ((unsigned)t << 17) ^ (unsigned)k;
+            for (int b = 0; b < 4; b++) { saw.print ^= (q >> (8 * b)) & 0xFF; saw.print *= 1099511628211ULL; }
+        }
+        if (f && !(t % 2))
+            fprintf(f, "%ld,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n", (long)t, alpha, on.w[LK_PARCH], on.w[LK_SAT], on.w[LK_BLACK],
+                    on.w[LK_WORLD], on.w[LK_LIST]);
+    }
+    if (f) fclose(f);
+    g_dispNew = 1;                                           /* (the next frame begins a new screen) */
+    return saw;
+}
+/* def's body, in src (the text of dll/cinderload.c), holds want. */
+static int SrcHas(const char *src, const char *def, const char *want)
+{
+    const char *a = src ? strstr(src, def) : NULL, *b = a ? strstr(a, "\n}\n") : NULL, *w = a ? strstr(a, want) : NULL;
+    return w && w < b;
+}
+/* The hooks only the 32-bit build compiles (OverlayDraw, PrePresent, ViewOff, ViewOpen, ViewThread) call what the tests
+ * run (OverlayFrame, PresentOrder, ViewGone, StylePick, ParchEndLog): their text, read from dll/cinderload.c. */
+static void TestOneMapHooks(void)
+{
+    char here[1024], p[1200];
+    snprintf(here, sizeof here, "%s", __FILE__);
+    char *slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(p, sizeof p, "%s/../dll/cinderload.c", here);
+    FILE *f = fopen(p, "rb");
+    long n = 0;
+    if (f && !fseek(f, 0, SEEK_END)) { n = ftell(f); fseek(f, 0, SEEK_SET); }
+    char *src = n > 0 ? malloc((size_t)n + 1) : NULL;
+    if (src) { src[fread(src, 1, (size_t)n, f)] = 0; }
+    if (f) fclose(f);
+    int ok = src != NULL;
+    ok &= SrcHas(src, "\nvoid WINAPI OverlayDraw(void)\n{", "OverlayFrame(GetTickCount(), OverlayDrawAll, OverlayBlack);");
+    ok &= SrcHas(src, "\nvoid WINAPI PrePresent(unsigned char *gx)\n{", "PresentOrder(gx, ExploreAfterLoad, PresentLay);");
+    ok &= SrcHas(src, "\nstatic void PresentLay(unsigned char *gx, int loading)\n{", "PresentLays(loading, GetTickCount(), &amount)");
+    ok &= SrcHas(src, "\nstatic DWORD ViewOff(const char *why)\n{", "ViewGone(why);");
+    ok &= SrcHas(src, "\nstatic int ViewOpen(const char **why)\n{", "ViewOpenFirst((float)w, (float)h, ViewNow());");
+    ok &= SrcHas(src, "\nstatic void ViewOpenFirst(float w, float h, DWORD now)\n{", "StylePick();");
+    ok &= SrcHas(src, "\nstatic DWORD WINAPI ViewThread(LPVOID arg)\n{", "if (g_parchOn) ParchEndLog(m);");
+    ok &= SrcHas(src, "\nstatic DWORD WINAPI ViewThread(LPVOID arg)\n{", "int open = ViewTake(&why, ViewOpen);");
+    ok &= SrcHas(src, "\nstatic int ViewTake(const char **why, int (*open)(const char **why))\n{", "MapPick();\n    return open(why);");
+    ok &= SrcHas(src, "\nstatic DWORD WINAPI ViewThread(LPVOID arg)\n{", "return ViewOff(\"its OpenGL frame could not be shown\");");
+    free(src);
+    Check(ok, "the 32-bit hooks call what the tests run: the game's loading frame lays what OverlayFrame says (black under the parchment while the view moves the zoom too), the present goes through PresentOrder (the world's frame counted last) and PresentLays, the view's going through ViewGone, its taking a screen through ViewTake (the screen's map picked before ViewOpen, which can fail), its opening through StylePick, its ending's log through ParchEndLog");
+}
+static void TestOneMap(void)
+{
+    Fresh("one-map"); GameDir();                             /* (the log goes to this folder) */
+    int pzN = g_pzN, asked = g_parchAsked, parchOn = g_parchOn, tablesOk = (int)g_parchTablesOk, luaOn = g_luaOn;
+    int classSure = g_classSure, barClassOk = g_barClassOk;
+    LONG live = g_viewLive, drew = g_viewDrew, steps = g_viewSteps, blurOn = g_blurOn, blurDim = g_blurDim, music = g_musicOn;
+    LONG picked = g_viewPicked, pending = g_exPending;
+    DWORD dispAt = g_dispAt;
+    int ok;
+    g_luaOn = 0; g_musicOn = 0;                              /* (a screen's start here: no CVar to read, no music to fade) */
+    g_classSure = 0; g_barClassOk = 0;                       /* (no character list to read) */
+
+    /* what the game's own frames lay over the world map's picture */
+    g_dispAt = 1000; g_pzN = 3; g_viewLive = 1; g_parchAsked = 1; g_parchOn = 1; g_viewPicked = 0; g_viewDrew = 0;
+    ok = OverlayGameLays(0, 1000) == OV_BLACK && OverlayGameLays(1, 1000) == OV_BLACK;            /* (its first moments, the view not open) */
+    g_viewPicked = 1;
+    ok &= OverlayGameLays(1, 13000) == OV_BLACK && OverlayGameLays(0, 61000) == OV_BLACK;          /* (the view open, moving the zoom, to its last frame; and the hold's, after it) */
+    g_viewLive = 0;
+    ok &= OverlayGameLays(0, 13000) == OV_BLACK;                                                     /* (the view gone partway, before its loop drew a frame too: black still) */
+    g_viewLive = 1; g_viewPicked = 0;
+    ok &= OverlayGameLays(0, 1000 + VIEW_TAKE_MS) == OV_ALL;                                         /* (not opened, the bar not stepped for VIEW_TAKE_MS: the game's own) */
+    g_viewLive = 0;
+    ok &= OverlayGameLays(0, 1000) == OV_ALL;                                                        /* (the view off before it: the game's own) */
+    g_viewLive = 1; g_parchAsked = 0; g_parchOn = 0;
+    ok &= OverlayGameLays(0, 1000) == OV_ALL;                                                        /* (the living map: the game's own until the view steps) */
+    g_viewPicked = 1;
+    ok &= OverlayGameLays(1, 13000) == OV_NONE && OverlayGameLays(0, 13000) == OV_ALL;              /* (nothing under the view's living map) */
+    g_parchAsked = 1; g_pzN = 0;
+    ok &= OverlayGameLays(1, 13000) == OV_NONE;                                                      /* (chosen, not drawable: the view's living map) */
+    g_viewPicked = 0;
+    ok &= OverlayGameLays(0, 1000) == OV_ALL;
+    g_pzN = 3; g_parchAsked = 1; g_viewPicked = 0;
+    StylePick();
+    ok &= g_viewPicked == 1 && g_parchOn == 1;                                                       /* (the view's pick as it opens: the screen's) */
+    g_dispNew = 1; shim_ticks = 350000;
+    DisplayStep(0, 350000);
+    ok &= g_viewPicked == 0;                                                                         /* (the next screen's to pick again) */
+    Check(ok, "a screen of the parchment's: the game's own frames under it black from its first to its last, the view moving the zoom too, and after the view has gone, even before its loop drew a frame; the view's pick the screen's from its opening, picked again on each; the game's own map when the view is not drawing the screen, nothing under the view's living map, the living map when the parchment cannot be drawn");
+
+    /* the game's loading frame as OverlayDraw draws it (OverlayFrame): what it lays, drawn, and counted for the log */
+    g_viewLive = 1; g_viewPicked = 1; g_parchOn = 1; g_viewSteps = 1; g_frmBlack = 0; g_hNoSheet = 0;
+    g_hAllN = g_hBlackN = 0;
+    OverlayFrame(13000, HarnessAll, HarnessBlack);
+    ok = g_hBlackN == 1 && !g_hAllN && g_frmBlack == 1;                                              /* (the view moving the zoom: black all the same) */
+    g_viewSteps = 0;
+    OverlayFrame(13016, HarnessAll, HarnessBlack);
+    ok &= g_hBlackN == 2 && !g_hAllN && g_frmBlack == 2;
+    g_hNoSheet = 1;
+    OverlayFrame(13032, HarnessAll, HarnessBlack);
+    ok &= g_hBlackN == 2 && !g_hAllN && g_frmBlack == 2;                                             /* (no sea sheet: none drawn, none counted) */
+    g_hNoSheet = 0; g_parchOn = 0; g_viewSteps = 1;
+    OverlayFrame(13048, HarnessAll, HarnessBlack);
+    ok &= g_hBlackN == 2 && !g_hAllN;                                                                /* (the view's living map: nothing) */
+    g_viewSteps = 0;
+    OverlayFrame(13064, HarnessAll, HarnessBlack);
+    ok &= g_hBlackN == 2 && g_hAllN == 1 && g_frmBlack == 2;                                         /* (the game's own living map) */
+    g_frmBlack = 0;
+    Check(ok, "the game's loading frame (OverlayDraw's): black over the world map's picture on the parchment's screen whether the view moves the zoom or not, counted only when drawn; nothing under the view's living map, the game's own living map otherwise");
+
+    /* the present (PrePresent's order): the explored areas' files and the ending over the frame first, then a frame of the
+     * world counted for the view, so its fade waits for neither */
+    LONG wf = g_worldFrames;
+    g_hExploreN = g_hLayN = 0; g_hFramesAtExplore = g_hFramesAtLay = -1;
+    g_blurOn = 0; g_loadFrame = 1; g_exPending = 1;
+    PresentOrder(NULL, HarnessExplore, HarnessLay);
+    ok = !g_hExploreN && g_hLayN == 1 && g_hLayLoading == 1 && g_worldFrames == wf && !g_loadFrame && g_exPending;   /* (a loading frame) */
+    PresentOrder(NULL, HarnessExplore, HarnessLay);
+    ok &= g_hExploreN == 1 && g_hLayN == 2 && !g_hLayLoading && !g_exPending;
+    ok &= g_hFramesAtExplore == wf && g_hFramesAtLay == wf && g_worldFrames == wf + 1;                 /* (counted after both) */
+    PresentOrder(NULL, HarnessExplore, HarnessLay);
+    ok &= g_hExploreN == 1 && g_hLayN == 3 && g_worldFrames == wf + 2;                                 /* (the files once) */
+    Check(ok, "the present: the explored areas' files read once as the world shows and the ending laid over the frame before the frame of the world is counted for the view, so the view's fade begins as that frame goes out; a loading frame not counted");
+
+    /* what the present lays over them: on the parchment's screen nothing (the game's ending over black, dissolving into
+     * the world, was the satellite map before); on the living map's, BlurStep's ending as before */
+    float am = 0;
+    g_pzN = 3; g_parchAsked = 1; g_parchOn = 1; g_viewLive = 1; g_viewPicked = 1; g_blurUsed = 0; g_dissolveAt = 0;
+    g_blurFrom = 3700; g_blurTo = 4200;
+    ok = PresentLays(1, 3650, &am) == 0 && PresentLays(1, 3950, &am) == 0 && PresentLays(1, 4300, &am) == 0 && !g_blurUsed;
+    ok &= PresentLays(0, 6000, &am) == 0 && PresentLays(0, 6250, &am) == 0 && !g_dissolveAt;
+    g_blurUsed = 1;
+    ok &= PresentLays(0, 6300, &am) == 3 && !g_blurUsed && PresentLays(0, 6400, &am) == 0;      /* (a blur already begun: it goes) */
+    for (int k = 0; k < 3; k++) {                            /* the living map's; the parchment chosen, not drawable, picked and not */
+        g_parchAsked = k > 0; g_parchOn = 0; g_pzN = k > 0 ? 0 : 3; g_viewPicked = k < 2;
+        g_blurUsed = 0; g_dissolveAt = 0;
+        ok &= PresentLays(1, 3650, &am) == 0 && PresentLays(1, 3950, &am) == 1 && am > 0.4f && am < 0.6f &&
+              PresentLays(1, 4300, &am) == 1 && am > 0.999f && g_blurUsed;
+        ok &= PresentLays(0, 6000, &am) == 2 && am > 0.999f && g_dissolveAt == 6000;
+        ok &= PresentLays(0, 6250, &am) == 2 && am > 0.4f && am < 0.6f;
+        ok &= PresentLays(0, 6500, &am) == 3 && !g_blurUsed && PresentLays(0, 6600, &am) == 0;
+    }
+    g_blurFrom = g_blurTo = 0; g_pzN = 3;
+    Check(ok, "the ending on a screen of the parchment's: no blur over its frames and no dissolve over the world's (the view's own fade goes straight into the world); on the living map's, and on a screen with the parchment chosen but not drawable (the living map then), the blur and the dissolve as before");
+
+    /* the log's proof, its numbers this screen's */
+    char m[700], lm[400];
+    LONG fc = g_frmCount, fb = g_frmBlack, fl = g_worldLaid;
+    g_frmCount = 100; g_frmBlack = 99; g_worldLaid = 0;
+    ParchEndLog(lm);
+    ok = strstr(lm, "black in only 99 of its 100 (1 with the satellite map under the parchment), and 0 of the world's") != NULL;
+    g_frmBlack = 100; g_worldLaid = 2;
+    ParchEndLog(lm);
+    ok &= strstr(lm, "black in only 100 of its 100 (0 with the satellite map under the parchment), and 2 of the world's") != NULL;
+    g_worldLaid = 0;
+    ParchEndLog(lm);
+    ok &= strstr(lm, "black, 100 of its 100 (none of the satellite map)") != NULL;
+    g_frmCount = fc; g_frmBlack = fb; g_worldLaid = fl;
+    Check(ok, "the parchment's ending in the log: all of the game's frames black and nothing over the world's said only when so; one frame short, or the old dissolve over the world, said as such");
+    LONG pk = g_viewPicked;
+    int po = g_parchOn;
+    g_frmCount = 100; g_frmBlack = 99; g_worldLaid = 3; g_viewPicked = 1; g_parchOn = 1;
+    g_dispNew = 1; shim_ticks = 352000;
+    DisplayStep(0, 352000);
+    ok = g_frmCount == 1 && g_frmBlack == 0 && g_worldLaid == 0 && g_viewPicked == 0;
+    g_frmCount = fc; g_frmBlack = fb; g_worldLaid = fl; g_viewPicked = pk; g_parchOn = po;
+    Check(ok, "a new screen's first frame begins its own count for the log (the game's frames, those black, the world's with the old dissolve over them) and its own map to pick, so a second or later screen's proof is never the last one's");
+
+    /* the view gone for the session: the screen it opened black to its end, the next the game's own (the 0.3.0 fallback,
+     * his call), said in the log */
+    g_pzN = 3; g_parchAsked = 1; g_viewLive = 1; g_viewPicked = 0; g_viewSteps = 1;
+    StylePick();
+    ViewGone("a test's");
+    ok = !g_viewLive && !g_viewSteps && OverlayGameLays(0, 350100) == OV_BLACK &&
+         LogSays("view off for this session: a test's") &&
+         LogSays("the parchment chosen, and only the view draws it: this screen black to its end, then the game's own loading screens, the living map (satellite), for the rest of the session");
+    g_dispNew = 1; shim_ticks = 360000;
+    DisplayStep(0, 360000);
+    ok &= OverlayGameLays(0, 360000) == OV_ALL;
+    g_viewPicked = 0;
+    ViewGone("a test's again");
+    ok &= LogSays("the parchment chosen, and only the view draws it: the game's own loading screens, the living map (satellite), from now to the end of the session");
+    Check(ok, "the view gone for the session with the parchment chosen: the screen it had opened black to its end, the screens after it the game's own living map (the fallback as 0.3.0's), and the log says so");
+
+    /* the harness: his login (Stormwind, 22:01, his recording and the log: the view's first frame 84 ms after the
+     * screen's, the game's last loading frame 2.9 s before the screen went, the world's first 350 ms after it, then
+     * nothing drawn for 1.55 s), a later load, the world unseen for VIEW_WORLD_WAIT_MS, no present hook, the view gone
+     * partway and at its loop's first frame, the view opening late, no sea sheet; and the living map's */
+    static const Scene kScenes[] = {
+        { "login-parchment", 1, 1, 84, 9165, 12085, 12435, 13984, 0, 0 },
+        { "later-parchment", 1, 1, 40, 4000, 4400, 4520, 4536, 0, 0 },
+        { "unseen-parchment", 1, 1, 40, 4000, 4400, 4400 + VIEW_WORLD_WAIT_MS + 500, 4400 + VIEW_WORLD_WAIT_MS + 516, 0, 0 },
+        { "nohook-parchment", 1, 0, 40, 4000, 4400, 4750, 4766, 0, 0 },
+        { "viewoff-parchment", 1, 1, 40, 4000, 4400, 4520, 4536, 2500, 0 },
+        { "viewoff-first-parchment", 1, 1, 40, 4000, 4400, 4520, 4536, 40, 0 },
+        { "late-parchment", 1, 1, VIEW_TAKE_MS + 500, 4000, 4400, 4520, 4536, 0, 0 },
+        { "nosheet-parchment", 1, 1, 40, 4000, 4400, 4520, 4536, 0, 1 },
+        { "login-satellite", 0, 1, 84, 9165, 12085, 12435, 13984, 0, 0 },
+        { "later-satellite", 0, 1, 40, 4000, 4400, 4520, 4536, 0, 0 },
+        { "viewoff-first-satellite", 0, 1, 40, 4000, 4400, 4520, 4536, 40, 0 },
+        { "openfail-parchment", 1, 1, 84, 9165, 12085, 12435, 13984, 0, 0, 1 },
+        { "openfail-late-parchment", 1, 1, 2000, 4000, 4400, 4520, 4536, 0, 0, 1 },
+        { "openfail-satellite", 0, 1, 84, 9165, 12085, 12435, 13984, 0, 0, 1 } };
+    enum { NSC = sizeof kScenes / sizeof kScenes[0] };
+    SceneSaw now[NSC], was[NSC];
+    int logged = 1;
+    for (int i = 0; i < NSC; i++) {
+        char p1[700], p2[700];
+        snprintf(p1, sizeof p1, "%s/screen-%s.csv", g_root, kScenes[i].name);
+        snprintf(p2, sizeof p2, "%s/screen-%s-before.csv", g_root, kScenes[i].name);
+        int keep = i == 0 || i == 5 || i == 8 || i == 11;    /* (his login's, both maps, and the view gone at once or as it opens: for looking at) */
+        now[i] = SceneRun(&kScenes[i], 0, keep ? p1 : NULL);
+        if (kScenes[i].parch && !kScenes[i].viewOffAt && !kScenes[i].openFail) {   /* (each screen's own numbers, the second and later too) */
+            if (!kScenes[i].noSheet)
+                snprintf(m, sizeof m, "the parchment's ending: the game's own frames under it black, %ld of its %ld (none of the satellite map), and the world's first frames as the game drew them (0 with the old dissolve over them)",
+                         (long)now[i].black, (long)now[i].loading);
+            else
+                snprintf(m, sizeof m, "the parchment's ending: the game's own frames under it black in only 0 of its %ld (%ld with the satellite map under the parchment), and 0 of the world's first frames",
+                         (long)now[i].loading, (long)now[i].loading);
+            logged &= now[i].loading > 200 && (kScenes[i].noSheet ? !now[i].black : now[i].black == now[i].loading) && LogSays(m);
+        }
+        was[i] = SceneRun(&kScenes[i], 1, keep ? p2 : NULL);
+        printf("  one map, %s: the satellite map up to %.0f%% for %ld ms, the parchment up to %.0f%%; the view's fade at %ld ms, the world whole at %ld ms (before: the satellite up to %.0f%% for %ld ms from %ld ms, the parchment up to %.0f%%)\n",
+               kScenes[i].name, now[i].sat * 100, (long)now[i].satMs, now[i].parch * 100, (long)now[i].fadeAt, (long)now[i].worldWholeAt,
+               was[i].sat * 100, (long)was[i].satMs, (long)was[i].satFrom, was[i].parch * 100);
+    }
+    Check(logged, "the log's proof on each parchment screen, its own numbers the second and later too: every one of the game's loading frames under the parchment black and nothing laid over the world's; without the sea sheet, none black, said as such");
+    const Scene *lg = &kScenes[0], *lt = &kScenes[1];
+    ok = now[0].sat == 0 && now[0].parch > 0.999f && now[0].fadeAt == lg->worldAt && now[0].worldWholeAt == lg->worldAt + VIEW_FADE_MS;
+    ok &= was[0].sat > 0.6f && was[0].satMs > 1000;          /* (his find, as the harness sees the code before) */
+    Check(ok, "his login in Stormwind, the parchment: no frame with any of the satellite map, from the screen's first to the world's, though the game draws nothing for 1.5 s after its first frame of the world; the view fades from the parchment straight into it (the code before: the blurred satellite map, darker, over a second)");
+    ok = now[1].sat == 0 && now[1].parch > 0.999f && now[1].fadeAt == lt->worldAt && now[1].worldWholeAt == lt->worldAt + VIEW_FADE_MS;
+    ok &= was[1].sat > 0.05f;
+    Check(ok, "a later load, the parchment: none of the satellite map as it fades straight into the world, the world whole as the view's fade ends (the code before: the satellite map dissolving under it)");
+    ok = now[2].sat == 0 && now[2].fadeAt == kScenes[2].goneAt + VIEW_WORLD_WAIT_MS && was[2].sat > 0.6f;
+    ok &= now[3].sat == 0 && now[3].fadeAt == kScenes[3].goneAt && was[3].sat > 0.6f;
+    ok &= now[4].sat == 0 && now[4].parch > 0.999f && was[4].sat > 0.999f;
+    ok &= now[5].sat == 0 && now[5].parch > 0.999f && was[5].sat > 0.999f;
+    Check(ok, "the parchment's ways out: with the world unseen it fades after VIEW_WORLD_WAIT_MS, without the present's hook as the screen goes, and with the view gone partway, even at its loop's first frame (his parchment's first frame shown, then the view off), it is gone at once, each over black, never the satellite map (the code before: the satellite map each time)");
+    ok = now[6].sat == 0 && now[6].parch > 0.999f;
+    Check(ok, "the view opening the parchment's screen late (two seconds in): the game's frames black until it does, and none of the satellite map from the first frame to the world's");
+    ok = now[11].sat == 0 && now[12].sat == 0 && now[11].black == now[11].loading && now[12].black == now[12].loading;
+    ok &= now[11].worldWholeAt == kScenes[11].worldAt && now[12].worldWholeAt == kScenes[12].worldAt;   /* (no old dissolve) */
+    ok &= was[11].sat > 0.999f && was[12].sat > 0.999f;
+    const char *lg2 = Get("Logs/CinderLoad.log"), *off = lg2 ? strstr(lg2, "view off for this session: its OpenGL context could not be made (a scene's)") : NULL;
+    const char *said = off ? strstr(off, "the parchment chosen, and only the view draws it: ") : NULL;
+    ok &= said && !strncmp(said + strlen("the parchment chosen, and only the view draws it: "), "this screen black to its end", 28);
+    Check(ok, "the view failing as it opens the parchment's screen (its window, pixel format, OpenGL context or picture), on his login's timing and two seconds in: the screen's map picked before it opens, so the game's frames black to the screen's end, the world whole as it shows (no old blur or dissolve), none of the satellite map, and the log says this screen black to its end (picked only once the view had opened: black, then the satellite map for the rest of the screen)");
+    ok = now[8].parch == 0 && now[9].parch == 0 && now[10].parch == 0 && now[13].parch == 0 && was[8].parch == 0;
+    for (int i = 8; i < NSC; i++) if (!kScenes[i].parch) ok &= now[i].print == was[i].print;   /* (every ms, to 1/65535) */
+    ok &= now[8].sum > 1 && now[10].sat > 0.999f && now[13].sat > 0.999f;
+    Check(ok, "the living map chosen: none of the parchment from the screen's first frame to the world's, and every millisecond as before, one frame different anywhere failing it (its ending the game's own blurred map, dissolving; the view gone at its loop's first frame or as it opens, the game's own living map)");
+
+    g_pzN = pzN; g_parchAsked = asked; g_parchOn = parchOn; g_parchTablesOk = tablesOk; g_classSure = classSure; g_barClassOk = barClassOk;
+    g_viewLive = live; g_viewDrew = drew; g_viewSteps = steps; g_blurOn = blurOn; g_blurDim = blurDim; g_viewPicked = picked;
+    g_dispAt = dispAt; g_blurUsed = 0; g_dissolveAt = 0; g_blurFrom = g_blurTo = 0; g_luaOn = luaOn; g_musicOn = music;
+    g_exPending = pending;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -10149,6 +10577,8 @@ int main(int argc, char **argv)
     TestNearbyStyle();
     if (g_client) TestNearbyClient(g_client);
     if (g_client) TestPaperClient(g_client);
+    TestOneMap();
+    TestOneMapHooks();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
