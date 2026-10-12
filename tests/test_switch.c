@@ -5991,7 +5991,9 @@ static void TestFadeStyle(void)
     Check(ok, "style.txt's fade line: zone, third, 3600 or 1800 (any case; a note after '#' passed over), the last one named counting; another word passed over; none of them one of the six choice words");
     Fresh("fade-style"); GameDir();
     StyleLoad();
-    ok = g_nearFade == NEAR_ZONE && !g_nearFadeNamed && LogSays("(whole to 800), from the default; fade zone, from the default");
+    ok = g_nearFade == NEAR_ZONE && !g_nearFadeNamed && LogSays("style: the parchment's zones nearby fade zone (each neighbour across its own land, "
+                                                                "whole where you would enter it, gone where you would leave it), from the default") &&
+         !LogSays("whole to 800") && !LogSays("the zones nearby's fade");          /* (said once, the reach style.txt's alone) */
     ok &= StyleSet(1, 0, 1, "the bar alone") == 1 && Get("Data/CinderLoad/style.txt") && !strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade ");
     Style st;
     StyleNow(&st);
@@ -6001,14 +6003,15 @@ static void TestFadeStyle(void)
     ok &= StyleApply(&st, "back") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade zone\r\n");
     ok &= StyleSet(1, 1, 1, "retro") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade zone\r\n");
     StyleLoad();
-    ok &= g_nearFade == NEAR_ZONE && g_nearFadeNamed && LogSays("; fade zone, from Data\\CinderLoad\\style.txt");
+    ok &= g_nearFade == NEAR_ZONE && g_nearFadeNamed && LogSays("style: the parchment's zones nearby fade zone (each neighbour across its own land, "
+                                                                "whole where you would enter it, gone where you would leave it), from Data\\CinderLoad\\style.txt");
     Put("Data/CinderLoad/style.txt", "map parchment\r\nbar neo\r\nareas full\r\nfade third\r\n");
     StyleLoad();
     ok &= g_nearFade == NEAR_THIRD && g_nearFadeNamed && StyleSet(1, 1, 1, "retro") == 1 && strstr(Get("Data/CinderLoad/style.txt"), "\r\nfade third\r\n");
     char chunk[sizeof kSwitchesLua + 420];
     ok &= LuaChunk(chunk, (int)sizeof chunk, 1, 1, 1) > 0 && strstr(chunk, "\nlocal CL_LOOK = \"fade third thick 100 ");
     g_nearFade = PARCH_NEAR_FADE; g_nearFadeNamed = 0;
-    Check(ok, "the fade kept: by default zone and not in style.txt (a choice of the map, the bar or the areas never adds it); chosen in the window, written as a line of its own and kept from then on; named by the file, written back as it is; read at the next start; said to the window in the chunk's look line");
+    Check(ok, "the fade kept: by default zone and not in style.txt (a choice of the map, the bar or the areas never adds it); chosen in the window, written as a line of its own and kept from then on; named by the file, written back as it is; read at the next start, the log saying the zones nearby once, by their fade; said to the window in the chunk's look line");
 }
 
 /* The Retro frame's art as the client has it: seen only in its rows 7 to 55 of 64 (VBarLayout stands the bar's centre at
