@@ -78,7 +78,7 @@ Check(Lex50(probeSrc) == nil, "the probe: Lua 5.0's syntax only (" .. tostring(L
 Check(string.find(setupSrc, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"\n') ~= nil and
       string.find(setupSN, '^local CL_MAP, CL_BAR, CL_AREAS = "satellite", "neo", "discovered"\n') ~= nil and
       string.find(setupFull, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "full"\n') ~= nil, "the chunk begins with the choice the DLL holds")
-local DEF = "nearby 1200 thick 100 width own whole off effect heat colour class quality pulse raw"
+local DEF = "nearby 1600 thick 100 width own whole off effect heat colour class quality pulse raw"
 local LOOK = "nearby 600 thick 150 width 60 whole on effect blade colour ember quality liquid unstable"
 Check(string.find(setupSrc, '^[^\n]*\nlocal CL_LOOK = "' .. DEF .. '"\n%-%- CinderLoad') ~= nil and
       string.find(setupLook, '\nlocal CL_LOOK = "' .. LOOK .. '"\n', 1, true) ~= nil,
@@ -300,9 +300,9 @@ local function SliderSays(key, v, text)
     return Near(s.slider:GetValue(), v) and s.value.text == text
 end
 Check(Shows("parchment", "discovered", "retro") and Gold("map", "parchment") and Gold("bar", "retro") and Gold("effect", "heat") and
-      SliderSays("nearby", 1200, "1200 yards") and SliderSays("thick", 100, "100%") and SliderSays("width", 30, "each bar's own") and
+      SliderSays("nearby", 1600, "1600 yards") and SliderSays("thick", 100, "100%") and SliderSays("width", 30, "each bar's own") and
       not P("Whole"):GetChecked() and P("Colour"):GetChecked() and u.words[1]:IsVisible() and not u.neoTitle:IsVisible() and
-      not P("QualityPulse"):IsVisible(), "the choice held shows: Parchment, Discovered, 1200 yards, Retro (its words), 100%, each bar's own width (Retro's on this screen), Heat in my class's colour")
+      not P("QualityPulse"):IsVisible(), "the choice held shows: Parchment, Discovered, 1600 yards, Retro (its words), 100%, each bar's own width (Retro's on this screen), Heat in my class's colour")
 
 -- ---- every control, as a player uses it ----
 world.sounds = {}
@@ -324,8 +324,8 @@ UI.Slide(P("nearbySlider"), 0)
 Check(string.find(CV(), " nearby 0 ", 1, true) and SliderSays("nearby", 0, "off"), "to its left end: off (nearby 0)")
 UI.Slide(P("nearbySlider"), 9000)
 Check(string.find(CV(), " nearby 4000 ", 1, true) and SliderSays("nearby", 4000, "4000 yards"), "past its right end: 4000 yards, the most")
-UI.Slide(P("nearbySlider"), 1234)
-Check(string.find(CV(), " nearby 1200 ", 1, true) and SliderSays("nearby", 1200, "1200 yards"), "between its steps: the nearest hundred yards (1234: 1200)")
+UI.Slide(P("nearbySlider"), 1634)
+Check(string.find(CV(), " nearby 1600 ", 1, true) and SliderSays("nearby", 1600, "1600 yards"), "between its steps: the nearest hundred yards (1634: 1600)")
 UI.Click(P("barneo"))
 Check(CV() == Value("parchment neo discovered") and Shows("parchment", "discovered", "neo") and Gold("bar", "neo") and not u.words[1]:IsVisible() and
       u.neoTitle:IsVisible() and P("QualityPulse"):IsVisible() and P("QualityRaw"):GetChecked() and P("QualityPulse"):GetChecked() and
@@ -426,8 +426,8 @@ UI.Click(P("Colour"))
 world.sounds = {}
 UI.Click(P("Defaults"))
 Check(CV() == Value("parchment retro discovered") and Shows("parchment", "discovered", "retro") and SliderSays("thick", 100, "100%") and
-      SliderSays("width", 30, "each bar's own") and SliderSays("nearby", 1200, "1200 yards") and P("Colour"):GetChecked() and not P("Whole"):GetChecked() and
-      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it began (the parchment, Discovered, 1200 yards, Retro, 100%, each bar's own, Heat, the class's colour, Pulse and Raw)")
+      SliderSays("width", 30, "each bar's own") and SliderSays("nearby", 1600, "1600 yards") and P("Colour"):GetChecked() and not P("Whole"):GetChecked() and
+      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it began (the parchment, Discovered, 1600 yards, Retro, 100%, each bar's own, Heat, the class's colour, Pulse and Raw)")
 UI.Click(P("barneo"))
 a1, a2, a3 = Bar()
 Check(Near(a3.r - a1.l, 316) and Near(a1.l, 406) and SliderSays("width", 100, "each bar's own"),

@@ -3788,9 +3788,11 @@ static int g_parchAsked;                         /* (the style's map, below: 1 t
 static int g_mapFull;                             /* (the style's map areas: 1 the full map, 0 only what was discovered) */
 static int g_parchFullOn;                         /* (the view's, as this screen opened: StylePick) */
 #ifndef PARCH_NEAR_YD
-#define PARCH_NEAR_YD   1200                        /* the zones nearby: the reach, yards, unless style.txt says (0: none) */
+#define PARCH_NEAR_YD   1600                        /* the zones nearby: the reach, yards, unless style.txt says (0: none) */
 #endif
 static int g_nearYd = PARCH_NEAR_YD;                /* (the style's reach for the zones nearby, yards: 0 none) */
+static int g_nearNamed;                             /* (1 when style.txt named the reach: only then written back, so a
+                                                     * choice made in game never pins the default into the file) */
 static int g_parchNearOn;                           /* (the view's, as this screen opened: StylePick) */
 static void ParchBlackBuild(void)
 {
@@ -10860,12 +10862,16 @@ static void ParchZoneMade(int z, int c, float fx, float fy, const char **why)
  * the whole sheet fades by distance from the arrival (ParchNearFade): whole out to half the reach, then smoothly to
  * nothing at the reach. It is drawn under the arrival's zone and over its continent, coming up with the zone; the
  * arrival's zone is drawn as before, on top, and never faded by it. Left out: the arrival's zone (and another page of
- * its area), a page wholly inside another zone's box (a city's or an entrance's page: the zone's own page shows it),
- * and a zone the arrival zone's own pieces already paint (Stormwind on Elwynn's map). Made on the parchment's worker
+ * its area), a capital's page (AreaTable's capital flag: its zone's own page paints it), an instance entrance's page
+ * (wholly inside another zone's box, its area not the open world's: AREA_OPEN; Mulgore, Moonglade and Hyjal lie inside
+ * others' boxes too, and are zones), and a zone the arrival zone's own pieces already paint (Stormwind on Elwynn's
+ * map). Made on the parchment's worker
  * after the arrival's zone is up, one neighbour's painting at a time (the sheet and one painting in memory at most). */
 #define PARCH_NEAR_MOST  4000         /* the reach at most, yards */
-#define PARCH_NEAR_MAX   6            /* neighbours at most, the nearest first */
+#define PARCH_NEAR_MAX   12           /* neighbours at most, the nearest first (each painted in turn, one in memory at a
+                                       * time: the cap holds the worker's time, about 0.1 s a neighbour, not memory) */
 #define PARCH_NEAR_TEX   2048         /* the sheet's texels a side at most (and 256 at least) */
+#define AREA_OPEN        0x40         /* AreaTable flags: the open world (duels allowed there; an instance's areas have none) */
 /* The fade by distance d from the arrival (yards) for reach (yards): 1 out to half the reach, then smoothstep down to 0
  * at the reach and past it; 0 for no reach. */
 static float ParchNearFade(float d, float reach)
@@ -10880,13 +10886,21 @@ static float ParchBoxYd(int i, float x, float y)
     float dy = y < g_pz[i].r ? g_pz[i].r - y : y > g_pz[i].l ? y - g_pz[i].l : 0;
     return ParchSqrt(dx * dx + dy * dy);
 }
-/* 1 when zone i's box lies wholly inside another zone's box on its map (a city's or an entrance's page). */
+/* 1 when zone i's box lies wholly inside another zone's box on its map (an entrance's page, a city's, or a zone's own:
+ * Mulgore's is inside the Barrens'). */
 static int ParchInsideOther(int i)
 {
     for (int j = 0; j < g_pzN; j++)
-        if (j != i && g_pz[j].map == g_pz[i].map && g_pz[j].area > 0 && g_pz[j].area != g_pz[i].area && g_pz[i].t <= g_pz[j].t &&
-            g_pz[i].b >= g_pz[j].b && g_pz[i].l <= g_pz[j].l && g_pz[i].r >= g_pz[j].r) return 1;
+        if (j != i && g_pz[j].map == g_pz[i].map && g_pz[j].area > 0 && g_pz[i].t <= g_pz[j].t && g_pz[i].b >= g_pz[j].b &&
+            g_pz[i].l <= g_pz[j].l && g_pz[i].r >= g_pz[j].r) return 1;
     return 0;
+}
+/* 1 when page i may be shown as a neighbour at all: not a capital's, nor an instance entrance's (inside another zone's
+ * box, its area not the open world's); an area with no row counts as the open world. */
+static int ParchNearPage(int i)
+{
+    int r = AreaRow(g_pz[i].area), f = r >= 0 ? g_atFlags[r] : AREA_OPEN;
+    return !(f & AREA_CAPITAL) && ((f & AREA_OPEN) || !ParchInsideOther(i));
 }
 /* 1 when a piece of zone z's own map names zone i's area (or one of its areas): z's painting already paints it. */
 static int ParchPaintedBy(int z, int i)
@@ -10902,7 +10916,7 @@ static int ParchPaintedBy(int z, int i)
 static int ParchNearMay(int z, int i, float x, float y, float reach)
 {
     return i != z && g_pz[i].map == g_pz[z].map && g_pz[i].area > 0 && g_pz[i].area != g_pz[z].area && ParchBoxYd(i, x, y) < reach &&
-           !ParchInsideOther(i) && !ParchPaintedBy(z, i);
+           ParchNearPage(i) && !ParchPaintedBy(z, i);
 }
 /* Yards from x, y to the nearest chunk of L's land (to its square, not its middle); -1 when it has none. */
 static float LandNearYd(const ParchLand *L, float x, float y)
@@ -10938,8 +10952,10 @@ static int ParchNearPick(const float *yd, int n, float reach, int *pick, float *
     return got;
 }
 /* The painting in g_parchPx (its picture placed at r on the frame, its alpha its cut) laid into the sheet S (T texels a
- * side, placed at sr), sampled between its texels; where the sheet has another's already, the more opaque shows (each
- * colour weighted by its alpha to the fourth), the sheet's alpha the higher. The texels it reached. */
+ * side, placed at sr), sampled between its texels, its alpha soft within PARCH_FEATHER of its box's edges as the zone's
+ * own painting is drawn (so where its picture ends there is no straight seam, over the continent or over another
+ * neighbour); where the sheet has another's already, the more opaque shows (each colour weighted by its alpha to the
+ * fourth), the sheet's alpha the higher. The texels it reached. */
 static int ParchNearLay(unsigned char *S, int T, ParchRect sr, ParchRect r)
 {
     int K = g_parchK, pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K, P = g_parchTW, n = 0;
@@ -10956,8 +10972,9 @@ static int ParchNearLay(unsigned char *S, int T, ParchRect sr, ParchRect r)
         if (v < 0) v = 0;
         if (v > (float)(ph - 1)) v = (float)(ph - 1);
         int v0 = (int)v, v1 = v0 + 1 < ph ? v0 + 1 : v0;
-        float fv = v - (float)v0;
-        for (int x = x0; x <= x1; x++) {
+        float fv = v - (float)v0, pv = (sr.y0 + ((float)y + 0.5f) * sy - r.y0) / (r.y1 - r.y0), ey = pv < 1 - pv ? pv : 1 - pv;
+        float ky = ParchSmooth(ey / PARCH_FEATHER);                 /* (soft within PARCH_FEATHER of its box's edges, as the */
+        for (int x = x0; x <= x1; x++) {                            /* zone's own painting is drawn: no straight seam there) */
             float u = (sr.x0 + ((float)x + 0.5f) * sx - r.x0) / (r.x1 - r.x0) * (float)pw - 0.5f;
             if (u < -0.5f || u > (float)pw - 0.5f) continue;
             if (u < 0) u = 0;
@@ -10968,6 +10985,8 @@ static int ParchNearLay(unsigned char *S, int T, ParchRect sr, ParchRect r)
             const unsigned char *e = g_parchPx + 4 * ((SIZE_T)v1 * (SIZE_T)P + (SIZE_T)u0), *f = g_parchPx + 4 * ((SIZE_T)v1 * (SIZE_T)P + (SIZE_T)u1);
             for (int k = 0; k < 4; k++)
                 c[k] = ((float)a[k] * (1 - fu) + (float)b[k] * fu) * (1 - fv) + ((float)e[k] * (1 - fu) + (float)f[k] * fu) * fv;
+            float pu = (sr.x0 + ((float)x + 0.5f) * sx - r.x0) / (r.x1 - r.x0), ex = pu < 1 - pu ? pu : 1 - pu;
+            c[3] *= ky * ParchSmooth(ex / PARCH_FEATHER);
             float al = c[3] / 255;
             if (!(al > 0)) continue;
             unsigned char *d = S + 4 * ((SIZE_T)y * (SIZE_T)T + (SIZE_T)x);
@@ -11031,6 +11050,7 @@ static int ParchNearMips(void)
     return 1;
 }
 static ParchLand g_nland;                     /* a neighbour's land, while the zones nearby are made */
+static int ParchJobStale(void);
 typedef struct { int n, laid, row[PARCH_NEAR_MAX], tiles, unread; float yd[PARCH_NEAR_MAX], ydTexel; ParchRect r; } ParchNear;
 /* The zones nearby for arrival zone z (continent row c) at x, y on map, within reach yards (bits: the pieces found, NULL
  * every piece; K: the arrival zone's painting's tiles over 256): the sheet made into g_parchPx (g_parchSheet, its
@@ -11044,6 +11064,7 @@ static int ParchNearMake(int z, int c, int map, float x, float y, float reach, c
     for (int i = 0; i < g_pzN; i++) {                              /* each zone near enough: its land's nearest chunk */
         yd[i] = -1;
         if (!ParchNearMay(z, i, x, y, reach)) continue;
+        if (ParchJobStale()) { *why = "no longer wanted"; return 0; }   /* (stopped: another arrival, or the screen gone) */
         const char *lwhy = "";
         if (ParchLandMake(i, &g_nland, &lwhy) && g_nland.n) yd[i] = LandNearYd(&g_nland, x, y);
         N->tiles += g_nland.tiles; N->unread += g_nland.unread;
@@ -11063,6 +11084,7 @@ static int ParchNearMake(int z, int c, int map, float x, float y, float reach, c
     if (!S) { *why = "no memory for its sheet"; return 0; }
     static const ParchLines none;
     for (int k = 0; k < N->n; k++) {                                /* each one painted, cut to its land, laid in */
+        if (ParchJobStale()) { HeapFree(GetProcessHeap(), 0, S); *why = "no longer wanted"; return 0; }
         int i = N->row[k];
         const char *pwhy = "", *lwhy = "", *cwhy = "";
         float share = 0;
@@ -11117,6 +11139,9 @@ static struct {
     const char *why, *cwhy;
     DWORD posted, ran;                                    /* (the view's clock as it was posted; the job's ms, GetTickCount's) */
 } g_pj;
+/* 1 when the job running has gone stale (its screen gone, the view off, or, for the zones nearby, its arrival no longer
+ * the one wanted): the zones nearby stop between neighbours, so the next job waits on them no longer than one. */
+static int ParchJobStale(void) { return g_pj.state == 3; }
 static volatile LONG g_pjWorker;                          /* a worker runs the jobs (once started), */
 static HANDLE g_pjEvent;                                  /* woken by this as each is posted */
 static int g_pjUp = -1;                                   /* the slot going up to OpenGL a strip a frame (-1: none) */
@@ -11285,7 +11310,7 @@ static int ParchJobDone(DWORD now, int map, float x, float y, LONG screen)
  * 1 when a job follows in this call. */
 static int ParchUpDone(DWORD now, int slot, int up)
 {
-    char m[720];                                                 /* (the zones nearby's line: up to six names) */
+    char m[1024];                                                /* (the zones nearby's line: up to twelve names; wsprintfA's most) */
     DWORD ms = g_pj.ran;
     if (slot == VT_PWORLD) {
         if (!up) { Log("  the parchment: OpenGL would not take the world's painting; each glide opens on its continent's painting"); return 0; }
@@ -11309,7 +11334,8 @@ static int ParchUpDone(DWORD now, int slot, int up)
         g_nearZ = g_pj.z; g_nearAt = now; g_nearRect = N->r; g_nearMap = g_pj.map; g_nearX = g_pj.x; g_nearY = g_pj.y;
         g_nearReach = (int)g_pj.reach; g_nearKnown = g_pj.known; g_nearFull = g_pj.full;
         for (int i = 0; i < EXPLORED_BYTES; i++) g_nearBits[i] = g_pj.bits[i];
-        char names[220] = "";
+        char names[480];
+        names[0] = 0;                                            /* (no initializer: the 32-bit build has no memset) */
         for (int k = 0; k < N->n; k++) {
             char one[64];
             wsprintfA(one, "%s%s %d yd", k ? ", " : "", g_pz[N->row[k]].name, (int)(N->yd[k] + 0.5f));
@@ -11395,7 +11421,9 @@ static void ParchWork(DWORD now)
             int more = ParchUpDone(now, slot, r > 0);
             if (!more) { ParchFree(); return; }                  /* (one painting a call) */
         }
-        if (g_pj.state == 1 || g_pj.state == 3) return;          /* (the worker's: done on a later frame) */
+        if (g_pj.state == 1 && g_pj.kind == PJ_NEAR && (map != g_pj.map || x != g_pj.x || y != g_pj.y || screen != g_parchForScreen))
+            InterlockedCompareExchange(&g_pj.state, 3, 1);       /* (the zones nearby for an arrival no longer wanted: stale, */
+        if (g_pj.state == 1 || g_pj.state == 3) return;          /* stopped by the worker) (the worker's: done on a later frame) */
         if (g_pj.state == 2) {
             InterlockedExchange(&g_pj.state, 0);
             if (!ParchJobDone(now, map, x, y, screen)) return;
@@ -12832,7 +12860,8 @@ static int StyleSave(int map, int bar, int full)
     lstrcatA(text, "\r\nareas ");
     lstrcatA(text, StyleAreasName(full));
     char nearby[32];
-    wsprintfA(nearby, "\r\nnearby %d\r\n", *(volatile int *)&g_nearYd);
+    if (*(volatile int *)&g_nearNamed) wsprintfA(nearby, "\r\nnearby %d\r\n", *(volatile int *)&g_nearYd);
+    else lstrcpyA(nearby, "\r\n");
     lstrcatA(text, nearby);
     char look[200];
     StyleLookText(look, &g_look, "\r\n");
@@ -12887,6 +12916,7 @@ static void StyleLoad(void)
     *(volatile int *)&g_vbarAsked = bar;
     *(volatile int *)&g_mapFull = full;
     *(volatile int *)&g_nearYd = reach;
+    *(volatile int *)&g_nearNamed = reachNamed;
     g_look = look;
     wsprintfA(m, "style: the map %s, the bar %s, the map's areas %s, from %s; set in game with /cinderload (its panel)",
               StyleMapName(map), StyleBarName(bar), StyleAreasName(full), from);
@@ -12921,6 +12951,7 @@ static int StyleApply(const Style *st, const char *how)
     *(volatile int *)&g_vbarAsked = st->bar;
     *(volatile int *)&g_mapFull = st->full;
     *(volatile int *)&g_nearYd = st->nearYd;
+    if (st->nearYd != was.nearYd) *(volatile int *)&g_nearNamed = 1;   /* (the reach chosen in game: kept in the file) */
     g_look = st->look;
     char m[400];
     int saved = StyleSave(st->map, st->bar, st->full);

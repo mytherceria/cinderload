@@ -8,7 +8,7 @@
 -- Run inside the game by CinderLoad.dll, on the game's own thread while no Lua is running (no add-on folder: the release
 -- is the DLL and its packs). The DLL puts two lines before this text, the choice it holds:
 --   local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"
---   local CL_LOOK = "nearby 1200 thick 100 width own whole off effect heat colour class quality pulse raw"
+--   local CL_LOOK = "nearby 1600 thick 100 width own whole off effect heat colour class quality pulse raw"
 -- Written for the client's Lua 5.0: no #, no %, no ... in a body, no string methods, no string.match.
 -- If this breaks, the game's own UI is unharmed: only frames of its own are made, every handler runs inside pcall, a
 -- fault switches it all off (CL.broken, the CVar told "fault"), no function of Blizzard's is replaced or hooked and no
@@ -44,7 +44,7 @@ CL.ART = "Interface\\CinderLoad\\"             -- the panel's pictures, in Cinde
 
 function CL.Defaults()
     CL.map, CL.bar, CL.areas = "parchment", "retro", "discovered"
-    CL.nearby, CL.thick, CL.width, CL.whole, CL.effect, CL.ember = 1200, 100, 0, nil, "heat", nil
+    CL.nearby, CL.thick, CL.width, CL.whole, CL.effect, CL.ember = 1600, 100, 0, nil, "heat", nil
     CL.quality = { pulse = 1, raw = 1 }
 end
 

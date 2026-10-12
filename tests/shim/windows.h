@@ -100,13 +100,16 @@ static HANDLE GetProcessHeap(void) { return (HANDLE)1; }
 #define HEAP_ZERO_MEMORY 0x00000008
 static size_t shim_refuse_size;                     /* HeapAlloc refuses the next shim_refuse_n asks for exactly */
 static int shim_refuse_n, shim_refuse_skip;         /* shim_refuse_size bytes (out of memory), after shim_refuse_skip given */
+static long shim_heap_live;                         /* blocks given by HeapAlloc and not yet freed */
 static void *HeapAlloc(HANDLE h, DWORD f, size_t n)
 {
     (void)h;
     if (shim_refuse_n > 0 && n == shim_refuse_size && shim_refuse_skip-- <= 0) { shim_refuse_n--; return NULL; }
-    return (f & HEAP_ZERO_MEMORY) ? calloc(1, n) : malloc(n);
+    void *p = (f & HEAP_ZERO_MEMORY) ? calloc(1, n) : malloc(n);
+    if (p) shim_heap_live++;
+    return p;
 }
-static BOOL HeapFree(HANDLE h, DWORD f, void *p) { (void)h; (void)f; free(p); return TRUE; }
+static BOOL HeapFree(HANDLE h, DWORD f, void *p) { (void)h; (void)f; if (p) shim_heap_live--; free(p); return TRUE; }
 static int lstrlenA(const char *s) { return (int)strlen(s); }
 static char *lstrcpyA(char *d, const char *s) { return strcpy(d, s); }
 static int lstrcmpiA(const char *a, const char *b)
