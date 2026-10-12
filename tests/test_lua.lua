@@ -238,11 +238,13 @@ Check(small == 0 and texts["Loading map"] and texts["Loading map"].size == 14 an
       texts["a still here; it moves in game"] and texts["Drag the title to move this window.  Each change shows from your next loading screen."],
       "its words as the mockup's: the sections' titles gold at 14, the choices white at 13, nothing under 12 (larger type: the plus)")
 local coming = env.CinderLoad.ui.coming
-Check(coming and table.getn(coming) == 2 and coming[1].text == "kept; drawn in a later version" and coming[1]:IsVisible() and
-      coming[2].text == coming[1].text and coming[1].size == 12 and coming[1].color[1] == 1 and
-      PB(coming[1]).l > PB(texts["Bar size"]).r + 8 and PB(coming[2]).l > PB(texts["Texture / effect"]).r + 8 and PB(coming[1]).b < 82 and PB(coming[2]).b < 300 and PB(coming[2]).b > 260 and Near(PB(coming[1]).r, 730) and
+local saidOver = 0
+for _, f in ipairs(world.made) do if f.kind == "FontString" and f.text == "kept; drawn in a later version" then saidOver = saidOver + 1 end end
+Check(coming and table.getn(coming) == 1 and saidOver == 1 and coming[1].text == "kept; drawn in a later version" and coming[1]:IsVisible() and
+      coming[1].size == 12 and coming[1].color[1] == 1 and PB(coming[1]).l > PB(texts["Texture / effect"]).r + 8 and
+      PB(coming[1]).b < 300 and PB(coming[1]).b > 260 and Near(PB(coming[1]).r, 730) and
       texts["Drag the title to move this window.  Each change shows from your next loading screen."],
-      "over Bar size and Texture / effect, at their right, clear of their titles: kept, drawn in a later version (no loading screen draws them yet), so the header's line stays true")
+      "over Texture / effect only, at its right, clear of its title: kept, drawn in a later version (no loading screen draws the effect or colour yet); Bar size says nothing, since the loading screens draw it now, so the header's line stays true")
 -- where everything is (the mockup's units)
 local u = env.CinderLoad.ui
 local cards = {}

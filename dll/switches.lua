@@ -37,8 +37,8 @@ CL.qualities = { { value = "liquid", text = "Liquid" }, { value = "pulse", text 
                  { value = "raw", text = "Raw" } }
 -- the sliders: least, most, step (the numbers are his to change); nearby is the DLL's (0 none, 4000 at most)
 CL.range = { nearby = { 0, 4000, 100 }, thick = { 50, 200, 5 }, width = { 20, 100, 5 } }
--- the bar's size and effect are kept in style.txt from now, but no loading screen draws them yet: said over their boxes
--- (nil once the DLL draws them)
+-- the bar's effect and colour are kept in style.txt, but no loading screen draws them yet: said over their box (nil once
+-- the DLL draws them); the bar's size is drawn (thickness, width, the whole width)
 CL.COMING = "kept; drawn in a later version"
 CL.ART = "Interface\\CinderLoad\\"             -- the panel's pictures, in CinderLoad's pack (tools/make_panel_art.py)
 
@@ -458,14 +458,13 @@ function CL.Build()
 
     -- Bar size
     CL.Box(R, 82, CW, 178, "Bar size")
-    if CL.COMING then CL.ui.coming = { CL.Text(p, R + CW - 4, 78, CL.COMING, 12, nil, "rd") } end
     CL.Slider(R + 16, 94, CW - 32, "thick", "Bar thickness", "Thin", "Thick")
     CL.Slider(R + 16, 158, CW - 32, "width", "Bar width", "Narrow", "Wide")
     CL.ui.whole = CL.Check(R + 14, 222, 28, "Whole", "Whole width of the screen", function(on) CL.Set("whole", on) end)
 
     -- Texture / effect
     CL.Box(R, 300, CW, 96, "Texture / effect")
-    if CL.COMING then table.insert(CL.ui.coming, CL.Text(p, R + CW - 4, 296, CL.COMING, 12, nil, "rd")) end
+    if CL.COMING then CL.ui.coming = { CL.Text(p, R + CW - 4, 296, CL.COMING, 12, nil, "rd") } end
     for i, o in ipairs(CL.effects) do
         local x = R + 16 + (i - 1) * 106
         CL.ui.effects[o.value] = CL.Card(x, 312, 96, 24, "Panel" .. string.upper(string.sub(o.value, 1, 1)) .. string.sub(o.value, 2), "effect", o.value)
