@@ -10016,7 +10016,8 @@ static void TestSwitchesPath(void)
      * the DLL's own (g_look, g_nearYd), the next screen takes Neo's qualities */
     Bridge("slide thick 125");
     ok = BridgeSaid("slid");
-    Bridge("slide width 50");
+    Bridge("slide width 50");                                             /* (greyed with Neo: still) */
+    ok &= BridgeSaid("not slid");
     Bridge("pick fade third");
     ok &= BridgeSaid("picked");
     Bridge("tick Whole");                                                 /* (greyed with Neo: always the whole width) */
@@ -10026,20 +10027,20 @@ static void TestSwitchesPath(void)
     ok &= BridgeSaid("unticked");
     Bridge("tick QualityLiquid");
     Bridge("tick QualityPulse");
-    ok &= !strcmp(g_fkVal, "parchment neo full fade third thick 125 width 50 whole off effect heat neofill blade colour ember quality liquid raw");
+    ok &= !strcmp(g_fkVal, "parchment neo full fade third thick 125 width own whole off effect heat neofill blade colour ember quality liquid raw");
     now += LUA_POLL_MS;
     Pump(now);
-    ok &= g_look.thick == 125 && g_look.width == 50 && g_look.whole == 0 && g_look.effect == LOOK_HEAT && g_look.neofx == LOOK_BLADE && g_look.ember == 1 &&
+    ok &= g_look.thick == 125 && g_look.width == 0 && g_look.whole == 0 && g_look.effect == LOOK_HEAT && g_look.neofx == LOOK_BLADE && g_look.ember == 1 &&
           g_look.quality == (int)(SABER_LIQUID | SABER_RAW) && g_nearFade == NEAR_THIRD && g_nearFadeNamed && g_nearYd == PARCH_NEAR_YD &&
           (t = Get(STYLE_REL)) && !strstr(t, "\r\nnearby") &&
-          strstr(t, "\r\nareas full\r\nfade third\r\nthick 125\r\nwidth 50\r\nwhole off\r\neffect heat\r\nneofill blade\r\ncolour ember\r\nquality liquid raw\r\n") &&
-          LogSays("style: the zones nearby out to 1600 yards, their fade third, the bar's look thick 125, width 50, whole off, effect heat, neofill blade, colour ember, quality liquid raw");
+          strstr(t, "\r\nareas full\r\nfade third\r\nthick 125\r\nwidth own\r\nwhole off\r\neffect heat\r\nneofill blade\r\ncolour ember\r\nquality liquid raw\r\n") &&
+          LogSays("style: the zones nearby out to 1600 yards, their fade third, the bar's look thick 125, width own, whole off, effect heat, neofill blade, colour ember, quality liquid raw");
     g_dispNew = 1;
     GameStep(0.0f, now + 10);
     ViewOpenFirst(1920, 1080, now + 20);
     ok &= g_saberStyle == (SABER_LIQUID | SABER_RAW) && g_barEffect == LOOK_BLADE && g_barEmber == 1 && LogSays("  the view: the blade's qualities liquid raw") &&
           LogSays("  the view: the bar's fill blade light, in CinderLoad's ember");
-    Check(ok, "the whole path, the bar's look: the thickness and width slid, a fade picked, the class's colour ticked (the whole width greyed with Neo), Blade light and Neo's qualities picked in the window; the CVar carries them, the next message keeps them in style.txt (the fade a line of its own) and in the DLL's own; the next screen takes Neo's qualities, the fill and the ember");
+    Check(ok, "the whole path, the bar's look: the thickness slid, a fade picked, the class's colour ticked (the width and the whole width greyed with Neo), Blade light and Neo's qualities picked in the window; the CVar carries them, the next message keeps them in style.txt (the fade a line of its own) and in the DLL's own; the next screen takes Neo's qualities, the fill and the ember");
 
     /* a /reload: the UI made anew; the probe finds no switches; made again from the choice held, showing it */
     Bridge("fresh");
@@ -10048,7 +10049,7 @@ static void TestSwitchesPath(void)
     Pump(now);
     Bridge("open");
     Bridge("text bar");
-    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo full fade third thick 125 width 50 whole off effect heat neofill blade colour ember quality liquid raw") &&
+    ok = g_fkSetups == setups + 1 && !strcmp(g_fkVal, "parchment neo full fade third thick 125 width own whole off effect heat neofill blade colour ember quality liquid raw") &&
          BridgeSaid("Neo shown");
     Bridge("text thick");
     ok &= BridgeSaid("125% shown");

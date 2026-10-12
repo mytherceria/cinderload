@@ -312,6 +312,10 @@ function R:SetNormalTexture(t) self.normalTexture = t end
 function R:SetPushedTexture(t) self.pushedTexture = t end
 function R:SetHighlightTexture(t) self.highlightTexture = t end
 function R:SetDisabledTexture(t) self.disabledTexture = t end
+local function Role(f, role) for _, k in ipairs(f.kids) do if k.role == role then return k end end end
+function R:GetNormalTexture() return Role(self, "normal") end
+function R:GetHighlightTexture() return Role(self, "highlight") end
+function R:GetThumbTexture() return Role(self, "thumb") end
 function R:SetChecked(c) if c == 0 or c == false then c = nil end; self.checked = c and 1 or nil end
 function R:GetChecked() return self.checked end
 -- ---- sliders (1.12's Slider: SetValue runs OnValueChanged, arg1 the value, when the value changes) ----
@@ -965,7 +969,7 @@ end
 function UI.World() return world end
 -- a slider dragged to v, as the client does it: held to its range, on its steps, then OnValueChanged
 function UI.Slide(s, v)
-    if not (s:IsVisible() and s.mouse) then return false end
+    if not (s:IsVisible() and s.mouse and not s.disabled) then return false end
     local step = s.step or 0
     if step > 0 then v = math.floor((v - s.min) / step + 0.5) * step + s.min end
     s:SetValue(v)

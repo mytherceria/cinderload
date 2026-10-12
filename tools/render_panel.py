@@ -214,7 +214,8 @@ def main():
                 x0, y0, x1, y1 = box(s)
                 f = (s['value'] - s['min']) / ((s['max'] - s['min']) or 1)
                 cx, cy, half = x0 + 8 * s['es'] * k + (x1 - x0 - 16 * s['es'] * k) * f, (y0 + y1) / 2, 16 * s['es'] * k
-                put(arc.texture(r['texture']), cx - half, cy - half, cx + half, cy + half)
+                put(arc.texture(r['texture']), cx - half, cy - half, cx + half, cy + half,
+                    [float(v) for v in r['shade']] if r['shade'] else None)      # (its vertex colour: a greyed slider's)
                 return
             x0, y0, x1, y1 = box(r)
             if r['color'] and not r['texture']:

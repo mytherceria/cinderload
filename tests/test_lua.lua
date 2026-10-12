@@ -201,7 +201,7 @@ Check(bd and bd.edgeFile == "Interface\\DialogFrame\\UI-DialogBox-Border" and bd
       p.backdropColor[1] == 0 and Near(p.backdropColor[4], 0.88), "the client's dialog border (UI-DialogBox-Border, 32), its black 88% opaque (the plus)")
 local fills = { n = 0, other = "" }
 for _, f in ipairs(world.made) do
-    if not f.blizzard and f.backdrop and f.backdrop.bgFile and f.backdropColor then          -- (a colour set on a fill of ours)
+    if not f.blizzard and f.kind ~= "Slider" and f.backdrop and f.backdrop.bgFile and f.backdropColor then   -- (a colour set on a fill of ours)
         fills.n = fills.n + 1
         if f.backdrop.bgFile ~= "Interface\\ChatFrame\\ChatFrameBackground" then fills.other = fills.other .. " " .. f.backdrop.bgFile end
     end
@@ -304,6 +304,17 @@ local function SliderSays(key, v, text)
     local s = u.sliders[key]
     return Near(s.slider:GetValue(), v) and s.value.text == text
 end
+-- greyed: no click taken, only its art dimmed (a slider's track and thumb, a check box's box), its words as bright as ever
+local function Greyed(c, off)
+    local k = off and 0.5 or 1
+    local art = env[c.name .. "Thumb"]
+    local dim
+    if art then dim = Near(art.vertex and art.vertex[1] or 1, k) and Near(c.backdropColor and c.backdropColor[1] or 1, k) and Near(c.backdropBorderColor and c.backdropBorderColor[1] or 1, k)
+    else local n = c:GetNormalTexture(); dim = Near(n.vertex and n.vertex[1] or 1, k) end
+    local words = true
+    for _, w in ipairs({ "Text", "Low", "High", "Value" }) do local fs = env[c.name .. w]; if fs then words = words and fs:IsVisible() and (fs.alpha or 1) == 1 end end
+    return dim and words and c.alpha == 1 and (c:IsEnabled() and 1 or 0) == (off and 0 or 1)
+end
 local function Fades(v)                                     -- its radio alone checked
     for _, o in ipairs({ "zone", "third", "3600", "1800" }) do if (P("fade" .. o):GetChecked() and 1 or 0) ~= (o == v and 1 or 0) then return false end end
     return true
@@ -343,10 +354,10 @@ Check(CV() == Value("parchment neo discovered") and Shows("parchment", "discover
       not P("QualityLiquid"):GetChecked() and not P("QualityUnstable"):GetChecked(), "Neo's radio: chosen; Retro's words give way to Neo's four qualities, Pulse and Raw ticked (today's)")
 Check(At(P("QualityLiquid"), 40, 490, 26, 26) and At(P("QualityPulse"), 202, 490, 26, 26) and At(P("QualityUnstable"), 40, 516, 26, 26) and
       At(P("QualityRaw"), 202, 516, 26, 26), "the four in the bar's box, two by two, where Retro's words were")
-Check(SliderSays("width", 100, "the whole screen") and P("widthSlider").alpha == 0.5 and not P("widthSlider"):IsEnabled() and
-      P("Whole"):GetChecked() and P("Whole").alpha == 0.5 and not P("Whole"):IsEnabled() and u.neoWide:IsVisible() and
+Check(SliderSays("width", 100, "the whole screen") and Greyed(P("widthSlider"), true) and not UI.Slide(P("widthSlider"), 40) and
+      P("Whole"):GetChecked() and Greyed(P("Whole"), true) and u.neoWide:IsVisible() and
       not UI.Click(P("Whole")) and CV() == Value("parchment neo discovered") and not env.CinderLoad.whole,
-      "with Neo picked (his, 11 Oct: always the whole width, its ends having no metal caps): the width slider at its end, \"the whole screen\", greyed and still; Whole width of the screen ticked, greyed and still; the note over Bar size says why; nothing of Retro's width changed")
+      "with Neo picked (his, 11 Oct: always the whole width, its ends having no metal caps): the width slider at its end, \"the whole screen\", greyed and still; Whole width of the screen ticked, greyed and still (only their art dimmed, their words as bright as ever: his 7:1); the note over Bar size says why; nothing of Retro's width changed")
 UI.Click(P("QualityLiquid"))
 Check(string.find(CV(), " quality liquid pulse raw$") and P("QualityLiquid"):GetChecked(), "Liquid ticked: quality liquid pulse raw")
 UI.Click(P("QualityPulse"))
@@ -359,8 +370,8 @@ UI.Click(P("QualityLiquid")); UI.Click(P("QualityUnstable"))
 UI.Click(cards["bar retro"])
 Check(CV() == Value("parchment retro discovered") and u.words[1]:IsVisible() and not P("QualityPulse"):IsVisible() and Gold("bar", "retro"),
       "Retro's picture: chosen, its words back, Neo's qualities kept as they were (pulse raw)")
-Check(SliderSays("width", 30, "each bar's own") and P("widthSlider").alpha == 1 and P("widthSlider"):IsEnabled() and not P("Whole"):GetChecked() and
-      P("Whole").alpha == 1 and P("Whole"):IsEnabled() and not u.neoWide:IsVisible(), "and Retro's width live again, its own as it was, the note gone")
+Check(SliderSays("width", 30, "each bar's own") and Greyed(P("widthSlider"), false) and not P("Whole"):GetChecked() and
+      Greyed(P("Whole"), false) and not u.neoWide:IsVisible(), "and Retro's width live again, its own as it was, the note gone")
 UI.Slide(P("thickSlider"), 125)
 Check(string.find(CV(), " thick 125 ", 1, true) and SliderSays("thick", 125, "125%"), "the thickness slider to 125: \"125%\", thick 125")
 UI.Slide(P("thickSlider"), 10)
@@ -379,12 +390,12 @@ UI.Slide(P("widthSlider"), 50)
 UI.Click(P("Whole"))
 Check(string.find(CV(), " width 50 whole on ", 1, true) and P("Whole"):GetChecked() and u.sliders.width.value.text == "the whole screen",
       "Whole width of the screen ticked: whole on, the width kept under it, the slider says the whole screen")
-Check(Near(P("widthSlider"):GetValue(), 100) and P("widthSlider").alpha == 0.5 and not P("widthSlider"):IsEnabled(),
+Check(Near(P("widthSlider"):GetValue(), 100) and Greyed(P("widthSlider"), true),
       "and the width slider's thumb at its end, the slider greyed and still while the whole width is ticked")
 UI.Click(P("Whole"))
 Check(string.find(CV(), " width 50 whole off ", 1, true) and not P("Whole"):GetChecked() and u.sliders.width.value.text == "50% of the screen",
       "unticked: whole off, back to its 50%")
-Check(Near(P("widthSlider"):GetValue(), 50) and P("widthSlider").alpha == 1 and P("widthSlider"):IsEnabled(), "and the width slider live again, its thumb at 50%")
+Check(Near(P("widthSlider"):GetValue(), 50) and Greyed(P("widthSlider"), false), "and the width slider live again, its thumb at 50%")
 UI.Click(cards["effect smooth"])
 Check(string.find(CV(), " effect smooth ", 1, true) and Gold("effect", "smooth"), "Smooth's picture: effect smooth, framed in gold")
 UI.Click(cards["effect blade"])
@@ -538,8 +549,10 @@ local atRest = dt.size == 13 and Near(dt.color[2], 0.82)
 UI.Enter(P("Defaults"))
 local over = dt.size == 13 and dt.color[1] == 1 and dt.color[2] == 1 and dt.fontFile == "Fonts\\FRIZQT__.TTF"
 UI.Leave(P("Defaults"))
-Check(atRest and over and dt.size == 13 and Near(dt.color[2], 0.82) and env[P("CloseButton").name .. "Text"].size == 13 and NoErrors(),
-      "Defaults and Close: their words at 13 at rest (gold) and with the mouse over them (white), as the template's colours go, never back to its 12")
+local glow = P("Defaults"):GetHighlightTexture()
+Check(atRest and over and dt.size == 13 and Near(dt.color[2], 0.82) and env[P("CloseButton").name .. "Text"].size == 13 and NoErrors() and
+      glow and glow.blend == "ADD" and Near(glow.vertex[1], 0.4) and Near(P("CloseButton"):GetHighlightTexture().vertex[2], 0.4),
+      "Defaults and Close: their words at 13 at rest (gold) and with the mouse over them (white), as the template's colours go, never back to its 12; the glow under the mouse at 0.4 of the template's, so the white words keep 7:1 (8.2:1, measured)")
 UI.Click(P("areasdiscovered"))                              -- (the words below begin from Discovered)
 -- moved by its title
 local l0, t0 = p:GetLeft(), p:GetTop()

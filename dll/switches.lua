@@ -520,11 +520,16 @@ function CL.ButtonFont(name, c)
     f:SetTextColor(c[1], c[2], c[3])
     return f
 end
+CL.GLOW = 0.4
 function CL.PanelButton(x, y, name, label, fn)
     local b = CreateFrame("Button", "CinderLoadPanel" .. name, CL.host, "UIPanelButtonTemplate")
     CL.At(b, x, y, 120, 26)
     b:SetTextFontObject(CL.ButtonFont("CinderLoadButtonFont", CL.GOLD))
     b:SetHighlightFontObject(CL.ButtonFont("CinderLoadButtonFontHighlight", CL.WHITE))
+    -- its glow under the mouse dimmed to CL.GLOW (his 7:1: the white words over the template's full glow measured 4.3:1
+    -- at the brightest pixel behind them, at 0.4 of it 8.2:1, as the gold at rest is 8.1:1)
+    local hl = b:GetHighlightTexture()
+    if hl then hl:SetVertexColor(CL.GLOW, CL.GLOW, CL.GLOW) end
     b:SetText(label)
     b:SetScript("OnClick", CL.Safe(name, fn))
     return b
@@ -733,6 +738,25 @@ function CL.LightOf(bar, effect)
     return c
 end
 
+-- greyed: it takes no click, and only its art is dimmed (a slider's track and thumb, a check box's box; its tick shows
+-- the client's disabled one), its words as bright as ever (his 7:1: greyed words at half their light measured 6.2:1)
+CL.DIM = 0.5
+function CL.Grey(c, off)
+    local k = 1
+    if off then
+        k = CL.DIM
+        if c.Disable then c:Disable() end
+    elseif c.Enable then
+        c:Enable()
+    end
+    if c.GetThumbTexture and c:GetThumbTexture() then
+        c:GetThumbTexture():SetVertexColor(k, k, k)
+        c:SetBackdropColor(k, k, k)
+        c:SetBackdropBorderColor(k, k, k)
+    elseif c.GetNormalTexture and c:GetNormalTexture() then
+        c:GetNormalTexture():SetVertexColor(k, k, k)
+    end
+end
 -- every control shows the choice
 function CL.Refresh()
     if not CL.ui then return end
@@ -767,16 +791,8 @@ function CL.Refresh()
     end
     -- the width: Retro's alone; with Neo picked, its slider and the whole width greyed and still, the note saying why
     CL.ui.whole:SetChecked(CL.whole or neo)
-    local ws = CL.ui.sliders.width.slider
-    for _, c in ipairs({ { ws, CL.whole or neo }, { CL.ui.whole, neo } }) do
-        if c[2] then
-            if c[1].Disable then c[1]:Disable() end
-            c[1]:SetAlpha(0.5)
-        else
-            if c[1].Enable then c[1]:Enable() end
-            c[1]:SetAlpha(1)
-        end
-    end
+    CL.Grey(CL.ui.sliders.width.slider, CL.whole or neo)
+    CL.Grey(CL.ui.whole, neo)
     if neo then CL.ui.neoWide:Show() else CL.ui.neoWide:Hide() end
     CL.ui.colour:SetChecked(not CL.ember)
     for _, fs in ipairs(CL.ui.words) do if neo then fs:Hide() else fs:Show() end end
