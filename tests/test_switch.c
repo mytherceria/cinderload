@@ -8001,22 +8001,25 @@ static void TestNearby(void)
     for (int d = 0; d <= 1300; d += 5) { float f = ParchNearFade((float)d, 1200); ok &= f <= last + 1e-6f && f >= 0 && f <= 1; last = f; }
     Check(ok, "the zones nearby fade by distance from the arrival: whole out to half the reach, then smoothly to nothing at the reach and past it (900 of 1200 yards: half); no reach, nothing");
 
-    /* the neighbours: those within the reach, the nearest first, PARCH_NEAR_MAX (twelve) at most */
+    /* the neighbours: those within the reach (0: any), the nearest first, every one (no count leaves one out: the recheck's
+     * find on 0b439a4, the twelve nearest dropping zones at half strength at the top of the reach) */
     float yd[17] = { -1, 50, 1300, 400, 10, 400, 900, 1199, 300, 100, 200, 500, 600, 700, 1150, 800, 5 };
-    int pick[PARCH_NEAR_MAX + 1];
-    float pyd[PARCH_NEAR_MAX + 1];
+    static int pick[PARCH_NEAR_MAX + 1];
+    static float pyd[PARCH_NEAR_MAX + 1];
     pick[PARCH_NEAR_MAX] = -7; pyd[PARCH_NEAR_MAX] = -7;                /* (past the end: never written) */
-    ok = PARCH_NEAR_MAX == 12 && ParchNearPick(yd, 17, 1200, pick, pyd) == 12 && pick[0] == 16 && pick[1] == 4 && pick[2] == 1 &&
-         pick[3] == 9 && pick[4] == 10 && pick[5] == 8 && pyd[0] == 5 && pyd[11] == 800 && pick[11] == 15;
+    ok = PARCH_NEAR_MAX >= PARCH_ZONES && ParchNearPick(yd, 17, 1200, pick, pyd) == 15 && pick[0] == 16 && pick[1] == 4 && pick[2] == 1 &&
+         pick[3] == 9 && pick[4] == 10 && pick[5] == 8 && pyd[0] == 5 && pyd[11] == 800 && pick[11] == 15 && pick[12] == 6 && pick[13] == 14 &&
+         pick[14] == 7 && pyd[14] == 1199;
     ok &= ParchNearPick(yd, 17, 100, pick, pyd) == 3 && pick[0] == 16 && pick[1] == 4 && pick[2] == 1 && ParchNearPick(yd, 17, 50, pick, pyd) == 2;
-    ok &= ParchNearPick(yd, 17, 5, pick, pyd) == 0 && ParchNearPick(yd, 17, 0, pick, pyd) == 0;
-    {                                                                   /* (twelve near, then a farther thirteenth, then a nearer) */
-        float y2[14] = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 500, 1 };
-        ok &= ParchNearPick(y2, 14, 1200, pick, pyd) == 12 && pick[0] == 13 && pick[11] == 10 && pyd[11] == 110;
-        ok &= ParchNearPick(y2, 13, 1200, pick, pyd) == 12 && pick[11] == 11 && pyd[11] == 120;
+    ok &= ParchNearPick(yd, 17, 5, pick, pyd) == 0 && ParchNearPick(yd, 17, 0, pick, pyd) == 16 && pick[15] == 2 && pyd[15] == 1300;
+    {                                                                   /* (as many as there are zones, the nearest first) */
+        static float y2[PARCH_ZONES];
+        for (int i = 0; i < PARCH_ZONES; i++) y2[i] = (float)(PARCH_ZONES - i);
+        ok &= ParchNearPick(y2, PARCH_ZONES, 0, pick, pyd) == PARCH_ZONES && pick[0] == PARCH_ZONES - 1 && pyd[0] == 1 &&
+              pick[PARCH_ZONES - 1] == 0 && pyd[PARCH_ZONES - 1] == PARCH_ZONES;
     }
     ok &= pick[PARCH_NEAR_MAX] == -7 && pyd[PARCH_NEAR_MAX] == -7;
-    Check(ok, "the zones nearby: those whose land comes within the reach (not at it), the nearest first, twelve at most (of fifteen within 1200 yards, the three farthest left out; a farther thirteenth after twelve left out, never written past the twelve)");
+    Check(ok, "the zones nearby: those whose land comes within the reach (not at it), or any with no reach (the per-zone fades), the nearest first, every one: no count leaves one out (all fifteen within 1200 yards; as many as there are zones), never written past the end");
 
     /* which pages may be neighbours: of the arrival's map, a zone's (not a continent's), not the arrival's zone or another
      * page of its area, its box near enough, not a page wholly inside another zone's box, not one the arrival's map paints */
@@ -8086,17 +8089,17 @@ static void TestNearby(void)
         static unsigned char S[32 * 32 * 4];
         memset(S, 0, sizeof S);
         ParchRect r = { 10, 10, 11, 11 }, sr = { 10, 10, 12, 12 };
-        int n = ParchNearLay(S, 32, sr, r);
+        int n = ParchNearLay(S, 32, sr, r, NULL);
         const unsigned char *in = S + 4 * (5 * 32 + 5), *out = S + 4 * (5 * 32 + 20), *in2 = S + 4 * (12 * 32 + 3);
         ok = n == 16 * 16 && in[0] == 0xC0 && in[1] == 0x40 && in[2] == 0x20 && in[3] == 255 && out[3] == 0 && in2[3] == 255;
         TestPaintFill(0, 0, 1002, 668, 0x2040C0);
         for (int y = 0; y < 668; y++) for (int x = 0; x < 1002; x++) g_parchPx[4 * ((size_t)y * g_parchTW + x) + 3] = 128;
-        ParchNearLay(S, 32, sr, r);                                     /* (half clear over the first, whole: the first shows) */
+        ParchNearLay(S, 32, sr, r, NULL);                                     /* (half clear over the first, whole: the first shows) */
         float w = powf(128 / 255.0f, 4);
         ok &= in[3] == 255 && abs(in[0] - (int)((0xC0 + w * 0x20) / (1 + w) + 0.5f)) <= 1 && abs(in[2] - (int)((0x20 + w * 0xC0) / (1 + w) + 0.5f)) <= 1 &&
               in[0] > 0xB0 && in[2] < 0x30;
         memset(S, 0, sizeof S);
-        ParchNearLay(S, 32, sr, r);                                     /* (alone: its own colour, its own alpha) */
+        ParchNearLay(S, 32, sr, r, NULL);                                     /* (alone: its own colour, its own alpha) */
         ok &= in[0] == 0x20 && in[2] == 0xC0 && in[3] == 128;
         for (int y = 0; y < 668; y++) for (int x = 0; x < 1002; x++) {   /* (stripes a texel wide: sampled between them) */
             unsigned char *p = g_parchPx + 4 * ((size_t)y * g_parchTW + x);
@@ -8104,7 +8107,7 @@ static void TestNearby(void)
         }
         memset(S, 0, sizeof S);
         ParchRect r3 = { 0, 0, 2, 2 };                                  /* (texel 0: 0.16 of the way from a black stripe to a red) */
-        ParchNearLay(S, 32, r3, r3);
+        ParchNearLay(S, 32, r3, r3, NULL);
         ok &= S[0] > 25 && S[0] < 55 && S[3] < 20;                    /* (its corner texel: its colour, nearly clear) */
         Check(ok, "a neighbour laid into the sheet: its painting sampled between texels at its place, nothing past its box; where it is less opaque than what is there already, what is there shows (colours weighted by alpha to the fourth), the alpha the higher; alone, its own colour and alpha");
         ParchFree();
@@ -8117,14 +8120,14 @@ static void TestNearby(void)
         ParchRect sr = { 0, 0, 4, 4 }, ra = { 1, 1, 3, 3 }, rb = { 2, 1, 4, 3 };   /* (a: texels 64..191 each way; b: 128..255 across) */
         TestPaintNew(1);
         TestPaintFill(0, 0, 1002, 668, 0xC04020);
-        ParchNearLay(S, 256, sr, ra);
+        ParchNearLay(S, 256, sr, ra, NULL);
         int most = 0, mostV = 0, at128 = S[4 * (128 * 256 + 128) + 3], edge = S[4 * (128 * 256 + 64) + 3];
         for (int x = 40; x < 215; x++) { int st = abs(S[4 * (128 * 256 + x + 1) + 3] - S[4 * (128 * 256 + x) + 3]); if (st > most) most = st; }
         for (int y = 40; y < 215; y++) { int st = abs(S[4 * ((y + 1) * 256 + 128) + 3] - S[4 * (y * 256 + 128) + 3]); if (st > mostV) mostV = st; }
         ok = at128 == 255 && edge < 30 && most <= 60 && mostV <= 60 && S[4 * (128 * 256 + 63) + 3] == 0;
         ok &= S[4 * (128 * 256 + 69) + 3] < 255 && S[4 * (128 * 256 + 72) + 3] == 255;   /* (soft over 0.06 of it, whole past that) */
         TestPaintFill(0, 0, 1002, 668, 0x2040C0);                       /* (b over a's right edge: a fades out into b) */
-        ParchNearLay(S, 256, sr, rb);
+        ParchNearLay(S, 256, sr, rb, NULL);
         int mostR = 0;
         for (int x = 150; x < 215; x++) { int st = abs(S[4 * (128 * 256 + x + 1)] - S[4 * (128 * 256 + x)]); if (st > mostR) mostR = st; }
         ok &= mostR <= 48 && abs(S[4 * (128 * 256 + 200)] - 0x20) <= 2 && abs(S[4 * (128 * 256 + 160)] - 0x70) <= 2;
@@ -8156,6 +8159,200 @@ static void TestNearby(void)
         Check(ok, "the sheet freed with the painting's memory; a painting's copies made as before (its last column run on)");
         ParchFree();
     }
+}
+/* chunk grid gx, gy to world x, y (LandChunkAt's other way) */
+static void TestGridWorld(float gx, float gy, float *x, float *y) { *y = (32 - gx / 16) * PARCH_TILE_YD; *x = (32 - gy / 16) * PARCH_TILE_YD; }
+/* zone row i's box over chunks gx0..gx1, gy0..gy1 (any place on the grid) */
+static void TestGridBox(int i, float gx0, float gy0, float gx1, float gy1)
+{
+    float x0, y0, x1, y1;
+    TestGridWorld(gx0, gy0, &x0, &y0);
+    TestGridWorld(gx1, gy1, &x1, &y1);
+    g_pz[i].l = y0; g_pz[i].r = y1; g_pz[i].t = x0; g_pz[i].b = x1;
+}
+/* land L made whole (1) over chunks gx0..gx1 - 1, gy0..gy1 - 1, in a grid one chunk wider each way */
+static void TestGridLand(ParchLand *L, unsigned char *m, int gx0, int gy0, int gx1, int gy1)
+{
+    L->gx0 = gx0 - 1; L->gy0 = gy0 - 1; L->w = gx1 - gx0 + 2; L->h = gy1 - gy0 + 2; L->m = m; L->n = 0;
+    for (int j = 0; j < L->h; j++)
+        for (int i = 0; i < L->w; i++) {
+            int gx = L->gx0 + i, gy = L->gy0 + j, in = gx >= gx0 && gx < gx1 && gy >= gy0 && gy < gy1;
+            m[j * L->w + i] = (unsigned char)in; L->n += in;
+        }
+}
+/* the per-zone fades' lines and runs (his pick: "DO THE PER ZONE, WHOLE ZONE AS THE DEFAULT"), against the mockups' real
+ * distances from the Lion's Pride Inn; the circles' numbers; which zones touch */
+static void TestNearbyRuns(void)
+{
+    /* the angle on the frame (no C runtime): within 2e-5 of a radian of atan2's, 0 to 2 pi, from x toward y */
+    float worst = 0;
+    int ok = ParchAngle(0, 0) == 0 && Near(ParchAngle(0, 5), 0, 1e-6) && Near(ParchAngle(5, 0), 1.5707963f, 2e-5) &&
+             Near(ParchAngle(0, -5), 3.1415927f, 2e-5) && Near(ParchAngle(-5, 0), 4.712389f, 2e-5) && Near(ParchAngle(-1e-6f, 1), 6.2831843f, 1e-4);
+    for (int k = 0; k < 7200; k++) {
+        double th = (k + 0.37) * 6.283185307179586 / 7200, r = 0.001 + k % 13 * 37.0;
+        float a = ParchAngle((float)(r * sin(th)), (float)(r * cos(th)));
+        double e = fabs(a - th);
+        if (e > 3.14159265) e = 6.28318531 - e;
+        if (e > worst) worst = (float)e;
+        ok &= a >= 0 && a < 6.2831854f;
+    }
+    ok &= worst < 2e-5f;
+    Check(ok, "the zones nearby's angle on the frame: from x toward y, 0 to 2 pi, within 2e-5 of a radian of atan2's all the way round (no C runtime)");
+
+    /* the circles, his numbers: 3600 whole to 1800 and gone at 3600, 1800 whole to 900 and gone at 1800; the mockups' table */
+    ok = NearReach(NEAR_C3600) == 3600 && NearReach(NEAR_C1800) == 1800 && NearReach(NEAR_ZONE) == 0 && NearReach(NEAR_THIRD) == 0 &&
+         ParchNearFade(1800, 3600) == 1 && ParchNearFade(3600, 3600) == 0 && Near(ParchNearFade(2700, 3600), 0.5, 1e-5) &&
+         ParchNearFade(900, 1800) == 1 && ParchNearFade(1800, 1800) == 0 && Near(ParchNearFade(1350, 1800), 0.5, 1e-5) && ParchNearFade(1799, 1800) > 0;
+    ok &= Near(ParchNearFade(2210, 3600), 0.87, 0.006) && Near(ParchNearFade(2294, 3600), 0.82, 0.006) && Near(ParchNearFade(3049, 3600), 0.22, 0.006) &&
+          Near(ParchNearFade(1683, 1800), 0.05, 0.006) && Near(ParchNearFade(1755, 1800), 0.01, 0.006) && Near(ParchNearFade(1683, 3600), 1, 1e-6);
+    Check(ok, "the circle fades, his numbers: 3600, whole to 1800 yards and gone at 3600; 1800, whole to 900 and gone at 1800; as the mockups' table (circle 3600: Lakeshire 2,210 yards 87%, its bridge 82%, Stonewatch Keep 22%, Darkshire whole; circle 1800: Darkshire 5%, Duskwood's southern edge 1%)");
+
+    /* the runs: along each line out from the arrival, where it enters a zone's land and leaves it (only its land inside its
+     * box); the mockups' real distances: from the Lion's Pride Inn, Redridge 1,752 to 3,756 yards due east, Duskwood 672
+     * to 1,770 due south */
+    int pzN = g_pzN;
+    const float ox = 500.5f, oy = 500.5f, yc = PARCH_TILE_YD / 16, pi = 3.14159265f;
+    float ax, ay;
+    TestGridWorld(ox, oy, &ax, &ay);
+    g_pzN = 3;
+    for (int i = 0; i < 3; i++) { g_pz[i].map = 0; g_pz[i].area = 100 + i; g_pz[i].id = 200 + i; }
+    TestGridBox(1, ox + 1752 / yc, oy - 25, ox + 3756 / yc, oy + 25);           /* (Redridge: east, its box its land's ends) */
+    TestGridBox(2, ox - 25, oy + 672 / yc, ox + 25, oy + 1770 / yc);            /* (Duskwood: south) */
+    static unsigned char m1[200 * 200], m2[200 * 200];
+    ParchLand L1 = { 0 }, L2 = { 0 };
+    TestGridLand(&L1, m1, (int)(ox + 1752 / yc), (int)oy - 25, (int)(ox + 3756 / yc) + 3, (int)oy + 25);   /* (its terrain past its box) */
+    TestGridLand(&L2, m2, (int)ox - 25, (int)(oy + 672 / yc), (int)ox + 25, (int)(oy + 1770 / yc) + 1);
+    static ParchRun R1, R2;
+    ParchRunMake(&L1, 1, ax, ay, &R1);
+    ParchRunMake(&L2, 2, ax, ay, &R2);
+    const float E = 0, S = pi / 2;                                  /* (east: the frame's x; south: its y) */
+    ok = R1.hit && R2.hit && Near(ParchRunFade(&R1, E, 1752, 0), 1, 1e-3) && R1.most > 3756 && R1.most < sqrtf(3756.0f * 3756 + 833.4f * 833.4f);
+    ok &= Near(ParchRunFade(&R1, E, 2210, 0), 0.87, 0.006) && Near(ParchRunFade(&R1, E, 2294, 0), 0.82, 0.006) &&
+          Near(ParchRunFade(&R1, E, 3049, 0), 0.29, 0.006) && ParchRunFade(&R1, E, 3757, 0) < 0.002f && ParchRunFade(&R1, E, 5000, 0) == 0 &&
+          ParchRunFade(&R1, E, 300, 0) == 1;
+    ok &= Near(ParchRunFade(&R2, S, 688, 0), 1, 0.002) && Near(ParchRunFade(&R2, S, 1221, 0), 0.5, 0.005) && ParchRunFade(&R2, S, 1755, 0) < 0.002f &&
+          ParchRunFade(&R2, S, 1771, 0) == 0 && ParchRunFade(&R2, S, 900, 0) > 0.87f;
+    /* third: whole over the nearest third of the run, then smoothly to nothing where it leaves (the mockups' (b)) */
+    ok &= ParchRunFade(&R1, E, 2210, 1) == 1 && ParchRunFade(&R1, E, 2294, 1) == 1 && Near(ParchRunFade(&R1, E, 1752 + 2004 / 3.0f, 1), 1, 1e-3) &&
+          Near(ParchRunFade(&R1, E, 3049, 1), 0.545, 0.008) && ParchRunFade(&R1, E, 3757, 1) < 0.002f && Near(ParchRunFade(&R2, S, 1404, 1), 0.5, 0.005);
+    Check(ok, "the per-zone fades, the mockups' real distances from the Lion's Pride Inn: zone, Redridge (1,752 to 3,756 yards due east, its terrain past its box not counted) at Lakeshire 87%, the bridge 82%, Stonewatch Keep 29%, gone by its eastern edge; Duskwood (672 to 1,770 due south) whole at its northern edge, half at its middle, gone by its southern edge (1,755); third, Lakeshire and the bridge whole, Stonewatch 54%, gone by the far edge");
+
+    /* beside the land (a line meeting none of it: its soft margin) the nearest line's run, either way round; no land, none */
+    {
+        int last = 170, first = PARCH_NEAR_RAYS - 170;               /* (well past its northern side, and its southern) */
+        ok = R1.in[170] == R1.in[250] && R1.out[170] == R1.out[250] && R1.out[170] > 0 && R1.in[1269] == R1.in[1200] && R1.out[1269] == R1.out[1200];
+        while (last > 0 && R1.in[last - 1] == R1.in[170] && R1.out[last - 1] == R1.out[170]) last--;
+        while (first < PARCH_NEAR_RAYS - 1 && R1.in[first + 1] == R1.in[1269] && R1.out[first + 1] == R1.out[1269]) first++;
+        ok &= last >= 95 && last <= 106 && first >= 1333 && first <= 1345;   /* (the line at each side: its edge, 0.44 of a radian) */
+        float th = ((float)last + 0.5f) * 2 * pi / PARCH_NEAR_RAYS;
+        for (float d = 1700; d < 2300; d += 25) ok &= ParchRunFade(&R1, th + 0.001f, d, 0) == ParchRunFade(&R1, th + 0.3f, d, 0);
+        ParchLand L0 = { 0 };
+        static unsigned char m0[16];
+        L0.m = m0; L0.w = L0.h = 4; L0.gx0 = 700; L0.gy0 = 700;
+        static ParchRun R0;
+        ParchRunMake(&L0, 1, ax, ay, &R0);                          /* (its land none: no line meets it) */
+        ok &= !R0.hit && ParchRunFade(&R0, E, 2000, 0) == 0 && R0.most == 0;
+        TestGridLand(&L0, m2, 700, 700, 710, 710);                  /* (land, but outside its own box: not counted) */
+        ParchRunMake(&L0, 1, ax, ay, &R0);
+        ok &= !R0.hit;
+        Check(ok, "a per-zone run beside a zone's land (its soft margin, where no line meets the land): the nearest line's run, either way round, so its margin is never cut along a line; no land of it inside its box: none of it shown");
+    }
+    /* the walk across the chunks is exact: each line's entry and leaving as a fine march along it finds them (a ragged land,
+     * its box cutting it), then the mean over PARCH_NEAR_EVEN lines */
+    {
+        static unsigned char mr[80 * 80];
+        ParchLand L = { 0 };
+        TestGridLand(&L, mr, 520, 480, 580, 540);                   /* (a ragged land, a hole in it) */
+        for (int j = 0; j < L.h; j++) for (int i = 0; i < L.w; i++) if (mr[j * L.w + i] && ((i * 7 + j * 3) % 11 < 4 || (i - 30) * (i - 30) + (j - 30) * (j - 30) < 40)) mr[j * L.w + i] = 0;
+        TestGridBox(1, 523.3f, 470, 575.6f, 536.2f);
+        static ParchRun R;
+        ParchRunMake(&L, 1, ax, ay, &R);
+        static float bi[PARCH_NEAR_RAYS], bo[PARCH_NEAR_RAYS];
+        float bx0, by0, bx1, by1;
+        LandChunkAt(g_pz[1].t, g_pz[1].l, &bx0, &by0);
+        LandChunkAt(g_pz[1].b, g_pz[1].r, &bx1, &by1);
+        for (int k = 0; k < PARCH_NEAR_RAYS; k++) {
+            double th = (k + 0.5) * 2 * 3.141592653589793 / PARCH_NEAR_RAYS, c = cos(th), sn = sin(th);
+            bi[k] = bo[k] = -1;
+            for (double t = 0; t < 100; t += 0.004) {
+                double px = ox + c * t, py = oy + sn * t;
+                if (px < bx0 || px > bx1 || py < by0 || py > by1 || !LandOwn(&L, (int)floor(px), (int)floor(py))) continue;
+                if (bi[k] < 0) bi[k] = (float)t;
+                bo[k] = (float)t;
+            }
+        }
+        float wi = 0, wo = 0;
+        int hits = 0;
+        for (int k = 0; k < PARCH_NEAR_RAYS; k++) {
+            if (bo[k] < 0) continue;
+            double si = 0, so = 0;
+            int n = 0;
+            for (int e = -(PARCH_NEAR_EVEN / 2); e <= PARCH_NEAR_EVEN / 2; e++) { int o = ParchRay(k + e); if (bo[o] < 0) continue; si += bi[o]; so += bo[o]; n++; }
+            float ei = fabsf(R.in[k] - (float)(si / n) * yc), eo = fabsf(R.out[k] - (float)(so / n) * yc);
+            if (ei > wi) wi = ei;
+            if (eo > wo) wo = eo;
+            hits++;
+        }
+        ok = R.hit && hits > 100 && wi < 0.2f && wo < 0.2f;
+        Check(ok, "a per-zone run walked chunk by chunk across its box is exact: each line's entry to a ragged land and its leaving it (its box cutting it) within a fifth of a yard of a fine march's, after the mean over its lines");
+    }
+
+    /* which zones touch: a chunk of one's land beside one of the other's, across a side or a corner; a chunk's gap, or its
+     * own sea beside it, not */
+    {
+        static unsigned char ma[64], mb[64];
+        ParchLand A = { 0 }, B = { 0 };
+        TestGridLand(&A, ma, 10, 10, 13, 13);
+        TestGridLand(&B, mb, 13, 13, 15, 15);
+        ok = LandTouch(&A, &B) && LandTouch(&B, &A);
+        TestGridLand(&B, mb, 14, 10, 16, 13);
+        ok &= !LandTouch(&A, &B) && !LandTouch(&B, &A);
+        TestGridLand(&B, mb, 13, 10, 15, 13);
+        ok &= LandTouch(&A, &B);
+        for (int j = 0; j < B.h; j++) mb[j * B.w + 1] = mb[j * B.w + 1] ? 2 : 0;   /* (its chunks beside A its own sea) */
+        ok &= !LandTouch(&A, &B);
+        ParchLand N0 = { 0 };
+        ok &= !LandTouch(&A, &N0) && !LandTouch(&N0, &A);
+        Check(ok, "the per-zone fades' neighbours: a zone whose land touches the arrival zone's (beside it across a side or a corner); a chunk's gap, its own sea between, or no land: not");
+    }
+    /* may be one: for the per-zone fades (no reach), a zone whose box lies within PARCH_NEAR_TOUCH chunks of the arrival
+     * zone's; for a circle, its box within the reach */
+    TestGridBox(0, 400, 400, 500, 500);
+    TestGridBox(1, 503.9f, 420, 520, 440);                          /* (3.9 chunks off: may) */
+    TestGridBox(2, 505.2f, 420, 520, 440);                          /* (5 off: not) */
+    ok = PARCH_NEAR_TOUCH == 4 && ParchNearMay(0, 1, ax, ay, 0) && !ParchNearMay(0, 2, ax, ay, 0) && Near(ParchBoxGap(1, 0), 3.9f * yc, 0.05) &&
+         Near(ParchBoxGap(0, 2), 5.2f * yc, 0.05) && ParchBoxGap(0, 0) == 0;
+    TestGridBox(2, 510, 510, 530, 530);                             /* (diagonal: across both gaps) */
+    ok &= Near(ParchBoxGap(2, 0), sqrtf(10 * 10 * 2) * yc, 0.1) && !ParchNearMay(0, 2, ax, ay, 0);
+    Check(ok, "the per-zone fades' zones that may touch: a box within four chunks of the arrival zone's (each one's land lies within a chunk of its box), not five, the gap measured across both ways");
+
+    /* laid faded: each neighbour's alpha times its own fade as it is laid, by its own runs or the circle's */
+    {
+        TestGridBox(1, ox + 1752 / yc, oy - 25, ox + 3756 / yc, oy + 25);
+        TestPaintNew(1);
+        TestPaintFill(0, 0, 1002, 668, 0xC04020);
+        static unsigned char S[256 * 256 * 4];
+        memset(S, 0, sizeof S);
+        float fx, fy;
+        g_wmc[0].ok = 0;
+        ParchSpot(0, ax, ay, &fx, &fy);
+        ParchRect zr = ParchBox(1), sr = { fx, fy - 2000 / PARCH_TILE_YD, fx + 4000 / PARCH_TILE_YD, fy + 2000 / PARCH_TILE_YD };
+        ParchNearHow how = { fx, fy, PARCH_TILE_YD, 0, 0, &R1 };
+        ParchNearLay(S, 256, sr, zr, &how);
+        int at2210 = S[4 * (128 * 256 + (int)(2210.0f / 4000 * 256)) + 3], at3049 = S[4 * (128 * 256 + (int)(3049.0f / 4000 * 256)) + 3];
+        int at2000 = S[4 * (128 * 256 + (int)(2000.0f / 4000 * 256)) + 3], at3740 = S[4 * (128 * 256 + (int)(3740.0f / 4000 * 256)) + 3];
+        ok = abs(at2210 - (int)(0.87f * 255)) <= 6 && abs(at3049 - (int)(0.29f * 255)) <= 6 && at2000 > 236 && at3740 < 4 && S[4 * (128 * 256 + 20) + 3] == 0;
+        ok &= Near(ParchNearHowAt(&how, fx + 2210 / PARCH_TILE_YD, fy), 0.87, 0.006) && Near(ParchNearHowAt(&how, fx + 3757 / PARCH_TILE_YD, fy), 0, 0.002);
+        ParchNearHow circ = { fx, fy, PARCH_TILE_YD, 3600, 0, NULL };
+        ok &= Near(ParchNearHowAt(&circ, fx + 2210 / PARCH_TILE_YD, fy), 0.87, 0.006) && Near(ParchNearHowAt(&circ, fx, fy - 2700 / PARCH_TILE_YD), 0.5, 1e-3);
+        memset(S, 0, sizeof S);
+        ParchNearLay(S, 256, sr, zr, &circ);
+        ok &= abs(S[4 * (128 * 256 + (int)(2210.0f / 4000 * 256)) + 3] - (int)(0.87f * 255)) <= 6 && S[4 * (128 * 256 + (int)(3700.0f / 4000 * 256)) + 3] == 0;
+        Check(ok, "a neighbour laid faded: its alpha times its own fade as it is laid (by its own runs: Redridge whole at its western side, 87% at Lakeshire, 29% at Stonewatch, gone by its eastern edge; or by the circle's: 3600, 87% at 2,210 yards, gone past it)");
+        ParchFree();
+    }
+    g_pzN = pzN;
+    TestGlideState();
 }
 /* the zones nearby made from the client's own files, by the parchment's work: a neighbour painted and cut to its land,
  * laid in the sheet about the arrival, faded by distance; posted once the arrival's zone is up, drawn under it */
@@ -8208,9 +8405,10 @@ static void TestNearbyMake(void)
     /* made: Westfall the one neighbour, 83 yards off; its land whole near the arrival, faded with distance, gone at the reach */
     ParchNear *N = &g_pj.nearby;
     const char *why = "";
-    int ok = ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why) && N->n == 1 && N->row[0] == 2 && Near(N->yd[0], 2.5f * PARCH_TILE_YD / 16, 0.05) &&
+    int ok = ParchNearMake(1, 0, 0, x, y, 300, 0, NULL, 1, N, &why) && N->n == 1 && N->row[0] == 2 && Near(N->yd[0], 2.5f * PARCH_TILE_YD / 16, 0.05) &&
              N->laid == 1 && g_parchSheet && g_parchTW == 2048 && g_mipLevels == 11 && g_mipPx && N->tiles == 1 && !N->unread &&
-             Near(N->r.x1 - N->r.x0, 600 / PARCH_TILE_YD, 1e-5) && Near(N->ydTexel, 600.0f / 2048, 1e-4) &&
+             Near(N->r.x1 - N->r.x0, 550 / PARCH_TILE_YD, 1e-4) && Near(N->r.y1 - N->r.y0, 550 / PARCH_TILE_YD, 1e-4) &&
+             Near(N->ydTexel, 550.0f / 2048, 1e-4) && Near(N->most, 300, 1e-4) &&
              Get("Data/CinderLoad/land-Westfall.bin") != NULL;
     float cx, cy;
     TestNearChunk(9, 8, &cx, &cy);                                     /* (Westfall's land, 4 chunks off: 133 yards, whole) */
@@ -8227,83 +8425,106 @@ static void TestNearbyMake(void)
     TestNearChunk(12, 10, &cx, &cy);                                   /* (its piece: every piece painted, no areas given) */
     a = TestSheetAt(0, cx, cy);
     ok &= a[0] > 0xC0 && a[2] < 0x40 && a[3] > 40;
-    Check(ok, "the zones nearby made from the client's files: the one zone whose land is within 300 yards (Westfall, 83 yards off), painted from its own tiles, cut to its land (its land read once and kept), laid in a sheet about the arrival 600 yards a side, whole to 150 yards, fading to nothing at 300; none of it on the arrival zone's own land");
+    Check(ok, "the zones nearby made from the client's files: the one zone whose land is within 300 yards (Westfall, 83 yards off), painted from its own tiles, cut to its land (its land read once and kept), laid in a sheet over its box as far as the reach (550 yards a side), whole to 150 yards, fading to nothing at 300; none of it on the arrival zone's own land");
     ParchFree();
     static unsigned char bits[EXPLORED_BYTES];                          /* (the areas found: its piece's area not) */
-    ok = ParchNearMake(1, 0, 0, x, y, 300, bits, 1, N, &why);
+    ok = ParchNearMake(1, 0, 0, x, y, 300, 0, bits, 1, N, &why);
     a = TestSheetAt(0, cx, cy);
     ok &= a[0] < 0x40 && a[2] > 0xB0;
     ParchFree();
     bits[0] = 1 << 2;                                                  /* (its area found) */
-    ok &= ParchNearMake(1, 0, 0, x, y, 300, bits, 1, N, &why);
+    ok &= ParchNearMake(1, 0, 0, x, y, 300, 0, bits, 1, N, &why);
     a = TestSheetAt(0, cx, cy);
     ok &= a[0] > 0xC0 && a[2] < 0x40;
     ParchFree();
     Check(ok, "the zones nearby painted as the arrival's zone is: only the pieces of each neighbour's map this character has found (a piece whose area is not found left out, its page bare), every piece with the full map");
     /* the sheet's size: the arrival zone's texel where that fits (its tiles over 256, K, finer still), 2048 at most */
-    ok = ParchNearMake(1, 0, 0, x, y, 100, NULL, 1, N, &why) && g_parchTW == 512 && g_mipLevels == 9;
+    ok = ParchNearMake(1, 0, 0, x, y, 100, 0, NULL, 1, N, &why) && g_parchTW == 512 && g_mipLevels == 9;
     ParchFree();
-    ok &= ParchNearMake(1, 0, 0, x, y, 100, NULL, 2, N, &why) && g_parchTW == 1024;
+    ok &= ParchNearMake(1, 0, 0, x, y, 100, 0, NULL, 2, N, &why) && g_parchTW == 1024;
     ParchFree();
-    ok &= ParchNearMake(1, 0, 0, x, y, 300, NULL, 2, N, &why) && g_parchTW == 2048 && Near(N->ydTexel, 600.0f / 2048, 1e-4);
+    ok &= ParchNearMake(1, 0, 0, x, y, 300, 0, NULL, 2, N, &why) && g_parchTW == 2048 && Near(N->ydTexel, 550.0f / 2048, 1e-4);
     ParchFree();
-    ok &= ParchNearMake(1, 0, 0, x, y, 2000, NULL, 1, N, &why) && g_parchTW == 2048;
+    ok &= ParchNearMake(1, 0, 0, x, y, 2000, 0, NULL, 1, N, &why) && g_parchTW == 2048;
     ParchFree();
     Check(ok, "the zones nearby's sheet at the arrival zone's own texel where that fits: 100 yards, 512 texels a side with 256-px tiles and 1024 with 512-px tiles; 2048 at most (300 yards with 512-px tiles, 2000 yards)");
     /* nothing kept but the sheet: each neighbour's painting freed as it is laid in; none laid, the sheet freed too */
     {
         long live = shim_heap_live;
-        ok = ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why);
+        ok = ParchNearMake(1, 0, 0, x, y, 300, 0, NULL, 1, N, &why);
         ParchFree();
         ok &= shim_heap_live == live;
         shim_refuse_size = (size_t)1024 * 1024 * 4; shim_refuse_n = 1;   /* (no memory for its painting: none laid) */
-        ok &= !ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why) && N->n == 1 && N->laid == 0 &&
+        ok &= !ParchNearMake(1, 0, 0, x, y, 300, 0, NULL, 1, N, &why) && N->n == 1 && N->laid == 0 &&
               !strcmp(why, "none of them could be painted and cut to its land") && !g_parchPx && shim_heap_live == live;
         shim_refuse_n = 0;
         g_pj.state = 3;                                                /* (the job gone stale: stopped, nothing kept) */
-        ok &= !ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why) && !strcmp(why, "no longer wanted") && N->n == 0 && !g_parchPx && shim_heap_live == live;
+        ok &= !ParchNearMake(1, 0, 0, x, y, 300, 0, NULL, 1, N, &why) && !strcmp(why, "no longer wanted") && N->n == 0 && !g_parchPx && shim_heap_live == live;
         g_pj.state = 0;
         Check(ok, "the zones nearby keep nothing but their sheet (each neighbour's painting freed once laid in); none laid: the sheet freed too, and why; the job gone stale: stopped, nothing kept");
     }
-    ok = !ParchNearMake(1, 0, 0, x, y, 80, NULL, 1, N, &why) && N->n == 0 && !strcmp(why, "no zone's land within the reach") && !g_parchPx;
-    ok &= !ParchNearMake(1, 0, 0, x, y, 0, NULL, 1, N, &why) && !ParchNearMake(-1, 0, 0, x, y, 300, NULL, 1, N, &why) && !g_parchPx;
+    ok = !ParchNearMake(1, 0, 0, x, y, 80, 0, NULL, 1, N, &why) && N->n == 0 && !strcmp(why, "no zone's land within the reach") && !g_parchPx;
+    ok &= !ParchNearMake(1, 0, 0, x, y, -5, 0, NULL, 1, N, &why) && !ParchNearMake(-1, 0, 0, x, y, 300, 0, NULL, 1, N, &why) && !g_parchPx;
     shim_refuse_size = (size_t)2048 * 2048 * 4; shim_refuse_n = 1;     /* (no memory for its sheet) */
-    ok &= !ParchNearMake(1, 0, 0, x, y, 300, NULL, 1, N, &why) && !strcmp(why, "no memory for its sheet") && !g_parchPx && !shim_refuse_n;
+    ok &= !ParchNearMake(1, 0, 0, x, y, 300, 0, NULL, 1, N, &why) && !strcmp(why, "no memory for its sheet") && !g_parchPx && !shim_refuse_n;
     shim_refuse_n = 0;
-    Check(ok, "the zones nearby: none within the reach (80 yards), no reach or no zone: none made, and why; no memory for the sheet: none, nothing kept");
+    Check(ok, "the zones nearby: none within the reach (80 yards), a reach below nothing or no zone: none made, and why; no memory for the sheet: none, nothing kept");
+
+    /* the per-zone fades from the client's files (his default): the zone whose land touches the arrival zone's (Westfall),
+     * each faded across its own land along the lines out from the arrival, whole where a line enters it (2.5 chunks east)
+     * and gone where it leaves (its box's edge, 10.5); third: its nearest third whole */
+    {
+        float ex, ey;
+        int at[3];
+        static const int col[3] = { 9, 13, 15 };
+        ok = ParchNearMake(1, 0, 0, x, y, 0, 0, NULL, 1, N, &why) && N->n == 1 && N->row[0] == 2 && N->laid == 1 && g_parchSheet &&
+             N->most > 400 && N->most < 460 && g_parchTW == 2048;
+        for (int k = 0; k < 3; k++) { TestNearChunk(col[k], 8, &ex, &ey); at[k] = TestSheetAt(0, ex, ey)[3]; }
+        ok &= abs(at[0] - 232) <= 12 && abs(at[1] - 59) <= 12 && at[2] < 12 && TestSheetAt(0, x, y)[3] == 0;
+        ParchFree();
+        ok &= ParchNearMake(1, 0, 0, x, y, 0, 1, NULL, 1, N, &why) && N->laid == 1;
+        for (int k = 0; k < 3; k++) { TestNearChunk(col[k], 8, &ex, &ey); at[k] = TestSheetAt(0, ex, ey)[3]; }
+        ok &= at[0] == 255 && abs(at[1] - 116) <= 12 && at[2] < 20;
+        ParchFree();
+        ok &= !ParchNearMake(0, 0, 0, x, y, 0, 0, NULL, 1, N, &why) && !strcmp(why, "its own land could not be read") && !g_parchPx;
+        Check(ok, "the per-zone fades from the client's files: the zone whose land touches the arrival zone's (Westfall), painted, cut to its land and faded across it along the lines out from the arrival (whole where a line enters it 83 yards off, 23% two thirds of the way across, gone at its box's edge); third, its nearest third whole, 45% two thirds of the way; the arrival zone's own land not read: none");
+    }
 
     /* the work: posted once the arrival's zone is up, run, given to OpenGL, logged; not again for the same arrival, again
-     * for another reach; none with the reach 0 */
+     * for another fade; none with none (the tests' own) */
     g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_pjWorker = 0;
     g_destMap = 0; g_destWX = x; g_destWY = y; g_destZOk = 0; g_scrKnown = 0; g_scrSeq++;
     TestGlideArrive(0, 1, 0, x, y, 2000);
     g_zoneK = 1; g_pmadeKnown = 0; g_pmadeFull = g_parchFullOn = 0; g_ptry.cont = g_ptry.zone = 1;
-    g_parchNearOn = 300; g_upN = 0;
+    g_parchNearOn = NEAR_C1800 + 1; g_upN = 0;
     ParchWork(3000);
-    ok = g_nearZ == 1 && g_viewTex[VT_PNEAR] && g_nearReach == 300 && g_nearMap == 0 && g_nearX == x && g_nearY == y && g_upN == 1 &&
+    ok = g_nearZ == 1 && g_viewTex[VT_PNEAR] && g_nearFadeUp == NEAR_C1800 && g_nearMap == 0 && g_nearX == x && g_nearY == y && g_upN == 1 &&
          g_upOrder[0] == VT_PNEAR && g_nearTW == 2048 && !g_parchPx && !g_parchSheet && g_nearAt == 3000 &&
-         LogSays("the zones nearby within 300 yards of the arrival, under Elwynn: Westfall 83 yd (1 of 1 laid), in a 2048-texel sheet (0.2 yards a texel), whole to 150 yards and gone at 300; their explored areas not known");
+         LogSays("the zones nearby under Elwynn, fade 1800 (a circle: whole to 900 yards of the arrival, gone at 1800): Westfall 83 yd (1 of 1 laid), in a 2048-texel sheet (0.2 yards a texel); their explored areas not known");
     ParchWork(3100);
     ok &= g_upN == 1 && g_nearAt == 3000;
     g_viewScreen++;                                                    /* (the next screen, the same arrival: found again, */
     ParchWork(3150);                                                   /* kept, not made again) */
     ok &= g_upN == 1 && g_nearAt == 3000 && g_nearZ == 1 && g_parchForScreen == g_viewScreen;
-    g_viewScreen++; g_parchNearOn = 200; g_zoneK = 2;                  /* (the next screen, another reach chosen; the zone's */
+    g_viewScreen++; g_parchNearOn = NEAR_ZONE + 1; g_zoneK = 2;        /* (the next screen, another fade chosen; the zone's */
     ParchWork(3200);                                                   /* painting in 512-px tiles: the sheet as fine) */
-    ok &= g_upN == 2 && g_nearReach == 200 && g_nearAt == 3200 && g_nearTW == 2048 && g_parchForScreen == g_viewScreen;
+    ok &= g_upN == 2 && g_nearFadeUp == NEAR_ZONE && g_nearAt == 3200 && g_nearTW == 2048 && g_parchForScreen == g_viewScreen &&
+          LogSays("the zones nearby under Elwynn, fade zone (each across its own land: whole where a line out from the arrival enters it, gone where it leaves; out to ");
     g_zoneK = 1;
-    g_viewScreen++; g_parchNearOn = 70;
+    g_viewScreen++; g_parchNearOn = NEAR_C3600 + 1;                    /* (another, not made: no memory for its sheet) */
+    shim_refuse_size = (size_t)2048 * 2048 * 4; shim_refuse_n = 1;
     ParchWork(3300);
     ParchWork(3400);
-    ok &= g_upN == 2 && g_nearZ == -1 && LogSays("no zones nearby within 70 yards of the arrival (no zone's land within the reach)");
+    ok &= g_upN == 2 && g_nearZ == -1 && !shim_refuse_n && LogSays("no zones nearby, fade 3600 (no memory for its sheet)");
+    shim_refuse_n = 0;
     {
-        const char *lg = Get("Logs/CinderLoad.log"), *f = lg ? strstr(lg, "no zones nearby within 70 yards") : NULL;
-        ok &= f && !strstr(f + 1, "no zones nearby within 70 yards");                /* (tried once for this arrival) */
+        const char *lg = Get("Logs/CinderLoad.log"), *f = lg ? strstr(lg, "no zones nearby, fade 3600") : NULL;
+        ok &= f && !strstr(f + 1, "no zones nearby, fade 3600");      /* (tried once for this arrival) */
     }
     g_viewScreen++; g_parchNearOn = 0;
     ParchWork(3500);
-    ok &= g_upN == 2 && g_nearZ == -1 && !LogSays("within 0 yards");
-    g_ptry.nearby = 0; g_ptry.zone = 1; g_parchNearOn = 300; g_parchZone = -1;   /* (its zone not up: tried and not made) */
+    ok &= g_upN == 2 && g_nearZ == -1 && g_pj.state == 0;
+    g_ptry.nearby = 0; g_ptry.zone = 1; g_parchNearOn = NEAR_C1800 + 1; g_parchZone = -1;   /* (its zone not up: tried and not made) */
     ParchWork(3540);
     ok &= g_upN == 2 && g_nearZ == -1 && g_pj.state == 0;
     g_parchZone = 1;
@@ -8315,7 +8536,7 @@ static void TestNearbyMake(void)
     g_viewScreen++; g_destWX = x;                                      /* (the next screen, back where it was) */
     ParchWork(3570);
     ok &= g_upN == 5 && g_nearX == x && g_parchForX == x;
-    Check(ok, "the zones nearby, by the parchment's work: once the arrival's zone is up, made and given to OpenGL and logged (each one, its distance, the sheet); not again for the same arrival, again for another reach or another arrival; none within it: logged once and not tried again for this arrival; reach 0: none; its zone not up: none");
+    Check(ok, "the zones nearby, by the parchment's work: once the arrival's zone is up, made and given to OpenGL and logged (each one, its distance, the fade, the sheet); not again for the same arrival, again for another fade or another arrival; not made: logged once and not tried again for this arrival; none (the tests' own): none; its zone not up: none");
     /* the areas found, as the screen began, or the full map: as the zone's own (the sheet as it went up to OpenGL) */
     TestGl(1);
     g_viewTex[VT_PNEAR] = 0;
@@ -8345,7 +8566,7 @@ static void TestNearbyMake(void)
     g_parchFullOn = 0; g_scrKnown = 0; g_scrSeq++; g_viewTex[VT_PNEAR] = 1;
 
     /* drawn under the arrival's zone, over its continent, coming up with the zone; not for another arrival, nor with reach 0 */
-    g_parchNearOn = 300; g_nearZ = -1; g_ptry.nearby = 0;
+    g_parchNearOn = NEAR_C1800 + 1; g_nearZ = -1; g_ptry.nearby = 0;
     ParchWork(3600);
     ok = g_nearZ == 1;
     int seen = 0, both = 1, part = 0;
@@ -8388,12 +8609,12 @@ static void TestNearbyMake(void)
     ViewBuild(1920, 1080, 0.0f, 5000);
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
-    Check(ok, "the zones nearby drawn under the arrival's zone and over its continent, coming up with the zone (the same alpha at the arrival all the way in, whole at the landing), and up after it, coming up on their own over the fade's time; not for another arrival (either coordinate) or another map, nor with reach 0");
+    Check(ok, "the zones nearby drawn under the arrival's zone and over its continent, coming up with the zone (the same alpha at the arrival all the way in, whole at the landing), and up after it, coming up on their own over the fade's time; not for another arrival (either coordinate) or another map, nor with none (the tests' own)");
 
     /* a sheet for an arrival no longer wanted (re-aimed as it is made, the worker's): stale, stopped, the arrival found again */
     TestGlideArrive(0, 1, 0, x, y, 2000);
     g_parchOn = 1; g_ptry.world = 1; g_ptry.cont = g_ptry.zone = 1; g_pmadeKnown = 0; g_pmadeFull = g_parchFullOn = 0; g_scrKnown = 0; g_scrSeq++;
-    g_zoneK = 1; g_parchNearOn = 300; g_nearZ = -1; g_ptry.nearby = 0; g_pj.state = 0; g_pjUp = -1;
+    g_zoneK = 1; g_parchNearOn = NEAR_C1800 + 1; g_nearZ = -1; g_ptry.nearby = 0; g_pj.state = 0; g_pjUp = -1;
     g_pjWorker = 1;
     ParchWork(20000);
     ok = g_pj.state == 1 && g_pj.kind == PJ_NEAR;
@@ -8413,6 +8634,106 @@ static void TestNearbyMake(void)
     g_testAreas = NULL; g_testGround = -1e30f; g_testTile[0] = g_testTile[1] = 0;
     ParchLandFree(&g_land); ParchFree();
     g_mapDirN = 0; g_waN = 0;
+    TestGlideState();
+}
+/* a zone's row by its page's name on map, or -1 */
+static int TestZoneRow(const char *name, int map)
+{
+    for (int i = 0; i < g_pzN; i++) if (g_pz[i].map == map && !strcmp(g_pz[i].name, name)) return i;
+    return -1;
+}
+/* how much of zone row i shows at world x, y for an arrival at ax, ay, by its runs R: as the sheet is faded */
+static float TestRunAt(const ParchRun *R, float ax, float ay, float x, float y, int third)
+{
+    float gx0, gy0, gx1, gy1;
+    LandChunkAt(ax, ay, &gx0, &gy0);
+    LandChunkAt(x, y, &gx1, &gy1);
+    return ParchRunFade(R, ParchAngle(gy1 - gy0, gx1 - gx0), sqrtf((x - ax) * (x - ax) + (y - ay) * (y - ay)), third);
+}
+/* the sheet's alpha at world x, y on map 0, 0..1 (none past the sheet) */
+static float TestSheetA(float x, float y)
+{
+    float fx, fy;
+    ParchSpot(0, x, y, &fx, &fy);
+    const ParchRect r = g_pj.nearby.r;
+    if (!g_parchPx || fx < r.x0 || fy < r.y0 || fx >= r.x1 || fy >= r.y1) return 0;
+    return TestSheetAt(0, x, y)[3] / 255.0f;
+}
+/* his calibration, against the real client (read only): from the Lion's Pride Inn, Goldshire, the per-zone fade shows
+ * Duskwood's northern half with Darkshire and is gone by its southern edge, and Redridge's western side, Lakeshire and its
+ * bridge, gone by its eastern edge (the mockups' table, measured on this client's own terrain); from Eastvale Logging Camp,
+ * Redridge; the circles reproduce their numbers; nothing a fade would show left out */
+static void TestNearbyClient(const char *client)
+{
+    Fresh("nearby-client");
+    if (!LinkClient(client)) return;
+    GameDir();
+    TestGlideState();
+    g_landPrint = 0;
+    ParchRead();
+    int elw = TestZoneRow("Elwynn", 0), dusk = TestZoneRow("Duskwood", 0), red = TestZoneRow("Redridge", 0), cont = ParchContinent(0);
+    if (elw < 0 || dusk < 0 || red < 0 || cont < 0) { printf("FAIL: the client's zones nearby: no Elwynn, Duskwood or Redridge page\n"); fails++; checks++; return; }
+    const float gx = -9462, gy = 16, ex = -9454, ey = -1404;          /* (the Lion's Pride Inn; Eastvale Logging Camp) */
+    static const struct { const char *n; float x, y, a, b; } kp[] = {  /* (the mockups' places and their per-zone (a), (b)) */
+        { "Duskwood's northern edge", -10150, 16, 1.00f, 1.00f }, { "Darkshire", -10634, -1192, 0.31f, 0.58f },
+        { "Duskwood's southern edge", -11217, 16, 0.00f, 0.00f }, { "Lakeshire", -9221, -2181, 0.87f, 1.00f },
+        { "the Lakeshire bridge", -9362, -2276, 0.82f, 1.00f }, { "Stonewatch Keep", -9380, -3032, 0.29f, 0.54f },
+        { "Render's Valley", -9746, -3199, 0.12f, 0.24f }, { "Redridge's eastern edge", -9462, -3741, 0.00f, 0.00f } };
+    static ParchRun Rd, Rr;
+    const char *why = "";
+    ParchLand L = { 0 };
+    int ok = ParchLandMake(dusk, &L, &why) && L.n > 1000;
+    ParchRunMake(&L, dusk, gx, gy, &Rd);
+    ParchLandFree(&L);
+    ok &= ParchLandMake(red, &L, &why) && L.n > 1000;
+    ParchRunMake(&L, red, gx, gy, &Rr);
+    ParchLandFree(&L);
+    char m[600] = "";
+    float worst = 0;
+    for (int k = 0; k < 8; k++) {
+        const ParchRun *R = k < 3 ? &Rd : &Rr;
+        float a = TestRunAt(R, gx, gy, kp[k].x, kp[k].y, 0), b = TestRunAt(R, gx, gy, kp[k].x, kp[k].y, 1);
+        float e = fabsf(a - kp[k].a) > fabsf(b - kp[k].b) ? fabsf(a - kp[k].a) : fabsf(b - kp[k].b);
+        if (e > worst) worst = e;
+        snprintf(m + strlen(m), sizeof m - strlen(m), "%s%s %.0f%% (%.0f%%)", k ? ", " : "", kp[k].n, 100 * a, 100 * b);
+    }
+    printf("  the zones nearby from the Lion's Pride Inn, zone (third): %s; the most off the mockups' %.0f points\n", m, 100 * worst);
+    ok &= worst <= 0.06f && TestRunAt(&Rd, gx, gy, -10634, -1192, 0) > 0.15f && TestRunAt(&Rd, gx, gy, -11217, 16, 0) < 0.02f &&
+          TestRunAt(&Rr, gx, gy, -9221, -2181, 0) > 0.75f && TestRunAt(&Rr, gx, gy, -9462, -3741, 0) < 0.02f;
+    Check(ok, "his calibration on the client's own terrain, the per-zone fade from the Lion's Pride Inn: Duskwood whole at its northern edge, Darkshire seen, gone by its southern edge; Redridge's western side seen, Lakeshire and its bridge, gone by its eastern edge; each place within 6 points of the mockups' table (zone and third)");
+
+    /* the sheet itself, as the parchment's work makes it: the zones touching Elwynn, each faded across its own land */
+    ParchNear *N = &g_pj.nearby;
+    int has[3] = { 0, 0, 0 };
+    ok = ParchNearMake(elw, cont, 0, gx, gy, 0, 0, NULL, 2, N, &why) && N->laid == N->n && N->n >= 4;
+    for (int k = 0; k < N->n; k++) {
+        has[0] |= N->row[k] == dusk; has[1] |= N->row[k] == red; has[2] |= N->row[k] == TestZoneRow("Westfall", 0);
+        ok &= strcmp(g_pz[N->row[k]].name, "DeadwindPass") && strcmp(g_pz[N->row[k]].name, "Stranglethorn");   /* (not touching Elwynn) */
+    }
+    float sDark = TestSheetA(-10634, -1192), sLake = TestSheetA(-9221, -2181), sBridge = TestSheetA(-9362, -2276);
+    float sSouth = TestSheetA(-11217, 16), sEast = TestSheetA(-9462, -3741), sNorth = TestSheetA(-10150, 16);
+    printf("  the zones nearby's sheet from the Lion's Pride Inn, zone: %d zones, %d-texel sheet, %.1f yards a texel, out to %.0f yards; alpha at Duskwood's northern edge %.2f, Darkshire %.2f, its southern edge %.2f, Lakeshire %.2f, the bridge %.2f, Redridge's eastern edge %.2f\n",
+           N->n, g_parchTW, N->ydTexel, N->most, sNorth, sDark, sSouth, sLake, sBridge, sEast);
+    ok &= has[0] && has[1] && has[2] && Near(sDark, 0.31, 0.1) && Near(sLake, 0.87, 0.1) && Near(sBridge, 0.82, 0.1) && sSouth < 0.04f && sEast < 0.04f && sNorth > 0.9f;
+    ParchFree();
+    ok &= ParchNearMake(elw, cont, 0, ex, ey, 0, 0, NULL, 2, N, &why) && TestSheetA(-9221, -2181) > 0.6f;   /* (Eastvale: Redridge, Lakeshire) */
+    printf("  the zones nearby's sheet from Eastvale Logging Camp, zone: Lakeshire %.2f\n", TestSheetA(-9221, -2181));
+    ParchFree();
+    Check(ok, "the per-zone fade's sheet from the client's files: from the Lion's Pride Inn, the zones touching Elwynn (Duskwood, Redridge, Westfall among them; not Deadwind Pass or Stranglethorn), Darkshire about 31%, Lakeshire 87%, its bridge 82%, gone at Duskwood's southern edge and Redridge's eastern; from Eastvale Logging Camp, Redridge seen (Lakeshire over 60%)");
+
+    /* the circles: 3600, Lakeshire 87% and Darkshire whole; 1800, Darkshire 5%, Lakeshire gone; every zone they reach laid */
+    ok = ParchNearMake(elw, cont, 0, gx, gy, 3600, 0, NULL, 2, N, &why) && N->laid == N->n && N->n > 12;
+    float c36Lake = TestSheetA(-9221, -2181), c36Dark = TestSheetA(-10634, -1192);
+    int n36 = N->n;
+    ParchFree();
+    ok &= ParchNearMake(elw, cont, 0, gx, gy, 1800, 0, NULL, 2, N, &why) && N->laid == N->n;
+    float c18Lake = TestSheetA(-9221, -2181), c18Dark = TestSheetA(-10634, -1192);
+    printf("  the zones nearby's circles from the Lion's Pride Inn: 3600, %d zones, Lakeshire %.2f, Darkshire %.2f; 1800, %d zones, Lakeshire %.2f, Darkshire %.2f\n",
+           n36, c36Lake, c36Dark, N->n, c18Lake, c18Dark);
+    ok &= Near(c36Lake, 0.87, 0.03) && c36Dark > 0.97f && c18Lake < 0.01f && Near(c18Dark, 0.05, 0.03);
+    ParchFree();
+    Check(ok, "the circle fades from the client's files: 3600 from the Lion's Pride Inn, Lakeshire 87% and Darkshire whole, more than twelve zones within it and every one laid (no count leaves one out); 1800, Darkshire 5% and Lakeshire gone");
+    ParchLandFree(&g_land);
     TestGlideState();
 }
 /* ---- the style: the map and the bar, each the player's (his decision, 10 Oct 2026), and the world map's switches ---- */
@@ -8790,59 +9111,72 @@ static int g_vsStarts, g_vsFail;
 static int FakeViewThreadStart(const unsigned char *base) { (void)base; g_vsStarts++; return !g_vsFail; }
 /* The style's file as Notepad and others save it; the CVar's value only as the switches write it; the black first frames
  * only for a parchment that will be drawn. */
-/* the reach from style.txt: one line "nearby <yards>" (0: none), read at start, kept as a choice is written, the old
- * three lines still read the same and anything else passed over */
+/* the fade from style.txt: one line "fade <how>" (zone, third, 3600 or 1800), read at start, written back as a choice is
+ * written only when the file named it; the old three lines still read the same, an old "nearby" line (never released)
+ * and anything else passed over */
 static void TestNearbyStyle(void)
 {
-    int yd = 7;
-    int ok = StyleNearby("map parchment\r\nnearby 600\r\n", &yd) == 1 && yd == 600;
-    yd = 7;
-    ok &= StyleNearby("NEARBY=0", &yd) == 1 && yd == 0 && StyleNearby("nearby: 99999999", &yd) == 1 && yd == PARCH_NEAR_MOST;
-    yd = 7;
-    ok &= StyleNearby("# nearby 5\nmap parchment\nbar retro\nareas full\n", &yd) == 0 && StyleNearby("nearby x 5", &yd) == 0 &&
-          StyleNearby("nearbyz 5 anearby 5 near 5", &yd) == 0 && StyleNearby(NULL, &yd) == 0 && StyleNearby("nearby", &yd) == 0 && yd == 7;
-    ok &= StyleNearby("nearby 300\nnearby\t1500 yards", &yd) == 1 && yd == 1500 && StyleNearby("nearby 4000", &yd) && yd == 4000 &&
-          StyleNearby("nearby 4001", &yd) && yd == 4000;
+    int f = 7;
+    int ok = StyleFade("map parchment\r\nfade third\r\n", &f) == 1 && f == NEAR_THIRD;
+    ok &= StyleFade("FADE=3600", &f) == 1 && f == NEAR_C3600 && StyleFade("fade: 1800", &f) == 1 && f == NEAR_C1800 &&
+          StyleFade("Fade\tZone", &f) == 1 && f == NEAR_ZONE;
+    f = 7;
+    ok &= StyleFade("# fade third\nmap parchment\nbar retro\nareas full\n", &f) == 0 && StyleFade("fade 2400", &f) == 0 &&
+          StyleFade("fade zones", &f) == 0 && StyleFade("fade 36000", &f) == 0 && StyleFade("fadez third afade third fade", &f) == 0 &&
+          StyleFade("fade x third", &f) == 0 && StyleFade("nearby 1600", &f) == 0 && StyleFade("fade # third", &f) == 0 &&
+          StyleFade(NULL, &f) == 0 && f == 7;
+    ok &= StyleFade("fade third\nfade 1800 yards", &f) == 1 && f == NEAR_C1800 && StyleFade("fade 3600\nfade bogus", &f) == 1 && f == NEAR_C3600;
     int map = -1, bar = -1, full = -1;
-    ok &= StyleParse("map satellite\r\nbar neo\r\nareas full\r\nnearby 600\r\nzoom 5\r\n", &map, &bar, &full) == 3 && map == 0 && bar == 0 && full == 1;
-    Check(ok, "the style's reach for the zones nearby: \"nearby\" and a number of yards (after spaces, '=' or ':'), held to 4000, 0 none; the last one counts; a note, another word, no number: not named; the three choices read as before beside it");
+    ok &= StyleParse("map satellite\r\nbar neo\r\nareas full\r\nfade third\r\nnearby 600\r\nzoom 5\r\n", &map, &bar, &full) == 3 && map == 0 &&
+          bar == 0 && full == 1;
+    Check(ok, "the style's fade for the zones nearby: \"fade\" and zone, third, 3600 or 1800 (case aside, after spaces, '=' or ':'); the last one named counts; a note, another word (2400, zones, 36000), none, an old nearby line: not named; the three choices read as before beside it");
 
     Fresh("style-nearby"); GameDir();
-    g_nearYd = 7;
+    g_nearFade = 7; g_nearFadeNamed = 1;
     StyleLoad();
-    ok = g_nearYd == PARCH_NEAR_YD && LogSays("style: the parchment's zones nearby out to 1600 yards of the arrival (whole to 800), from the default") && PARCH_NEAR_YD == 1600;
-    Put(STYLE_REL, "map parchment\r\nbar retro\r\nareas discovered\r\n");      /* (0.3.0's three lines: the default reach) */
+    ok = PARCH_NEAR_FADE == NEAR_ZONE && g_nearFade == NEAR_ZONE && !g_nearFadeNamed &&
+         LogSays("style: the parchment's zones nearby fade zone (each neighbour across its own land, whole where you would enter it, gone where you would leave it), from the default");
+    Put(STYLE_REL, "map parchment\r\nbar retro\r\nareas discovered\r\n");      /* (0.3.0's three lines: the default fade) */
     StyleLoad();
-    ok &= g_nearYd == PARCH_NEAR_YD && g_parchAsked == 1 && g_mapFull == 0;
-    {                                                                  /* (a choice written: no reach pinned into the file, */
+    ok &= g_nearFade == NEAR_ZONE && !g_nearFadeNamed && g_parchAsked == 1 && g_mapFull == 0;
+    {                                                                  /* (a choice written: no fade pinned into the file, */
         const char *t0;                                                /* so a later default still reaches it) */
         ok &= StyleSet(0, 1, 0, "a test") == 1 && (t0 = Get(STYLE_REL)) && strstr(t0, "\r\nmap satellite\r\nbar retro\r\nareas discovered\r\n") &&
-              !strstr(t0, "\nnearby") && strstr(t0, "# nearby: how far round");
-        g_nearYd = 7;
+              !strstr(t0, "\nfade") && strstr(t0, "# fade: how the zones nearby fade on the parchment: zone (each across its own land), third "
+                                                  "(its nearest third whole), 3600 or 1800 (a circle of that many yards).");
+        g_nearFade = 7;
         StyleLoad();
-        ok &= g_nearYd == PARCH_NEAR_YD && g_parchAsked == 0 && LogSays("from the default");
+        ok &= g_nearFade == NEAR_ZONE && g_parchAsked == 0 && LogSays("from the default");
     }
-    Put(STYLE_REL, "map satellite\r\nbar neo\r\nareas full\r\nnearby 600\r\nsomething else 9\r\n");
+    Put(STYLE_REL, "map satellite\r\nbar neo\r\nareas full\r\nnearby 600\r\nfade 3600\r\nsomething else 9\r\n");
     StyleLoad();
-    ok &= g_nearYd == 600 && g_parchAsked == 0 && g_vbarAsked == 0 && g_mapFull == 1 &&
-          LogSays("zones nearby out to 600 yards of the arrival (whole to 300), from Data\\CinderLoad\\style.txt");
+    ok &= g_nearFade == NEAR_C3600 && g_nearFadeNamed && g_parchAsked == 0 && g_vbarAsked == 0 && g_mapFull == 1 &&
+          LogSays("style: the parchment's zones nearby fade 3600 (a circle, whole to 1800 yards, gone at 3600), from Data\\CinderLoad\\style.txt");
     const char *t;
-    ok &= StyleSet(1, 1, 0, "a test") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas discovered\r\nnearby 600\r\n") &&
-          strstr(t, "# nearby: how far round where you arrive the parchment shows the zones nearby, in yards (0: none).");
-    g_nearYd = 7;
+    ok &= StyleSet(1, 1, 0, "a test") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nmap parchment\r\nbar retro\r\nareas discovered\r\nfade 3600\r\n") &&
+          !strstr(t, "nearby 600") && strlen(t) < 640;
+    g_nearFade = 7;
     StyleLoad();
-    ok &= g_nearYd == 600 && g_parchAsked == 1;
-    Put(STYLE_REL, "nearby 0\r\n");
+    ok &= g_nearFade == NEAR_C3600 && g_parchAsked == 1;
+    Put(STYLE_REL, "nearby 0\r\nfade bogus\r\n");                    /* (neither named: the default, and not written back) */
     StyleLoad();
-    ok &= g_nearYd == 0 && LogSays("style: the parchment's zones nearby off (style.txt's nearby 0)");
-    g_parchNearOn = 5; g_pzN = 4;
+    ok &= g_nearFade == NEAR_ZONE && !g_nearFadeNamed && LogSays("fade zone (each neighbour across its own land, whole where you would enter it, gone where you would leave it), from the default");
+    ok &= StyleSet(0, 0, 1, "a test") == 1 && (t = Get(STYLE_REL)) && !strstr(t, "\nfade") && !strstr(t, "\nnearby");
+    Put(STYLE_REL, "fade 1800\r\nfade third\r\n");
+    StyleLoad();
+    ok &= g_nearFade == NEAR_THIRD && g_nearFadeNamed && LogSays("fade third (each neighbour across its own land, its nearest third whole), from Data\\CinderLoad\\style.txt");
+    ok &= StyleSet(1, 0, 1, "a test") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nareas full\r\nfade third\r\n");
+    g_parchNearOn = 0; g_pzN = 4;
     StylePick();
-    ok &= g_parchNearOn == 0 && LogSays("  the view: the parchment's zones nearby off");
-    g_nearYd = 900;
+    ok &= g_parchNearOn == NEAR_THIRD + 1 && LogSays("  the view: the parchment's zones nearby under its zone, fade third (each neighbour across its own land, its nearest third whole)");
+    g_nearFade = NEAR_C1800;
     StylePick();
-    ok &= g_parchNearOn == 900 && LogSays("  the view: the parchment's zones nearby out to 900 yards of the arrival, under its zone");
-    Check(ok, "the reach at start: the default (1600 yards) without style.txt or with 0.3.0's three lines; style.txt's nearby line read beside the three choices, other lines passed over; kept when a choice is written, and not written when the file never named it (the default not pinned); 0: none; each screen takes it as it opens");
-    g_nearYd = PARCH_NEAR_YD; g_parchNearOn = 0; g_pzN = 0;
+    ok &= g_parchNearOn == NEAR_C1800 + 1 && LogSays("  the view: the parchment's zones nearby under its zone, fade 1800 (a circle, whole to 900 yards, gone at 1800)");
+    g_nearFade = 9;                                                    /* (none of the four: the default) */
+    StylePick();
+    ok &= g_parchNearOn == NEAR_ZONE + 1;
+    Check(ok, "the fade at start: the default (zone, his) without style.txt or with 0.3.0's three lines; style.txt's fade line read beside the three choices, an old nearby line and other lines passed over; written back when a choice is written only when the file named it (the default not pinned), the nearby line never; each screen takes it as it opens");
+    g_nearFade = PARCH_NEAR_FADE; g_nearFadeNamed = 0; g_parchNearOn = 0; g_pzN = 0;
 }
 static void TestStyleFiles(void)
 {
@@ -9582,8 +9916,10 @@ int main(int argc, char **argv)
     TestModeTurn();
     TestExplore();
     TestNearby();
+    TestNearbyRuns();
     TestNearbyMake();
     TestNearbyStyle();
+    if (g_client) TestNearbyClient(g_client);
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
