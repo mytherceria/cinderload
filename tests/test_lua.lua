@@ -78,8 +78,8 @@ Check(Lex50(probeSrc) == nil, "the probe: Lua 5.0's syntax only (" .. tostring(L
 Check(string.find(setupSrc, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "discovered"\n') ~= nil and
       string.find(setupSN, '^local CL_MAP, CL_BAR, CL_AREAS = "satellite", "neo", "discovered"\n') ~= nil and
       string.find(setupFull, '^local CL_MAP, CL_BAR, CL_AREAS = "parchment", "retro", "full"\n') ~= nil, "the chunk begins with the choice the DLL holds")
-local DEF = "fade zone thick 100 width own whole off effect heat colour class quality pulse raw"
-local LOOK = "fade third thick 150 width 60 whole on effect blade colour ember quality liquid unstable"
+local DEF = "fade zone thick 100 width own whole off effect heat neofill blade colour class quality pulse raw"
+local LOOK = "fade third thick 150 width 60 whole on effect blade neofill smooth colour ember quality liquid unstable"
 Check(string.find(setupSrc, '^[^\n]*\nlocal CL_LOOK = "' .. DEF .. '"\n%-%- CinderLoad') ~= nil and
       string.find(setupLook, '\nlocal CL_LOOK = "' .. LOOK .. '"\n', 1, true) ~= nil,
       "and its second line the zones nearby's fade and the bar's look the DLL holds, as the CVar carries them")
@@ -201,7 +201,7 @@ Check(bd and bd.edgeFile == "Interface\\DialogFrame\\UI-DialogBox-Border" and bd
       p.backdropColor[1] == 0 and Near(p.backdropColor[4], 0.88), "the client's dialog border (UI-DialogBox-Border, 32), its black 88% opaque (the plus)")
 local fills = { n = 0, other = "" }
 for _, f in ipairs(world.made) do
-    if not f.blizzard and f.backdrop and f.backdrop.bgFile and f.backdropColor then          -- (a colour set on a fill of ours)
+    if not f.blizzard and f.kind ~= "Slider" and f.backdrop and f.backdrop.bgFile and f.backdropColor then   -- (a colour set on a fill of ours)
         fills.n = fills.n + 1
         if f.backdrop.bgFile ~= "Interface\\ChatFrame\\ChatFrameBackground" then fills.other = fills.other .. " " .. f.backdrop.bgFile end
     end
@@ -304,6 +304,17 @@ local function SliderSays(key, v, text)
     local s = u.sliders[key]
     return Near(s.slider:GetValue(), v) and s.value.text == text
 end
+-- greyed: no click taken, only its art dimmed (a slider's track and thumb, a check box's box), its words as bright as ever
+local function Greyed(c, off)
+    local k = off and 0.5 or 1
+    local art = env[c.name .. "Thumb"]
+    local dim
+    if art then dim = Near(art.vertex and art.vertex[1] or 1, k) and Near(c.backdropColor and c.backdropColor[1] or 1, k) and Near(c.backdropBorderColor and c.backdropBorderColor[1] or 1, k)
+    else local n = c:GetNormalTexture(); dim = Near(n.vertex and n.vertex[1] or 1, k) end
+    local words = true
+    for _, w in ipairs({ "Text", "Low", "High", "Value" }) do local fs = env[c.name .. w]; if fs then words = words and fs:IsVisible() and (fs.alpha or 1) == 1 end end
+    return dim and words and c.alpha == 1 and (c:IsEnabled() and 1 or 0) == (off and 0 or 1)
+end
 local function Fades(v)                                     -- its radio alone checked
     for _, o in ipairs({ "zone", "third", "3600", "1800" }) do if (P("fade" .. o):GetChecked() and 1 or 0) ~= (o == v and 1 or 0) then return false end end
     return true
@@ -327,7 +338,7 @@ Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retr
 UI.Click(P("areasdiscovered"))
 Check(CV() == Value("parchment retro discovered"), "Discovered's radio: back")
 UI.Click(P("fadethird"))
-Check(CV() == Value("parchment retro discovered", "fade third thick 100 width own whole off effect heat colour class quality pulse raw") and
+Check(CV() == Value("parchment retro discovered", "fade third thick 100 width own whole off effect heat neofill blade colour class quality pulse raw") and
       Fades("third") and NoErrors(), "the zones nearby's \"Per zone, nearest third\": the CVar's fade third (one line of style.txt), its radio alone checked")
 UI.Click(P("fade3600"))
 Check(string.find(CV(), " fade 3600 ", 1, true) and Fades("3600"), "\"Circle, 3,600 yd\": fade 3600")
@@ -343,10 +354,10 @@ Check(CV() == Value("parchment neo discovered") and Shows("parchment", "discover
       not P("QualityLiquid"):GetChecked() and not P("QualityUnstable"):GetChecked(), "Neo's radio: chosen; Retro's words give way to Neo's four qualities, Pulse and Raw ticked (today's)")
 Check(At(P("QualityLiquid"), 40, 490, 26, 26) and At(P("QualityPulse"), 202, 490, 26, 26) and At(P("QualityUnstable"), 40, 516, 26, 26) and
       At(P("QualityRaw"), 202, 516, 26, 26), "the four in the bar's box, two by two, where Retro's words were")
-Check(SliderSays("width", 100, "the whole screen") and P("widthSlider").alpha == 0.5 and not P("widthSlider"):IsEnabled() and
-      P("Whole"):GetChecked() and P("Whole").alpha == 0.5 and not P("Whole"):IsEnabled() and u.neoWide:IsVisible() and
+Check(SliderSays("width", 100, "the whole screen") and Greyed(P("widthSlider"), true) and not UI.Slide(P("widthSlider"), 40) and
+      P("Whole"):GetChecked() and Greyed(P("Whole"), true) and u.neoWide:IsVisible() and
       not UI.Click(P("Whole")) and CV() == Value("parchment neo discovered") and not env.CinderLoad.whole,
-      "with Neo picked (his, 11 Oct: always the whole width, its ends having no metal caps): the width slider at its end, \"the whole screen\", greyed and still; Whole width of the screen ticked, greyed and still; the note over Bar size says why; nothing of Retro's width changed")
+      "with Neo picked (his, 11 Oct: always the whole width, its ends having no metal caps): the width slider at its end, \"the whole screen\", greyed and still; Whole width of the screen ticked, greyed and still (only their art dimmed, their words as bright as ever: his 7:1); the note over Bar size says why; nothing of Retro's width changed")
 UI.Click(P("QualityLiquid"))
 Check(string.find(CV(), " quality liquid pulse raw$") and P("QualityLiquid"):GetChecked(), "Liquid ticked: quality liquid pulse raw")
 UI.Click(P("QualityPulse"))
@@ -359,8 +370,8 @@ UI.Click(P("QualityLiquid")); UI.Click(P("QualityUnstable"))
 UI.Click(cards["bar retro"])
 Check(CV() == Value("parchment retro discovered") and u.words[1]:IsVisible() and not P("QualityPulse"):IsVisible() and Gold("bar", "retro"),
       "Retro's picture: chosen, its words back, Neo's qualities kept as they were (pulse raw)")
-Check(SliderSays("width", 30, "each bar's own") and P("widthSlider").alpha == 1 and P("widthSlider"):IsEnabled() and not P("Whole"):GetChecked() and
-      P("Whole").alpha == 1 and P("Whole"):IsEnabled() and not u.neoWide:IsVisible(), "and Retro's width live again, its own as it was, the note gone")
+Check(SliderSays("width", 30, "each bar's own") and Greyed(P("widthSlider"), false) and not P("Whole"):GetChecked() and
+      Greyed(P("Whole"), false) and not u.neoWide:IsVisible(), "and Retro's width live again, its own as it was, the note gone")
 UI.Slide(P("thickSlider"), 125)
 Check(string.find(CV(), " thick 125 ", 1, true) and SliderSays("thick", 125, "125%"), "the thickness slider to 125: \"125%\", thick 125")
 UI.Slide(P("thickSlider"), 10)
@@ -379,12 +390,12 @@ UI.Slide(P("widthSlider"), 50)
 UI.Click(P("Whole"))
 Check(string.find(CV(), " width 50 whole on ", 1, true) and P("Whole"):GetChecked() and u.sliders.width.value.text == "the whole screen",
       "Whole width of the screen ticked: whole on, the width kept under it, the slider says the whole screen")
-Check(Near(P("widthSlider"):GetValue(), 100) and P("widthSlider").alpha == 0.5 and not P("widthSlider"):IsEnabled(),
+Check(Near(P("widthSlider"):GetValue(), 100) and Greyed(P("widthSlider"), true),
       "and the width slider's thumb at its end, the slider greyed and still while the whole width is ticked")
 UI.Click(P("Whole"))
 Check(string.find(CV(), " width 50 whole off ", 1, true) and not P("Whole"):GetChecked() and u.sliders.width.value.text == "50% of the screen",
       "unticked: whole off, back to its 50%")
-Check(Near(P("widthSlider"):GetValue(), 50) and P("widthSlider").alpha == 1 and P("widthSlider"):IsEnabled(), "and the width slider live again, its thumb at 50%")
+Check(Near(P("widthSlider"):GetValue(), 50) and Greyed(P("widthSlider"), false), "and the width slider live again, its thumb at 50%")
 UI.Click(cards["effect smooth"])
 Check(string.find(CV(), " effect smooth ", 1, true) and Gold("effect", "smooth"), "Smooth's picture: effect smooth, framed in gold")
 UI.Click(cards["effect blade"])
@@ -395,73 +406,141 @@ UI.Click(P("Colour"))
 Check(string.find(CV(), " colour ember ", 1, true) and not P("Colour"):GetChecked(), "In my class's colour unticked: colour ember (CinderLoad's own)")
 UI.Click(P("Colour"))
 Check(string.find(CV(), " colour class ", 1, true) and P("Colour"):GetChecked(), "ticked again: colour class")
--- the preview: the bottom of the screen at 316 wide, the bar as the choice lays it
+-- the preview: the bottom of the screen at 316 wide, the bar as the choice lays it; every picture made here from the
+-- client's own textures and CinderLoad's own pack (none shipped with the window)
 local pv = u.preview
 local H = 316 * env.GetScreenHeight() / env.GetScreenWidth()
-local function Bar() return PB(pv.bar[1]), PB(pv.bar[2]), PB(pv.bar[3]) end
-local a1, a2, a3 = Bar()
-Check(pv.ground.texture == "Interface\\CinderLoad\\PreviewParchment" and pv.bar[2].texture == "Interface\\CinderLoad\\PreviewRetro" and
-      Near(a3.r - a1.l, 158) and Near(a1.b - a1.t, 42 / 720 * H * 1.25) and Near(a1.l - 406, 79) and Near(a2.l, a1.r) and Near(a3.l, a2.r),
-      "the preview: the parchment's foot, Retro's bar 125% thick and half the strip wide, its caps kept and its middle stretched")
-UI.Click(P("Whole"))
-a1, a2, a3 = Bar()
-Check(Near(a3.r - a1.l, 316) and Near(a1.l, 406), "whole width: the bar across the strip")
+local function Pool(name, file)                             -- the textures of a pool now shown (of that file, when given)
+    local out, p = {}, pv.pools[name]
+    for i = 1, (p and p.n or 0) do
+        local t = p.list[i]
+        if t:IsVisible() and (not file or t.texture == file) then table.insert(out, t) end
+    end
+    return out
+end
+local function Span(list)
+    local o
+    for _, t in ipairs(list) do
+        local q = PB(t)
+        if not o then o = { l = q.l, t = q.t, r = q.r, b = q.b }
+        else o.l, o.t, o.r, o.b = math.min(o.l, q.l), math.min(o.t, q.t), math.max(o.r, q.r), math.max(o.b, q.b) end
+    end
+    return o or { l = 0, t = 0, r = 0, b = 0 }
+end
+local function Bar() return Span(Pool("frame")) end
+local RF, NF, NL = "Interface\\CastingBar\\UI-CastingBar-Border", "Interface\\Glues\\LoadingScreens\\CinderBar", "Interface\\Glues\\LoadingScreens\\CinderLogo"
+local MAGE, EMBER = { 0.412, 0.8, 0.941 }, { 1, 0.541, 0.165 }
+local VMAGE, VEMBER = env.CinderLoad.Vivid(MAGE), env.CinderLoad.Vivid(EMBER)
+local function Is3(t, c, k) k = k or 1; return t and Near(t[1], c[1] * k) and Near(t[2], c[2] * k) and Near(t[3], c[3] * k) end
+local ground = Pool("ground")
+local tiles = true
+for _, t in ipairs(ground) do tiles = tiles and string.find(t.texture, "^Interface\\WorldMap\\Azeroth\\Azeroth%d+$") and Is3(t.vertex, { 0.7, 0.588, 0.434 }) end
+local a1 = Bar()
+local rf = Pool("frame", RF)
+Check(table.getn(ground) >= 2 and tiles and Near(Span(ground).l, 406) and Near(Span(ground).r, 722) and Near(Span(ground).t, 448) and Near(Span(ground).b, 536) and
+      table.getn(rf) == 3 and table.getn(Pool("frame")) == 3 and Near(a1.r - a1.l, 158) and Near(a1.l - 406, 79) and Near(a1.b - a1.t, 42 / 720 * H * 1.25) and
+      Near((a1.t + a1.b) / 2 - 448, 88 - 0.075 * H) and Near(PB(rf[1]).r - PB(rf[1]).l, 40 / 60 * 42 / 720 * H * 1.25) and Near(rf[1].texcoord[1], 40 / 512) and
+      Near(rf[3].texcoord[2], 472 / 512),
+      "the preview: the parchment's foot made of the client's own painting of the Eastern Kingdoms, by the candle (dimmed as ever); Retro 125% thick and half the strip wide, its centre 0.075 of the screen's height up, drawn with the client's casting-bar frame (vanilla's loading-bar frame is hidden in game by CinderLoad's pack), its caps kept and its middle stretched")
 UI.Slide(P("thickSlider"), 200)
 a1 = Bar()
-Check(Near(a1.t + (a1.b - a1.t) / 2 - 448, 88 - 0.075 * H), "Retro at 200%: its centre 0.075 of the screen's height up, where the loading screen now puts it (no longer lifted)")
+Check(Near((a1.t + a1.b) / 2 - 448, 88 - 0.075 * H), "Retro at 200%: its centre 0.075 of the screen's height up, where the loading screen now puts it (no longer lifted)")
 UI.Slide(P("thickSlider"), 125)
 UI.Click(P("Whole"))
+a1 = Bar()
+Check(Near(a1.r - a1.l, 316) and Near(a1.l, 406), "whole width: the bar across the strip")
+UI.Click(P("Whole"))
 UI.Click(P("mapsatellite")); UI.Click(P("barneo"))
-a1, a2, a3 = Bar()
-Check(pv.ground.texture == "Interface\\CinderLoad\\PreviewSatellite" and pv.bar[2].texture == "Interface\\CinderLoad\\PreviewNeo" and
-      Near(a1.b - a1.t, 0.066 * H * 1.25), "Satellite and Neo: the living map's foot and the blade's frame band (0.066 of the screen's height)")
-local stands = Near(a1.b, 536) and Near(a3.r - a1.l, 316) and Near(a1.l, 406)
-for _, t in ipairs({ 50, 100, 150, 200 }) do
+ground = Pool("ground")
+a1 = Bar()
+Check(table.getn(ground) == 1 and ground[1].texture == "Interface\\Glues\\LoadingScreens\\CinderMap" and Is3(ground[1].vertex, { 0.7, 0.7, 0.7 }) and
+      table.getn(Pool("frame", NF)) == table.getn(Pool("frame")) and table.getn(Pool("frame")) > 6,
+      "Satellite and Neo: the living map's foot from CinderLoad's own world (CinderMap, in its pack); Neo's frame its own (CinderBar), caps, rails and centre")
+local stands = true
+for _, t in ipairs({ 50, 100, 125, 150, 200 }) do
     UI.Slide(P("thickSlider"), t)
-    a1, a2, a3 = Bar()
-    stands = stands and Near(a1.b, 536) and a1.t >= 448 and Near(a1.b - a1.t, 0.066 * H * t / 100)
+    a1 = Bar()
+    local lg = Span(Pool("logo", NL))
+    local band = 0.066 * H * t / 100
+    stands = stands and Near(a1.b, 536) and Near(a1.l, 406) and Near(a1.r, 722) and Near(a1.b - a1.t, band / 90 * 313) and
+             Near((lg.l + lg.r) / 2, 564) and Near(lg.b - lg.t, 0.085 * H * t / 100) and Near(lg.r - lg.l, 0.085 * H * t / 100 * 2.117) and
+             Near(lg.b, 536 - 0.004 * H * t / 100)
 end
 UI.Slide(P("thickSlider"), 125)
-a1, a2, a3 = Bar()
-Check(stands, "Neo in the preview stands on the strip's foot at 50% to 200% (as the loading screen stands its band on the screen's bottom), never hanging below it, and across the whole strip though the width says 50% (Neo is always the whole width)")
--- the preview's fill: the chosen effect in the chosen colour (this player a mage), in the bar's channel to 60%, the rest dark
-local MAGE, EMBER = { 0.412, 0.8, 0.941 }, { 1, 0.541, 0.165 }
-local function Is3(t, c, k) k = k or 1; return t and Near(t[1], c[1] * k) and Near(t[2], c[2] * k) and Near(t[3], c[3] * k) end
-local function Fill() return PB(pv.fill), PB(pv.rest), PB(pv.core) end
+Check(stands, "Neo in the preview stands on the strip's foot at 50% to 200% (as the loading screen stands its band on the screen's bottom), never hanging below it, across the whole strip though the width says 50% (Neo is always the whole width), its logo centred at the thickness's size and its own shape")
+-- the preview's fill: the bar's own effect in the chosen colour (this player a mage), in the bar's channel to 60%, the rest dark
+local function Fill() local f = Pool("fill"); return f[1], f[2], f[3] end
 local f, r, c = Fill()
-Check(pv.fill.texture == "Interface\\ChatFrame\\ChatFrameBackground" and pv.fill.gradient and pv.fill.gradient[1] == "HORIZONTAL" and
-      Is3({ pv.fill.gradient[2], pv.fill.gradient[3], pv.fill.gradient[4] }, MAGE, 0.35) and Is3({ pv.fill.gradient[5], pv.fill.gradient[6], pv.fill.gradient[7] }, MAGE) and
-      not pv.core:IsVisible() and Near(f.l, a1.l + (a1.r - a1.l) * 8 / 40) and Near(r.r, a3.r - (a3.r - a3.l) * 8 / 40) and
-      Near(f.r - f.l, 0.6 * (r.r - f.l)) and Near(r.l, f.r) and Near(f.t, a1.t + (a1.b - a1.t) * 11 / 48) and Near(f.b - f.t, (a1.b - a1.t) * 34 / 48) and
-      pv.rest.color and pv.rest.color[1] < 0.05,
-      "the preview's fill, Heat in the class's colour: dark at its tail to the mage's colour at its tip, over Neo's blade inside its frame's rails (rows 11 to 45 of 48, 8 texels into each cap) to 60%, the rest dark")
+Check(Gold("effect", "blade") and env.CinderLoad.effect == "blade" and string.find(CV(), " effect heat neofill blade ", 1, true) and c and c:IsVisible() and
+      Is3(f.vertex, VMAGE), "Neo picked: its own fill, Blade light, chosen and shown at once (his pick: Neo keeps its blade), in the blade's vivid colour; Retro's Heat kept for Retro")
+UI.Click(cards["effect heat"])
+Check(Gold("effect", "heat") and string.find(CV(), " effect heat neofill heat ", 1, true), "Heat picked with Neo: Neo's own fill Heat (neofill heat), Retro's untouched")
+f, r, c = Fill()
+local ch = pv.channel
+Check(f.texture == "Interface\\ChatFrame\\ChatFrameBackground" and f.gradient and f.gradient[1] == "HORIZONTAL" and
+      Is3({ f.gradient[2], f.gradient[3], f.gradient[4] }, VMAGE, 0.35) and Is3({ f.gradient[5], f.gradient[6], f.gradient[7] }, VMAGE) and not c and
+      Near(PB(f).l, 406) and Near(PB(f).r - PB(f).l, 0.6 * 316) and Near(PB(r).l, PB(f).r) and Near(PB(r).r, 722) and r.color and r.color[1] < 0.05 and
+      Near(PB(f).t - 448, ch[2]) and Near(PB(f).b - PB(f).t, ch[4]),
+      "the preview's fill, Heat: dark at its tail to the colour at its tip, in Neo's channel (its frame's rows 236 to 301) to 60%, the rest dark, under the frame")
 UI.Click(cards["effect smooth"])
-Check(Is3(pv.fill.vertex, MAGE) and not pv.fill.gradient and not pv.core:IsVisible(), "Smooth: the fill the class's colour, even")
+f, r, c = Fill()
+Check(Is3(f.vertex, VMAGE) and not f.gradient and not c, "Smooth: the fill the colour, even")
 UI.Click(cards["effect blade"])
 f, r, c = Fill()
-Check(Is3(pv.fill.vertex, MAGE) and pv.core:IsVisible() and pv.core.vertex[1] > 0.85 and pv.core.vertex[3] > 0.95 and Near(c.l, f.l) and Near(c.r, f.r) and
-      c.t > f.t and c.b < f.b, "Blade light: the class's colour round a near-white core along the fill")
+Check(Is3(f.vertex, VMAGE) and c and c.vertex[1] > 0.8 and c.vertex[3] > 0.95 and Near(PB(c).l, PB(f).l) and Near(PB(c).r, PB(f).r) and
+      PB(c).t > PB(f).t and PB(c).b < PB(f).b, "Blade light: the colour round a near-white core along the fill")
 UI.Click(P("Colour"))
-Check(Is3(pv.fill.vertex, EMBER) and Is3(pv.colour, EMBER), "In my class's colour unticked: the fill CinderLoad's ember")
+f = Fill()
+Check(Is3(f.vertex, VEMBER) and Is3(pv.colour, VEMBER), "In my class's colour unticked: the fill CinderLoad's ember (made vivid on Neo, as its light is)")
 UI.Click(P("Colour"))
-Check(Is3(pv.fill.vertex, MAGE), "ticked again: the class's colour")
+f = Fill()
+Check(Is3(f.vertex, VMAGE), "ticked again: the class's colour")
 UI.Click(cards["bar retro"])
-a1, a2, a3 = Bar()
+Check(Gold("effect", "heat") and string.find(CV(), " effect heat neofill blade ", 1, true), "back to Retro: its own fill, Heat, as it had it; Neo's Blade light kept for Neo")
+a1 = Bar()
 f, r = Fill()
-Check(Near(f.l, a1.l + (a1.r - a1.l) * 28 / 34) and Near(r.r, a3.r - (a3.r - a3.l) * 27 / 34) and Near(f.t, a1.t + (a1.b - a1.t) * 9 / 42) and
-      Near(f.b - f.t, (a1.b - a1.t) * 25 / 42), "Retro: the fill in its channel (its art's texels 28 to 449 across, 9 to 34 down)")
+local k = (a1.b - a1.t) / 60
+Check(Near(PB(f).l, a1.l + 28 * k) and Near(PB(r).r, a1.r - 28 * k) and Near(PB(f).t, a1.t + 23 * k) and Near(PB(f).b - PB(f).t, 16 * k) and
+      f.gradient and Is3({ f.gradient[5], f.gradient[6], f.gradient[7] }, MAGE),
+      "Retro: the fill in its frame's channel (the frame's art 68 to 444 across, 57 to 73 down), Heat in the class's colour itself, as retro's fill takes it")
+-- the window's pictures: each the client's own or CinderLoad's own pack's, made here; none of a picture shipped with the window
+local seen, shipped, ours = {}, "", 0
+for _, t in ipairs(world.made) do
+    if not t.blizzard and t.kind == "Texture" and t.texture then seen[t.texture] = 1 end
+end
+for file in pairs(seen) do
+    if string.find(file, "^Interface\\CinderLoad\\") then shipped = shipped .. " " .. file end
+    if file == "Interface\\Glues\\LoadingScreens\\CinderMap" or file == NF or file == NL then ours = ours + 1 end
+end
+Check(shipped == "" and ours == 3 and seen[RF] and seen["Interface\\WorldMap\\Azeroth\\Azeroth6"] and seen["Interface\\WorldMap\\Azeroth\\Azeroth10"],
+      "every picture of the window made at run time: the client's own (its painting of the Eastern Kingdoms, its casting-bar frame) and CinderLoad's own pack's (its living map, Neo's frame and logo); none of its own shipped with the window (his rules: no Blizzard art in the packs):" .. shipped)
+-- the pictures in the window's cards: the parchment and the living map; Retro on the parchment, Neo on the living map; the fills
+local function CardFiles(key, value)
+    for _, cd in ipairs(u.cards) do
+        if cd.key == key and cd.value == value then
+            local fs = {}
+            for name, p in pairs(cd.scene.pools) do for i = 1, p.n do if p.list[i]:IsVisible() and p.list[i].texture then fs[p.list[i].texture] = name end end end
+            return fs
+        end
+    end
+end
+local cp, cs, cr, cn, ch2 = CardFiles("map", "parchment"), CardFiles("map", "satellite"), CardFiles("bar", "retro"), CardFiles("bar", "neo"), CardFiles("effect", "heat")
+Check(cp["Interface\\WorldMap\\Azeroth\\Azeroth6"] == "ground" and cs["Interface\\Glues\\LoadingScreens\\CinderMap"] == "ground" and cr[RF] == "frame" and
+      cr["Interface\\WorldMap\\Azeroth\\Azeroth6"] == "ground" and cn[NF] == "frame" and cn[NL] == "logo" and cn["Interface\\Glues\\LoadingScreens\\CinderMap"] and
+      ch2["Interface\\ChatFrame\\ChatFrameBackground"] == "fill",
+      "the cards' pictures made the same way: the parchment and the living map, Retro on the parchment and Neo (its logo) on the living map, each effect's fill drawn")
 UI.Click(cards["effect heat"])
 UI.Click(P("Colour"))
 -- Defaults (the class's colour unticked before it)
 world.sounds = {}
-UI.Click(P("fade1800")); UI.Click(P("mapsatellite")); UI.Click(P("barneo")); UI.Slide(P("thickSlider"), 150)
+UI.Click(P("fade1800")); UI.Click(P("mapsatellite")); UI.Click(P("barneo")); UI.Click(cards["effect smooth"]); UI.Slide(P("thickSlider"), 150)
 UI.Click(P("Defaults"))
 Check(CV() == Value("parchment retro full") and Shows("parchment", "full", "retro") and Fades("zone") and SliderSays("thick", 100, "100%") and
       SliderSays("width", 30, "each bar's own") and P("Colour"):GetChecked() and not P("Whole"):GetChecked() and
-      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it begins (his, 11 Oct: the parchment, the Full map, each zone fading whole, Retro; 100%, each bar's own width, Heat, the class's colour, Pulse and Raw)")
+      Gold("effect", "heat") and NoErrors(), "Defaults: everything as it begins (his, 11 Oct: the parchment, the Full map, each zone fading whole, Retro; 100%, each bar's own width, Heat for Retro and Blade light for Neo, the class's colour, Pulse and Raw)")
 UI.Click(P("barneo"))
-a1, a2, a3 = Bar()
-Check(Near(a3.r - a1.l, 316) and Near(a1.l, 406) and SliderSays("width", 100, "the whole screen"),
+a1 = Bar()
+Check(Near(a1.r - a1.l, 316) and Near(a1.l, 406) and SliderSays("width", 100, "the whole screen"),
       "Neo: the bar across the whole strip, the width slider's thumb at its end (Neo is always the whole width)")
 UI.Click(P("barretro"))
 -- the red buttons keep the window's size of words under the mouse (their own font objects, not the template's 12)
@@ -470,8 +549,10 @@ local atRest = dt.size == 13 and Near(dt.color[2], 0.82)
 UI.Enter(P("Defaults"))
 local over = dt.size == 13 and dt.color[1] == 1 and dt.color[2] == 1 and dt.fontFile == "Fonts\\FRIZQT__.TTF"
 UI.Leave(P("Defaults"))
-Check(atRest and over and dt.size == 13 and Near(dt.color[2], 0.82) and env[P("CloseButton").name .. "Text"].size == 13 and NoErrors(),
-      "Defaults and Close: their words at 13 at rest (gold) and with the mouse over them (white), as the template's colours go, never back to its 12")
+local glow = P("Defaults"):GetHighlightTexture()
+Check(atRest and over and dt.size == 13 and Near(dt.color[2], 0.82) and env[P("CloseButton").name .. "Text"].size == 13 and NoErrors() and
+      glow and glow.blend == "ADD" and Near(glow.vertex[1], 0.4) and Near(P("CloseButton"):GetHighlightTexture().vertex[2], 0.4),
+      "Defaults and Close: their words at 13 at rest (gold) and with the mouse over them (white), as the template's colours go, never back to its 12; the glow under the mouse at 0.4 of the template's, so the white words keep 7:1 (8.2:1, measured)")
 UI.Click(P("areasdiscovered"))                              -- (the words below begin from Discovered)
 -- moved by its title
 local l0, t0 = p:GetLeft(), p:GetTop()
@@ -556,8 +637,8 @@ Check(P("QualityLiquid"):GetChecked() and P("QualityUnstable"):GetChecked() and 
       "and Neo's qualities held: Liquid and Unstable")
 -- a look set by hand in style.txt, off the sliders' steps: said back exactly at a login (no click), so style.txt is never
 -- rewritten by a login; only the slider a player moves puts its own value on a step
-for _, odd in ipairs({ "fade 1800 thick 123 width 33 whole off effect heat colour class quality pulse raw",
-                       "fade 3600 thick 51 width 99 whole off effect smooth colour class quality raw" }) do
+for _, odd in ipairs({ "fade 1800 thick 123 width 33 whole off effect heat neofill blade colour class quality pulse raw",
+                       "fade 3600 thick 51 width 99 whole off effect smooth neofill heat colour class quality raw" }) do
     Fresh({ cvar = "?" })
     Run((string.gsub(setupSrc, 'local CL_LOOK = "[^"]*"', 'local CL_LOOK = "' .. odd .. '"', 1)))
     local said = CV()
@@ -584,8 +665,16 @@ Fresh({ cvar = "?", noPack = true })
 Run(setupSrc)
 Slash("")
 u = env.CinderLoad.ui
-Check(P():IsVisible() and u.preview.ground.color and not u.preview.ground.texture and u.cards[1].picture.color and NoErrors(),
-      "the pictures not in the client (an older pack): dark plates in their place, everything else as ever")
+UI.Click(P("mapsatellite"))
+local g = u.preview.pools.ground.list[1]
+local plates, painted = 0, 0
+for _, cd in ipairs(u.cards) do
+    for _, pl in pairs(cd.scene.pools) do
+        for i = 1, pl.n do if pl.list[i].color and not pl.list[i].texture then plates = plates + 1 elseif pl.list[i].texture then painted = painted + 1 end end
+    end
+end
+Check(P():IsVisible() and g.color and not g.texture and plates >= 2 and painted >= 6 and NoErrors(),
+      "CinderLoad's own pictures not in the client (an older pack): dark plates in their place (the living map, Neo's frame and logo), the client's own as ever, everything else as ever")
 
 -- ---- a fault: off, the game's UI as ever ----
 Fresh({ cvar = "?" })
@@ -609,7 +698,7 @@ Check(string.find(CV(), " fault$") and NoErrors(), "after a fault: a control cli
 Fresh({ cvar = "?" })
 Run(setupSrc)
 Slash("")
-env.CinderLoad.ui.preview.bar[1].SetTexCoord = function() error("the art broke") end
+env.CinderLoad.ui.preview.pools.frame.list[1].SetTexCoord = function() error("the art broke") end
 UI.Slide(P("thickSlider"), 150)
 Check(env.CinderLoad.broken and not P():IsShown() and string.find(CV(), " fault$") and Said("the art broke") and NoErrors(),
       "a fault while the window redraws: caught, off, said; no error left to the game")
@@ -647,6 +736,7 @@ local function Dump(path)
     local f = io.open(path, "w")
     local function Q(v) if v == nil then return "" end; return string.gsub(tostring(v), "[\t\n]", " ") end
     local function L(t) if not t then return "" end; local o = {}; for i = 1, table.getn(t) do o[i] = Q(t[i]) end; return table.concat(o, " ") end
+    local function Alpha(r) local a = 1; while r do a = a * (r.alpha or 1); r = r.parent end; return a end   -- (as drawn: its frames' alphas)
     for _, r in ipairs(world.made) do r.id0 = nil end
     for i, r in ipairs(world.made) do
         local l, b, rr, t = UI.Rect(r)
@@ -658,7 +748,7 @@ local function Dump(path)
                                bdp and bdp.insets and L({ bdp.insets.left, bdp.insets.right, bdp.insets.top, bdp.insets.bottom }) or "",
                                L(r.backdropColor), L(r.backdropBorderColor), Q(r.min), Q(r.max), Q(r.value), Q(r:GetEffectiveScale()),
                                Q(table.getn(r.points or {}) == 1 and r.points[1].p or ""),
-                               r.gradient and L(r.gradient) or L(r.vertex) }, "\t") .. "\n")
+                               r.gradient and L(r.gradient) or L(r.vertex), Q(Alpha(r)), r.disabled and "1" or "0" }, "\t") .. "\n")
         r.id0 = i
     end
     f:close()

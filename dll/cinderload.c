@@ -5758,8 +5758,7 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_QUADS    ((6 + SABER_BANDS) * SABER_COLS_MAX + 1 + 2 + SABER_SPARKS + SABER_DROPS + SABER_BLOOMS + 2 + 1 + 5 * (256 + 3) + 3 + ORB_GLOWS + \
                         SABER_STRANDS * 2 * STRAND_PTS + SABER_ARCS * (2 * ARC_SEGS + 1) + SURGE_GLOWS + \
                         SABER_DROPS + SABER_ARCS * 2 * ARC_SEGS)   /* (the frame's: FRAME_TILES and the rest, and its shine: four
-                                                                    * more a piece; and a slanted quad cut at a narrowed bar's
-                                                                    * end drawn as two) */
+                                                                    * more a piece) */
 #define VIEW_QUADS_MAX (2 + TITLE_QUADS_ROOM + WAVE_QUADS + FLOW_DROP_Q + LBL_FRAME + GLINTS + 6 * MARKS_FRAME + MAEL_QUADS_ROOM + SABER_QUADS + SHIPS_MAX * (2 + SHIP_WAKE_Q + ZEP_STREAK_Q) + SKY_QUADS)
 #define MAEL_QUADS_ROOM (2 + 200 * 14 + 90)   /* the Maelstrom's strokes (MAEL_QUADS, defined with them below) */
 #define TITLE_QUADS_ROOM (6 * 3 * TITLE_CHARS)  /* a name and its three-part line (the outgoing ones are gone before
@@ -7044,8 +7043,8 @@ static void SaberGlowAt(float x, float y, float rx, float ry, DWORD argb)
 #define LOOK_WIDTH_MOST  100
 static int g_barThick = 100, g_barWidth, g_barWhole;    /* the view's, this screen's (width 0: the bar's own) */
 /* The size as the view draws it: the thickness a multiplier (*tk, 1 at 100), the width a share of the screen (0: the
- * bar's own; the whole width 1). Neo's (neo): always its own, edge to edge. */
-static void BarSize(int neo, float *tk, float *share)
+ * bar's own; the whole width 1: retro's alone, Neo's run is the window's whatever it says, FrameRun). */
+static void BarSize(float *tk, float *share)
 {
     int t = g_barThick, w = g_barWidth;
     if (t < LOOK_THICK_LEAST) t = LOOK_THICK_LEAST;
@@ -7053,7 +7052,7 @@ static void BarSize(int neo, float *tk, float *share)
     if (w && w < LOOK_WIDTH_LEAST) w = LOOK_WIDTH_LEAST;
     if (w > LOOK_WIDTH_MOST) w = LOOK_WIDTH_MOST;
     *tk = t == 100 ? 1.0f : (float)t / 100.0f;
-    *share = neo ? 0.0f : g_barWhole ? 1.0f : (float)w / 100.0f;
+    *share = g_barWhole ? 1.0f : (float)w / 100.0f;
 }
 /* ---- the bar's fill and colour, chosen in the /cinderload panel (his design and his pick, 11 Oct 2026: Heat, Smooth or
  * Blade light on both bars, inside Neo's frame on Neo, "in my class's colour" or CinderLoad's ember): style.txt's
@@ -7085,7 +7084,7 @@ static void FrameRun(float W, const float *s, float *bx0, float *bx1, float *cl,
 static void FrameLayout(float W, float H, float *s, float *top, float *cy, float *ch, float *x0, float *x1, float *bx0, float *bx1)
 {
     float tk, share, cl, cr;
-    BarSize(1, &tk, &share);
+    BarSize(&tk, &share);
     if (g_frameOn && g_frame.ok && g_viewTex[VT_FRAME]) {
         *s = FRAME_BAND * H * tk / (float)(g_frame.band[1] - g_frame.band[0]);
         FrameRun(W, s, bx0, bx1, &cl, &cr);
@@ -7343,7 +7342,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), boltRgb = SaberMix(rgb, 0xFFFFFF, 0.7f);
     float fs, ftop, cy, ch, fx0, fx1, bx0, bx1, tk, share, wl = 0, wr = 0;
     int in = g_sbRetro.on, blade = in || g_barEffect == LOOK_BLADE;   /* (in retro's channel: its fill Blade light) */
-    BarSize(1, &tk, &share);
+    BarSize(&tk, &share);
     if (in) { fs = 0; ftop = 0; cy = g_sbRetro.cy; ch = g_sbRetro.ch; fx0 = bx0 = g_sbRetro.x0; fx1 = bx1 = g_sbRetro.x1; }
     else {
         FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1, &bx0, &bx1);   /* the channel the frame holds it in, end to end */
@@ -7671,7 +7670,7 @@ static void VBarLayout(float W, float H, float *s, float *x0, float *y0, float *
 {
     float k = H / VBAR_UI_H, tk, share;
     if (VBAR_TEX_W * k > 0.96f * W) k = 0.96f * W / VBAR_TEX_W;   /* (a window narrower than 2:3: as wide as fits) */
-    BarSize(0, &tk, &share);
+    BarSize(&tk, &share);
     float sc = k * tk, bw = share > 0 ? W * share : VBAR_TEX_W * k;
     float least = (float)(VBAR_CAP_L + VBAR_CAP_R + VBAR_MID_LEAST);
     if (least * sc > bw) sc = bw / least;                          /* (too thick for so narrow a bar: as thick as fits) */
@@ -11832,7 +11831,7 @@ static int ViewWorldBlind(LONG seen)
 }
 
 /* At start (ViewStart; here so the tests reach it): the view, as ViewWanted says (on by default since slice 5), while the
- * pack's world map zoom is on; then the style chosen (style.txt) and the world map's switches for it. start: the view's
+ * pack's world map zoom is on; then the style chosen (style.txt) and the /cinderload window for it. start: the view's
  * thread started, 1 when it was. 1 when the view is on. */
 static int ViewStartFrom(const unsigned char *base, int (*start)(const unsigned char *base))
 {
@@ -11847,7 +11846,7 @@ static int ViewStartFrom(const unsigned char *base, int (*start)(const unsigned 
     InterlockedExchange(&g_viewOn, 1);                     /* before any loading frame: the game's thread locks from now */
     InterlockedExchange(&g_viewLive, 1);
     if (!start(base)) { InterlockedExchange(&g_viewOn, 0); InterlockedExchange(&g_viewLive, 0); Log("view off: its thread could not be started"); return 0; }
-    LuaStart();                                            /* the world map's switches for them */
+    LuaStart();                                            /* the /cinderload window for them */
     if (!wine && !g_gameWindowed)
         Log("view on although the game holds the whole screen (Data\\CinderLoad\\view.txt asks for it): on world map "
             "screens, its own window over the game; if a loading screen shows without its fire, labels and sea, delete "
@@ -12877,7 +12876,7 @@ static void ModeTurnStart(void)
  * overlay pieces this character has found, as the client's world map shows them) | Full map (every piece, as though all
  * were found: his words, 11 Oct, "we could have a switch that turns on the full map as though it were fully discovered,
  * but it should default to only what they've discovered"). Defaults: the parchment, retro, discovered. Chosen in game
- * (the world map's switches and /cinderload, below) and kept in Data\CinderLoad\style.txt, written here, so it holds over
+ * (the /cinderload window and its words, below) and kept in Data\CinderLoad\style.txt, written here, so it holds over
  * restarts; a choice counts from the next loading screen. Until a choice is made in game (no style.txt), the old switch
  * files still say what they said: parchment.txt the parchment with vanilla's bar, bar-vanilla.txt vanilla's bar on the
  * living map; with neither, the defaults. style.txt wins over them; nothing removes them. g_parchAsked (1: the
@@ -12974,8 +12973,10 @@ static int StyleNearby(const char *text, int *yd)
  * "colour class" or "colour ember", "quality" and any of liquid, pulse, unstable and raw (or none). A line missing: its
  * default, today's look. g_look holds them (the game's thread writes it, the view's reads it as each screen opens; the
  * effects' words LOOK_HEAT and the rest are the view's, with the bar's fill). ---- */
-typedef struct { int thick, width, whole, effect, ember, quality; } Look;    /* (width 0: each bar's own) */
-#define LOOK_DEFAULT { 100, 0, 0, LOOK_HEAT, 0, SABER_PULSE | SABER_RAW }
+/* (width 0: each bar's own; effect retro's fill, neofx Neo's: each bar keeps its own, his pick 11 Oct evening: "Neo keeps
+ * its blade", so picking Neo looks as 0.2.0's did straight away and going back finds what each had) */
+typedef struct { int thick, width, whole, effect, ember, quality, neofx; } Look;
+#define LOOK_DEFAULT { 100, 0, 0, LOOK_HEAT, 0, SABER_PULSE | SABER_RAW, LOOK_BLADE }
 static Look g_look = LOOK_DEFAULT;
 static const char *const kLookEffect[LOOK_EFFECTS] = { "heat", "smooth", "blade" };
 static const char *const kLookQuality[4] = { "liquid", "pulse", "unstable", "raw" };     /* SABER_LIQUID << i */
@@ -13022,6 +13023,8 @@ static int StyleLook(const char *text, Look *lk)
         else if (!lstrcmpiA(w, "whole") && kx == 1 && (!lstrcmpiA(x, "on") || !lstrcmpiA(x, "off"))) { lk->whole = x[1] == 'n'; named++; s = at; }
         else if (!lstrcmpiA(w, "effect") && kx == 1) {
             for (int e = 0; e < LOOK_EFFECTS; e++) if (!lstrcmpiA(x, kLookEffect[e])) { lk->effect = e; named++; s = at; }
+        } else if (!lstrcmpiA(w, "neofill") && kx == 1) {
+            for (int e = 0; e < LOOK_EFFECTS; e++) if (!lstrcmpiA(x, kLookEffect[e])) { lk->neofx = e; named++; s = at; }
         } else if ((!lstrcmpiA(w, "colour") || !lstrcmpiA(w, "color")) && kx == 1 && (!lstrcmpiA(x, "class") || !lstrcmpiA(x, "ember"))) {
             lk->ember = x[0] == 'e'; named++; s = at;
         } else if (!lstrcmpiA(w, "quality")) {                      /* its words, as many as follow on its line */
@@ -13047,14 +13050,15 @@ static void StyleLookText(char *out, const Look *lk, const char *sep)
         if (lk->quality & ((int)SABER_LIQUID << i)) { if (q[0]) lstrcatA(q, " "); lstrcatA(q, kLookQuality[i]); }
     char wd[8];
     if (lk->width) wsprintfA(wd, "%d", lk->width); else lstrcpyA(wd, "own");
-    wsprintfA(out, "thick %d%swidth %s%swhole %s%seffect %s%scolour %s%squality %s", lk->thick, sep, wd, sep, lk->whole ? "on" : "off", sep,
-              kLookEffect[lk->effect >= 0 && lk->effect < LOOK_EFFECTS ? lk->effect : 0], sep, lk->ember ? "ember" : "class", sep,
+    wsprintfA(out, "thick %d%swidth %s%swhole %s%seffect %s%sneofill %s%scolour %s%squality %s", lk->thick, sep, wd, sep, lk->whole ? "on" : "off",
+              sep, kLookEffect[lk->effect >= 0 && lk->effect < LOOK_EFFECTS ? lk->effect : 0], sep,
+              kLookEffect[lk->neofx >= 0 && lk->neofx < LOOK_EFFECTS ? lk->neofx : LOOK_BLADE], sep, lk->ember ? "ember" : "class", sep,
               q[0] ? q : "none");
 }
 static int LookSame(const Look *a, const Look *b)
 {
     return a->thick == b->thick && a->width == b->width && a->whole == b->whole && a->effect == b->effect && a->ember == b->ember &&
-           a->quality == b->quality;
+           a->quality == b->quality && a->neofx == b->neofx;
 }
 static const char *StyleMapName(int map) { return map ? "parchment" : "satellite"; }
 static const char *StyleBarName(int bar) { return bar ? "retro" : "neo"; }
@@ -13085,7 +13089,7 @@ static int StyleSave(int map, int bar, int full)
                    "nearby fade on the parchment: zone (each across its own land), third (its nearest third whole), 3600 or 1800 (a "
                    "circle of that many yards).\r\n# thick: the bar's thickness, percent of its own (50 to 200). width: percent "
                    "of the screen (20 to 100), or own (its own); retro's alone, Neo is always the whole width. whole: on (the whole "
-                   "width of the screen) or off.\r\n# effect: heat, smooth or blade (blade light). colour: class (your "
+                   "width of the screen) or off.\r\n# effect: Retro's fill, heat, smooth or blade (blade light); neofill: Neo's, the same three. colour: class (your "
                    "class's) or ember. quality: Neo's, any of liquid, pulse, unstable and raw, or none.\r\nmap ");
     lstrcatA(text, StyleMapName(map));
     lstrcatA(text, "\r\nbar ");
@@ -13165,9 +13169,8 @@ static void StyleLoad(void)
     Log(m);
     wsprintfA(m, "style: the parchment's zones nearby fade %s (%s), from %s", kNearWord[fade], StyleFadeSays(fade),
               fadeNamed ? "Data\\CinderLoad\\style.txt" : "the default");
-    Log(m);
-    wsprintfA(m, "style: the zones nearby's fade %s, from %s", kNearWord[fade], fadeNamed ? "Data\\CinderLoad\\style.txt" : "the default");
-    Log(m);
+    Log(m);                                                 /* (one line for the zones nearby: their fade; the reach is style.txt's
+                                                             * alone, kept and drawn no longer) */
     char lk[200];
     StyleLookText(lk, &look, ", ");
     wsprintfA(m, "style: the bar's look: %s, from %s", lk, lookNamed ? "Data\\CinderLoad\\style.txt" : "the defaults");
@@ -13273,8 +13276,8 @@ static void StylePick(void)
         Log(sm);
         g_barThick = thick; g_barWidth = width; g_barWhole = whole;
     }
-    int effect = *(volatile int *)&g_look.effect, ember = *(volatile int *)&g_look.ember != 0;
-    if (effect < 0 || effect >= LOOK_EFFECTS) effect = LOOK_HEAT;
+    int effect = retro ? *(volatile int *)&g_look.effect : *(volatile int *)&g_look.neofx, ember = *(volatile int *)&g_look.ember != 0;
+    if (effect < 0 || effect >= LOOK_EFFECTS) effect = retro ? LOOK_HEAT : LOOK_BLADE;   /* (the bar's own fill: retro its own, neo its own) */
     if (effect != g_barEffect || ember != g_barEmber) {             /* the bar's fill and colour, as chosen in the panel */
         char em[160];
         wsprintfA(em, "  the view: the bar's fill %s, in %s", effect == LOOK_BLADE ? "blade light" : kLookEffect[effect],
@@ -13439,7 +13442,7 @@ static int LookQualityAt(const char *v, int *len)
 }
 static int StyleCvarTail(const char *v, Style *st, int *fault)
 {
-    static const char *const kKeys[7] = { "fade", "thick", "width", "whole", "effect", "colour", "quality" };
+    static const char *const kKeys[8] = { "fade", "thick", "width", "whole", "effect", "neofill", "colour", "quality" };
     Style out = *st;
     int next = 0;
     *fault = 0;
@@ -13451,10 +13454,10 @@ static int StyleCvarTail(const char *v, Style *st, int *fault)
         w[n] = 0;
         if (!lstrcmpiA(w, "fault") && !*v) { *fault = 1; break; }
         int k = next;
-        while (k < 7 && lstrcmpiA(w, kKeys[k])) k++;
-        if (k == 7 || *v++ != ' ') return 0;
+        while (k < 8 && lstrcmpiA(w, kKeys[k])) k++;
+        if (k == 8 || *v++ != ' ') return 0;
         next = k + 1;
-        if (k == 6) {                                              /* quality: its words, each once, or none */
+        if (k == 7) {                                              /* quality: its words, each once, or none */
             int q = 0, len, i = LookQualityAt(v, &len), j;
             if (i < 0) return 0;
             if (i == 4) v += len;
@@ -13483,9 +13486,9 @@ static int StyleCvarTail(const char *v, Style *st, int *fault)
         else if (k == 2 && digits && val >= LOOK_WIDTH_LEAST && val <= LOOK_WIDTH_MOST) out.look.width = val;
         else if (k == 2 && letters && !lstrcmpiA(x, "own")) out.look.width = 0;
         else if (k == 3 && letters && (!lstrcmpiA(x, "on") || !lstrcmpiA(x, "off"))) out.look.whole = x[1] == 'n';
-        else if (k == 4 && letters && (!lstrcmpiA(x, "heat") || !lstrcmpiA(x, "smooth") || !lstrcmpiA(x, "blade")))
-            out.look.effect = x[0] == 'h' ? LOOK_HEAT : x[0] == 's' ? LOOK_SMOOTH : LOOK_BLADE;
-        else if (k == 5 && letters && (!lstrcmpiA(x, "class") || !lstrcmpiA(x, "ember"))) out.look.ember = x[0] == 'e';
+        else if ((k == 4 || k == 5) && letters && (!lstrcmpiA(x, "heat") || !lstrcmpiA(x, "smooth") || !lstrcmpiA(x, "blade")))
+            *(k == 4 ? &out.look.effect : &out.look.neofx) = x[0] == 'h' ? LOOK_HEAT : x[0] == 's' ? LOOK_SMOOTH : LOOK_BLADE;
+        else if (k == 6 && letters && (!lstrcmpiA(x, "class") || !lstrcmpiA(x, "ember"))) out.look.ember = x[0] == 'e';
         else return 0;
     }
     *st = out;
@@ -13539,7 +13542,7 @@ static void LuaBreak(const char *why)
 {
     if (InterlockedExchange(&g_luaBroken, 1)) return;
     char m[400];
-    wsprintfA(m, "the world map's switches: off for this session, as %s; the world map is the game's own as ever, and "
+    wsprintfA(m, "the /cinderload window: off for this session, as %s; the game's own windows are as ever, and "
                  "Data\\CinderLoad\\style.txt still sets the style", why);
     Log(m);
 }
@@ -13577,7 +13580,7 @@ static void LuaTick(DWORD now)
         StyleValue(def, *(volatile int *)&g_parchAsked, *(volatile int *)&g_vbarAsked, *(volatile int *)&g_mapFull);
         cv = g_cvRegister(CV_NAME, NULL, 0, def, NULL, CV_CATEGORY, 0, NULL);
         if (!cv || g_cvLookup(CV_NAME) != cv) { LuaBreak("the client would not make its CVar (" CV_NAME ")"); g_luaBusy = 0; return; }
-        Log("the world map's switches: their CVar " CV_NAME " made, as the client's own RegisterCVar makes one");
+        Log("the /cinderload window: its CVar " CV_NAME " made, as the client's own RegisterCVar makes one");
     }
     g_luaCv = cv;
     if (StyleFromCvar(cv, "chosen in the /cinderload window or with its words") < 0) {
@@ -13598,14 +13601,14 @@ static void LuaTick(DWORD now)
         if (marked) DeleteFileA(mark);
         g_luaSetups++;
         if (!len || !CvText(cv, v, (int)sizeof v) || (v[0] == '?' && !v[1])) {
-            wsprintfA(m, "the world map's switches: made, but no word back from them (%d time%s)", g_luaFails + 1, g_luaFails ? "s" : "");
+            wsprintfA(m, "the /cinderload window: made, but no word back from it (%d time%s)", g_luaFails + 1, g_luaFails ? "s" : "");
             Log(m);
             if (++g_luaFails >= LUA_FAILS_MAX) LuaBreak("they did not run (twice made, no word back)");
         } else {
             g_luaFails = 0;
             g_luaSynced = 1;
             if (g_luaSetups <= 8) {
-                wsprintfA(m, "the world map's switches: made (%s: at a login or a /reload), set to %s", g_luaSetups == 1 ? "the first" : "again", v);
+                wsprintfA(m, "the /cinderload window: made (%s: at a login or a /reload), set to %s", g_luaSetups == 1 ? "the first" : "again", v);
                 Log(m);
             }
         }
@@ -13634,7 +13637,7 @@ static int LuaWanted(void)
     char path[MAX_PATH], m[400];
     const char *what = "";
     if (!LuaCodeOk(&what)) {
-        wsprintfA(m, "the world map's switches: off, as WoW.exe is not as read (%s); Data\\CinderLoad\\style.txt sets the style", what);
+        wsprintfA(m, "the /cinderload window: off, as WoW.exe is not as read (%s); Data\\CinderLoad\\style.txt sets the style", what);
         Log(m);
         return 0;
     }
@@ -13645,12 +13648,12 @@ static int LuaWanted(void)
                            "they were being made. Delete it to have them back. Data\\CinderLoad\\style.txt still sets the style "
                            "(map parchment or satellite, bar retro or neo).\r\n");
         DeleteFileA(path);
-        Log("the world map's switches: off, as the last session ended while they were being made (Data\\CinderLoad\\ui-off.txt "
+        Log("the /cinderload window: off, as the last session ended while it was being made (Data\\CinderLoad\\ui-off.txt "
             "keeps them off until it is deleted)");
         return 0;
     }
     if (Join(path, g_dir, LUA_OFF_PATH) && Exists(path)) {
-        Log("the world map's switches: off, as Data\\CinderLoad\\ui-off.txt is there (delete it to have them back)");
+        Log("the /cinderload window: off, as Data\\CinderLoad\\ui-off.txt is there (delete it to have it back)");
         return 0;
     }
     g_luaExec = (LuaExecFn)(void *)ClientAt(LUA_EXEC_VA);
@@ -13703,11 +13706,11 @@ static int LuaPumpStep(LuaPump *p, DWORD now)
         p->hook = SetWindowsHookExA(WH_GETMESSAGE, LuaHook, NULL, tid);
         p->hooked = p->hook ? tid : 0;
         if (!p->hook) { LuaBreak("the game's thread would not take a message hook"); return 0; }
-        Log("the world map's switches: on the game's own thread, in its message pump, between its frames");
+        Log("the /cinderload window: on the game's own thread, in its message pump, between its frames");
     }
     if (g_luaPosted && now - (DWORD)g_luaPostedAt >= LUA_POST_STALE_MS) {
         InterlockedExchange(&g_luaPosted, 0);
-        if (p->stale++ < 4) Log("the world map's switches: our message was not taken in 5 s (a long freeze, or its window gone); sent again");
+        if (p->stale++ < 4) Log("the /cinderload window: our message was not taken in 5 s (a long freeze, or the game's window gone); sent again");
     }
     unsigned layer, mgr, L;
     int ready = ClientWord(0x400000u + FIRE_LAYER_RVA, &layer) && !layer && ClientWord(OBJ_MGR_VA, &mgr) && mgr &&
@@ -13731,7 +13734,7 @@ static void LuaStart(void)
     if (!LuaWanted()) return;
     g_luaOn = 1;
     HANDLE t = CreateThread(NULL, 0, LuaThread, NULL, 0, NULL);
-    if (!t) { g_luaOn = 0; Log("the world map's switches: off, as their thread could not be started"); return; }
+    if (!t) { g_luaOn = 0; Log("the /cinderload window: off, as its thread could not be started"); return; }
     CloseHandle(t);
 }
 
