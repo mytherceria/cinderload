@@ -5681,6 +5681,14 @@ static void TestBarSize(void)
                   Near(fcy, ftop + 78.5f * fs, 1e-3) && Near(fch, 22.5f * fs, 1e-3);
         }
     Check(ok, "Neo laid out at each setting: its rail band the thickness's share of a fifteenth of the height, its bottom on the window's; edge to edge at its own width and the whole, centred at a narrower width; the blade between its caps' back walls; at its defaults exactly the old formula, to the bit");
+    /* without the frame's sheet: the band and the channel still the thickness's share, the run still the width's */
+    g_viewTex[VT_FRAME] = 0;
+    BarSizeSet(150, 60, 0);
+    FrameLayout(1000, 500, &fs, &ftop, &fcy, &fch, &fx0, &fx1, &fb0, &fb1);
+    ok = fs == 0 && Near(ftop, 500 - FRAME_BAND * 500 * 1.5f, 1e-3) && Near(fcy, 500 - FRAME_BAND * 500 * 1.5f / 2, 1e-3) &&
+         Near(fch, FRAME_BAND * 500 * 1.5f * 0.27f, 1e-3) && Near(fb0, 200, 1e-3) && Near(fb1, 800, 1e-3) && fx0 == fb0 && fx1 == fb1;
+    g_viewTex[VT_FRAME] = 1;
+    Check(ok, "Neo without its frame's sheet at 150% and 60%: its band and channel 150% of their own, at the window's bottom, its run 60% of the width, centred");
     /* Neo drawn at a width: the caps at the run's ends, the diamond at its centre, the rails between with no gap, the
      * channel, shine and lips along the run, the logo centred on it at the thickness's size; nothing past the run */
     g_logoOn = 1; g_logo.ok = 1; g_logo.aspect = 2.0f; g_logo.tu0 = g_logo.tv0 = 0; g_logo.tu1 = g_logo.tv1 = 1;
@@ -5725,6 +5733,19 @@ static void TestBarSize(void)
     float g100 = BarGlowReach(100, 0), g200 = BarGlowReach(200, 0), g50 = BarGlowReach(50, 0);
     ok &= g100 > 0 && g200 / g100 > 1.7f && g200 / g100 < 2.4f && g50 / g100 > 0.4f && g50 / g100 < 0.6f;
     Check(ok, "Neo's lit lips run from the cap's lip at the run's end (not the window's) to the tip; its glow reaches past the core twice as far at 200% and half as far at 50%, the bar's light scaled with it");
+    /* the logo grows with the thickness past its own width cap (that cap times the thickness too): the real logo's shape
+     * at 200% across the whole of a 16:9 screen, twice as wide as at 100% */
+    {
+        float keepAsp = g_logo.aspect, lw2[2] = { 0, 0 };
+        g_logo.aspect = 2.117f;
+        for (int k = 0; k < 2; k++) {
+            BarSizeSet(k ? 200 : 100, 0, 1);
+            ViewListStart(); SaberBuild(1920, 1080, 0.3f, 3000);
+            for (int i = 0; i < g_vbN; i++) if (g_vb[i].tex == VT_LOGO) lw2[k] = g_vv[g_vb[i].first + 1].x - g_vv[g_vb[i].first].x;
+        }
+        g_logo.aspect = keepAsp;
+        Check(lw2[0] > 0 && Near(lw2[1] / lw2[0], 2, 1e-3), "Neo's logo at 200% across the whole of a 16:9 screen twice as wide as at 100% (its width cap grows with the thickness)");
+    }
     /* a run too short for both caps: cut at their inner sides (the right cap keeps its right end), never past the cups'
      * back walls and lit lips; the logo no wider than half the run. With the test's caps, whose walls are their whole
      * width, the scale gives instead. */
@@ -5807,10 +5828,15 @@ static void TestBarSize(void)
     g_look.whole = 1;
     StylePick();
     ok &= g_barWhole == 1 && LogSays("the view: the bar 175% of its own thickness, the whole width of the screen");
+    g_look.whole = 0;
+    StylePick();
+    g_look.width = 60;                                                    /* (the width alone: the slider's commonest move) */
+    StylePick();
+    ok &= g_barThick == 175 && g_barWidth == 60 && g_barWhole == 0 && LogSays("the view: the bar 175% of its own thickness, 60% of the screen's width");
     g_look = keep;
     StylePick();
     ok &= g_barThick == 100 && g_barWidth == 0 && g_barWhole == 0 && LogSays("the view: the bar 100% of its own thickness, its own width");
-    Check(ok, "each screen takes the bar's size as it opens (thick, width, whole from style.txt), the log saying so; back at the defaults, the defaults");
+    Check(ok, "each screen takes the bar's size as it opens (thick, width, whole from style.txt; the width changed alone too), the log saying so; back at the defaults, the defaults");
     BarSizeSet(100, 0, 0);
     g_logoOn = 0; g_logo.ok = 0; g_frameOn = 0; g_frame.ok = 0; g_class = 0;
     for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
