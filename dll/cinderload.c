@@ -7043,8 +7043,8 @@ static void SaberGlowAt(float x, float y, float rx, float ry, DWORD argb)
 #define LOOK_WIDTH_MOST  100
 static int g_barThick = 100, g_barWidth, g_barWhole;    /* the view's, this screen's (width 0: the bar's own) */
 /* The size as the view draws it: the thickness a multiplier (*tk, 1 at 100), the width a share of the screen (0: the
- * bar's own; the whole width 1). Neo's (neo): always its own, edge to edge. */
-static void BarSize(int neo, float *tk, float *share)
+ * bar's own; the whole width 1: retro's alone, Neo's run is the window's whatever it says, FrameRun). */
+static void BarSize(float *tk, float *share)
 {
     int t = g_barThick, w = g_barWidth;
     if (t < LOOK_THICK_LEAST) t = LOOK_THICK_LEAST;
@@ -7052,7 +7052,7 @@ static void BarSize(int neo, float *tk, float *share)
     if (w && w < LOOK_WIDTH_LEAST) w = LOOK_WIDTH_LEAST;
     if (w > LOOK_WIDTH_MOST) w = LOOK_WIDTH_MOST;
     *tk = t == 100 ? 1.0f : (float)t / 100.0f;
-    *share = neo ? 0.0f : g_barWhole ? 1.0f : (float)w / 100.0f;
+    *share = g_barWhole ? 1.0f : (float)w / 100.0f;
 }
 /* ---- the bar's fill and colour, chosen in the /cinderload panel (his design and his pick, 11 Oct 2026: Heat, Smooth or
  * Blade light on both bars, inside Neo's frame on Neo, "in my class's colour" or CinderLoad's ember): style.txt's
@@ -7084,7 +7084,7 @@ static void FrameRun(float W, const float *s, float *bx0, float *bx1, float *cl,
 static void FrameLayout(float W, float H, float *s, float *top, float *cy, float *ch, float *x0, float *x1, float *bx0, float *bx1)
 {
     float tk, share, cl, cr;
-    BarSize(1, &tk, &share);
+    BarSize(&tk, &share);
     if (g_frameOn && g_frame.ok && g_viewTex[VT_FRAME]) {
         *s = FRAME_BAND * H * tk / (float)(g_frame.band[1] - g_frame.band[0]);
         FrameRun(W, s, bx0, bx1, &cl, &cr);
@@ -7342,7 +7342,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
     unsigned hotRgb = SaberMix(rgb, 0xFFFFFF, 0.4f), boltRgb = SaberMix(rgb, 0xFFFFFF, 0.7f);
     float fs, ftop, cy, ch, fx0, fx1, bx0, bx1, tk, share, wl = 0, wr = 0;
     int in = g_sbRetro.on, blade = in || g_barEffect == LOOK_BLADE;   /* (in retro's channel: its fill Blade light) */
-    BarSize(1, &tk, &share);
+    BarSize(&tk, &share);
     if (in) { fs = 0; ftop = 0; cy = g_sbRetro.cy; ch = g_sbRetro.ch; fx0 = bx0 = g_sbRetro.x0; fx1 = bx1 = g_sbRetro.x1; }
     else {
         FrameLayout(W, H, &fs, &ftop, &cy, &ch, &fx0, &fx1, &bx0, &bx1);   /* the channel the frame holds it in, end to end */
@@ -7670,7 +7670,7 @@ static void VBarLayout(float W, float H, float *s, float *x0, float *y0, float *
 {
     float k = H / VBAR_UI_H, tk, share;
     if (VBAR_TEX_W * k > 0.96f * W) k = 0.96f * W / VBAR_TEX_W;   /* (a window narrower than 2:3: as wide as fits) */
-    BarSize(0, &tk, &share);
+    BarSize(&tk, &share);
     float sc = k * tk, bw = share > 0 ? W * share : VBAR_TEX_W * k;
     float least = (float)(VBAR_CAP_L + VBAR_CAP_R + VBAR_MID_LEAST);
     if (least * sc > bw) sc = bw / least;                          /* (too thick for so narrow a bar: as thick as fits) */
