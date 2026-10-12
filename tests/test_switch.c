@@ -5589,7 +5589,7 @@ static void TestBarSize(void)
             VBarLayout(5120, 2160, &s, &x0, &y0, &tw);
             ViewListStart();
             VBarBuild(5120, 2160, 0.6f, 5000);
-            int own = kWidth[b] == 0 && !kWhole[b] && kThick[a] == 100, n = own ? 1 : 3;
+            int own = kWidth[b] == 0 && !kWhole[b] && kThick[a] == 100, n = own ? 1 : tw < 512 ? 2 : 3;
             const ViewVert *gl = g_vv + g_vb[1].first, *bd = g_vv + g_vb[2].first, *ch = g_vv + g_vb[0].first;
             float right = x0 + tw * s, span = tw - 56;
             ok &= g_vbN == 3 && g_vb[1].tex == VT_VGLASS && g_vb[2].tex == VT_VBORDER && g_vb[1].count == 4 * n && g_vb[2].count == 4 * n &&
@@ -5601,17 +5601,23 @@ static void TestBarSize(void)
             for (int q = 1; q <= fillQ && q < g_vb[0].count / 4; q++) for (int j = 0; j < 4; j++) if (ch[4 * q + j].x > most) most = ch[4 * q + j].x;
             ok &= Near(most, tip, 0.05);
             if (n == 3) {
-                float m0 = tw < 512 ? 256 - (tw - 80) / 2 : 40, m1 = tw < 512 ? 256 + (tw - 80) / 2 : 472;   /* (narrower: its centre cut) */
-                ok &= Near(bd[1].x, x0 + 40 * s, 1e-2) && Near(bd[1].u, 40.0 / 512, 1e-6) && bd[4].x == bd[1].x && Near(bd[4].u, m0 / 512, 1e-5) &&
-                      Near(bd[5].u, m1 / 512, 1e-5) && Near(bd[5].x, right - 40 * s, 1e-2) && bd[8].x == bd[5].x && Near(bd[8].u, 472.0 / 512, 1e-6) &&
+                ok &= Near(bd[1].x, x0 + 40 * s, 1e-2) && Near(bd[1].u, 40.0 / 512, 1e-6) && bd[4].x == bd[1].x && Near(bd[5].u, 472.0 / 512, 1e-6) &&
+                      Near(bd[5].x, right - 40 * s, 1e-2) && bd[8].x == bd[5].x && Near(bd[8].u, 472.0 / 512, 1e-6) &&
                       Near(gl[0].u, 28.0 / 512, 1e-6) && Near(gl[1].x, x0 + 40 * s, 1e-2) && gl[4].x == gl[1].x && gl[8].x == gl[5].x &&
-                      Near(gl[4].u, m0 / 512, 1e-5) && Near(gl[5].u, m1 / 512, 1e-5) && Near(gl[9].u, 484.0 / 512, 1e-6) && Near(gl[2].v, 46.0 / 64, 1e-6);
+                      Near(gl[9].u, 484.0 / 512, 1e-6) && Near(gl[2].v, 46.0 / 64, 1e-6);
+            }
+            if (n == 2) {                                                /* (narrower: the art's two ends, meeting at the centre) */
+                float mid = x0 + tw / 2 * s;
+                ok &= Near(bd[1].x, mid, 1e-2) && Near(bd[1].u, tw / 2 / 512, 1e-5) && bd[4].x == bd[1].x && Near(bd[4].u, 1 - tw / 2 / 512, 1e-5) &&
+                      bd[5].u == 1 && Near(gl[0].u, 28.0 / 512, 1e-6) && Near(gl[1].x, mid, 1e-2) && gl[4].x == gl[1].x &&
+                      Near(gl[1].u, tw / 2 / 512, 1e-5) && Near(gl[4].u, 1 - tw / 2 / 512, 1e-5) && Near(gl[5].u, 484.0 / 512, 1e-6) && Near(gl[2].v, 46.0 / 64, 1e-6);
             }
         }
-    Check(ok, "Retro drawn at each setting on his 5120 x 2160: its frame from the bar's left to its right and the glass over its channel, each as the art's caps at their own size (40 texels) with the middle stretched between them on a wider bar and its centre cut to fit on a narrower one, no gap; the dark channel, the fill (to 60% of the longer channel) and all of it inside the bar and the window; at its own size one rectangle each, as before");
+    Check(ok, "Retro drawn at each setting on his 5120 x 2160: its frame from the bar's left to its right and the glass over its channel, each as the art's caps at their own size (40 texels) with the middle stretched between them on a wider bar, and on a narrower one as the art's two ends at their own size meeting at the bar's centre (the rest of the middle cut out), no gap; the dark channel, the fill (to 60% of the longer channel) and all of it inside the bar and the window; at its own size one rectangle each, as before");
     /* never squeezed: across the middle of the frame, the glass and the flash, no more of the art's texels to a pixel than
      * across the caps (a squeezed middle is sampled from a coarser mip level: a smeared box with a seam at each cap), on
-     * every shape of screen at every thickness and the narrow widths; and the art's middle used is its centre */
+     * every shape of screen at every thickness and the narrow widths; narrower than the art, its two ends meeting at the
+     * bar's centre */
     {
         static const float kWin2[6][2] = { { 1024, 768 }, { 1280, 720 }, { 1366, 768 }, { 1920, 1080 }, { 2560, 1600 }, { 5120, 2160 } };
         static const int kT[4] = { 50, 100, 150, 200 }, kW[4] = { 20, 30, 45, 60 };
@@ -5629,11 +5635,11 @@ static void TestBarSize(void)
                             float per = (v[1].u - v[0].u) * VBAR_TEX_W / (v[1].x - v[0].x);   /* (texels a pixel, across) */
                             cases++;
                             if (per > 1 / s * 1.0001f) squeezed++;
-                            if (q % 3 == 1 && tw < 512 && !Near((v[0].u + v[1].u) / 2, 0.5, 1e-5)) off++;
+                            if (tw < 512 && (g_vb[bt].count != 8 || !Near(q ? v[0].x : v[1].x, x0 + tw / 2 * s, 1e-2))) off++;   /* (two, meeting at the centre) */
                         }
                     }
                 }
-        Check(!squeezed && !off && cases >= 6 * 4 * 4 * 9, "Retro narrower than its art (1024 x 768 to 5120 x 2160, 50% to 200% thick, 20% to 60% wide): across the middle of its frame, its glass and its flash never more of the art's texels to a pixel than across its caps, so the middle is sampled as sharp as the caps (cut from the art's centre, not squeezed)");
+        Check(!squeezed && !off && cases >= 6 * 4 * 4 * 6, "Retro narrower than its art (1024 x 768 to 5120 x 2160, 50% to 200% thick, 20% to 60% wide): across the middle of its frame, its glass and its flash never more of the art's texels to a pixel than across its caps, so the middle is sampled as sharp as the caps (the art's two ends meeting at the bar's centre, the rest of its middle cut out, not squeezed)");
     }
     /* full, at a width: the flash is the three pieces added */
     BarSizeSet(125, 60, 0);

@@ -6996,7 +6996,6 @@ static float SaberNoise(float x, float t, unsigned seed)
     float lo = a + (b - a) * ax, hi = c + (d - c) * ax;
     return lo + (hi - lo) * at;
 }
-/* A quad round from its top left: corners x, y, each its own colour (a plain quad's u, v unused). */
 /* A narrowed blade's light held to its bar's run (g_sbClip[0] to [1] across, while g_sbClipOn: SaberBuild sets it), as
  * the window's edges hold it at the whole width: no glow, orb, streak, ember, drop or bolt lights the map past the bar's
  * cut ends. */
@@ -7027,6 +7026,7 @@ static DWORD SaberPtArgb(const SaberPt *p)
     for (int j = 0; j < 4; j++) out = out << 8 | (DWORD)(int)(FireClamp(p->c[j], 0, 255) + 0.5f);
     return out;
 }
+/* A quad round from its top left: corners x, y, each its own colour (a plain quad's u, v unused). */
 static void SaberPut(int tex, int add, const float *x, const float *y, const DWORD *c, const float *uv)
 {
     static const float kWhole[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
@@ -7658,7 +7658,7 @@ static void SaberBuild(float W, float H, float shown, DWORD now)
 #define VBAR_TEX_H    64
 #define VBAR_UI_H     768.0f        /* a texel is the window's height over this (times the thickness) */
 #define VBAR_CAP_L    40            /* the frame's caps, in texels (the art's ends, its spike and its cup's wall): left, */
-#define VBAR_CAP_R    40            /* right; at any other width the middle between them is stretched, or cut, */
+#define VBAR_CAP_R    40            /* right; on a wider bar the middle between them is stretched (narrower: VBarAt), */
 #define VBAR_MID_LEAST 16           /* never to less than this */
 #define VBAR_CY       0.075f        /* its centre this far up from the bottom, of the height (the client's table, VA 0x7FFD34) */
 #define VBAR_C0       28            /* the channel behind the frame, in texels (a little under the metal, which hides */
@@ -7700,38 +7700,35 @@ static void VBarLayout(float W, float H, float *s, float *x0, float *y0, float *
     *y0 = H - VBAR_CY * H - VBAR_TEX_H * sc / 2;
     if (*y0 + VBAR_TEX_H * sc > H) *y0 = H - VBAR_TEX_H * sc;
 }
-/* The part of the art's middle drawn in a bar tw texels wide (*m0 to *m1 across): all of it on a bar as wide as the art
- * or wider (stretched); on a narrower one, a slice from its centre at the caps' own scale, cut, never squeezed (the
- * middle is the same all along, and squeezed it would be sampled from a coarser mip level than the caps: a smeared box
- * with a seam at each cap). */
-static void VBarMid(float tw, float *m0, float *m1)
-{
-    *m0 = (float)VBAR_CAP_L; *m1 = (float)(VBAR_TEX_W - VBAR_CAP_R);
-    if (tw < (float)VBAR_TEX_W) {
-        float half = (tw - (float)(VBAR_CAP_L + VBAR_CAP_R)) / 2, c = (*m0 + *m1) / 2;
-        *m0 = c - half; *m1 = c + half;
-    }
-}
-/* Where texel u of the art (0 to 512 across) is drawn, in a bar tw texels wide from x0 at s: the left cap as it is, the
- * middle stretched to fill (or, narrower, its centre cut to fit: VBarMid), the right cap as it is at the far end. */
+/* Where texel u of the art (0 to 512 across) is drawn, in a bar tw texels wide from x0 at s. As wide as the art or
+ * wider: the left cap as it is, the middle stretched to fill, the right cap as it is at the far end. Narrower: the art's
+ * two ends at their own scale, its left tw / 2 texels from the bar's left and its right tw / 2 to the bar's right,
+ * meeting at the bar's centre, the rest of its middle cut out, never squeezed (squeezed, the middle would be sampled
+ * from a coarser mip level than the caps: a smeared box with a seam at each cap; cut so, each cap meets its own
+ * middle as in the art, and the one joint is between two stretches of the middle's plain rail). */
 static float VBarAt(float u, float x0, float s, float tw)
 {
-    float m0, m1, right = (float)(VBAR_TEX_W - VBAR_CAP_R);
+    float mid = (float)(VBAR_TEX_W - VBAR_CAP_L - VBAR_CAP_R), right = (float)(VBAR_TEX_W - VBAR_CAP_R);
+    if (tw < (float)VBAR_TEX_W) {
+        if (u <= tw / 2) return x0 + u * s;
+        if (u >= (float)VBAR_TEX_W - tw / 2) return x0 + (tw - ((float)VBAR_TEX_W - u)) * s;
+        return x0 + tw / 2 * s;                                        /* (cut out: at the joint) */
+    }
     if (u <= VBAR_CAP_L) return x0 + u * s;
     if (u >= right) return x0 + (tw - ((float)VBAR_TEX_W - u)) * s;
-    VBarMid(tw, &m0, &m1);
-    return x0 + ((float)VBAR_CAP_L + (u - m0) * (tw - (float)(VBAR_CAP_L + VBAR_CAP_R)) / (m1 - m0)) * s;
+    return x0 + ((float)VBAR_CAP_L + (u - (float)VBAR_CAP_L) * (tw - (float)(VBAR_CAP_L + VBAR_CAP_R)) / mid) * s;
 }
-/* The art from texel u0 to u1 across and v0 to v1 down, its top at y0, in a bar tw texels wide from x0 at s: up to three
- * rectangles (the part over the left cap, over the middle, over the right cap), added when add (the flash). */
+/* The art from texel u0 to u1 across and v0 to v1 down, its top at y0, in a bar tw texels wide from x0 at s: as wide
+ * as the art or wider, up to three rectangles (the part over the left cap, over the middle, over the right cap);
+ * narrower, two (the art's left end and its right end, meeting at the bar's centre). Added when add (the flash). */
 static void VBarPiece(int tex, int add, float x0, float y0, float s, float tw, float u0, float v0, float u1, float v1, DWORD c)
 {
-    float m0, m1;
-    VBarMid(tw, &m0, &m1);
+    int narrow = tw < (float)VBAR_TEX_W, n = narrow ? 2 : 3;
     float cut[4] = { u0, (float)VBAR_CAP_L, (float)(VBAR_TEX_W - VBAR_CAP_R), u1 };
-    for (int i = 0; i < 3; i++) {
+    if (narrow) { cut[1] = tw / 2; cut[2] = u1; }
+    for (int i = 0; i < n; i++) {
         float a = cut[i] > u0 ? cut[i] : u0, b = cut[i + 1] < u1 ? cut[i + 1] : u1;
-        if (i == 1) { if (a < m0) a = m0; if (b > m1) b = m1; }       /* (the middle: the part of it drawn) */
+        if (narrow && i == 1 && a < (float)VBAR_TEX_W - tw / 2) a = (float)VBAR_TEX_W - tw / 2;   /* (the right end: from where it is kept) */
         if (!(b > a)) continue;
         ViewVert *q = ViewQuadMode(tex, add);
         if (!q) return;
