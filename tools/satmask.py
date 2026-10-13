@@ -26,7 +26,8 @@ The rule, per cell corner (4.17 yards apart) over a whole continent at once, the
     25_36, 26_36) is deep sea; and dry ground below FLOOR_YD is the open ocean's floor whatever its chunk's type (a
     chunk with no liquid at all at -515 in Azeroth 44_35 showed as a dark square in the sea), as is any liquid over
     such ground (four chunks of plain water at -23 and -11 over the floor in Kalimdor 26_54).
-  - Everything else is LAND, lakes, rivers, magma and slime included (they stay the render's own). Dry ground above
+  - Everything else is LAND, lakes, rivers, magma and slime included (they stay the render's own; a magma or slime
+    chunk is never sea whatever its level: Blackrock's lava moat, the coordinator's note, 13 Oct). Dry ground above
     FLOOR_YD never counts as sea for being low (Un'Goro's floor is 311 yards below the sea, Thousand Needles 93).
   land alpha = 1 - smoothstep(SHALLOW_YD, DEEP_YD, depth): 1 on land and in the render's own shallows, 0 where the sea
   is deep; land counts as depth (sea level - ground), never above 0, so the coast lies where the heights put it.
@@ -48,7 +49,7 @@ OCEAN = 2            # wtype: the client's ocean liquid
 LAND_D = -50.0       # the depth land counts as, far from the sea (enough to be alpha 1 whatever the placeholders)
 FLOOR_YD = -400.0    # dry ground below this is the open ocean's floor (the client's empty ocean tiles lie at -515;
                      # the lowest land is Un'Goro's floor at -311)
-VERSION = 6          # the rule's version: caches made by an older rule are not used
+VERSION = 7          # the rule's version: caches made by an older rule are not used
 
 
 def tile_file(c_map, X, Y, root=W3D):
@@ -94,6 +95,7 @@ class Continent:
         Wv = np.full((nr, nc), 0.0, np.float32)
         oc = np.zeros((nr, nc), bool)
         open_sea = np.ones((nr, nc), bool)                    # corners of tiles with no file
+        lava = np.zeros((nr, nc), bool)                       # corners of magma and slime chunks
         have = []
         for Y in range(Y0, Y1 + 1):
             for X in range(X0, X1 + 1):
@@ -108,6 +110,10 @@ class Continent:
                 big = np.repeat(np.repeat(wt == OCEAN, 8, 0), 8, 1)
                 o = np.zeros((129, 129), bool)
                 o[:-1, :-1] |= big; o[1:, :-1] |= big; o[:-1, 1:] |= big; o[1:, 1:] |= big
+                hot = np.repeat(np.repeat((wt == 3) | (wt == 4), 8, 0), 8, 1)     # magma and slime: never sea
+                k = np.zeros((129, 129), bool)
+                k[:-1, :-1] |= hot; k[1:, :-1] |= hot; k[:-1, 1:] |= hot; k[1:, 1:] |= hot
+                lava[r:r + 129, c:c + 129] = k
                 # a corner on a shared edge: the tile with a file wins over open sea; between two files the later
                 # one's corner stands (their heights agree but for the client's own seams)
                 H[r:r + 129, c:c + 129] = h
@@ -117,7 +123,7 @@ class Continent:
         wet = (Wv > -1e8) | open_sea
         ocean_w = wet & oc
         level = float(np.median(Wv[ocean_w])) if ocean_w.any() else 0.0
-        near = wet & (np.abs(Wv - level) < 2 * LEVEL_YD)
+        near = wet & (np.abs(Wv - level) < 2 * LEVEL_YD) & ~(lava & ~oc)
         lab, n = ndimage.label(near)                          # 4-connected, corner to corner
         seed = np.unique(lab[(ocean_w | open_sea) & near])
         sea = np.isin(lab, seed[seed > 0])
