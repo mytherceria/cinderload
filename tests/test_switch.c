@@ -497,6 +497,17 @@ static void FireTests(void)
     Client(0, 0.4f, 1); FireStep(shim_ticks += 20);
     Client(0x1234, 0, 1); FireStep(shim_ticks += 20);
     Check(strstr(g_calls, "create start-paused") && g_fire.stream, "and tried again at the next screen");
+    /* the screen's line with its bar's account as long as it runs (his logs, 12 Oct: every one of them 230 to 247
+     * characters, built in 220 bytes since 0.1.x): logged whole, never past its line */
+    float vh = g_viewH;
+    g_barsOn = 1; g_barShown = -1; g_mapShown = 1; g_viewH = 0.0236f; g_zoomHalf = 1; g_zoomStart = 0.5f;
+    g_destKnownPct = 100; g_destKnownWay = 2; g_driftResets = 9; g_musicFaded = 1; g_holdLast = 9900;
+    Client(0, 1, 1); FireStep(shim_ticks += 20);
+    Check(LogSays("its sound (hearth) played for") && LogSays(", its fire the pack's orange, the world map from 50% in, ending 21.2x in, "
+                                                            "the arrival known at 100% (the game's, written during it), 9 resets mid-screen"),
+          "a screen's line with its bar's account at its longest: logged whole");
+    g_barsOn = 0; g_mapShown = 0; g_zoomHalf = 0; g_zoomStart = 0; g_destKnownPct = -1; g_destKnownWay = 0; g_driftResets = 0;
+    g_musicFaded = 0; g_holdLast = 0; g_viewH = vh;
 
     Fresh("fire-no-files");
     GameDir();                                              /* the log goes to this folder */
@@ -12069,6 +12080,28 @@ static void TestOneMap(void)
     g_exPending = pending;
 }
 
+/* A message longer than a log line (his crash on fogtest, 12 Oct: the zones nearby under Searing Gorge, five of them
+ * named, 419 characters with the stamp, ran past the 400 bytes Log built each line in and over its return): written
+ * whole up to wsprintfA's most, 1024, and cut there beyond it, never past the line. */
+static void TestLogLine(void)
+{
+    Fresh("log-line");
+    Put(UW, "AAAA"); Put("WTF/Config.wtf", RES("5120x2160"));
+    Start();
+    static char msg[2001], want[1100];
+    for (int i = 0; i < 2000; i++) msg[i] = (char)('a' + i % 26);
+    msg[1000] = 0;
+    Log(msg);
+    want[0] = ' '; memcpy(want + 1, msg, 1000); memcpy(want + 1001, "\r\n", 3);
+    const char *g = Get("Logs/CinderLoad.log");
+    Check(g && strstr(g, want), "a 1000-character message: logged whole, on its own line");
+    msg[1000] = (char)('a' + 1000 % 26); msg[2000] = 0;
+    Log(msg);
+    want[0] = ' '; memcpy(want + 1, msg, 1024); memcpy(want + 1025, "\r\n", 3);
+    g = Get("Logs/CinderLoad.log");
+    Check(g && strstr(g, want), "a 2000-character message: cut to 1024, the line ended, nothing past it");
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -12288,6 +12321,7 @@ int main(int argc, char **argv)
     if (g_client) TestWarmClient(g_client);
     TestOneMap();
     TestOneMapHooks();
+    TestLogLine();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }

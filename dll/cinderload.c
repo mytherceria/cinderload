@@ -85,9 +85,11 @@ static void Log(const char *msg)
     if (h == INVALID_HANDLE_VALUE) return;
     SYSTEMTIME t;
     GetLocalTime(&t);
-    char line[400];
-    int len = wsprintfA(line, "%04d-%02d-%02d %02d:%02d:%02d %s\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
-                        t.wSecond, msg);
+    char line[20 + 1024 + 2];                                    /* the stamp, the message (wsprintfA's most, so any it made
+                                                                    fits whole; a longer one cut there), \r\n: never past it */
+    int len = wsprintfA(line, "%04d-%02d-%02d %02d:%02d:%02d ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    for (const char *s = msg; *s && len < (int)sizeof line - 2; s++) line[len++] = *s;
+    line[len++] = '\r'; line[len++] = '\n';
     DWORD wrote;
     WriteFile(h, line, (DWORD)len, &wrote, NULL);
     CloseHandle(h);
@@ -982,7 +984,7 @@ static void FireStep(DWORD now)
     int screen = *(volatile const unsigned int *)(base + FIRE_LAYER_RVA) != 0;
     float read = *(volatile const float *)(base + FIRE_PROGRESS_RVA);
     int up = *(volatile const unsigned char *)(base + FIRE_SOUNDUP_RVA) != 0;
-    char m[220];
+    char m[1024];                                /* (wsprintfA's most: the screen's line with its bar's account runs past 220) */
     if (!g_screenWatch) InterlockedExchange(&g_screenWatch, 1);   /* screens ending are watched for from now on */
 
     if (!up) {                                   /* the engine is closed: it took our stream with it, so no call */
