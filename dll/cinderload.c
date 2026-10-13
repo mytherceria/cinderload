@@ -8549,6 +8549,7 @@ static unsigned char *ParchTile(const char *folder, const char *name, int n, uns
 /* src (sw x sh RGBA) over the painting at x, y, as far as cw x ch of it, blended by its alpha (opaque when solid); an
  * overlay piece's alpha kept too (g_pieceA, a byte a texel at the painting's stride: the most of any piece's there). */
 static unsigned char *g_pieceA;
+static unsigned char *g_parchBaseL;          /* a zone's tiles' own lightness before any piece, at the map's size (ParchPaper) */
 static void ParchPut(const unsigned char *src, unsigned sw, unsigned sh, int x, int y, int cw, int ch, int solid)
 {
     for (int j = 0; j < ch && j < (int)sh; j++) {
@@ -8633,6 +8634,21 @@ static int ParchMakeNamed(const char *name, int id, int z, const char **why)
     if (g_pieceA) { HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL; }
     if (z >= 0 && g_pz[z].area)                                    /* (a zone's: where its pieces lie, for its cut) */
         g_pieceA = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)g_parchTW * (SIZE_T)g_parchTW);
+    if (g_parchBaseL) { HeapFree(GetProcessHeap(), 0, g_parchBaseL); g_parchBaseL = NULL; }
+    if (g_pieceA &&                                                /* (and its tiles' lightness, K x K texels a texel, before the
+                                                                    * pieces: what the map's own tiles draw, for ParchPaper) */
+        (g_parchBaseL = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)PARCH_MAP_W * PARCH_MAP_H)) != NULL) {
+        int K = g_parchK;
+        for (int y = 0; y < PARCH_MAP_H; y++)
+            for (int x = 0; x < PARCH_MAP_W; x++) {
+                unsigned s3[3] = { 0, 0, 0 };
+                for (int j = 0; j < K; j++)
+                    for (int i = 0; i < K; i++)
+                        for (int c = 0; c < 3; c++) s3[c] += g_parchPx[4 * ((unsigned)(y * K + j) * (unsigned)g_parchTW + (unsigned)(x * K + i)) + c];
+                float l = (0.30f * (float)s3[0] + 0.59f * (float)s3[1] + 0.11f * (float)s3[2]) / (float)(K * K);
+                g_parchBaseL[y * PARCH_MAP_W + x] = (unsigned char)(int)(l + 0.5f);
+            }
+    }
     for (int p = 0; p < g_ppN; p++) {                             /* the overlay pieces, as the world map lays them */
         const ParchPiece *P = &g_pp[p];
         if (P->zone != id) continue;
@@ -9268,6 +9284,7 @@ static void ParchFree(void)
     if (g_parchPx) { HeapFree(GetProcessHeap(), 0, g_parchPx); g_parchPx = NULL; }
     g_parchSheet = 0;
     if (g_pieceA) { HeapFree(GetProcessHeap(), 0, g_pieceA); g_pieceA = NULL; }
+    if (g_parchBaseL) { HeapFree(GetProcessHeap(), 0, g_parchBaseL); g_parchBaseL = NULL; }
     if (g_mipPx) { HeapFree(GetProcessHeap(), 0, g_mipPx); g_mipPx = NULL; }
     g_mipLevels = 0;
 }
@@ -9416,14 +9433,26 @@ static int ParchMatch(const ParchLow *L, ParchRect rf)
  * box, a body not its sum: made again. Never kept when a tile could not be read (out of memory, an I/O error): that
  * screen's zone is cut as though it had no land, and its land is read again the next time. The zone's
  * cut keeps every texel of its land whole (ParchLandCut), and the same grid, chunk for chunk, is each zone's share of the
- * map: no chunk is two zones' land. */
+ * map: no chunk is two zones' land. Another zone's dry land on the grid is marked too where that zone may be laid under
+ * this one as one of its zones nearby (LandMark: its page not a capital's or an instance entrance's, nor one this zone's
+ * own map paints) and lies inside that zone's page's box, where its painting is (LandInBox), with that zone's page,
+ * so this zone's plain paper there gives way to that zone's own painting (ParchPaper, ParchLandCut; his find, 11 Oct: a
+ * blank band along the whole northern edge of Duskwood from Eastvale Logging Camp, Elwynn's picture of Duskwood as
+ * plain parchment over Duskwood's painting). A chunk whose area is a zone's but which lies outside its page's box is
+ * not marked: no painting of that zone is ever there (chunks in the mountains north of Stormwind carry the
+ * Hinterlands' and Eastern Plaguelands' areas, 6,840 and 9,162 yards from their pages; a zone's terrain runs past its
+ * own page's box, Northwind's and Redridge's past theirs by Elwynn). */
 #define LAND_MAGIC      0x444E4C43u   /* "CLND" */
-#define LAND_VERSION    2             /* (2: its body's sum after the box; a version 1 file is made again) */
+#define LAND_VERSION    5             /* (2: its body's sum after the box; 3: the neighbours' land marked; 4: only inside their
+                                       * pages' boxes; 5: and each such chunk's page; an older file is made again) */
 #define LAND_HEAD       40            /* its header's bytes: magic, version, print, id, area, the box (4), its body's sum */
 #define LAND_CHUNKS     1024          /* the map's chunks across and down (64 tiles of 16) */
 #define ADT_OCEAN       0x8u          /* a chunk's header flags: ocean */
-typedef struct { int z, gx0, gy0, w, h, n, tiles, fromFile, unread; unsigned char *m; } ParchLand;   /* m: w x h, 1 the zone's own land,
-                                                       * 2 its own sea (its area's, under the sea); n: its land's chunks */
+#define LAND_THEIRS     3             /* a chunk of another zone's dry land inside its page's box, that zone one that may be laid
+                                       * under it */
+typedef struct { int z, gx0, gy0, w, h, n, tiles, fromFile, unread; unsigned char *m, *pg; } ParchLand;   /* m: w x h, 1 the zone's own land,
+                                                       * 2 its own sea (its area's, under the sea), LAND_THEIRS a neighbour's
+                                                       * land; n: its land's chunks */
 static ParchLand g_land;                      /* the land of the zone last cut */
 static unsigned g_landPrint;                  /* the archives' print (their sizes), once a session; 0 not yet */
 /* The client's terrain archives' print: each archive the terrain may come from (as ClientPicture tries them) and its
@@ -9502,7 +9531,13 @@ static int LandOwn(const ParchLand *L, int gx, int gy)
     gx -= L->gx0; gy -= L->gy0;
     return L->m && gx >= 0 && gy >= 0 && gx < L->w && gy < L->h && L->m[gy * L->w + gx] == 1;
 }
-static void ParchLandFree(ParchLand *L) { if (L->m) HeapFree(GetProcessHeap(), 0, L->m); L->m = NULL; L->n = 0; L->z = -1; }
+/* 1 when chunk gx, gy (any int) is a neighbour's land on L's grid (LAND_THEIRS). */
+static int LandTheirs(const ParchLand *L, int gx, int gy)
+{
+    gx -= L->gx0; gy -= L->gy0;
+    return L->m && gx >= 0 && gy >= 0 && gx < L->w && gy < L->h && L->m[gy * L->w + gx] == LAND_THEIRS;
+}
+static void ParchLandFree(ParchLand *L) { if (L->m) HeapFree(GetProcessHeap(), 0, L->m); L->m = L->pg = NULL; L->n = 0; L->z = -1; }
 /* A file of the game's folder (rel under it) read whole into buf (cap bytes at most): its size, or -1. */
 static int FileGet(const char *rel, void *buf, unsigned cap)
 {
@@ -9566,6 +9601,41 @@ static unsigned LandSum(const unsigned char *body, int bytes)
     for (int i = 0; i < bytes; i++) h = (h ^ body[i]) * 16777619u;
     return h;
 }
+static int ParchNearPage(int i);
+static int ParchPaintedBy(int z, int i);
+/* What a chunk of area on zone row z's grid is: 1 its own (its area's zone z's), LAND_THEIRS a neighbour's (its zone's page
+ * on z's map one that may be laid under z: ParchNearPage, not painted by z's own map; that page's row into *page, for
+ * LandInBox), else 0; theirs: each page's answer once asked (-1 not yet). */
+static int LandMark(int z, int area, signed char *theirs, int *page)
+{
+    int zone = AreaZone(area);
+    if (zone == g_pz[z].area) return 1;
+    int i = zone > 0 ? ParchPage(g_pz[z].map, zone) : -1;
+    if (i < 0 || i == z) return 0;
+    if (theirs[i] < 0) theirs[i] = (signed char)(ParchNearPage(i) && !ParchPaintedBy(z, i));
+    *page = i;
+    return theirs[i] ? LAND_THEIRS : 0;
+}
+/* 1 when chunk gx, gy's middle lies inside page i's box: where its painting is, laid under another zone. */
+static int LandInBox(int i, int gx, int gy)
+{
+    float ax, ay, bx, by, cx = (float)gx + 0.5f, cy = (float)gy + 0.5f;
+    LandChunkAt(g_pz[i].t, g_pz[i].l, &ax, &ay);
+    LandChunkAt(g_pz[i].b, g_pz[i].r, &bx, &by);
+    return cx > ax && cx < bx && cy > ay && cy < by;
+}
+/* page i's painting's own softness at grid point gx, gy (chunks, fractional): 1 inside its box but its last PARCH_FEATHER,
+ * to 0 at its box's edge (as a neighbour is laid: ParchNearLay) */
+static float LandFeather(int i, float gx, float gy)
+{
+    float ax, ay, bx, by;
+    LandChunkAt(g_pz[i].t, g_pz[i].l, &ax, &ay);
+    LandChunkAt(g_pz[i].b, g_pz[i].r, &bx, &by);
+    if (!(bx > ax && by > ay)) return 1;
+    float u = (gx - ax) / (bx - ax), v = (gy - ay) / (by - ay), eu = u < 1 - u ? u : 1 - u, ev = v < 1 - v ? v : 1 - v;
+    if (eu <= 0 || ev <= 0) return 0;
+    return ParchSmooth(eu / PARCH_FEATHER) * ParchSmooth(ev / PARCH_FEATHER);
+}
 /* Zone z's land (its row) into L: from its file when it is there whole and holds this box, the archives' print and its
  * body's sum, else from the tiles (and its file written when every tile was read): 1 when made (its land may be none: a
  * city inside its building, an instance's map), 0 and why not (a tile that could not be read among them: none kept). */
@@ -9586,8 +9656,10 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
     if (gx1 > LAND_CHUNKS - 1) gx1 = LAND_CHUNKS - 1;
     if (gy1 > LAND_CHUNKS - 1) gy1 = LAND_CHUNKS - 1;
     if (gx1 < gx0 || gy1 < gy0) { *why = "its box is off the map"; return 0; }
-    int w = gx1 - gx0 + 1, h = gy1 - gy0 + 1, bytes = (w * h + 3) / 4;
-    L->m = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)w * (SIZE_T)h);
+    int w = gx1 - gx0 + 1, h = gy1 - gy0 + 1, bytes = (w * h + 3) / 4 + w * h;   /* (its marks, 2 bits a chunk; each chunk's
+                                                                                 * neighbour's page) */
+    L->m = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)w * (SIZE_T)h * 2);
+    L->pg = L->m ? L->m + (SIZE_T)w * (SIZE_T)h : NULL;
     unsigned char *file = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)(LAND_HEAD + bytes));
     if (!L->m || !file) { if (file) HeapFree(GetProcessHeap(), 0, file); ParchLandFree(L); *why = "no memory for it"; return 0; }
     L->z = z; L->gx0 = gx0; L->gy0 = gy0; L->w = w; L->h = h;
@@ -9598,14 +9670,17 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
     int same = got == LAND_HEAD + bytes;
     for (int k = 0; same && k < 9; k++) same = Rd32(file + 4 * k) == head[k];
     if (same && Rd32(file + 36) == LandSum(file + LAND_HEAD, bytes)) {   /* (as kept) */
-        for (int i = 0; i < w * h; i++) { L->m[i] = (file[LAND_HEAD + i / 4] >> (2 * (i % 4))) & 3; L->n += L->m[i] == 1; }
+        for (int i = 0; i < w * h; i++) { L->m[i] = (file[LAND_HEAD + i / 4] >> (2 * (i % 4))) & 3; L->n += L->m[i] == 1; L->pg[i] = file[LAND_HEAD + bytes - w * h + i]; }
         L->fromFile = 1;
         HeapFree(GetProcessHeap(), 0, file);
         return 1;
     }
     static int area[256];
     static unsigned char dry[256];
-    int bad = 0;                                                    /* (tiles, or buildings, that could not be read) */
+    static signed char theirs[PARCH_ZONES];
+    for (int i = 0; i < PARCH_ZONES; i++) theirs[i] = -1;
+    int bad = 0, lastArea = 0, mark = 0, page = -1;                 /* (tiles, or buildings, that could not be read; the last
+                                                                     * area seen, what it is and its page) */
     for (int ty = gy0 / 16; ty <= gy1 / 16; ty++)
         for (int tx = gx0 / 16; tx <= gx1 / 16; tx++) {
             int r = LandTile(dir, tx, ty, area, dry);
@@ -9614,7 +9689,14 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
             L->tiles++;
             for (int c = 0; c < 256; c++) {
                 int gx = tx * 16 + c % 16, gy = ty * 16 + c / 16;
-                if (gx < gx0 || gx > gx1 || gy < gy0 || gy > gy1 || !area[c] || AreaZone(area[c]) != g_pz[z].area) continue;
+                if (gx < gx0 || gx > gx1 || gy < gy0 || gy > gy1 || !area[c]) continue;
+                if (area[c] != lastArea) { lastArea = area[c]; mark = LandMark(z, area[c], theirs, &page); }
+                if (mark == LAND_THEIRS && dry[c] && LandInBox(page, gx, gy)) {   /* (a neighbour's land where its painting is,
+                                                                                 * not its sea; and its page) */
+                    L->m[(gy - gy0) * w + gx - gx0] = LAND_THEIRS;
+                    L->pg[(gy - gy0) * w + gx - gx0] = (unsigned char)page;
+                }
+                if (mark != 1) continue;
                 L->m[(gy - gy0) * w + gx - gx0] = dry[c] ? 1 : 2;
                 L->n += dry[c];
             }
@@ -9630,7 +9712,7 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
         *why = "a tile of its terrain could not be read";
         return 0;
     }
-    for (int i = 0; i < w * h; i++) file[LAND_HEAD + i / 4] |= (unsigned char)((L->m[i] & 3) << (2 * (i % 4)));
+    for (int i = 0; i < w * h; i++) { file[LAND_HEAD + i / 4] |= (unsigned char)((L->m[i] & 3) << (2 * (i % 4))); file[LAND_HEAD + bytes - w * h + i] = L->pg[i]; }
     head[9] = LandSum(file + LAND_HEAD, bytes);
     for (int k = 0; k < 10; k++) { file[4 * k] = (unsigned char)head[k]; file[4 * k + 1] = (unsigned char)(head[k] >> 8); file[4 * k + 2] = (unsigned char)(head[k] >> 16); file[4 * k + 3] = (unsigned char)(head[k] >> 24); }
     FilePut(rel, file, (unsigned)(LAND_HEAD + bytes));
@@ -9904,20 +9986,19 @@ static void CutLay(const ParchLines *P, const unsigned char *reg, int cx0, int c
 }
 /* The painting in g_parchPx given its cut (inside: its own area, pw x ph): whole inside; outside, d texels from it, alpha 1
  * to PARCH_CUT_GROW - PARCH_CUT_BAND and smoothly to nothing at PARCH_CUT_GROW (scaled by K / 2), its colours toward a
- * softened copy by smooth(d / grow). 1 when done. */
-static int CutApply(const unsigned char *inside, int pw, int ph, int K)
+ * softened copy by smooth(d / grow). inside's bits (ParchLandCut): 1 whole, 2 whole only as its map's art over a
+ * neighbour's land (CUT_ART), 4 its plain paper over a neighbour's land (CUT_PAPER, never whole): that paper's margin
+ * is measured from the rest of what is whole, never from that art (so the paper past a mountain range or a river its
+ * map draws over the border does not lie on as a band), and it is there at least as near that art as PARCH_PAPER_SOFT
+ * (so the art's edge is soft). 1 when done. */
+#define CUT_WHOLE  1
+#define CUT_ART    2
+#define CUT_PAPER  4
+#define CUT_PIECE  8                  /* (ParchLandCut: an overlay piece's texel that has given way, whole before) */
+#define PARCH_PAPER_SOFT 12           /* (texels of an HD painting, scaled by K / 2, as the margin) */
+static void CutDistance(const unsigned char *inside, int mask, int want, unsigned short *d, int pw, int ph, unsigned short dmax)
 {
-    int T = g_parchTW, grow = PARCH_CUT_GROW * K / 2, band = PARCH_CUT_BAND * K / 2;
-    if (band > grow) band = grow;
-    if (band < 1) band = 1;
-    int c = (int)((float)(PARCH_CUT_BLUR * K) / 3.0f + 0.5f), nw, nh;    /* the softened copy: cells of c texels, softened thrice */
-    if (c < 1) c = 1;
-    nw = (pw + c - 1) / c; nh = (ph + c - 1) / c;
-    unsigned short *d = (unsigned short *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * sizeof(unsigned short));
-    float *g = (float *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)nw * (SIZE_T)nh * 3 + (SIZE_T)(nw > nh ? nw : nh)) * sizeof(float));
-    if (!d || !g || !g_parchPx) { if (d) HeapFree(GetProcessHeap(), 0, d); if (g) HeapFree(GetProcessHeap(), 0, g); return 0; }
-    unsigned short dmax = (unsigned short)(3 * (grow + 2));
-    for (int i = 0; i < pw * ph; i++) d[i] = inside[i] ? 0 : dmax;    /* the distance to it (3 a step across, 4 corner to corner) */
+    for (int i = 0; i < pw * ph; i++) d[i] = (inside[i] & mask) == want ? 0 : dmax;    /* (3 a step across, 4 corner to corner) */
     for (int y = 0; y < ph; y++)
         for (int x = 0; x < pw; x++) {
             int i = y * pw + x, v = d[i];
@@ -9942,6 +10023,28 @@ static int CutApply(const unsigned char *inside, int pw, int ph, int K)
             }
             d[i] = (unsigned short)v;
         }
+}
+static int CutApply(const unsigned char *inside, int pw, int ph, int K)
+{
+    int T = g_parchTW, grow = PARCH_CUT_GROW * K / 2, band = PARCH_CUT_BAND * K / 2;
+    if (band > grow) band = grow;
+    if (band < 1) band = 1;
+    int c = (int)((float)(PARCH_CUT_BLUR * K) / 3.0f + 0.5f), nw, nh;    /* the softened copy: cells of c texels, softened thrice */
+    if (c < 1) c = 1;
+    nw = (pw + c - 1) / c; nh = (ph + c - 1) / c;
+    unsigned short *d = (unsigned short *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * sizeof(unsigned short));
+    float *g = (float *)HeapAlloc(GetProcessHeap(), 0, ((SIZE_T)nw * (SIZE_T)nh * 3 + (SIZE_T)(nw > nh ? nw : nh)) * sizeof(float));
+    if (!d || !g || !g_parchPx) { if (d) HeapFree(GetProcessHeap(), 0, d); if (g) HeapFree(GetProcessHeap(), 0, g); return 0; }
+    unsigned short dmax = (unsigned short)(3 * (grow + 2)), *d2 = NULL;
+    int soft = PARCH_PAPER_SOFT * K / 2, paper = 0;
+    if (soft < 1) soft = 1;
+    for (int i = 0; i < pw * ph && !paper; i++) paper = (inside[i] & CUT_PAPER) != 0;
+    if (paper && !(d2 = (unsigned short *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * sizeof(unsigned short)))) {
+        HeapFree(GetProcessHeap(), 0, d); HeapFree(GetProcessHeap(), 0, g);
+        return 0;
+    }
+    CutDistance(inside, CUT_WHOLE, CUT_WHOLE, d, pw, ph, dmax);       /* (to all that is whole) */
+    if (d2) CutDistance(inside, CUT_WHOLE | CUT_ART, CUT_WHOLE, d2, pw, ph, dmax);   /* (and to it but its art over a neighbour) */
     for (int j = 0; j < nh; j++)                                      /* the softened copy's cells */
         for (int i = 0; i < nw; i++) {
             float s[3] = { 0, 0, 0 };
@@ -9959,8 +10062,11 @@ static int CutApply(const unsigned char *inside, int pw, int ph, int K)
         for (int x = 0; x < pw; x++) {
             int i = y * pw + x;
             if (!d[i]) continue;
-            if (d[i] >= 3 * grow) { g_parchPx[4 * ((unsigned)y * (unsigned)T + (unsigned)x) + 3] = 0; continue; }   /* (past the line: none) */
-            float dt = (float)d[i] / 3.0f, w = ParchSmooth(dt / (float)grow), al = 1 - ParchSmooth((dt - (float)(grow - band)) / (float)band);
+            int dm = d2 && (inside[i] & CUT_PAPER) ? d2[i] : d[i];          /* (its paper over a neighbour: from what is whole but
+                                                                         * that art) */
+            if (dm >= 3 * grow && (dm == d[i] || d[i] >= 3 * soft)) { g_parchPx[4 * ((unsigned)y * (unsigned)T + (unsigned)x) + 3] = 0; continue; }   /* (past the line: none) */
+            float dt = (float)dm / 3.0f, w = ParchSmooth(dt / (float)grow), al = 1 - ParchSmooth((dt - (float)(grow - band)) / (float)band);
+            if (dm != d[i]) { float as = 1 - ParchSmooth((float)d[i] / 3.0f / (float)soft); if (as > al) al = as; }
             float u = ((float)x + 0.5f) / (float)c - 0.5f;
             int i0 = u < 0 ? 0 : (int)u, i1 = i0 + 1 < nw ? i0 + 1 : i0;
             float fx = u < 0 ? 0 : u - (float)i0;
@@ -9975,6 +10081,7 @@ static int CutApply(const unsigned char *inside, int pw, int ph, int K)
     }
     HeapFree(GetProcessHeap(), 0, d);
     HeapFree(GetProcessHeap(), 0, g);
+    if (d2) HeapFree(GetProcessHeap(), 0, d2);
     return 1;
 }
 /* The painting in g_parchPx (placed at rf) cut to its own area as P (the coarser painting under it) draws it, from the
@@ -10087,8 +10194,15 @@ static int CutZoneSeeds(const ParchLines *P, ParchRect rz, int id, float fx, flo
  * those held made whole as the outline was (CutWhole), and none of it trusted when it covers under PARCH_LAND_FEW of the
  * land (a lake or a town in ink, not the zone). inside = its land, the outline where it lies within PARCH_LAND_EDGE
  * chunks of the land, and its overlay pieces as the client lays them (the map it shows for the zone: the skeptic's
- * measure of its own art, each piece against none); then the grown margin outside it, fading and softened, as before
- * (CutApply). A page with no land of its own (an instance's map) is cut to its outline as before (ParchCut). */
+ * measure of its own art, each piece against none), but not its plain paper and the names on it over a neighbour's
+ * land (LAND_THEIRS: a zone that may be laid under it, inside its page's box, its own painting there; ParchPaper), which
+ * over the neighbour's painting was a blank band (his find, 11 Oct: along the whole northern edge of Duskwood from
+ * Eastvale Logging Camp), nor a scrap of its drawing that paper leaves floating there; then the grown margin outside
+ * it, fading and softened, as before (CutApply): that paper's measured from the rest of it, not from its art over the
+ * neighbour, so from its own border it softens into the neighbour's painting as into the continent's, and it stays as
+ * much as the neighbour's own painting is soft at that neighbour's box's edge. Its art past its border (mountains,
+ * rivers, its places' names) stays whole as before. A page with no land of its own (an instance's map) is cut to its
+ * outline as before (ParchCut). */
 #define PARCH_LAND_EDGE  1            /* the outline refines the land's edge this many chunks past it at most */
 #define PARCH_LAND_NEAR  3            /* a fill's cells farther than this many chunks from the land are another zone's, */
 #define PARCH_LAND_LEAK  0.2f         /* and over this share of its cells there: it ran through a gap (not held) */
@@ -10108,6 +10222,173 @@ static void LandGrow(const ParchLand *L, int r, unsigned char *g)
                 for (int dx = 0; dx <= 2 * r; dx++) g[(y + dy) * W + x + dx] = 1;
         }
 }
+/* ---- the paper past a zone's border (his pick, 12 Oct, of the two fixes for the blank band along Duskwood's northern
+ * edge: only the paper gives way) ----
+ * Past its border a zone's map shows the land round it as plain parchment with the neighbours' names on it, and its
+ * overlay pieces carry that paper as far as they reach (Elwynn's 100 to 250 yards onto Duskwood: the band, its paper
+ * whole over Duskwood's painting). ParchPaper finds that paper on the zone's painting, at the map's own size (a texel
+ * K x K of the painting's): where few strokes are near (its lightness off the mean of the texels within PARCH_PAPER_HW
+ * by over PARCH_PAPER_INK, ink or a highlight, at under PARCH_PAPER_DENSE of the texels within PARCH_PAPER_DW), in the
+ * page's own paper's colour (its median where the tiles draw a neighbour's land, under no piece and few strokes; the
+ * client's pages' own when too few: PARCH_PAPER_TONE), and what the map's own tiles draw there (its lightness within
+ * PARCH_PAPER_BASE of theirs: a piece's own art and its places' names never are), in stretches of PARCH_PAPER_MIN texels
+ * or more. A mountain, a forest, a road, a river or a place's name past the border is not paper and stays whole; but a
+ * scrap of the drawing over a neighbour that its paper leaves floating there, cut off from the zone's own drawing (a
+ * letter of a neighbour's name the paper ringed, a mark: PARCH_PAPER_SCRAP texels at most), goes with the paper
+ * (ParchLandCut), so no letter is left on the neighbour's painting. Measured on the
+ * client's 74 zone pages, 12 Oct: their paper's red less green 19 to 57 and green less blue 27 to 83 from page to page
+ * (so each page's own), within a page about 9 and 14 either way; in a mountain range a tenth to a sixth of the texels
+ * about a texel are strokes (the middle half), on the paper under 4 in 100 (99% of it: its fibres); the name DUSKWOOD
+ * on Elwynn's map within 10 of the tiles' lightness (nine strokes in ten), Elwynn's own places' names 45 to 84 off it. */
+#define PARCH_PAPER_HW     8          /* (texels of the map's own size, 1002 x 668) */
+#define PARCH_PAPER_INK    30
+#define PARCH_PAPER_DW     6
+#define PARCH_PAPER_DENSE  0.04f
+#define PARCH_PAPER_RG     20         /* the colour (a 3 x 3 mean) within this of the page's paper's red less green, */
+#define PARCH_PAPER_GB     32         /* this of its green less blue, */
+#define PARCH_PAPER_L      50         /* and this of its lightness */
+#define PARCH_PAPER_BASE   24
+#define PARCH_PAPER_MIN    400
+#define PARCH_PAPER_TONE   2000       /* its paper sampled from this many texels at least, */
+#define PARCH_PAPER_DEFRG  41         /* else the pages' own: their medians' median */
+#define PARCH_PAPER_DEFGB  62
+#define PARCH_PAPER_DEFL   104
+#define PARCH_PAPER_JOIN   3          /* its drawing's strokes this far apart (either way) one drawing; */
+#define PARCH_PAPER_SCRAP  1500       /* one over a neighbour left floating on its paper, at most this many texels: with the
+                                       * paper (ParchLandCut) */
+/* in (W x H) averaged over the texels within r either way (the edges' repeated), into out; tmp as large */
+static void PaperBox(const float *in, float *out, float *tmp, int W, int H, int r)
+{
+    float k = 1.0f / (float)(2 * r + 1);
+    for (int y = 0; y < H; y++) {
+        const float *s = in + (SIZE_T)y * W;
+        float *d = tmp + (SIZE_T)y * W, sum = 0;
+        for (int q = -r; q <= r; q++) sum += s[q < 0 ? 0 : q >= W ? W - 1 : q];
+        for (int x = 0; x < W; x++) {
+            d[x] = sum * k;
+            int a = x - r, b = x + r + 1;
+            sum += s[b >= W ? W - 1 : b] - s[a < 0 ? 0 : a];
+        }
+    }
+    for (int x = 0; x < W; x++) {
+        float sum = 0;
+        for (int q = -r; q <= r; q++) sum += tmp[(SIZE_T)(q < 0 ? 0 : q >= H ? H - 1 : q) * W + x];
+        for (int y = 0; y < H; y++) {
+            out[(SIZE_T)y * W + x] = sum * k;
+            int a = y - r, b = y + r + 1;
+            sum += tmp[(SIZE_T)(b >= H ? H - 1 : b) * W + x] - tmp[(SIZE_T)(a < 0 ? 0 : a) * W + x];
+        }
+    }
+}
+/* c (W x H RGB) at x, y as a 3 x 3 mean: its red less green, green less blue and lightness */
+static void PaperColour(const unsigned char *c, int W, int H, int x, int y, float *rg, float *gb, float *l)
+{
+    float s[3] = { 0, 0, 0 };
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            int xx = x + i < 0 ? 0 : x + i >= W ? W - 1 : x + i, yy = y + j < 0 ? 0 : y + j >= H ? H - 1 : y + j;
+            for (int k = 0; k < 3; k++) s[k] += c[3 * ((SIZE_T)yy * W + xx) + k];
+        }
+    *rg = (s[0] - s[1]) / 9; *gb = (s[1] - s[2]) / 9; *l = (0.30f * s[0] + 0.59f * s[1] + 0.11f * s[2]) / 9;
+}
+/* the median of a histogram of cnt values (bin 0 = value lo) */
+static int PaperMedian(const int *h, int bins, int lo, int cnt)
+{
+    int run = 0;
+    for (int b = 0; b < bins; b++) if ((run += h[b]) * 2 >= cnt) return b + lo;
+    return lo;
+}
+/* The paper on the zone's painting in g_parchPx (its pieces in g_pieceA, its tiles' lightness in g_parchBaseL; L its land
+ * and gcol, grow each painting column's and row's chunk, for where its tiles draw a neighbour's land): a W x H mask at
+ * the map's own size, 1 paper (HeapFree it), or NULL (no memory, or no painting of a zone's: nothing is paper). */
+static unsigned char *ParchPaper(const ParchLand *L, const int *gcol, const int *grow)
+{
+    int K = g_parchK, W = PARCH_MAP_W, H = PARCH_MAP_H, T = g_parchTW;
+    SIZE_T n = (SIZE_T)W * H, nI = (SIZE_T)(W + 1) * (H + 1);
+    if (!g_parchPx || !g_pieceA || !g_parchBaseL || K < 1) return NULL;
+    unsigned char *c3 = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, n * 3), *m = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, n);
+    unsigned char *out = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n);
+    float *f0 = (float *)HeapAlloc(GetProcessHeap(), 0, nI * sizeof(float)), *f1 = (float *)HeapAlloc(GetProcessHeap(), 0, nI * sizeof(float));
+    float *f2 = (float *)HeapAlloc(GetProcessHeap(), 0, nI * sizeof(float));
+    if (!c3 || !m || !out || !f0 || !f1 || !f2) {
+        if (c3) HeapFree(GetProcessHeap(), 0, c3);
+        if (m) HeapFree(GetProcessHeap(), 0, m);
+        if (out) HeapFree(GetProcessHeap(), 0, out);
+        if (f0) HeapFree(GetProcessHeap(), 0, f0);
+        if (f1) HeapFree(GetProcessHeap(), 0, f1);
+        if (f2) HeapFree(GetProcessHeap(), 0, f2);
+        return NULL;
+    }
+    for (int y = 0; y < H; y++)                                         /* the painting at the map's size */
+        for (int x = 0; x < W; x++) {
+            unsigned s3[3] = { 0, 0, 0 };
+            for (int j = 0; j < K; j++)
+                for (int i = 0; i < K; i++)
+                    for (int c = 0; c < 3; c++) s3[c] += g_parchPx[4 * ((unsigned)(y * K + j) * (unsigned)T + (unsigned)(x * K + i)) + c];
+            SIZE_T o = (SIZE_T)y * W + x;
+            for (int c = 0; c < 3; c++) c3[3 * o + c] = (unsigned char)((s3[c] + (unsigned)(K * K) / 2) / (unsigned)(K * K));
+            f0[o] = 0.30f * c3[3 * o] + 0.59f * c3[3 * o + 1] + 0.11f * c3[3 * o + 2];
+        }
+    /* m: 1 a stroke, 2 the tiles' own, 4 few strokes near, 8 the paper's colour */
+    PaperBox(f0, f2, f1, W, H, PARCH_PAPER_HW);
+    for (SIZE_T i = 0; i < n; i++) { float d = f0[i] - f2[i]; m[i] = (unsigned char)(d > PARCH_PAPER_INK || d < -PARCH_PAPER_INK); }
+    for (SIZE_T i = 0; i < n; i++) { float d = f0[i] - (float)g_parchBaseL[i]; f2[i] = d < 0 ? -d : d; }
+    PaperBox(f2, f0, f1, W, H, 1);
+    for (SIZE_T i = 0; i < n; i++) if (f0[i] < PARCH_PAPER_BASE) m[i] |= 2;
+    for (SIZE_T i = 0; i < n; i++) f2[i] = (float)(m[i] & 1);
+    PaperBox(f2, f0, f1, W, H, PARCH_PAPER_DW);
+    for (SIZE_T i = 0; i < n; i++) if (f0[i] < PARCH_PAPER_DENSE) m[i] |= 4;
+    static int hrg[512], hgb[512], hl[256];                             /* the page's paper: where its tiles draw a neighbour's
+                                                                         * land, under no piece, few strokes near */
+    for (int i = 0; i < 512; i++) hrg[i] = hgb[i] = 0;
+    for (int i = 0; i < 256; i++) hl[i] = 0;
+    int cnt = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            if (!(m[(SIZE_T)y * W + x] & 4) || !LandTheirs(L, gcol[x * K], grow[y * K])) continue;
+            int bare = 1;
+            for (int j = 0; j < K && bare; j++)
+                for (int i = 0; i < K; i++) if (g_pieceA[(SIZE_T)(y * K + j) * T + (SIZE_T)(x * K + i)]) { bare = 0; break; }
+            if (!bare) continue;
+            float rg, gb, l;
+            PaperColour(c3, W, H, x, y, &rg, &gb, &l);
+            hrg[(int)FireClamp(rg + 255.5f, 0, 511)]++; hgb[(int)FireClamp(gb + 255.5f, 0, 511)]++; hl[(int)FireClamp(l + 0.5f, 0, 255)]++;
+            cnt++;
+        }
+    float trg = PARCH_PAPER_DEFRG, tgb = PARCH_PAPER_DEFGB, tl = PARCH_PAPER_DEFL;
+    if (cnt >= PARCH_PAPER_TONE) { trg = (float)PaperMedian(hrg, 512, -255, cnt); tgb = (float)PaperMedian(hgb, 512, -255, cnt); tl = (float)PaperMedian(hl, 256, 0, cnt); }
+    for (int y = 0; y < H; y++)                                         /* the paper */
+        for (int x = 0; x < W; x++) {
+            SIZE_T o = (SIZE_T)y * W + x;
+            if ((m[o] & 3) != 2) continue;                              /* (the tiles' own, no stroke) */
+            float rg, gb, l;
+            PaperColour(c3, W, H, x, y, &rg, &gb, &l);
+            float a = rg - trg, b = gb - tgb, c = l - tl;
+            if (a < PARCH_PAPER_RG && -a < PARCH_PAPER_RG && b < PARCH_PAPER_GB && -b < PARCH_PAPER_GB && c < PARCH_PAPER_L && -c < PARCH_PAPER_L) {
+                m[o] |= 8;                                              /* (the paper's colour) */
+                out[o] = (unsigned char)((m[o] & 4) != 0);
+            }
+        }
+    int *q = (int *)f1;                                                 /* (its stretches, side to side: under PARCH_PAPER_MIN
+                                                                         * dropped; 2 while kept) */
+    for (SIZE_T s = 0; s < n; s++) {
+        if (out[s] != 1) continue;
+        int nq = 0;
+        q[nq++] = (int)s; out[s] = 2;
+        for (int t = 0; t < nq; t++) {
+            int c = q[t], x = c % W, y = c / W;
+            if (x > 0 && out[c - 1] == 1) { out[c - 1] = 2; q[nq++] = c - 1; }
+            if (x < W - 1 && out[c + 1] == 1) { out[c + 1] = 2; q[nq++] = c + 1; }
+            if (y > 0 && out[c - W] == 1) { out[c - W] = 2; q[nq++] = c - W; }
+            if (y < H - 1 && out[c + W] == 1) { out[c + W] = 2; q[nq++] = c + W; }
+        }
+        if (nq < PARCH_PAPER_MIN) for (int t = 0; t < nq; t++) out[q[t]] = 0;
+    }
+    for (SIZE_T i = 0; i < n; i++) out[i] = (unsigned char)(out[i] ? 1 : (m[i] & 8) ? 2 : 0);   /* (2: like it, but near strokes) */
+    HeapFree(GetProcessHeap(), 0, c3); HeapFree(GetProcessHeap(), 0, m);
+    HeapFree(GetProcessHeap(), 0, f0); HeapFree(GetProcessHeap(), 0, f1); HeapFree(GetProcessHeap(), 0, f2);
+    return out;
+}
 /* The painting in g_parchPx (zone row z, at rf on the frame, on map) cut to its land L, its edge refined by P's lines
  * (above): its own share of its picture through *share, the outline's fills held through *held; 0 and why when its land
  * has nothing on its painting or there is no memory (then it is left as it was). */
@@ -10120,7 +10401,7 @@ static int ParchLandCut(const ParchLines *P, int map, ParchRect rf, const ParchL
     if (!L->m || !g_parchPx) { *why = "no land"; return 0; }
     unsigned char *inside = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * 2);
     unsigned char *eg = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)EW * EH + (SIZE_T)NW * NH);
-    int *gcol = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(pw + ph) * sizeof(int));
+    int *gcol = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(pw + ph) * (sizeof(int) + sizeof(float)));
     if (!inside || !eg || !gcol) {
         if (inside) HeapFree(GetProcessHeap(), 0, inside);
         if (eg) HeapFree(GetProcessHeap(), 0, eg);
@@ -10129,21 +10410,32 @@ static int ParchLandCut(const ParchLines *P, int map, ParchRect rf, const ParchL
     }
     unsigned char *outline = inside + (SIZE_T)pw * ph, *ng = eg + EW * EH;
     int *grow = gcol + pw;
+    float *fcol = (float *)(grow + ph), *frow = fcol + pw;             /* (as on the grid, for a neighbour's softness) */
     LandGrow(L, E, eg);
     LandGrow(L, N, ng);
     float gx, gy;
-    for (int x = 0; x < pw; x++) { FrameLand(map, rf.x0 + ((float)x + 0.5f) / (float)pw * (rf.x1 - rf.x0), rf.y0, &gx, &gy); gcol[x] = (int)gx - (gx < 0); }
-    for (int y = 0; y < ph; y++) { FrameLand(map, rf.x0, rf.y0 + ((float)y + 0.5f) / (float)ph * (rf.y1 - rf.y0), &gx, &gy); grow[y] = (int)gy - (gy < 0); }
+    for (int x = 0; x < pw; x++) { FrameLand(map, rf.x0 + ((float)x + 0.5f) / (float)pw * (rf.x1 - rf.x0), rf.y0, &gx, &gy); gcol[x] = (int)gx - (gx < 0); fcol[x] = gx; }
+    for (int y = 0; y < ph; y++) { FrameLand(map, rf.x0, rf.y0 + ((float)y + 0.5f) / (float)ph * (rf.y1 - rf.y0), &gx, &gy); grow[y] = (int)gy - (gy < 0); frow[y] = gy; }
     int nT = 0;
     for (int y = 0; y < ph; y++)                                       /* its land, whole */
         for (int x = 0; x < pw; x++) { int o = LandOwn(L, gcol[x], grow[y]); inside[y * pw + x] = (unsigned char)o; nT += o; }
+    unsigned char *paper = ParchPaper(L, gcol, grow);                  /* (the paper past its border: ParchPaper) */
     for (int y = 0; g_pieceA && y < ph; y++)                           /* and its overlay pieces as the client lays them, whole: the
                                                                         * map it shows for the zone (a capital's piece on its zone's
                                                                         * map too, Stormwind's on Elwynn's; a piece's art over its
-                                                                        * border, Northwind's northern hills) */
-        for (int x = 0; x < pw; x++) if (g_pieceA[(SIZE_T)y * (SIZE_T)g_parchTW + (SIZE_T)x] >= PARCH_LAND_PIECE) inside[y * pw + x] = 1;
+                                                                        * border, Northwind's mountains over the Burning Steppes, a
+                                                                        * place's name across it), but not its plain paper and the
+                                                                        * names on it over a neighbour's land, where that
+                                                                        * neighbour's own painting is */
+        for (int x = 0; x < pw; x++) {
+            if (g_pieceA[(SIZE_T)y * (SIZE_T)g_parchTW + (SIZE_T)x] < PARCH_LAND_PIECE || inside[y * pw + x]) continue;
+            if (!LandTheirs(L, gcol[x], grow[y])) inside[y * pw + x] = CUT_WHOLE;
+            else if (!paper || paper[(SIZE_T)(y / K) * PARCH_MAP_W + (SIZE_T)(x / K)] != 1) inside[y * pw + x] = CUT_WHOLE | CUT_ART;
+            else inside[y * pw + x] = CUT_PIECE;
+        }
     if (!nT) {
         HeapFree(GetProcessHeap(), 0, inside); HeapFree(GetProcessHeap(), 0, eg); HeapFree(GetProcessHeap(), 0, gcol);
+        if (paper) HeapFree(GetProcessHeap(), 0, paper);
         *why = "its land does not fall on its painting";
         return 0;
     }
@@ -10207,10 +10499,115 @@ static int ParchLandCut(const ParchLines *P, int map, ParchRect rf, const ParchL
         if (q) HeapFree(GetProcessHeap(), 0, q);
         if (sm) HeapFree(GetProcessHeap(), 0, sm);
     }
+    if (paper) {                                                       /* what the paper leaves floating over a neighbour: with it */
+        int W = PARCH_MAP_W, H = PARCH_MAP_H, r = PARCH_PAPER_JOIN;
+        unsigned char *sc = (unsigned char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)W * H * 3);
+        int *q = (int *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)W * H * sizeof(int));
+        if (sc && q) {
+            unsigned char *tmp = sc + (SIZE_T)W * H, *jn = tmp + (SIZE_T)W * H;   /* sc: 1 its drawing over a neighbour (kept whole so
+                                                                         * far), 2 the rest of it whole, 4 seen, 8 floating, 16 held
+                                                                         * (near what is whole); jn: its drawing grown by r */
+            for (int y = 0; y < ph; y++)
+                for (int x = 0; x < pw; x++) {
+                    unsigned char o = inside[y * pw + x];
+                    SIZE_T t = (SIZE_T)(y / K) * W + x / K;
+                    if ((o & CUT_ART) && !paper[t]) sc[t] |= 1;
+                    else if ((o & CUT_WHOLE) && !(o & CUT_ART)) sc[t] |= 2;
+                }
+            for (int y = 0; y < H; y++)                                /* (grown: along the rows, then the columns) */
+                for (int x = 0; x < W; x++) {
+                    unsigned char v = 0;
+                    for (int k = -r; k <= r && !v; k++) v = x + k >= 0 && x + k < W && (sc[y * W + x + k] & 1);
+                    tmp[y * W + x] = v;
+                }
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++) {
+                    unsigned char v = 0;
+                    for (int k = -r; k <= r && !v; k++) v = y + k >= 0 && y + k < H && tmp[(y + k) * W + x];
+                    jn[y * W + x] = v;
+                }
+            for (int s0 = 0; s0 < W * H; s0++) {                       /* each stretch of its drawing (strokes r apart joined): held
+                                                                         * when it meets the rest of it whole, else floating when no
+                                                                         * more than PARCH_PAPER_SCRAP texels of drawing */
+                if (!jn[s0] || (sc[s0] & 4)) continue;
+                int nq = 0, held = 0, nd = 0;
+                q[nq++] = s0; sc[s0] |= 4;
+                for (int t = 0; t < nq; t++) {
+                    int c = q[t], x = c % W, y = c / W;
+                    static const int dx[4] = { -1, 1, 0, 0 }, dy[4] = { 0, 0, -1, 1 };
+                    held |= sc[c] & 2;
+                    nd += sc[c] & 1;
+                    for (int k = 0; k < 4; k++) {
+                        int xx = x + dx[k], yy = y + dy[k];
+                        if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+                        int e = yy * W + xx;
+                        held |= sc[e] & 2;
+                        if (jn[e] && !(sc[e] & 4)) { sc[e] |= 4; q[nq++] = e; }
+                    }
+                }
+                if (!held && nd <= PARCH_PAPER_SCRAP) for (int t = 0; t < nq; t++) if (sc[q[t]] & 1) sc[q[t]] |= 8;
+            }
+            int nq = 0;                                                /* the paper's colour near strokes held as far as
+                                                                         * PARCH_PAPER_DW + 1 from what stays whole, else with the
+                                                                         * paper */
+            for (int c = 0; c < W * H; c++) {
+                tmp[c] = 255;
+                if ((sc[c] & 2) || ((sc[c] & 9) == 1)) { tmp[c] = 0; q[nq++] = c; }
+            }
+            for (int t = 0; t < nq; t++) {
+                int c = q[t], x = c % W, y = c / W;
+                if (tmp[c] >= PARCH_PAPER_DW + 1) continue;
+                for (int dy = -1; dy <= 1; dy++)
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int xx = x + dx, yy = y + dy;
+                        if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+                        int e = yy * W + xx;
+                        if (paper[e] == 2 && tmp[e] == 255) { tmp[e] = (unsigned char)(tmp[c] + 1); q[nq++] = e; }
+                    }
+            }
+            for (int y = 0; y < ph; y++)
+                for (int x = 0; x < pw; x++) {
+                    SIZE_T t = (SIZE_T)(y / K) * W + x / K;
+                    if ((inside[y * pw + x] & CUT_ART) && ((sc[t] & 8) || (paper[t] == 2 && tmp[t] == 255))) inside[y * pw + x] = CUT_PAPER | CUT_PIECE;
+                }
+        }
+        if (sc) HeapFree(GetProcessHeap(), 0, sc);
+        if (q) HeapFree(GetProcessHeap(), 0, q);
+    }
     int in = 0;
-    for (int i = 0; i < pw * ph; i++) in += inside[i];
+    for (int y = 0; y < ph; y++)                                       /* its plain paper over a neighbour's land, not whole: its
+                                                                        * margin from the rest of it (CutApply) */
+        for (int x = 0; x < pw; x++) {
+            unsigned char *o = inside + y * pw + x;
+            if (paper && !(*o & ~CUT_PIECE) && paper[(SIZE_T)(y / K) * PARCH_MAP_W + (SIZE_T)(x / K)] == 1 && LandTheirs(L, gcol[x], grow[y])) *o |= CUT_PAPER;
+            in += *o & CUT_WHOLE;
+        }
+    if (paper) HeapFree(GetProcessHeap(), 0, paper);
     *share = (float)in / (float)(pw * ph);
     if (ok && !CutApply(inside, pw, ph, K)) ok = 0;
+    unsigned short *d0 = ok && L->pg ? (unsigned short *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)pw * (SIZE_T)ph * sizeof(unsigned short)) : NULL;
+    if (d0) {                                                          /* its paper over a neighbour where that neighbour's own
+                                                                        * painting is soft at its box's edge (PARCH_FEATHER): there
+                                                                        * as much as that painting is not (of what it was before, its
+                                                                        * pieces whole and its margin from them), so the continent
+                                                                        * never shows through where neither is (a straight strip
+                                                                        * along the neighbour's box) */
+        int g0 = PARCH_CUT_GROW * K / 2;
+        if (g0 < 1) g0 = 1;
+        for (int i = 0; i < pw * ph; i++) if (inside[i] & CUT_PIECE) inside[i] |= CUT_WHOLE;   /* (as before: its pieces whole) */
+        CutDistance(inside, CUT_WHOLE, CUT_WHOLE, d0, pw, ph, (unsigned short)(3 * (g0 + 2)));
+        for (int y = 0; y < ph; y++)
+            for (int x = 0; x < pw; x++) {
+                if (!(inside[y * pw + x] & CUT_PAPER)) continue;
+                int cx = gcol[x] - L->gx0, cy = grow[y] - L->gy0;
+                if (cx < 0 || cy < 0 || cx >= L->w || cy >= L->h) continue;
+                float was = 1 - ParchSmooth((float)d0[y * pw + x] / 3.0f / (float)g0);
+                unsigned char *a = g_parchPx + 4 * ((unsigned)y * (unsigned)g_parchTW + (unsigned)x) + 3;
+                int lo = (int)(255 * was * (1 - LandFeather(L->pg[cy * L->w + cx], fcol[x], frow[y])) + 0.5f);
+                if (*a < lo) *a = (unsigned char)lo;
+            }
+        HeapFree(GetProcessHeap(), 0, d0);
+    }
     HeapFree(GetProcessHeap(), 0, inside); HeapFree(GetProcessHeap(), 0, eg); HeapFree(GetProcessHeap(), 0, gcol);
     if (!ok) *why = "no memory for its outline or its margin";
     return ok;
