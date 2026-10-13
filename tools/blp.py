@@ -115,3 +115,46 @@ def read_blp(data):
         out = px.reshape(bh, bw, 4, 4, 4).transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
         return out[:lh, :lw].astype(np.uint8)
     return info, decode
+
+
+def write_blp_mips(images, dst, best=False):
+    """A BLP2 DXT1 (no alpha) of the given levels exactly, level 0 first, each half the one before (the satellite's
+    detail tiles: their own area-averaged mips, down to 4 x 4, make_sat.py). ImageMagick compresses the list as it is
+    (dds:mipmaps=fromlist); best=True asks for its cluster fit (about 2 dB closer to the picture, about 300 times
+    slower). Returns (levels, bytes)."""
+    w, h = images[0].size
+    for k, im in enumerate(images):
+        if im.size != (max(1, w >> k), max(1, h >> k)):
+            raise SystemExit('level %d is %s, wanted %dx%d' % (k, im.size, max(1, w >> k), max(1, h >> k)))
+    if len(images) > 16:
+        raise SystemExit('a BLP2 holds 16 levels at most')
+    with tempfile.TemporaryDirectory() as tmp:
+        names = []
+        for k, im in enumerate(images):
+            names.append(os.path.join(tmp, 'l%02d.png' % k))
+            im.convert('RGB').save(names[-1])
+        dds = os.path.join(tmp, 'tex.dds')
+        subprocess.run(['magick'] + names + ['-alpha', 'off', '-define', 'dds:compression=dxt1',
+                                             '-define', 'dds:mipmaps=fromlist'] +
+                       (['-define', 'dds:cluster-fit=true'] if best else []) + [dds], check=True,
+                       env=dict(os.environ, MAGICK_THREAD_LIMIT=os.environ.get('MAGICK_THREAD_LIMIT', '1')))
+        data = open(dds, 'rb').read()
+    if data[:4] != b'DDS ' or data[84:88] != b'DXT1':
+        raise SystemExit('ImageMagick did not write a DXT1 DDS')
+    dh, dw = struct.unpack_from('<II', data, 12)
+    if (dw, dh) != (w, h) or struct.unpack_from('<I', data, 28)[0] != len(images):
+        raise SystemExit('the DDS is %dx%d in %d levels, wanted %dx%d in %d' % (
+            dw, dh, struct.unpack_from('<I', data, 28)[0], w, h, len(images)))
+    sizes = [max(1, (max(1, w >> k) + 3) // 4) * max(1, (max(1, h >> k) + 3) // 4) * 8 for k in range(len(images))]
+    if 128 + sum(sizes) != len(data):
+        raise SystemExit('the DDS is %d bytes, its levels want %d' % (len(data), 128 + sum(sizes)))
+    header_len = 4 + 4 + 4 + 8 + 64 + 64 + 1024          # 1172, as write_blp
+    offs, p = [], header_len
+    for s in sizes:
+        offs.append(p); p += s
+    header = b'BLP2' + struct.pack('<IBBBBII', 1, 2, 0, 0, 1 if len(sizes) > 1 else 0, w, h)
+    header += struct.pack('<16I', *(offs + [0] * (16 - len(offs)))) + struct.pack('<16I', *(sizes + [0] * (16 - len(sizes))))
+    header += bytes(1024)
+    with open(dst, 'wb') as f:
+        f.write(header + data[128:])
+    return len(sizes), os.path.getsize(dst)
