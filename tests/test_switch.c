@@ -12258,6 +12258,956 @@ static void TestLogLine(void)
     Check(g && strstr(g, want), "a 2000-character message: cut to 1024, the line ended, nothing past it");
 }
 
+/* ---- the satellite's detail (0.4.0, 13 Oct 2026, his ask: the satellite's stitched map replaced by the 3D render, the
+ * landing sharp): tiles of their own archive round the arrival, over the world map, fading in by the zoom ---- */
+static float SatF(unsigned u) { float f; memcpy(&f, &u, 4); return f; }
+/* map.txt's lines as 0.3.0 shipped them (au bu av bv), for 16x10, 16x9, 21x9 and 32x9 */
+static const unsigned kSatMapLines[4][2][4] = {
+    { { 0x3f38c841u, 0xb7b0e74cu, 0x3eb7a492u, 0xb80d880cu }, { 0x3e51ef63u, 0xb7b0e3a4u, 0x3f093200u, 0xb80d851fu } },
+    { { 0x3f3980fbu, 0xb79f37cfu, 0x3eb7a492u, 0xb80d880cu }, { 0x3e568a53u, 0xb79f3485u, 0x3f093200u, 0xb80d851fu } },
+    { { 0x3f3b1f01u, 0xb76ed5d0u, 0x3eb7a492u, 0xb80d880cu }, { 0x3e60d338u, 0xb76ed0e1u, 0x3f093200u, 0xb80d851fu } },
+    { { 0x3f3cc2bdu, 0xb71f37cfu, 0x3eb7a492u, 0xb80d880cu }, { 0x3e6b3c2au, 0xb71f3485u, 0x3f093200u, 0xb80d851fu } } };
+enum { SH_16x10, SH_16x9, SH_21x9, SH_32x9 };
+static void SatTestMap(int shape)
+{
+    g_map.ok = 1; g_map.endYards = 3500; g_map.pace = 7;
+    for (int c = 0; c < 2; c++) {
+        g_map.m[c].ok = 1;
+        g_map.m[c].au = SatF(kSatMapLines[shape][c][0]); g_map.m[c].bu = SatF(kSatMapLines[shape][c][1]);
+        g_map.m[c].av = SatF(kSatMapLines[shape][c][2]); g_map.m[c].bv = SatF(kSatMapLines[shape][c][3]);
+    }
+}
+/* A tile as make_sat.py writes one: BLP2, DXT1 without alpha, px square, every level to 4 x 4, each block one colour
+ * (col, 565). */
+static unsigned char *SatTestBlp(unsigned px, unsigned col, unsigned *len)
+{
+    unsigned total = 1172, sizes[16], w = px;
+    int levels = 0;
+    for (; w >= 4; w /= 2) { sizes[levels] = (w / 4) * (w / 4) * 8; total += sizes[levels]; levels++; }
+    unsigned char *d = calloc(1, total);
+    memcpy(d, "BLP2", 4); d[4] = 1; d[8] = 2; d[9] = 0; d[10] = 0; d[11] = 1;
+    memcpy(d + 12, &px, 4); memcpy(d + 16, &px, 4);
+    unsigned at = 1172;
+    for (int i = 0; i < levels; i++) {
+        memcpy(d + 20 + 4 * i, &at, 4); memcpy(d + 84 + 4 * i, &sizes[i], 4);
+        for (unsigned k = 0; k < sizes[i]; k += 8) { d[at + k] = d[at + k + 2] = (unsigned char)col; d[at + k + 1] = d[at + k + 3] = (unsigned char)(col >> 8); }
+        at += sizes[i];
+    }
+    *len = total;
+    return d;
+}
+static unsigned SatTestCol(int c, int X, int Y) { return (unsigned)(((X * 7 + Y * 13 + c * 29) & 31) << 11 | ((Y * 5 + 1) & 63) << 5 | ((X + 3) & 31)); }
+static int SatTestLevels(unsigned px) { int n = 0; for (; px >= 4; px /= 2) n++; return n; }
+/* An archive with more files than MakeMpq's (its hash table a power of two at least twice the files), files stored. */
+static void MakeMpqBig(const char *rel, int n, char (*names)[48], unsigned char **data, const unsigned *lens)
+{
+    unsigned hs = 64;
+    while (hs < 2u * (unsigned)n) hs *= 2;
+    size_t total = 32 + (size_t)hs * 16 + (size_t)n * 16;
+    for (int i = 0; i < n; i++) total += lens[i];
+    unsigned char *out = malloc(total);
+    unsigned *hash = malloc((size_t)hs * 16), *block = malloc((size_t)n * 16 + 16), at = 32;
+    memset(hash, 0xFF, (size_t)hs * 16);
+    for (int i = 0; i < n; i++) {
+        memcpy(out + at, data[i], lens[i]);
+        block[4 * i] = at; block[4 * i + 1] = lens[i]; block[4 * i + 2] = lens[i]; block[4 * i + 3] = 0x80000000u;
+        at += lens[i];
+        unsigned slot = HashName(names[i], 0) & (hs - 1);
+        while (hash[4 * slot + 3] != 0xFFFFFFFFu) slot = (slot + 1) & (hs - 1);
+        hash[4 * slot] = HashName(names[i], 1); hash[4 * slot + 1] = HashName(names[i], 2);
+        hash[4 * slot + 2] = 0; hash[4 * slot + 3] = (unsigned)i;
+    }
+    Encrypt(hash, hs * 4, HashName("(hash table)", 3));
+    Encrypt(block, (unsigned)n * 4, HashName("(block table)", 3));
+    unsigned hashOff = at, blockOff = at + hs * 16, size = blockOff + (unsigned)n * 16;
+    memcpy(out + hashOff, hash, (size_t)hs * 16);
+    memcpy(out + blockOff, block, (size_t)n * 16);
+    unsigned head[8] = { 0x1A51504Du, 32, size, 3u << 16, hashOff, blockOff, hs, (unsigned)n };
+    memcpy(out, head, 32);
+    char p[700];
+    snprintf(p, sizeof p, "%s%s", shim_gamedir, rel);
+    FILE *f = fopen(p, "wb");
+    fwrite(out, 1, size, f);
+    fclose(f);
+    free(out); free(hash); free(block);
+}
+/* CinderSat.MPQ for a test: sat.txt (px, levels, then a t line for each tile given) and each tile's BLP */
+#define SAT_TEST_FILES 700
+static char g_spNames[SAT_TEST_FILES][48];
+static unsigned char *g_spData[SAT_TEST_FILES];
+static unsigned g_spLens[SAT_TEST_FILES];
+static char g_spIdx[40000];
+static int g_spN;
+static void SatPackBegin(unsigned px)
+{
+    g_spN = 1;
+    snprintf(g_spIdx, sizeof g_spIdx, "# CinderSat: the satellite's detail (a test)\npx %u\nlevels %d\n", px, SatTestLevels(px));
+}
+/* tile c_X_Y: named in sat.txt (inIndex), in the archive as make_sat.py writes it, or as bytes given (bytes, len), or
+ * not at all (inArc 0) */
+static void SatPackTile(int c, int X, int Y, unsigned px, int inIndex, int inArc, const unsigned char *bytes, unsigned len)
+{
+    if (inIndex) snprintf(g_spIdx + strlen(g_spIdx), sizeof g_spIdx - strlen(g_spIdx), "t %d %d %d\n", c, X, Y);
+    if (!inArc || g_spN >= SAT_TEST_FILES) return;
+    snprintf(g_spNames[g_spN], 48, "CinderSat\\%d_%d_%d.blp", c, X, Y);
+    if (bytes) { g_spData[g_spN] = malloc(len); memcpy(g_spData[g_spN], bytes, len); g_spLens[g_spN] = len; }
+    else g_spData[g_spN] = SatTestBlp(px, SatTestCol(c, X, Y), &g_spLens[g_spN]);
+    g_spN++;
+}
+static void SatPackEnd(void)
+{
+    snprintf(g_spNames[0], 48, "CinderSat\\sat.txt");
+    g_spData[0] = (unsigned char *)g_spIdx; g_spLens[0] = (unsigned)strlen(g_spIdx);
+    MakeMpqBig("Data/CinderLoad/CinderSat.MPQ", g_spN, g_spNames, g_spData, g_spLens);
+    for (int i = 1; i < g_spN; i++) free(g_spData[i]);
+}
+/* every tile in X0..X1 by Y0..Y1 of continent c (a block of the world) */
+static void SatPackBlock(int c, int X0, int X1, int Y0, int Y1, unsigned px)
+{
+    for (int Y = Y0; Y <= Y1; Y++) for (int X = X0; X <= X1; X++) SatPackTile(c, X, Y, px, 1, 1, NULL, 0);
+}
+/* The tests' OpenGL for the detail's tiles (gl, as the 32-bit build's): each texture's levels, format and parameters
+ * kept, by name */
+#define TSAT_NAMES 4096
+static struct { int levels, w0, fmt, rgba, maxLevel, minf, magf, wrapS, wrapT, deleted, made; long bytes; unsigned char px0[4]; } g_tsat[TSAT_NAMES];
+static unsigned g_tsatBound, g_tsatNext, g_tsatErr;
+static int g_tsatRefuse;                                 /* the next texture to be given (1: the next) OpenGL refuses */
+static long g_tsatBytes;
+static int g_tsatDeleted, g_tsatMade;
+static int TsatOk(void) { return g_tsatBound > 0 && g_tsatBound < TSAT_NAMES; }
+static void TsatGen(int n, unsigned *names) { for (int i = 0; i < n; i++) { names[i] = ++g_tsatNext; if (names[i] < TSAT_NAMES) { memset(&g_tsat[names[i]], 0, sizeof g_tsat[0]); g_tsat[names[i]].made = 1; } g_tsatMade++; } }
+static void TsatBind(unsigned t, unsigned name) { (void)t; g_tsatBound = name; }
+static void TsatParam(unsigned t, unsigned p, int v)
+{
+    (void)t;
+    if (!TsatOk()) return;
+    if (p == GL_TEXTURE_MAX_LEVEL_) g_tsat[g_tsatBound].maxLevel = v;
+    if (p == GL_TEXTURE_MIN_FILTER_) g_tsat[g_tsatBound].minf = v;
+    if (p == GL_TEXTURE_MAG_FILTER_) g_tsat[g_tsatBound].magf = v;
+    if (p == GL_TEXTURE_WRAP_S_) g_tsat[g_tsatBound].wrapS = v;
+    if (p == GL_TEXTURE_WRAP_T_) g_tsat[g_tsatBound].wrapT = v;
+}
+static void TsatStore(unsigned p, int v) { (void)p; (void)v; }
+static unsigned TsatError(void) { unsigned e = g_tsatErr; g_tsatErr = 0; return e; }
+static void TsatLevel(int level, int w, int h, long bytes)
+{
+    if (!TsatOk() || w != h || level != g_tsat[g_tsatBound].levels) { g_tsatErr = 1; return; }
+    if (!level) { g_tsat[g_tsatBound].w0 = w; if (g_tsatRefuse > 0 && --g_tsatRefuse == 0) g_tsatErr = 0x505; }
+    else if (w != (g_tsat[g_tsatBound].w0 >> level ? g_tsat[g_tsatBound].w0 >> level : 1)) g_tsatErr = 1;
+    g_tsat[g_tsatBound].levels++;
+    g_tsat[g_tsatBound].bytes += bytes;
+    g_tsatBytes += bytes;
+}
+static void TsatImage(unsigned t, int level, int ifmt, int w, int h, int b, unsigned f, unsigned ty, const void *px)
+{
+    (void)t; (void)ifmt; (void)b; (void)f; (void)ty;
+    TsatLevel(level, w, h, 4L * w * h);
+    if (TsatOk()) { g_tsat[g_tsatBound].rgba = 1; if (!level) memcpy(g_tsat[g_tsatBound].px0, px, 4); }
+}
+static void TsatComp(unsigned t, int level, unsigned fmt, int w, int h, int b, int size, const void *d)
+{
+    (void)t; (void)b; (void)d;
+    if (size != ((w + 3) / 4) * ((h + 3) / 4) * 8) g_tsatErr = 1;
+    TsatLevel(level, w, h, size);
+    if (TsatOk()) g_tsat[g_tsatBound].fmt = (int)fmt;
+}
+static void TsatDelete(int n, const unsigned *names)
+{
+    for (int i = 0; i < n; i++) {
+        if (names[i] < TSAT_NAMES && g_tsat[names[i]].made && !g_tsat[names[i]].deleted) { g_tsat[names[i]].deleted = 1; g_tsatDeleted++; }
+        else g_tsatErr = 2;                              /* (a name not made, or deleted twice) */
+    }
+}
+static void TestSatGl(int on, int s3tc)
+{
+    gl.GenTextures = on ? TsatGen : NULL; gl.BindTexture = on ? TsatBind : NULL; gl.TexParameteri = on ? TsatParam : NULL;
+    gl.TexImage2D = on ? TsatImage : NULL; gl.TexSubImage2D = NULL; gl.PixelStorei = on ? TsatStore : NULL;
+    gl.GetError = on ? TsatError : NULL; gl.CompressedTexImage2D = on && s3tc ? TsatComp : NULL;
+    gl.DeleteTextures = on ? TsatDelete : NULL;
+    g_view.s3tc = on && s3tc; g_view.maxTex = 4096;
+    if (on) g_tsatNext = 0;                              /* (names from 1 again: the last test's all deleted) */
+    g_tsatBound = 0; g_tsatErr = 0; g_tsatRefuse = 0; g_tsatBytes = 0; g_tsatDeleted = g_tsatMade = 0;
+}
+static int TsatLive(void) { int n = 0; for (unsigned i = 1; i <= g_tsatNext && i < TSAT_NAMES; i++) n += g_tsat[i].made && !g_tsat[i].deleted; return n; }
+/* this screen's arrival known, as DriftStep keeps it; a new screen */
+static void SatArrive(int c, float x, float y) { g_destOk = 1; g_destMap = c; g_destWX = x; g_destWY = y; }
+static void SatNewScreen(void) { InterlockedIncrement(&g_viewScreen); g_destOk = 0; g_destMap = -1; }
+/* the view centred on world x, y of continent c, yards tall (a square in u, v, as DriftStep makes it) */
+static void SatView(int c, float x, float y, float yards)
+{
+    float u = g_map.m[c].au + g_map.m[c].bu * y, v = g_map.m[c].av + g_map.m[c].bv * x;
+    float h = 0.5f * yards * (g_map.m[c].bv < 0 ? -g_map.m[c].bv : g_map.m[c].bv);
+    float uv[8] = { u - h, v + h, u + h, v + h, u - h, v - h, u + h, v - h };
+    memcpy(g_bgUV, uv, sizeof uv);
+}
+/* the detail's batches in the list now: how many, and the first's index (-1 none) */
+static int SatBatches(int *first)
+{
+    int n = 0;
+    if (first) *first = -1;
+    for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex >= VT_COUNT) { if (first && *first < 0) *first = b; n++; }
+    return n;
+}
+/* the batch drawing tile X, Y (its slot's texture), or -1 */
+static int SatBatchOf(int X, int Y)
+{
+    int i = g_ssAt[Y * SAT_GRID + X] - 1;
+    return i < 0 ? -1 : TestBatch(VT_COUNT + i);
+}
+/* the detail's state all gone, as a fresh session's (between the tests) */
+static void SatTestReset(void)
+{
+    SatRelease();
+    for (int k = 0; k < 4 && g_sj.state == 3; k++) SatWorkerTurn();   /* (a job left stale freed, as its worker would) */
+    InterlockedExchange(&g_sjWorker, 0);
+    g_sat.ok = 0;
+    g_parchOn = 0; g_destOk = 0; g_destMap = -1;
+    TestSatGl(0, 0);
+}
+/* a satellite screen's frame for the detail: its work (SatWork), then its list (the map, the detail) at now */
+static void SatFrame(DWORD now, float W, float H)
+{
+    SatWork(now);
+    ViewListStart();
+    ViewRect(VT_MAP, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
+    SatBuild(W, H, now);
+}
+
+static void TestSatGeometry(void)
+{
+    /* Goldshire's inn, -9464, 62: the client's Azeroth_31_49, 0.884 along (west to east) and 0.745 down (north to south),
+     * the master's pixel 904, 762 of its 1024 (looked at: the Lion's Pride Inn at the crossroads) */
+    int X = -1, Y = -1, ok;
+    float u = -1, v = -1;
+    ok = SatTileOf(-9464, 62, &X, &Y, &u, &v) && X == 31 && Y == 49 && (int)(u * 1024) == 904 && (int)(v * 1024) == 762;
+    ok &= SatTileOf(1629, -4373, &X, &Y, &u, &v) && X == 40 && Y == 28 && (int)(u * 1024) == 204 && (int)(v * 1024) == 968;   /* Orgrimmar */
+    ok &= !SatTileOf(17100, 0, &X, &Y, &u, &v) && !SatTileOf(0, -17100, &X, &Y, &u, &v);   /* off the grid */
+    /* both ways: each pixel's centre of a tile, as make_sat.py places it, back to that tile and pixel */
+    for (int r = 0; r < 512; r += 37)
+        for (int c = 0; c < 512; c += 41) {
+            float wx = SAT_ORIGIN - (49 + (r + 0.5f) / 512) * SAT_TILE, wy = SAT_ORIGIN - (31 + (c + 0.5f) / 512) * SAT_TILE;
+            ok &= SatTileOf(wx, wy, &X, &Y, &u, &v) && X == 31 && Y == 49 && (int)(u * 512) == c && (int)(v * 512) == r;
+        }
+    Check(ok, "the satellite's detail: a world place's tile as the client names it, X from y and Y from x (Goldshire's inn, -9464, 62: Azeroth_31_49 at the master's pixel 904, 762; Orgrimmar: Kalimdor_40_28 at 204, 968), each pixel's centre back to its tile and pixel");
+    /* on the overview, at every shape: the tile's rect through map.txt's own line holds the place where MapPlace puts it,
+     * at the same fraction across and down; its size 533.33 yards each way through bu and bv; neighbours share edges */
+    ok = 1;
+    static const float places[3][3] = { { 0, -9464, 62 }, { 1, 1629, -4373 }, { 1, 7980, -2501 } };   /* (Moonglade's) */
+    for (int sh = 0; sh < 4; sh++) {
+        SatTestMap(sh);
+        for (int p = 0; p < 3; p++) {
+            int c = (int)places[p][0];
+            float x = places[p][1], y = places[p][2], du, dv, hEnd, u0, v0, u1, v1, a0, b0, a1, b1;
+            ok &= MapPlace((unsigned)c, x, y, 0, 0, &du, &dv, &hEnd) && SatTileOf(x, y, &X, &Y, &u, &v);
+            SatTileUV(c, X, Y, &u0, &v0, &u1, &v1);
+            ok &= u0 < du && du < u1 && v0 < dv && dv < v1;
+            ok &= Near((du - u0) / (u1 - u0), u, 2e-3) && Near((dv - v0) / (v1 - v0), v, 2e-3);
+            ok &= Near(u1 - u0, SAT_TILE * -g_map.m[c].bu, 1e-7) && Near(v1 - v0, SAT_TILE * -g_map.m[c].bv, 1e-7);
+            SatTileUV(c, X + 1, Y, &a0, &b0, &a1, &b1); ok &= a0 == u1 && b0 == v0 && b1 == v1;   /* east neighbour */
+            SatTileUV(c, X, Y + 1, &a0, &b0, &a1, &b1); ok &= b0 == v1 && a0 == u0 && a1 == u1;   /* south neighbour */
+        }
+    }
+    g_map.ok = 0;
+    Check(ok, "the satellite's detail: each tile placed on the overview through map.txt's own line, at 16x10, 16x9, 21x9 and 32x9: Goldshire, Orgrimmar and Moonglade inside their tiles where MapPlace puts them, at the same fraction, each tile 533.33 yards a side on the picture, neighbours sharing their edges exactly");
+}
+
+static void TestSatIndex(void)
+{
+    static const char good[] =
+        "# CinderSat: the satellite's detail\r\n"
+        "px 512\r\nlevels 8\r\n"
+        "t 0 31 49\r\nt 0 32 49\n"
+        "\tt\t1  40 28  # Orgrimmar\n"
+        "t 0 31 49\n"                                        /* (the same twice: once) */
+        "t 2 31 49\nt 0 64 49\nt 0 31 -1\nt 0 3x 49\nt 0 31\nt 0 31 49 7\nt0 1 1\n"   /* (none of these) */
+        "levels 99\npx 384\nwhat 1 2 3\n"
+        "t 1 0 63";                                          /* (the last line without its end) */
+    int ok = SatParse(good, (unsigned)strlen(good)) && g_sat.px == 512 && g_sat.levels == 8 && g_sat.tiles == 4;
+    ok &= SatBit(g_sat.has[0], 31, 49) && SatBit(g_sat.has[0], 32, 49) && SatBit(g_sat.has[1], 40, 28) && SatBit(g_sat.has[1], 0, 63);
+    ok &= !SatBit(g_sat.has[1], 31, 49) && !SatBit(g_sat.has[0], 40, 28) && !SatBit(g_sat.has[0], 1, 1);
+    static const char noPx[] = "levels 8\nt 0 31 49\n", noTiles[] = "px 256\nlevels 7\n# none\n", odd[] = "px 300\nt 0 1 1\n";
+    ok &= !SatParse(noPx, sizeof noPx - 1) && !SatParse(noTiles, sizeof noTiles - 1) && !SatParse(odd, sizeof odd - 1);
+    ok &= SatParse("px 256\nt 1 2 3", 14) && g_sat.px == 256 && g_sat.tiles == 1 && SatBit(g_sat.has[1], 2, 3);
+    g_sat.ok = 0;
+    Check(ok, "the satellite's detail: sat.txt read (px, levels and each tile's line on either continent, '#' comments, CRLF or LF, tabs, a last line without its end, a tile named twice counted once); a line it cannot read passed over (a continent past 1, a column past 63, a word for a number, a number short or one too many); no px, a px not a power of two, or no tile: not used");
+}
+
+static void TestSatMissing(void)
+{
+    Fresh("sat-missing"); GameDir();
+    SatTestReset();
+    long heap = shim_heap_live;
+    SatRead();
+    int ok = !g_sat.ok && LogSays("no Data\\CinderLoad\\CinderSat.MPQ, so the satellite draws its world map alone, as 0.3.0 did");
+    SatWorkerStart();
+    ok &= !g_sjWorker;                                                   /* (no worker for nothing) */
+    SatTestMap(SH_21x9); g_mapShown = 1;
+    SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    TestSatGl(1, 1);
+    for (int f = 0; f < 5; f++) SatFrame(1000 + 7 * f, 5120, 2160);
+    ok &= SatBatches(NULL) == 0 && g_vbN == 1 && g_ssN == 0 && !g_satFor.on && g_tsatMade == 0 && shim_heap_live == heap;
+    /* the same through ViewBuild: the map, then the overlay as 0.3.0 had it, no detail batch */
+    g_ovOn = 0; g_viewTex[VT_MAP] = 1;
+    ViewBuild(5120, 2160, 1.0f, 2000);
+    ok &= g_vb[0].tex == VT_MAP && SatBatches(NULL) == 0;
+    /* an index the reader cannot use: said, and the same */
+    Fresh("sat-badindex"); GameDir();
+    SatPackBegin(512);
+    snprintf(g_spIdx, sizeof g_spIdx, "# nothing usable\nlevels 8\n");
+    SatPackTile(0, 31, 49, 64, 0, 1, NULL, 0);
+    SatPackEnd();
+    SatRead();
+    ok &= !g_sat.ok && LogSays("names no tile size (px), so the satellite draws its world map alone, as 0.3.0 did");
+    SatTestReset(); g_viewTex[VT_MAP] = 0; g_map.ok = 0;
+    Check(ok, "the satellite's detail: no Data\\CinderLoad\\CinderSat.MPQ, or an index it cannot use: said in the log, no worker, nothing read or given to OpenGL, and the satellite's frame as 0.3.0 drew it (the map, then the overlay, no detail)");
+}
+
+static void TestSatSet(void)
+{
+    /* every tile there: the landing view's (the end's height, the view's square in u, v) and one ring round them */
+    Fresh("sat-set"); GameDir();
+    SatTestReset();
+    static char all[2 * 64 * 64 * 12 + 64];
+    int n = snprintf(all, sizeof all, "px 512\nlevels 8\n");
+    for (int c = 0; c < 2; c++) for (int Y = 0; Y < 64; Y++) for (int X = 0; X < 64; X++) n += snprintf(all + n, sizeof all - n, "t %d %d %d\n", c, X, Y);
+    g_sat.ok = SatParse(all, (unsigned)n);
+    g_view.s3tc = 1;
+    static const struct { int sh, c; float x, y; int X0, X1, Y0, Y1; } want[] = {      /* (worked out in yards, apart) */
+        { SH_16x10, 0, -9464, 62, 25, 38, 45, 54 }, { SH_16x9, 1, 1629, -4373, 33, 47, 24, 33 },
+        { SH_21x9, 0, -9464, 62, 23, 40, 45, 54 }, { SH_21x9, 1, 7980, -2501, 27, 45, 12, 21 },
+        { SH_32x9, 0, -8913, 554, 18, 43, 44, 52 }, { SH_32x9, 0, -14354, 518, 18, 43, 54, 63 } };
+    int ok = g_sat.ok && g_sat.tiles == 2 * 64 * 64;
+    for (unsigned k = 0; k < sizeof want / sizeof want[0]; k++) {
+        SatTestMap(want[k].sh);
+        SatRelease();
+        int got = SatWant(want[k].c, want[k].x, want[k].y, 1, 1000);
+        int count = (want[k].X1 - want[k].X0 + 1) * (want[k].Y1 - want[k].Y0 + 1);
+        ok &= got == count && g_ssN == count && g_satFor.X0 == want[k].X0 && g_satFor.X1 == want[k].X1 &&
+              g_satFor.Y0 == want[k].Y0 && g_satFor.Y1 == want[k].Y1;
+        int X, Y; float u, v;
+        SatTileOf(want[k].x, want[k].y, &X, &Y, &u, &v);
+        ok &= g_ss[0].X == X && g_ss[0].Y == Y && g_ss[0].c == want[k].c && g_ss[0].st == SAT_WANT;   /* its own tile first */
+        float fx = (SAT_ORIGIN - want[k].y) / SAT_TILE, fy = (SAT_ORIGIN - want[k].x) / SAT_TILE, last = 0;
+        for (int i = 0; i < g_ssN; i++) {                                 /* then nearer to farther */
+            float ex = g_ss[i].X + 0.5f - fx, ey = g_ss[i].Y + 0.5f - fy, d = ex * ex + ey * ey;
+            ok &= d >= last - 1e-4f && g_ssAt[g_ss[i].Y * SAT_GRID + g_ss[i].X] == i + 1;
+            last = d;
+        }
+    }
+    /* only the tiles the archive has (a hole, the sea left out); never a tile that would not read */
+    SatTestMap(SH_21x9); SatRelease();
+    for (int X = 23; X <= 40; X++) g_sat.has[0][(50 * 64 + X) >> 3] &= (unsigned char)~(1u << ((50 * 64 + X) & 7));
+    SatBitSet(g_sat.bad[0], 31, 49);
+    ok &= SatWant(0, -9464, 62, 1, 1000) == 180 - 18 - 1 && g_ssAt[49 * 64 + 31] == 0 && g_ssAt[50 * 64 + 30] == 0 && g_ssAt[51 * 64 + 31] > 0;
+    /* the budget: the nearest as many as SAT_BUDGET holds (1024-px tiles: 699 KB each, so 72), the rest left out */
+    SatRelease();
+    g_sat.px = 1024;
+    ok &= SatTileBytes(1) == 699048 && SatWant(0, -9464, 62, 1, 1000) == 72 && g_ssN == 72 && g_satFor.cut == 180 - 18 - 1 - 72;
+    /* without DXT: the tiles counted decoded (256 px, 349 KB), so fewer */
+    SatRelease();
+    g_sat.px = 512;
+    g_view.s3tc = 0;
+    ok &= SatWant(0, -9464, 62, 1, 1000) == 144 && SatTileBytes(0) == 4 * (256 * 256 + 128 * 128 + 64 * 64 + 32 * 32 + 16 * 16 + 8 * 8 + 4 * 4);
+    g_view.s3tc = 1;
+    /* SAT_MAX at the most: a landing view four times as tall (no map.txt has one: the cap holds) */
+    SatRelease();
+    memset(g_sat.bad, 0, sizeof g_sat.bad);
+    for (int i = 0; i < (int)sizeof g_sat.has[0]; i++) g_sat.has[0][i] = 0xFF;
+    g_map.endYards = 14000; g_sat.px = 64;                               /* (small tiles: the budget holds them all) */
+    ok &= SatWant(0, -9464, 62, 1, 1000) == SAT_MAX && g_ss[0].X == 31 && g_ss[0].Y == 49;
+    g_map.endYards = 3500; g_sat.px = 512;
+    /* kept inside the picture as DriftStep keeps the view: an arrival at its very edge (Kalimdor's grid reaches past the
+     * picture's top: v 0.0005 is world x 15887, row 2), the set the view's there, the edge's row first, 2h down last */
+    SatRelease();
+    float xEdge = (0.0005f - g_map.m[1].av) / g_map.m[1].bv;
+    SatWant(1, xEdge, -4000, 1, 1000);
+    float u0, v0, u1, v1, h = 0.5f * 3500 * -g_map.m[1].bv;
+    SatTileUV(1, 40, g_satFor.Y0 + SAT_RING, &u0, &v0, &u1, &v1);
+    ok &= g_ssN > 0 && v0 <= 0 && v1 > 0;                                /* (the first row inside the ring: on the edge) */
+    SatTileUV(1, 40, g_satFor.Y1 - SAT_RING, &u0, &v0, &u1, &v1);
+    ok &= v0 <= 2 * h + 1e-6f && v1 > 2 * h - 1e-6f;                     /* (and the last: 2h down, the view's bottom) */
+    ok &= g_satFor.Y0 == 1 && g_satFor.Y1 == 9;                          /* (not 0-6, as centred on the arrival) */
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail: the set is the landing view's tiles (the end's height, the screen's shape through map.txt) and one ring round them, the arrival's own first, then nearer to farther: Goldshire 25-38 by 45-54 at 16x10, 23-40 at 21x9 (180 tiles); Orgrimmar, Moonglade, Stormwind, Booty Bay at the grid's edge; only tiles the archive has and that read; at the most SAT_MAX and SAT_BUDGET's bytes (counted decoded without DXT), the nearest kept; kept inside the picture at its edge as the view is");
+}
+
+/* the 21x9 world round Goldshire packed as tiles of px (X0..X1 by Y0..Y1), the index read, OpenGL given (s3tc) */
+static void SatTestWorld(const char *name, unsigned px, int X0, int X1, int Y0, int Y1, int s3tc)
+{
+    Fresh(name); GameDir();
+    SatTestReset();
+    SatTestMap(SH_21x9);
+    SatPackBegin(px);
+    SatPackBlock(0, X0, X1, Y0, Y1, px);
+    SatPackEnd();
+    SatRead();
+    TestSatGl(1, s3tc);
+}
+static int SatUpCount(void) { int n = 0; for (int i = 0; i < g_ssN; i++) n += g_ss[i].st == SAT_UP; return n; }
+static int SatSlotOf(int X, int Y) { return g_ssAt[Y * SAT_GRID + X] - 1; }
+
+static void TestSatRead(void)
+{
+    SatTestWorld("sat-read", 64, 25, 40, 45, 54, 1);                    /* (the sea west of 25 left out) */
+    int ok = g_sat.ok && g_sat.tiles == 160 && g_sat.px == 64 && LogSays("160 tiles of 64 px (5 levels) in Data\\CinderLoad\\CinderSat.MPQ");
+    long heap = shim_heap_live;
+    SatNewScreen();
+    SatWork(1000);                                                       /* (no arrival yet: nothing) */
+    ok &= !g_satFor.on && g_tsatMade == 0;
+    SatArrive(0, -9464, 62); SatView(0, -9464, 62, 20000);
+    SatWork(1007);
+    int s0 = SatSlotOf(31, 49);
+    ok &= g_ssN == 160 && s0 == 0 && SatUpCount() == 160 && g_tsatMade == 160 && g_satFor.read == 160 && g_satFor.up == 160;
+    unsigned first = g_satTex[0];
+    ok &= first == 1;                                                    /* (the arrival's own tile up first) */
+    for (int i = 0; i < g_ssN; i++) {
+        unsigned t = g_satTex[i];
+        ok &= t && t < TSAT_NAMES && g_tsat[t].fmt == GL_DXT1_RGB_ && g_tsat[t].levels == 5 && g_tsat[t].w0 == 64 &&
+              g_tsat[t].maxLevel == 4 && g_tsat[t].minf == GL_LINEAR_MIPMAP_LINEAR_ && g_tsat[t].magf == GL_LINEAR_ &&
+              g_tsat[t].wrapS == GL_CLAMP_TO_EDGE_ && g_tsat[t].wrapT == GL_CLAMP_TO_EDGE_ && !g_tsat[t].rgba &&
+              g_tsat[t].bytes == (16 * 16 + 8 * 8 + 4 * 4 + 2 * 2 + 1) * 8;
+    }
+    ok &= shim_heap_live == heap && g_tsatErr == 0 && g_sj.state == 0 && g_squ.at == g_squ.n;   /* (every tile's bytes freed once up) */
+    SatScreenEnd();
+    ok &= LogSays("the satellite's detail: 160 tiles wanted round the arrival (map 0, tile 31_49; tiles 23-40 by 45-54), 160 read in");
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail: read from CinderSat.MPQ with our own reader as the arrival is known, only the tiles the archive has, the arrival's own first; each given to OpenGL whole, its DXT1 blocks as they are (GL_COMPRESSED_RGB_S3TC_DXT1), every level to 4 x 4, smooth between levels, clamped at its edges; every tile's bytes freed once up; the screen's line in the log");
+}
+
+static void TestSatBudget(void)
+{
+    /* 512-px tiles (171 KB on OpenGL each): 12 a frame at 165 Hz (6 ms: SAT_UP_BYTES, 2 MB), 34 at 60 Hz (17 ms) */
+    SatTestWorld("sat-budget", 512, 27, 34, 47, 51, 1);                 /* 40 tiles */
+    long heap = shim_heap_live;
+    SatNewScreen();
+    SatWork(1000);
+    SatArrive(0, -9464, 62); SatView(0, -9464, 62, 20000);
+    SatWork(1006);
+    int ok = SatUpCount() == 12 && g_tsatBytes == 12L * 174760 && g_tsatBytes <= (long)SatUpBudget(6);
+    ok &= g_satTex[0] && SatSlotOf(31, 49) == 0;                         /* (nearest first) */
+    for (int i = 0; i < g_ssN; i++) ok &= (g_ss[i].st == SAT_UP) == (i < 12);
+    SatWork(1012);
+    ok &= SatUpCount() == 24;
+    SatWork(1029);                                                       /* (17 ms: 34 at the most; 16 left) */
+    ok &= SatUpCount() == 40 && shim_heap_live == heap;
+    ok &= SatUpBudget(6) == SAT_UP_BYTES && SatUpBudget(17) == 17u * SAT_UP_RATE && SatUpBudget(40) == SAT_UP_MOST &&
+          SatUpBudget(1) == SAT_UP_BYTES && SatUpBudget(100000) == SAT_UP_MOST;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail: given to OpenGL a frame at the most as many bytes as SatUpBudget gives (the parchment's rule, its own numbers: 2 MB at 165 Hz's 6 ms, 6 MB at the most), one tile at the least: 12 tiles of 512 px a frame at 165 Hz, the nearest first, all 40 by the third frame");
+}
+
+static void TestSatFail(void)
+{
+    Fresh("sat-fail"); GameDir();
+    SatTestReset();
+    SatTestMap(SH_21x9);
+    SatPackBegin(64);
+    for (int Y = 47; Y <= 51; Y++)
+        for (int X = 28; X <= 34; X++) {
+            unsigned n = 0;
+            unsigned char *b = NULL;
+            if (X == 32 && Y == 49) { SatPackTile(0, X, Y, 64, 1, 0, NULL, 0); continue; }        /* named, not in it */
+            if (X == 30 && Y == 49) { SatPackTile(0, X, Y, 64, 1, 1, (const unsigned char *)"BLP2junk", 8); continue; }
+            if (X == 31 && Y == 50) b = TestPalBlp(64, 64, 0x123456, 0, &n);                          /* a palette BLP */
+            if (X == 33 && Y == 49) b = BlpMake(64, 32, 1, 5, 1, &n);                                   /* not square */
+            if (X == 30 && Y == 50) b = BlpMake(2048, 2048, 1, 1, 0, &n);                               /* past SAT_PX_MOST */
+            if (X == 29 && Y == 48) { unsigned m; unsigned char *t = SatTestBlp(64, 0xF800, &m); n = 1172 + 1000; b = malloc(n); memcpy(b, t, n); free(t); }   /* cut short */
+            SatPackTile(0, X, Y, 64, 1, 1, b, n);
+            free(b);
+        }
+    SatPackEnd();
+    SatRead();
+    TestSatGl(1, 1);
+    long heap = shim_heap_live;
+    SatNewScreen(); SatWork(1000);
+    SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    SatWork(1007);
+    static const int badXY[6][2] = { { 32, 49 }, { 30, 49 }, { 31, 50 }, { 33, 49 }, { 30, 50 }, { 29, 48 } };
+    int ok = g_ssN == 35 && SatUpCount() == 29 && g_satFor.failed == 6 && shim_heap_live == heap;
+    for (int k = 0; k < 6; k++) {
+        int s = SatSlotOf(badXY[k][0], badXY[k][1]);
+        ok &= s >= 0 && g_ss[s].st == SAT_GONE && !g_satTex[s] && SatBit(g_sat.bad[0], badXY[k][0], badXY[k][1]);
+    }
+    /* the tiles round one that would not read: soft toward it (each corner as the weakest tile round it), whole elsewhere
+     * (corners: top left, top right, bottom right, bottom left) */
+    SatFrame(1500, 5120, 2160);
+    int b = SatBatchOf(31, 48);                                          /* (31_48: 30_49 and 32_49 south of it gone) */
+    const ViewVert *q = b >= 0 ? g_vv + g_vb[b].first : NULL;
+    ok &= q && q[0].c[3] == 255 && q[1].c[3] == 255 && q[2].c[3] == 0 && q[3].c[3] == 0;
+    b = SatBatchOf(29, 50);                                              /* (29_50: 30_49 north-east, 30_50 east gone) */
+    q = b >= 0 ? g_vv + g_vb[b].first : NULL;
+    ok &= q && q[0].c[3] == 255 && q[1].c[3] == 0 && q[2].c[3] == 0 && q[3].c[3] == 255;
+    b = SatBatchOf(33, 51);                                              /* (33_51: the set's south edge under it) */
+    q = b >= 0 ? g_vv + g_vb[b].first : NULL;
+    ok &= q && q[0].c[3] == 255 && q[1].c[3] == 255 && q[2].c[3] == 0 && q[3].c[3] == 0;
+    ok &= SatBatchOf(30, 49) < 0 && SatBatchOf(32, 49) < 0;              /* (not up: not drawn) */
+    ok &= g_ss[SatSlotOf(31, 49)].st == SAT_UP && SatBatchOf(31, 49) < 0;   /* (up, but every corner at a tile gone: none of it) */
+    SatScreenEnd();
+    ok &= LogSays("29 up (") && LogSays("; 6 would not read (");
+    /* the next screen at the same place: never read again this session */
+    SatRelease(); SatNewScreen(); SatWork(3000);
+    SatArrive(0, -9464, 62);
+    SatWork(3007);
+    ok &= g_ssN == 29 && SatUpCount() == 29 && g_satFor.failed == 0 && SatSlotOf(32, 49) < 0;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail: a tile sat.txt names that the archive lacks, and one not a square DXT BLP2 of 1024 px at the most (junk, a palette BLP, not square, 2048 px, cut short): not up, not drawn, the tiles round it soft toward it, said in the screen's line, never read again this session; the rest up, every byte freed");
+}
+
+static void TestSatNoDxt(void)
+{
+    /* a driver without DXT: each 512-px tile decoded from its level 1 (256 px), opaque, its levels as RGBA */
+    SatTestWorld("sat-nodxt", 512, 30, 32, 48, 50, 0);
+    long heap = shim_heap_live;
+    SatNewScreen(); SatWork(1000);
+    SatArrive(0, -9464, 62);
+    SatWork(1100);
+    unsigned t = g_satTex[0];
+    unsigned col = SatTestCol(0, 31, 49);
+    unsigned char rgb[3];
+    Dxt565(col, rgb);
+    int ok = g_ssN == 9 && SatUpCount() >= 1 && t && g_tsat[t].rgba && g_tsat[t].w0 == 256 && g_tsat[t].levels == 7 &&
+             g_tsat[t].maxLevel == 6 && g_tsat[t].bytes == 4L * (256 * 256 + 128 * 128 + 64 * 64 + 32 * 32 + 16 * 16 + 8 * 8 + 4 * 4) &&
+             g_tsat[t].px0[0] == rgb[0] && g_tsat[t].px0[1] == rgb[1] && g_tsat[t].px0[2] == rgb[2] && g_tsat[t].px0[3] == 255;
+    for (int f = 0; f < 10; f++) SatWork(1200 + 17 * f);
+    ok &= SatUpCount() == 9 && shim_heap_live == heap;
+    /* with DXT, OpenGL's largest texture under the tile: from the first level it takes */
+    SatTestReset();
+    SatTestWorld("sat-maxtex", 512, 30, 32, 48, 50, 1);
+    g_view.maxTex = 128;
+    SatNewScreen(); SatWork(1000); SatArrive(0, -9464, 62); SatWork(1100);
+    t = g_satTex[0];
+    ok &= SatUpCount() == 9 && t && !g_tsat[t].rgba && g_tsat[t].fmt == GL_DXT1_RGB_ && g_tsat[t].w0 == 128 && g_tsat[t].levels == 6 &&
+          g_tsat[t].maxLevel == 5;
+    /* and none it takes at all: not up, said */
+    SatRelease(); memset(g_sat.bad, 0, sizeof g_sat.bad);
+    g_view.maxTex = 2;
+    SatNewScreen(); SatWork(2000); SatArrive(0, -9464, 62); SatWork(2100);
+    ok &= SatUpCount() == 0 && g_satFor.failed == 9;
+    SatScreenEnd();
+    ok &= LogSays("9 would not read (too large for its OpenGL)");
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail on a driver without DXT: each 512-px tile decoded from its first level no wider than 256, opaque (DXT1 without alpha), its levels as RGBA, counted at that size; with DXT, OpenGL's largest texture under a tile: from the first level it takes; none it takes: not up, said");
+}
+
+static void TestSatRefused(void)
+{
+    SatTestWorld("sat-refused", 64, 28, 34, 47, 51, 1);
+    long heap = shim_heap_live;
+    g_tsatRefuse = 3;                                                    /* (the third texture: OpenGL's memory full) */
+    SatNewScreen(); SatWork(1000); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    SatWork(1007);
+    int ok = SatUpCount() == 2 && g_satFor.refused == 1 && g_tsatMade == 3 && g_tsatDeleted == 1 && TsatLive() == 2;
+    for (int f = 0; f < 5; f++) SatWork(1100 + 7 * f);
+    ok &= SatUpCount() == 2 && g_tsatMade == 3 && g_sj.state == 0 && g_squ.n == 0 && shim_heap_live == heap;   /* (no more this screen) */
+    SatFrame(1200, 5120, 2160);
+    ok &= SatBatches(NULL) == 2 || SatBatches(NULL) == 0;               /* (the two up, or none: never the refused one) */
+    ok &= g_ss[2].st == SAT_GONE && !g_satTex[2];
+    SatScreenEnd();
+    ok &= LogSays("OpenGL would not take one, so no more were given it this screen");
+    SatRelease();
+    ok &= TsatLive() == 0;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail: OpenGL refusing a tile (its memory full): its texture deleted at once, that tile never drawn, none more given to OpenGL or read this screen, every byte freed, said in the screen's line");
+}
+
+static void TestSatDraw(void)
+{
+    SatTestWorld("sat-draw", 64, 23, 40, 45, 54, 1);                    /* (the whole set: 180) */
+    float W = 5120, H = 2160;
+    SatNewScreen(); SatWork(1000);
+    SatArrive(0, -9464, 62); SatView(0, -9464, 62, 20000);
+    SatWork(1007);
+    int ok = g_ssN == 180 && SatUpCount() == 180;
+    /* the zoom: none while the view is twice the end's height (7000 yards) or more; whole by 1.25 times (4375), even
+     * between; never by the bar */
+    static const float yards[6] = { 20000, 7001, 7000, 5687.5f, 4375, 3500 };   /* (0.3.0's end: 3500) */
+    int alpha[6];
+    for (int k = 0; k < 6; k++) {
+        SatView(0, -9464, 62, yards[k]);
+        SatFrame(1500, W, H);
+        int b = SatBatchOf(31, 49);
+        alpha[k] = b < 0 ? -1 : g_vv[g_vb[b].first].c[3];
+    }
+    ok &= alpha[0] == -1 && alpha[1] == -1 && alpha[2] == -1 && alpha[3] == 128 && alpha[4] == 255 && alpha[5] == 255;
+    /* drawn straight over the map, one batch a tile: where map.txt puts it through the view's corners */
+    SatView(0, -9464, 62, 3500);
+    SatFrame(1500, W, H);
+    int first, n = SatBatches(&first);
+    ok &= g_vb[0].tex == VT_MAP && first == 1 && n > 100;
+    for (int b = 1; b < 1 + n; b++) ok &= g_vb[b].tex >= VT_COUNT && g_vb[b].count == 4 && !g_vb[b].add;
+    int b = SatBatchOf(31, 49);
+    float u0, v0, u1, v1;
+    SatTileUV(0, 31, 49, &u0, &v0, &u1, &v1);
+    const ViewVert *q = b >= 0 ? g_vv + g_vb[b].first : NULL;
+    float du = g_bgUV[2] - g_bgUV[4], dv = g_bgUV[3] - g_bgUV[5];
+    ok &= q && Near(q[0].x, (u0 - g_bgUV[4]) / du * W, 0.01) && Near(q[0].y, (v0 - g_bgUV[5]) / dv * H, 0.01) &&
+          Near(q[2].x, (u1 - g_bgUV[4]) / du * W, 0.01) && Near(q[2].y, (v1 - g_bgUV[5]) / dv * H, 0.01) &&
+          q[1].x == q[2].x && q[1].y == q[0].y && q[3].x == q[0].x && q[3].y == q[2].y &&
+          q[0].u == 0 && q[0].v == 0 && q[2].u == 1 && q[2].v == 1 && q[1].u == 1 && q[1].v == 0 && q[3].u == 0 && q[3].v == 1 &&
+          q[0].c[0] == 255 && q[0].c[1] == 255 && q[0].c[2] == 255;
+    /* the arrival where MapPlace puts it on the overview is in its tile's quad at its own place in the tile (905, 763) */
+    float pu, pv, ph;
+    MapPlace(0, -9464, 62, 0, 0, &pu, &pv, &ph);
+    float sx = (pu - g_bgUV[4]) / du * W, sy = (pv - g_bgUV[5]) / dv * H;
+    int ix, iy;
+    float iu, iv;
+    SatTileOf(-9464, 62, &ix, &iy, &iu, &iv);
+    ok &= q && Near((sx - q[0].x) / (q[2].x - q[0].x), iu, 1e-3) && Near((sy - q[0].y) / (q[2].y - q[0].y), iv, 1e-3);
+    /* neighbours meet exactly: no seam, no overlap */
+    int e = SatBatchOf(32, 49), s2 = SatBatchOf(31, 50);
+    ok &= e >= 0 && s2 >= 0 && g_vv[g_vb[e].first].x == q[1].x && g_vv[g_vb[s2].first].y == q[3].y;
+    /* the set's edge soft: the ring's outer corners none, the rest whole (the view 1.25 times the end: the ring in sight) */
+    SatView(0, -9464, 62, 4375);
+    SatFrame(1500, W, H);
+    int west = SatBatchOf(23, 49), in = SatBatchOf(24, 49);
+    ok &= west >= 0 && g_vv[g_vb[west].first].c[3] == 0 && g_vv[g_vb[west].first + 3].c[3] == 0 &&
+          g_vv[g_vb[west].first + 1].c[3] == 255 && g_vv[g_vb[west].first + 2].c[3] == 255;
+    ok &= in >= 0 && g_vv[g_vb[in].first].c[3] == 255 && g_vv[g_vb[in].first + 1].c[3] == 255 &&
+          g_vv[g_vb[in].first + 2].c[3] == 255 && g_vv[g_vb[in].first + 3].c[3] == 255;
+    int north = SatBatchOf(31, 45);
+    ok &= north >= 0 && g_vv[g_vb[north].first].c[3] == 0 && g_vv[g_vb[north].first + 1].c[3] == 0 &&
+          g_vv[g_vb[north].first + 2].c[3] == 255 && g_vv[g_vb[north].first + 3].c[3] == 255;
+    /* off the screen: left out (the landing at a third of the end's height: the ring's far columns out of sight) */
+    SatView(0, -9464, 62, 1200);
+    SatFrame(1500, W, H);
+    ok &= SatBatchOf(40, 49) < 0 && SatBatchOf(23, 49) < 0 && SatBatchOf(31, 49) >= 0;
+    /* each tile fading up over 400 ms from when it went up; not up: not drawn (the overview shows) */
+    SatRelease(); SatNewScreen(); SatWork(5000);
+    SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    SatWork(5007);
+    SatFrame(5007 + 200, W, H);
+    b = SatBatchOf(31, 49);
+    ok &= b >= 0 && g_vv[g_vb[b].first].c[3] == 128;                    /* (halfway up) */
+    SatFrame(5007 + 400, W, H);
+    b = SatBatchOf(31, 49);
+    ok &= b >= 0 && g_vv[g_vb[b].first].c[3] == 255;
+    int s = SatSlotOf(32, 49);
+    g_ss[s].st = SAT_HELD;                                               /* (read, not up yet) */
+    SatFrame(5007 + 400, W, H);
+    ok &= SatBatchOf(32, 49) < 0 && g_vv[g_vb[SatBatchOf(31, 49)].first + 1].c[3] == 0;   /* (31_49's corner at it: none) */
+    g_ss[s].st = SAT_UP;
+    /* only this screen's set, for its arrival's continent */
+    g_destMap = 1;
+    SatFrame(5500, W, H);
+    ok &= SatBatches(NULL) == 0;
+    g_destMap = 0; g_destOk = 0;
+    SatBuild(W, H, 5500);
+    ok &= SatBatches(NULL) == 0;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail drawn straight over the world map, one batch a tile, each where map.txt puts it through the view's corners (Goldshire's inn at its own pixel of its tile), neighbours meeting exactly: none while the view is 7000 yards tall or more (twice the end), whole by 4375 (1.25 times), even between; each tile fading up over 400 ms once up, a tile not up not drawn and its neighbours soft toward it; the set's edge soft; tiles off the screen left out; only this screen's set, for its arrival's continent");
+}
+
+static void TestSatOrder(void)
+{
+    /* through ViewBuild with the overlay on: the map, the detail, then the overlay's layers and the blade, as before */
+    Fresh("sat-order");
+    PackLive(1 | 2 | 4 | 8 | 32 | 64, 0);
+    Start();
+    int ok = g_ovOn && g_seaOn && g_marksOn;
+    g_mapShown = 1; g_scrW = g_surfW = 1000; g_scrH = g_surfH = 500;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    g_viewTex[VT_MAP] = g_viewTex[VT_MARKS] = g_viewTex[VT_SEA] = g_viewTex[VT_LOGO] = 1;
+    SatPackBegin(64);
+    for (int Y = 48; Y <= 50; Y++) for (int X = 30; X <= 32; X++) SatPackTile(0, X, Y, 64, 1, 1, NULL, 0);
+    SatPackEnd();
+    SatTestReset();
+    SatRead();
+    ok &= g_sat.ok;
+    SatNewScreen(); SatWork(100000);
+    SatArrive(0, -9464, 62);
+    SatWork(100007);
+    float h = 0.5f * 3000 * 2e-5f, u = 0.5f - 2e-5f * 62, v = 0.5f + 2e-5f * 9464;   /* (PackLive's map.txt: end 3000, 2e-5 a yard) */
+    float uv[8] = { u - h, v + h, u + h, v + h, u - h, v - h, u + h, v - h };
+    memcpy(g_bgUV, uv, sizeof uv);
+    ViewBuild(1000, 500, 0.5f, 100500);
+    int first, n = SatBatches(&first), logo = -1, mapAt = -1, lastSat = -1, firstOv = -1;
+    for (int i = 0; i < g_vbN; i++) {
+        int t = g_vb[i].tex;
+        if (t == VT_MAP) mapAt = i;
+        if (t >= VT_COUNT) lastSat = i;
+        if ((t == VT_MARKS || t == VT_SEA) && firstOv < 0) firstOv = i;
+        if (t == VT_LOGO) logo = i;
+    }
+    ok &= n == 9 && mapAt == 0 && first == 1 && lastSat == 9 && (firstOv < 0 || firstOv > lastSat) && g_vbN > 10 && logo == g_vbN - 1;
+    /* the batch caps: the overlay's 48 as before, the detail's beside them */
+    ok &= g_vbN - n <= VIEW_BATCHES;
+    g_mapShown = 0; g_ovOn = 0;
+    for (int i = 0; i < VT_COUNT; i++) g_viewTex[i] = 0;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail in the view's frame through ViewBuild: the world map, then the detail's tiles, then every layer of the overlay (the Maelstrom, the sea's glints, the marks) and the blade with its logo last, as 0.3.0 drew them");
+}
+
+static void TestSatEnd(void)
+{
+    SatTestWorld("sat-end", 512, 27, 34, 47, 51, 1);                    /* (40 tiles of 512 px: 12 a frame at 2 MB) */
+    float W = 5120, H = 2160;
+    long heap = shim_heap_live;
+    /* the screen ending with a job posted (the worker's still) and tiles read but not up */
+    InterlockedExchange(&g_sjWorker, 1);                                 /* (a worker, run by hand below) */
+    SatNewScreen(); SatWork(1000);
+    SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    SatWork(1007);                                                       /* (posted: the worker's) */
+    int ok = g_sj.state == 1 && SatUpCount() == 0;
+    SatWorkerTurn();                                                     /* (read: done) */
+    SatWork(1013);                                                       /* (taken, the next posted, 12 up, 4 waiting) */
+    int up = SatUpCount();
+    ok &= g_sj.state == 1 && up == 12 && g_squ.n - g_squ.at == 4;
+    ViewListStart(); SatBuild(W, H, 1100);
+    int drawn = SatBatches(NULL);
+    SatScreenEnd();                                                      /* the screen gone */
+    ok &= g_sj.state == 3 && g_squ.n == 0;                               /* (the job stale: the worker's to free) */
+    SatWorkerTurn();
+    ok &= g_sj.state == 0 && shim_heap_live == heap && SatUpCount() == up;
+    ok &= LogSays("the satellite's detail: 40 tiles wanted round the arrival (map 0, tile 31_49; tiles 23-40 by 45-54), 16 read in") &&
+          LogSays(", 12 up (2048 KB on OpenGL), the first 6 ms and the last 6 ms after the arrival was known");
+    ok &= TsatLive() == up;                                              /* (the textures kept for the fade) */
+    SatWork(1200);                                                       /* (nothing more this screen) */
+    ok &= SatUpCount() == up && g_sj.state == 0 && g_tsatMade == up;
+    ViewListStart(); SatBuild(W, H, 1300);                               /* (the view's last frame, as it fades: drawn still) */
+    ok &= drawn > 0 && SatBatches(NULL) == drawn;
+    SatRelease();                                                        /* the window hidden after the fade */
+    ok &= TsatLive() == 0 && g_tsatDeleted == g_tsatMade && g_ssN == 0 && !g_satFor.on && g_tsatErr == 0;
+    /* a screen ending with its job done but not taken: freed at once */
+    SatNewScreen(); SatWork(1500); SatArrive(0, -9464, 62); SatWork(1507);
+    SatWorkerTurn();
+    ok &= g_sj.state == 2;
+    SatScreenEnd();
+    ok &= g_sj.state == 0 && shim_heap_live == heap;
+    SatRelease();
+    /* the next screen: none of the last one's tiles, its own once its arrival is known */
+    SatNewScreen(); SatWork(2000);
+    SatFrame(2007, W, H);
+    ok &= SatBatches(NULL) == 0 && g_ssN == 0;
+    SatArrive(0, -8913, 554); SatView(0, -8913, 554, 3500);              /* (Stormwind, its own set) */
+    shim_ticks = 2007;
+    for (int f = 0; f < 200 && SatUpCount() < 40; f++) { SatWork(shim_ticks += 7); SatWorkerTurn(); }
+    int X, Y; float tu, tv;
+    SatTileOf(-8913, 554, &X, &Y, &tu, &tv);
+    ok &= g_ss[0].X == X && g_ss[0].Y == Y && SatUpCount() == 40 && g_ssN == 40;
+    /* a screen whose set was never let go (the fade never seen): the next screen's work lets it go first */
+    int made = g_tsatMade;
+    SatNewScreen();
+    SatWork(shim_ticks += 7);
+    ok &= g_ssN == 0 && TsatLive() == 0 && g_tsatDeleted == made && shim_heap_live == heap;
+    InterlockedExchange(&g_sjWorker, 0);
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail as a screen ends: a job posted goes stale (its worker frees it, never up), a job done is freed at once, the tiles read but not up freed (the heap as before), nothing more read; the screen's line in the log; the textures kept for the view's last frame and its fade, then every one deleted as its window hides; the next screen draws none of the last one's tiles, its own once its arrival is known; a set never let go is let go by the next screen's work");
+}
+
+static void TestSatWorker(void)
+{
+    SatTestWorld("sat-worker", 64, 25, 37, 45, 53, 1);
+    LONG pjState = g_pj.state, pjWorker = g_pjWorker;
+    int pjUp = g_pjUp;
+    long heap = shim_heap_live;
+    shim_thread_fn = NULL; shim_thread_prio = 0;
+    int threads = shim_threads;
+    SatWorkerStart();
+    int ok = g_sjWorker == 1 && shim_threads == threads + 1 && shim_thread_fn == SatWorker && shim_thread_prio == THREAD_PRIORITY_BELOW_NORMAL &&
+             LogSays("its tiles read by a worker thread of their own");
+    SatWorkerStart();
+    ok &= shim_threads == threads + 1;                                   /* (once) */
+    SatNewScreen(); SatWork(1000);
+    SatArrive(0, -9464, 62);
+    int events = shim_events_set;
+    SatWork(1007);
+    ok &= g_sj.state == 1 && shim_events_set == events + 1 && SatUpCount() == 0 && g_sj.n == SAT_JOB_TILES;
+    /* the worker's loop, a pass of it (as its thread runs it): the job read */
+    shim_waits = 1; shim_wait_stop = &g_sjWorker;
+    SatWorker(NULL);
+    ok &= g_sj.state == 2;
+    InterlockedExchange(&g_sjWorker, 1);
+    SatWork(1014);
+    ok &= SatUpCount() == 16 && g_sj.state == 1;
+    /* the arrival moving with a job in flight: the job stale, freed by the worker, never up; the new set read */
+    SatArrive(0, -9464, 1662);                                           /* (three tiles west) */
+    SatWork(1021);
+    ok &= g_sj.state == 3;
+    SatWorkerTurn();
+    ok &= g_sj.state == 0;
+    SatWork(1028);
+    ok &= g_sj.state == 1 && g_ss[0].X == 28 && g_ss[0].Y == 49;
+    /* a job gone stale as it begins reads no tile */
+    shim_tick_hook = SatDrop;
+    SatWorkerTurn();
+    ok &= g_sj.state == 0;
+    for (int f = 0; f < 60 && SatUpCount() < g_ssN; f++) { SatWork(1035 + 7 * f); SatWorkerTurn(); }
+    ok &= SatUpCount() == g_ssN && g_ssN > 0;
+    /* the view off with a job in flight: the worker's loop ends, freeing it */
+    SatRelease();
+    SatNewScreen(); SatWork(3000); SatArrive(0, -9464, 62); SatWork(3007);
+    ok &= g_sj.state == 1;
+    SatStop();
+    ok &= g_sjWorker == 0 && g_sj.state == 3 && !g_sat.ok && TsatLive() == 0;
+    shim_waits = 1; shim_wait_stop = &g_sjWorker;                       /* (never more than a pass, whatever the flag) */
+    SatWorker(NULL);                                                     /* (its loop sees it is to end: the job freed on the way out) */
+    ok &= g_sj.state == 0 && shim_heap_live == heap;
+    SatWork(3100);
+    ok &= g_ssN == 0;                                                    /* (nothing more this session) */
+    ok &= g_pj.state == pjState && g_pjWorker == pjWorker && g_pjUp == pjUp;   /* (the parchment's own: untouched) */
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail read by a worker of its own (never the parchment's: its job, worker and upload untouched), at a lower priority, started once: a job posted runs on it, and is taken and given to OpenGL by the view while the next is read; the arrival moving with a job in flight makes it stale, freed by the worker, never up; a job stale as it begins reads no tile; the view off ends its loop and frees what it held");
+}
+
+static void TestSatTeleport(void)
+{
+    /* Goldshire, then a teleport to Moonglade on the next screen: Kalimdor's tiles only, Azeroth's all gone */
+    Fresh("sat-teleport"); GameDir();
+    SatTestReset();
+    SatTestMap(SH_21x9);
+    SatPackBegin(64);
+    SatPackBlock(0, 27, 35, 47, 51, 64);
+    SatPackBlock(1, 30, 40, 13, 19, 64);
+    SatPackEnd();
+    SatRead();
+    TestSatGl(1, 1);
+    float W = 5120, H = 2160;
+    SatNewScreen(); SatWork(1000); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    SatWork(1007);
+    int azeroth = g_ssN, ok = azeroth == 45 && SatUpCount() == 45;
+    /* within the screen the arrival moves a tile east: the tiles still wanted keep their textures, the rest are read */
+    int made = g_tsatMade;
+    unsigned keepName = g_satTex[SatSlotOf(31, 49)];
+    SatArrive(0, -9464, 62 - 533.33f);
+    SatWork(1014);
+    ok &= g_ss[0].X == 32 && g_satTex[SatSlotOf(31, 49)] == keepName && g_tsatMade == made && TsatLive() == 45;
+    SatScreenEnd(); SatRelease();
+    ok &= TsatLive() == 0;
+    SatNewScreen(); SatWork(2000); SatArrive(1, 7980, -2501); SatView(1, 7980, -2501, 3500);
+    SatWork(2007);
+    SatFrame(2600, W, H);
+    int kal = 1;
+    for (int i = 0; i < g_ssN; i++) kal &= g_ss[i].c == 1;
+    ok &= kal && g_ssN == 77 && SatUpCount() == 77 && SatBatches(NULL) > 0 && g_satFor.c == 1;
+    /* and back across in the same screen's set (a set for the other continent while one is up): Azeroth's only */
+    SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    SatWork(2014);
+    SatFrame(2600, W, H);
+    int az = 1;
+    for (int i = 0; i < g_ssN; i++) az &= g_ss[i].c == 0;
+    ok &= az && g_ssN == 45 && TsatLive() == SatUpCount();
+    for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex >= VT_COUNT) ok &= g_ss[g_vb[b].tex - VT_COUNT].c == 0;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail across a teleport: a hearth from Goldshire then Moonglade on the next screen draws Kalimdor's tiles only, every texture of the last set deleted; an arrival moving within a screen keeps the textures of the tiles still wanted (none made again) and lets the rest go; a set for the other continent never draws a tile of the first");
+}
+
+static void TestSatViewOff(void)
+{
+    SatTestWorld("sat-viewoff", 64, 28, 34, 47, 51, 1);
+    long heap = shim_heap_live;
+    SatNewScreen(); SatWork(1000); SatArrive(0, -9464, 62); SatWork(1007);
+    int ok = SatUpCount() == 35 && TsatLive() == 35;
+    ViewGone("a test");
+    ok &= TsatLive() == 0 && g_ssN == 0 && !g_sat.ok && !g_sjWorker && shim_heap_live == heap;
+    SatWork(1100);
+    SatFrame(1200, 5120, 2160);
+    ok &= g_ssN == 0 && SatBatches(NULL) == 0 && g_tsatMade == 35;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the view off for the session (ViewGone): the detail's textures deleted, its tiles and job freed, its worker's loop told to end, nothing more read or drawn");
+}
+
+static void TestSatParchment(void)
+{
+    SatTestWorld("sat-parch", 64, 28, 34, 47, 51, 1);
+    LONG pjState = g_pj.state, pjWorker = g_pjWorker;
+    int pjUp = g_pjUp;
+    long heap = shim_heap_live;
+    g_parchOn = 1;
+    SatNewScreen(); SatWork(1000); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    for (int f = 0; f < 5; f++) SatWork(1007 + 7 * f);
+    int ok = g_ssN == 0 && !g_satFor.on && g_tsatMade == 0 && shim_heap_live == heap && g_sj.state == 0;
+    ok &= g_pj.state == pjState && g_pjWorker == pjWorker && g_pjUp == pjUp;
+    /* (the control: the same arrival on the satellite's screen reads its tiles and gives them to OpenGL) */
+    g_parchOn = 0;
+    SatNewScreen(); SatWork(2000); SatArrive(0, -9464, 62); SatWork(2007);
+    ok &= g_ssN == 35 && SatUpCount() == 35 && g_tsatMade == 35;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "a parchment screen: the satellite's detail reads nothing, makes nothing and draws nothing (the same arrival on a satellite screen: all 35 tiles up); the parchment's own job, worker and upload untouched");
+}
+
+static void TestSatBatchRoom(void)
+{
+    ViewListStart();
+    ViewRect(VT_MAP, 0, 0, 1, 1, 0, 0, 1, 1, 0);
+    int ok = 1;
+    for (int i = 0; i < SAT_MAX + 5; i++) {
+        ViewVert *q = ViewQuadNew(VT_COUNT + i);
+        ok &= (q != NULL) == (i < SAT_MAX);
+    }
+    ok &= g_vbN == 1 + SAT_MAX && !g_vbFull && g_vbSat == SAT_MAX;
+    for (int i = 0; i < VIEW_BATCHES + 8; i++) ViewRect(i & 1 ? VT_SEA : VT_MARKS, 0, 0, 1, 1, 0, 0, 1, 1, 0);
+    ok &= g_vbN - g_vbSat == VIEW_BATCHES && g_vbFull;                   /* (the overlay's own room: as before) */
+    ViewListStart();
+    ok &= g_vbN == 0 && g_vbSat == 0 && g_vqSat == 0;
+    for (int i = 0; i < VIEW_BATCHES + 8; i++) ViewRect(i & 1 ? VT_SEA : VT_MARKS, 0, 0, 1, 1, 0, 0, 1, 1, 0);
+    ok &= g_vbN == VIEW_BATCHES && g_vvN == VIEW_BATCHES * 4 && g_vbFull;
+    ok &= ViewQuadNew(VT_COUNT) == NULL;                                 /* (full: nothing after, in order) */
+    g_viewTex[VT_SEA] = 7; g_satTex[0] = 9; g_satTex[SAT_MAX - 1] = 11;
+    ok &= ViewTexName(-1) == 0 && ViewTexName(VT_SEA) == 7 && ViewTexName(VT_COUNT) == 9 && ViewTexName(VT_COUNT + SAT_MAX - 1) == 11 &&
+          ViewTexName(VT_COUNT + SAT_MAX) == 0;
+    g_viewTex[VT_SEA] = 0; g_satTex[0] = 0; g_satTex[SAT_MAX - 1] = 0;
+    ViewListStart();
+    Check(ok, "the view's list: the detail's tiles in room of their own (SAT_MAX of them, the next left out without cutting the rest), the map's, the overlay's and the bar's VIEW_BATCHES and quads as before; a batch's picture by slot, or by tile past the slots");
+}
+
+static void TestSatHooks(void)
+{
+    char here[1024], p[1200];
+    snprintf(here, sizeof here, "%s", __FILE__);
+    char *slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(p, sizeof p, "%s/../dll/cinderload.c", here);
+    FILE *f = fopen(p, "rb");
+    long n = 0;
+    if (f && !fseek(f, 0, SEEK_END)) { n = ftell(f); fseek(f, 0, SEEK_SET); }
+    char *src = n > 0 ? malloc((size_t)n + 1) : NULL;
+    if (src) { src[fread(src, 1, (size_t)n, f)] = 0; }
+    if (f) fclose(f);
+    int ok = src != NULL;
+    const char *vt = "\nstatic DWORD WINAPI ViewThread(LPVOID arg)\n{";
+    ok &= SrcHas(src, vt, "ParchWorkerStart();                                 /* (its paintings made off this thread) */\n    SatRead();");
+    ok &= SrcHas(src, vt, "SatRead();                                          /* the satellite's detail: its archive's index (read only) */\n    SatWorkerStart();");
+    ok &= SrcHas(src, vt, "ParchWork(g_vclk.at);                            /* the parchment's painting, once the arrival is known (the step's clock) */\n            SatWork(g_vclk.at);");
+    ok &= SrcHas(src, vt, "ParchScreenEnd();                               /* (its job's painting never kept into the game) */\n            SatScreenEnd();");
+    ok &= SrcHas(src, vt, "ShowWindow(g_view.win, SW_HIDE); SatRelease(); }   /* a new screen */");
+    ok &= SrcHas(src, vt, "            ShowWindow(g_view.win, SW_HIDE);\n            SatRelease();");
+    ok &= SrcHas(src, "\nstatic void ViewGone(const char *why)\n{", "ParchStop();                                            /* (the parchment's job and its painting freed) */\n    SatStop();");
+    ok &= SrcHas(src, "\nstatic int ViewFrame(DWORD *drawn, DWORD *gpu)\n{", "else if (!ViewTexName(t)) continue;");
+    ok &= SrcHas(src, "\nstatic int ViewFrame(DWORD *drawn, DWORD *gpu)\n{", "gl.BindTexture(GL_TEXTURE_2D_, ViewTexName(t)); }");
+    ok &= SrcHas(src, "\nstatic void ViewBuild(float W, float H, float shown, DWORD now)\n{",
+                 "ViewRect(VT_MAP, 0, 0, W, H, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);\n    SatBuild(W, H, now);");
+    ok &= SrcHas(src, "\nstatic int GlLoad(void)\n{", "GLP(DeleteTextures, gl.lib, \"glDeleteTextures\");");
+    ok &= SrcHas(src, "\n#if defined(__i386__) && !defined(SAT_TEX_UP)\n#define SAT_TEX_UP SatTexUp", "");
+    /* the parchment's 32-bit upload is its own: nothing of the detail's in it */
+    ok &= !SrcHas(src, "\nstatic int ParchUpBegin(int slot)\n{", "Sat") && !SrcHas(src, "\nstatic int ParchUpStep(SIZE_T budget)\n{", "Sat") &&
+          !SrcHas(src, "\nstatic DWORD WINAPI ParchWorker(LPVOID arg)\n{", "Sat") && !SrcHas(src, "\nstatic void ParchWork(DWORD now)\n{", "Sat") &&
+          !SrcHas(src, "\nstatic void ParchScreenEnd(void)\n{", "Sat");
+    free(src);
+    Check(ok, "the 32-bit hooks call what the tests run for the satellite's detail: the view's thread reads its index and starts its worker as it starts, works it each frame after the parchment's, ends it with the screen beside ParchScreenEnd, lets its textures go as its window hides (after the fade, or a new screen first); the view's going stops it; ViewFrame binds the detail's textures past the slots; ViewBuild draws it straight after the map; glDeleteTextures loaded; the parchment's own upload, worker, work and screen end hold nothing of it");
+}
+
+static void TestSatellite(void)
+{
+    TestSatGeometry();
+    TestSatIndex();
+    TestSatMissing();
+    TestSatSet();
+    TestSatRead();
+    TestSatBudget();
+    TestSatFail();
+    TestSatNoDxt();
+    TestSatRefused();
+    TestSatDraw();
+    TestSatOrder();
+    TestSatEnd();
+    TestSatWorker();
+    TestSatTeleport();
+    TestSatViewOff();
+    TestSatParchment();
+    TestSatBatchRoom();
+    TestSatHooks();
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { printf("usage: test_switch <scratch dir>\n"); return 2; }
@@ -12479,6 +13429,7 @@ int main(int argc, char **argv)
     TestOneMap();
     TestOneMapHooks();
     TestLogLine();
+    TestSatellite();
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }
