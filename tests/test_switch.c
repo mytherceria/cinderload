@@ -6079,6 +6079,8 @@ static void TestGlideState(void)
     g_destMap = -1;
     g_ptry.world = g_ptry.cont = g_ptry.zone = g_ptry.nearby = 0; g_pbitsSeq = -1; g_pmadeKnown = -1;
     g_parchNearOn = 0; g_nearZ = -1; g_nearMap = -2;                    /* (the zones nearby: off unless a test asks for them) */
+    g_nearNone = 0; g_reveal.screen = -1; g_reveal.z = -1;
+    g_parchCity = -1; g_cityUp = -1; g_ptry.city = 0; g_cmadeKnown = -1;  /* (no capital) */
     g_lpWorld.ok = g_lpCont.ok = 0;
     g_pj.state = 0; g_pjUp = -1;
 }
@@ -6111,6 +6113,28 @@ static float TestTauFor(float e)
     float lo = 0, hi = 1;
     for (int i = 0; i < 60; i++) { float m = 0.5f * (lo + hi); if (ParchEase(m) < e) lo = m; else hi = m; }
     return 0.5f * (lo + hi);
+}
+/* in a capital, where on the glide onto its zone z (its continent c's painting first; world: the world's) for an arrival
+ * at wx, wy on z's map the city's own page comes up over z, as the fade A has it (the last close-up): *y0 to *y1 */
+static void TestCitySpan(float W, float H, int world, int c, int z, float wx, float wy, float *y0, float *y1)
+{
+    float fx, fy;
+    ParchSpot(g_pz[z].map, wx, wy, &fx, &fy);
+    ParchRect zr = ParchBox(z);
+    ParchView a = ParchStart(W, H, world, ParchBox(c)), b = ParchEnd(W, H, zr, PARCH_ZOOM, fx, fy);
+    ParchSpan(&a, &b, H / PARCH_REF_H * (float)(PARCH_MAP_W * g_zoneK) / (zr.x1 - zr.x0), PARCH_MAG0, PARCH_MAG1, y0, y1);
+}
+/* the marker's pictures as up (their sizes only: nothing is read from them as drawn), or none */
+static void TestMarkUp(int on)
+{
+    for (int k = 0; k < 2; k++) { g_markPic[k].w = g_markPic[k].h = on ? 64 : 0; g_markTW[k] = g_markTH[k] = 64; g_viewTex[VT_PMARK + k] = on; }
+    g_markUp = on;
+}
+/* the alpha (0..255) layer tex is drawn with at the character's spot this frame, -1 when not drawn */
+static int TestAlphaAt(int tex)
+{
+    int b = TestBatch(tex);
+    return b < 0 ? -1 : TestVertNear(b, g_pcam.px, g_pcam.py)->c[3];
 }
 static void TestHoldStub(void) {}
 /* the parchment's worker's own loop (ParchWorker, as ParchWorkerStart asked the shim for its thread), run by hand for
@@ -6868,10 +6892,13 @@ static void TestZoneRule(void)
     g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0;                    /* (the work takes the arrival's height, and says so) */
     g_destMap = 0; g_destWX = -4900; g_destWY = -900; g_destWZ = 150; g_destZOk = 1; g_viewScreen = 22;
     ParchWork(6000);
-    ok &= g_parchWant == 4 && LogSays("the arrival (map 0, -4900, -900, 150 high) is in Ironforge, by the building's floor under it, as the client");
+    ok &= LogSays("the arrival (map 0, -4900, -900, 150 high) is in Ironforge, by the building's floor under it, as the client");
+    int capOk = g_parchWant == 5 && g_parchCity == 4 &&
+                LogSays("the arrival (map 0, -4900, -900, 150 high) is in Ironforge, by the building's floor under it, as the client; a capital: its zone the one round it, DunMorogh, whole with its zones nearby, Ironforge's own map over it as the view lands");
     g_destZOk = 0;
     TestGlideState();
     Check(ok, "the arrival's zone (his rule, 11 Oct: \"the way the client does (height, and the building's own groups), not a wider box\"): in a building only over a floor of its own group's faces, inside the group's box; under it, over it, beside it in its placement's bounds (a city's gate), or its height not known: the terrain's");
+    Check(capOk, "an arrival in a capital's building (Ironforge, as the client finds it) takes the zone round it as its zone (Dun Morogh, whose box holds Ironforge's), the city's own page over it at the landing, and the log says so");
     g_testTile[0] = 33; g_testTile[1] = 41;                            /* (the terrain with heights: over the floor, or under it) */
     g_testGround = 120;
     { static unsigned char both[128]; memcpy(both, modf[0], 64); memcpy(both + 64, modf[1], 64);
@@ -7434,6 +7461,224 @@ static void TestWordO(int x1, int y0, int y1, unsigned paper, unsigned mid)
             float d = sqrtf((x - cx) * (x - cx) + (y - cy) * (y - cy));
             if (d <= 12.5f) TestPaintFill(x, y, x + 1, y + 1, d > 10 || (d > 5 && d <= 7) ? 0xF0E0C0 : d > 7 ? 0x302010 : mid);
         }
+}
+/* the land prepared ahead (his design, 10 Oct: built once from the player's own files, on their own disk; the
+ * verifiers' find, 12 Oct: a first visit to a capital waited seconds on its zones nearby's lands): at a quiet moment only,
+ * every zone page's land not kept made, a zone a turn at the lowest priority, the same bytes a first visit makes; once
+ * made, nothing; again for another LAND_VERSION or other archives; stopped at a tile by a loading screen or a job and
+ * made again whole */
+static int g_testWarmCalls, g_testWarmAt, g_testWarmJob, g_testWarmSeeAt, g_testWarmSaw = -1;
+static void TestWarmTick(void)                                         /* (the g_testWarmAt'th look at the clock: a screen begins, */
+{                                                                      /* or with g_testWarmJob a job is posted; at the */
+    ++g_testWarmCalls;                                                 /* g_testWarmSeeAt'th, whether tiles are kept, seen) */
+    if (g_testWarmCalls == g_testWarmSeeAt) g_testWarmSaw = g_tileKeep.on;
+    if (g_testWarmCalls != g_testWarmAt || g_testWarmSeeAt > g_testWarmCalls) shim_tick_hook = TestWarmTick;
+    if (g_testWarmCalls != g_testWarmAt) return;
+    if (g_testWarmJob) { g_pj.kind = PJ_NONE; InterlockedExchange(&g_pj.state, 1); }
+    else InterlockedExchange(&g_warmBusy, 1);
+}
+static int TestLogCount(const char *words)
+{
+    const char *g = Get("Logs/CinderLoad.log");
+    int n = 0;
+    for (const char *f = g; f && (f = strstr(f, words)) != NULL; f++) n++;
+    return n;
+}
+static void TestWarmSession(void) { memset(&g_warm, 0, sizeof g_warm); }   /* (a new session) */
+static void TestWarmQuiet(DWORD at) { LandWarmQuiet(1, at - 1); LandWarmQuiet(0, at); shim_ticks = at + LAND_WARM_QUIET_MS; }
+static void TestLandWarm(void)
+{
+    const unsigned *areas0 = g_testAreas;                              /* (the made-up terrain's, put back after) */
+    const unsigned char *sea0 = g_testSea;
+    float ground0 = g_testGround;
+    int tile0[2] = { g_testTile[0], g_testTile[1] }, ocean0 = g_testOcean;
+    Fresh("land-warm");
+    GameDir();
+    TestGlideState();
+    g_wmc[0].ok = 0;                                                   /* (the frame: map tiles, no continent's offset) */
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Ironforge\0";
+    unsigned wv[3 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+                           30, 0, 12, 9, TestF(533.33333f), TestF(0), TestF(-9600), TestF(-10133.333f),
+                           341, 0, 1537, 17, TestF(533.33333f), TestF(0), TestF(-9600), TestF(-10133.333f) };
+    static unsigned char wma[256];
+    unsigned wn = TestWdbc(wma, 3, 8, wv, wstr, sizeof wstr);
+    ParchTables(wma, wn, NULL, 0);
+    unsigned av[5 * 11] = { 0 };
+    static const unsigned arow[5][5] = { { 12, 0, 0, 1, 0x40 }, { 40, 0, 0, 2, 0x40 }, { 87, 0, 12, 3, 0x40 }, { 1537, 0, 0, 4, 0x138 }, { 9, 0, 1537, 5, 0 } };
+    for (int i = 0; i < 5; i++) memcpy(av + 11 * i, arow[i], sizeof arow[i]);
+    static unsigned char atb[512];
+    unsigned an = TestWdbc(atb, 5, 11, av, "\0", 1);
+    ParchAreas(atb, an);
+    static const char mstr[] = "\0Azeroth\0";
+    unsigned mv[3] = { 0, 1, 0 };
+    static unsigned char mpd[64];
+    ParchMaps(mpd, TestWdbc(mpd, 1, 3, mv, mstr, sizeof mstr));
+    unsigned wav[11] = { 1, 208, 0, 0xFFFFFFFFu, 0, 0, 0, 0, 0, 0, 1537 };
+    static unsigned char wat[128];
+    ParchWmoAreas(wat, TestWdbc(wat, 1, 11, wav, "\0", 1));
+    g_testAreas = TestLandAreas();
+    static unsigned char sea[256];
+    for (int i = 2; i < 8; i++) sea[14 * 16 + i] = 1;
+    g_testSea = sea; g_testGround = 10; g_testTile[0] = 31; g_testTile[1] = 50;
+    unsigned n0 = TestAdt(g_adt[0], 0, 0, 0, 0, NULL, 0, NULL);
+    static const char *tn[1] = { "World\\Maps\\Azeroth\\Azeroth_31_50.adt" };
+    const char *td[1] = { (const char *)g_adt[0] };
+    unsigned tl[1] = { n0 };
+    MakeMpq("Data/terrain.MPQ", 1, tn, td, tl);
+    g_landPrint = 0;
+    static const char ewr[] = "Data/CinderLoad/land-Elwynn.bin";
+    static char ifr[96];                                               /* (row 2's, its name as the made-up table gives it) */
+    snprintf(ifr, sizeof ifr, "Data/CinderLoad/land-%s.bin", g_pz[2].name);
+    static unsigned char e0[8192], i0[8192], e1[8192], i1[8192];
+    g_parchTablesOk = 1; g_parchAsked = 1; g_prepareOn = 1; g_pj.state = 0; g_warmBusy = 1;
+    TestWarmSession();
+    /* not while a loading screen is up (or the view on one), nor until quiet for LAND_WARM_QUIET_MS, nor with a job
+     * posted or the satellite chosen; the view's thread says when it went quiet */
+    shim_ticks = 50000;
+    int ok = !LandWarmTurn();
+    LandWarmQuiet(0, 50000);
+    ok &= !g_warmBusy && g_warmQuietAt == 50000;
+    LandWarmQuiet(0, 52000);                                           /* (quiet still: since then) */
+    ok &= g_warmQuietAt == 50000;
+    shim_ticks = 50000 + LAND_WARM_QUIET_MS - 1;
+    ok &= !LandWarmTurn();
+    shim_ticks = 50000 + LAND_WARM_QUIET_MS;
+    g_pj.state = 1; ok &= !LandWarmTurn(); g_pj.state = 2; ok &= !LandWarmTurn(); g_pj.state = 0;
+    g_parchAsked = 0; ok &= !LandWarmTurn(); g_parchAsked = 1;
+    LandWarmQuiet(1, 50000 + LAND_WARM_QUIET_MS);                      /* (a screen began) */
+    ok &= g_warmBusy && !LandWarmTurn();
+    ok &= g_warm.state == 0 && Gone(ewr) && Gone(ifr) && !LogSays("preparing once");
+    Check(ok, "the land prepared ahead only at a quiet moment: not while a loading screen is up (or the view still on one), nor until 10 s after (LAND_WARM_QUIET_MS), nor with a job posted or done and not yet taken, nor with the satellite map chosen; the view's thread says when it went quiet");
+
+    /* made: the zones not kept found (Elwynn, Ironforge; not the continent) and logged; one a turn, at
+     * the lowest priority, the tile they share read once; logged as it ends */
+    TestWarmQuiet(60000);
+    shim_thread_prio_low = 0; shim_thread_prio = THREAD_PRIORITY_BELOW_NORMAL;
+    int t1 = LandWarmTurn();
+    ok = t1 == 1 && g_warm.state == 1 && g_warm.n == 2 && Gone(ewr) && Gone(ifr) &&
+         LogSays("the parchment: preparing once, off the game's thread at quiet moments, the land of 2 of its 2 zone pages not kept yet, from the client's terrain into Data\\CinderLoad\\land-<zone>.bin, so a first visit waits on none (style.txt: prepare off turns it off)");
+    int t2 = LandWarmTurn();
+    ok &= t2 == 1 && Get(ewr) && Gone(ifr) && g_warm.keep && g_tileKeep.on;
+    int t3 = LandWarmTurn();
+    ok &= t3 == 0 && g_warm.state == 2 && Get(ifr) && !g_warm.keep && !g_tileKeep.on && shim_thread_prio_low == THREAD_PRIORITY_IDLE &&
+          shim_thread_prio == THREAD_PRIORITY_BELOW_NORMAL && g_warm.made == 2 && !g_warm.failed &&
+          LogSays("the parchment: the land of 2 zone pages prepared in ") && LogSays(" s at work (1 terrain files read, the longest step ") && !LogSays("could not be read");
+    ok &= !LandWarmTurn() && TestLogCount("preparing once") == 1;      /* (done: nothing more this session) */
+    int ne = TestBytes(ewr, e0, sizeof e0), ni = TestBytes(ifr, i0, sizeof i0);
+    TestBytesGone(ewr); TestBytesGone(ifr);                             /* (as a first visit makes them, one at a time) */
+    ParchLand L = { 0 };
+    const char *why = "";
+    ok &= ParchLandMake(1, &L, &why) && !L.fromFile && L.n == 6 * 12 + 2 * 2 && ParchLandMake(2, &L, &why) && !L.fromFile;
+    ParchLandFree(&L);
+    ok &= ne > LAND_HEAD && TestBytes(ewr, e1, sizeof e1) == ne && !memcmp(e0, e1, (size_t)ne) && ni > LAND_HEAD && TestBytes(ifr, i1, sizeof i1) == ni && !memcmp(i0, i1, (size_t)ni);
+    Check(ok, "the land prepared ahead: the zone pages whose land is not kept found and logged as it starts (Elwynn, and Ironforge, no land of its own on this terrain; not the continent), one zone a turn at the lowest priority (back below normal after), the terrain tile both lie on read once, logged as it ends; each file the same bytes a first visit makes");
+
+    /* the next session: all kept, nothing made or said; another LAND_VERSION (an older file): that one again; other
+     * archives (their print): all again */
+    TestWarmSession();
+    TestWarmQuiet(80000);
+    ok = !LandWarmTurn() && g_warm.state == 2 && g_warm.n == 0 && TestLogCount("preparing once") == 1;
+    e1[4] = (unsigned char)(LAND_VERSION - 1);                         /* (Elwynn's file as an older version made it) */
+    TestBytesPut(ewr, e1, ne);
+    TestWarmSession();
+    ok &= LandWarmTurn() == 1 && g_warm.n == 1 && g_warm.order[0] == 1 && LogSays("the land of 1 of its 2 zone pages not kept yet");
+    while (LandWarmTurn()) {}
+    ok &= g_warm.state == 2 && g_warm.made == 1 && TestBytes(ewr, e1, sizeof e1) == ne && !memcmp(e0, e1, (size_t)ne);
+    TestLandPatch("Data/patch-2.MPQ", "x");                            /* (another archive: another print) */
+    TestWarmSession();
+    ok &= LandWarmTurn() == 1 && g_warm.n == 2;
+    while (LandWarmTurn()) {}
+    ok &= g_warm.state == 2 && g_warm.made == 2 && TestBytes(ewr, e1, sizeof e1) == ne && memcmp(e0, e1, (size_t)ne) && Rd32(e1 + 8) == LandPrint();
+    Check(ok, "the land prepared once: the next session, all kept, nothing made and nothing said; a land file of another LAND_VERSION made again, alone; other archives (their print): every one again");
+
+    /* a loading screen beginning part way through a zone (after the tile it lies on was read): stopped at the next
+     * tile, nothing kept, the tiles read freed; made again whole at the next quiet moment, the same bytes */
+    TestBytesGone(ewr); TestBytesGone(ifr);
+    TestWarmSession();
+    TestWarmQuiet(100000);
+    ok = LandWarmTurn() == 1 && g_warm.n == 2;
+    g_testWarmCalls = 0; g_testWarmAt = 7; shim_tick_hook = TestWarmTick;   /* (the turn's look, then its six tiles' first) */
+    int st = LandWarmTurn();
+    shim_tick_hook = NULL;
+    ok &= !st && g_warmBusy && g_warm.state == 1 && g_warm.at == 0 && g_warm.tiles == 1 && !g_warm.made && Gone(ewr) && !g_warm.keep && !g_tileKeep.on;
+    ok &= !LandWarmTurn() && Gone(ewr);                                /* (the screen up: nothing) */
+    TestWarmQuiet(120000);
+    ok &= LandWarmTurn() == 1 && g_warm.at == 1 && Get(ewr) && Gone(ifr);
+    g_testWarmCalls = 0; g_testWarmAt = 12; shim_tick_hook = TestWarmTick;  /* (Ironforge's: no land on its tiles, so its building */
+    st = LandWarmTurn();                                               /* looked for, tile by tile: stopped there too) */
+    shim_tick_hook = NULL;
+    ok &= !st && g_warmBusy && g_warm.at == 1 && Gone(ifr) && !g_tileKeep.on;
+    TestWarmQuiet(140000);
+    while (LandWarmTurn()) {}
+    ok &= g_warm.state == 2 && g_warm.made == 2 && TestBytes(ewr, e1, sizeof e1) == ne && Get(ifr);
+    TestBytes(ifr, i1, sizeof i1);
+    TestBytesGone(ewr);
+    ParchLandMake(1, &L, &why);
+    ParchLandFree(&L);
+    ok &= TestBytes(ewr, e0, sizeof e0) == ne && !memcmp(e0, e1, (size_t)ne);
+    /* a job posted part way (the worker's): stopped the same way; a job before a turn frees the tiles kept between turns */
+    TestBytesGone(ewr); TestBytesGone(ifr);
+    TestWarmSession();
+    ok &= LandWarmTurn() == 1;
+    g_testWarmCalls = 0; g_testWarmAt = 7; g_testWarmJob = 1; shim_tick_hook = TestWarmTick;
+    st = LandWarmTurn();
+    shim_tick_hook = NULL; g_testWarmJob = 0;
+    ok &= !st && g_pj.state == 1 && !g_warmBusy && g_warm.at == 0 && g_warm.tiles == 1 && Gone(ewr) && !g_tileKeep.on;
+    ok &= ParchWorkerTurn() == 1 && g_pj.state == 2;
+    g_pj.state = 0;
+    ok &= LandWarmTurn() == 1 && Get(ewr) && g_warm.keep && g_tileKeep.on;
+    g_pj.state = 1; g_pj.kind = PJ_NONE;
+    ok &= ParchWorkerTurn() == 1 && !g_warm.keep && !g_tileKeep.on;
+    g_pj.state = 0;
+    ok &= !LandWarmTurn() && g_warm.state == 2 && Get(ifr);
+    Check(ok, "the land prepared ahead gives way: a loading screen beginning part way through a zone (its tile read) stops it at the next tile, nothing kept and the tiles read freed, nothing more while the screen is up, the zone made again whole at the next quiet moment (the same bytes); stopped the same way while a zone's building is looked for; a job posted part way stops it the same way, and runs; a job between its turns frees the tiles it keeps");
+
+    /* by the worker's own loop: between jobs, each pass a turn; a job done and not yet taken: none */
+    TestBytesGone(ewr); TestBytesGone(ifr);
+    TestWarmSession();
+    shim_waits = 3; shim_wait_stop = &g_pjWorker; g_pjWorker = 1;
+    ParchWorker(NULL);
+    ok = g_warm.state == 2 && Get(ewr) && Get(ifr) && !g_tileKeep.on;
+    TestBytesGone(ewr); TestBytesGone(ifr);                             /* (a screen beginning between its turns: the tiles kept */
+    TestWarmSession();                                                 /* freed in that pass, not held through the screen) */
+    g_testWarmCalls = 0; g_testWarmAt = 13; g_testWarmSeeAt = 14; g_testWarmSaw = -1; shim_tick_hook = TestWarmTick;
+    shim_waits = 4; shim_wait_stop = &g_pjWorker; g_pjWorker = 1;
+    ParchWorker(NULL);
+    shim_tick_hook = NULL; g_testWarmSeeAt = 0;
+    ok &= g_testWarmSaw == 0 && g_warmBusy && g_warm.state == 1 && g_warm.at == 1 && Get(ewr) && Gone(ifr) && !g_tileKeep.on;
+    TestWarmQuiet(160000);
+    TestBytesGone(ewr); TestBytesGone(ifr);
+    TestWarmSession();
+    g_pj.state = 1; g_pj.kind = PJ_NONE;
+    shim_waits = 3; shim_wait_stop = &g_pjWorker; g_pjWorker = 1;
+    ParchWorker(NULL);
+    ok &= g_pj.state == 2 && g_warm.state == 0 && Gone(ewr);
+    g_pj.state = 0;
+    Check(ok, "the land prepared ahead by the parchment's worker, between its jobs: a pass a turn; a loading screen beginning between two turns: the tiles kept freed in that pass, never held through the screen; a job done and not yet taken by the view: none");
+
+    /* a zone page with nothing to make (its map without a folder): not counted, never tried */
+    TestBytesGone(ewr); TestBytesGone(ifr);
+    TestWarmSession();
+    int map2 = g_pz[2].map;
+    g_pz[2].map = 77;
+    ok = LandWarmTurn() == 1 && g_warm.n == 1 && LogSays("the land of 1 of its 2 zone pages not kept yet");
+    while (LandWarmTurn()) {}
+    ok &= g_warm.state == 2 && g_warm.made == 1 && !g_warm.failed && Get(ewr) && Gone(ifr) && !LogSays("could not be read, tried again next session");
+    TestWarmSession();
+    ok &= !LandWarmTurn() && g_warm.state == 2 && !g_warm.n;
+    g_pz[2].map = map2;
+    Check(ok, "the land prepared ahead passes over a zone page with nothing to make (its map without a folder): not among those to make, never tried, never counted as unread");
+
+    /* off (style.txt: prepare off): nothing made, said once */
+    TestBytesGone(ewr);
+    TestWarmSession();
+    g_prepareOn = 0;
+    ok = !LandWarmTurn() && g_warm.state == 2 && !LandWarmTurn() && Gone(ewr) &&
+         TestLogCount("the parchment: the land of its zones not prepared ahead (style.txt: prepare off); each is read from the terrain on its first visit") == 1;
+    g_prepareOn = 1;
+    Check(ok, "the land not prepared ahead with style.txt's prepare off: nothing made, said once");
+    g_parchTablesOk = 0; g_parchAsked = 0; g_warmBusy = 1; TestWarmSession();
+    g_testAreas = areas0; g_testSea = sea0; g_testGround = ground0; g_testTile[0] = tile0[0]; g_testTile[1] = tile0[1]; g_testOcean = ocean0;
 }
 static void TestWords(void)
 {
@@ -8973,19 +9218,20 @@ static void TestNearbyMake(void)
     GameDir();
     TestGlideState();
     g_wmc[0].ok = 0;                                                   /* (the frame: map tiles, no continent's offset) */
-    static const char wstr[] = "\0Azeroth\0Elwynn\0Westfall\0";
-    unsigned wv[3 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Westfall\0Stormwind\0";   /* (and a capital inside Elwynn's box) */
+    unsigned wv[4 * 8] = { 14, 0, 0, 1, TestF(16000), TestF(-19200), TestF(7466), TestF(-16000),
                            30, 0, 12, 9, TestF(533.33333f), TestF(0), TestF(-9600), TestF(-10133.333f),
-                           39, 0, 40, 16, TestF(600), TestF(0), TestF(-9600), TestF(-10133.333f) };
+                           39, 0, 40, 16, TestF(600), TestF(0), TestF(-9600), TestF(-10133.333f),
+                           301, 0, 1519, 25, TestF(300), TestF(100), TestF(-9700), TestF(-9900) };
     static unsigned char wma[256], wmo[256];
     static const char ostr[] = "\0PIECE\0";                          /* (a piece of Westfall's map, its area 40's) */
     unsigned ov[17] = { 1, 39, 40, 0, 0, 0, 0, 0, 1, 60, 60, 780, 410 };
-    ParchTables(wma, TestWdbc(wma, 3, 8, wv, wstr, sizeof wstr), wmo, TestWdbc(wmo, 1, 17, ov, ostr, sizeof ostr));
-    unsigned av[3 * 11] = { 0 };
-    static const unsigned arow[3][5] = { { 12, 0, 0, 1, 0x40 }, { 40, 0, 0, 2, 0x40 }, { 87, 0, 12, 3, 0x40 } };
-    for (int i = 0; i < 3; i++) memcpy(av + 11 * i, arow[i], sizeof arow[i]);
+    ParchTables(wma, TestWdbc(wma, 4, 8, wv, wstr, sizeof wstr), wmo, TestWdbc(wmo, 1, 17, ov, ostr, sizeof ostr));
+    unsigned av[4 * 11] = { 0 };
+    static const unsigned arow[4][5] = { { 12, 0, 0, 1, 0x40 }, { 40, 0, 0, 2, 0x40 }, { 87, 0, 12, 3, 0x40 }, { 1519, 0, 0, 4, 0x138 } };
+    for (int i = 0; i < 4; i++) memcpy(av + 11 * i, arow[i], sizeof arow[i]);
     static unsigned char atb[512];
-    ParchAreas(atb, TestWdbc(atb, 3, 11, av, "\0", 1));
+    ParchAreas(atb, TestWdbc(atb, 4, 11, av, "\0", 1));
     static const char mstr[] = "\0Azeroth\0";
     unsigned mv[3] = { 0, 1, 0 };
     static unsigned char mpd[64];
@@ -9099,6 +9345,21 @@ static void TestNearbyMake(void)
         ParchFree();
         ok &= !ParchNearMake(0, 0, 0, x, y, 0, 0, NULL, 1, N, &why) && !strcmp(why, "its own land could not be read") && !g_parchPx;
         Check(ok, "the per-zone fades from the client's files: the zone whose land touches the arrival zone's (Westfall), painted, cut to its land and faded across it along the lines out from the arrival (whole where a line enters it 83 yards off, 23% two thirds of the way across, gone at its box's edge); third, its nearest third whole, 45% two thirds of the way; the arrival zone's own land not read: none");
+    }
+    /* a first visit (neither land kept): the one terrain tile both lands lie on read once for both, the sheet as before */
+    {
+        float ex, ey;
+        int at[3];
+        static const int col[3] = { 9, 13, 15 };
+        TestBytesGone("Data/CinderLoad/land-Elwynn.bin"); TestBytesGone("Data/CinderLoad/land-Westfall.bin");
+        long live = shim_heap_live;
+        ok = ParchNearMake(1, 0, 0, x, y, 0, 0, NULL, 1, N, &why) && N->n == 1 && N->laid == 1 && N->tiles == 1 && !N->unread &&
+             Get("Data/CinderLoad/land-Elwynn.bin") && Get("Data/CinderLoad/land-Westfall.bin");
+        for (int k = 0; k < 3; k++) { TestNearChunk(col[k], 8, &ex, &ey); at[k] = TestSheetAt(0, ex, ey)[3]; }
+        ok &= abs(at[0] - 232) <= 12 && abs(at[1] - 59) <= 12 && at[2] < 12;
+        ParchFree();
+        ok &= !g_tileKeep.on && shim_heap_live == live && g_tileKeep.read == 1 && g_tileKeep.kept == 1;
+        Check(ok, "the zones nearby on a first visit (no land kept yet): the terrain tile Elwynn's and Westfall's lands both lie on read once for both (one file, not two), the sheet as when their lands were kept, nothing of the reading kept after");
     }
 
     /* the work: posted once the arrival's zone is up, run, given to OpenGL, logged; not again for the same arrival, again
@@ -9221,6 +9482,176 @@ static void TestNearbyMake(void)
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
     Check(ok, "the zones nearby drawn under the arrival's zone and over its continent, coming up with the zone (the same alpha at the arrival all the way in, whole at the landing), and up after it, coming up on their own over the fade's time; not for another arrival (either coordinate) or another map, nor with none (the tests' own)");
+
+    /* in a capital (his, 11 Oct: the zone round it "with the surrounding zones ... all appearing at the same time"): the sheet
+     * made after its zone is up and its glide has begun, the zone held (its marker too), the glide going on over its
+     * continent's, until the sheet is up; then the two come up together from the sheet's time, the same alpha in the same
+     * frame, the marker with them; their job ended without one: the zone alone from then; neither as the last close-up
+     * begins (where the city's own page starts to come up: the verifiers' find, 11 Oct, held to the bar's end a first
+     * visit left the camera still over the continent's painting for seconds): the zone alone from there (his to confirm),
+     * the sheet after it on its own when it is up; the zone made again after a sheet still good (its time later than the
+     * sheet's): the two together from the zone's time */
+    {
+        DWORD was = g_nearAt;
+        float y0, y1, sy0, sy1;
+        TestCitySpan(1920, 1080, 0, 0, 1, x, y, &y0, &y1);
+        int held = 1, seen0 = 0;
+        g_parchNearOn = NEAR_C1800 + 1;
+        TestMarkUp(1);
+        g_viewScreen++;                                                /* (the next screen: its arrival's zone shown anew) */
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = 3;                                               /* (in the capital Elwynn's box holds) */
+        g_nearZ = -1;                                                  /* (its sheet being made) */
+        ViewBuild(1920, 1080, 0.0f, 4000);
+        for (int k = 1; k <= 8; k++) {                                 /* (to just short of the last close-up) */
+            ViewBuild(1920, 1080, TestTauFor(0.97f * y0 * (float)k / 8), 4000 + 100 * (DWORD)k);
+            held &= TestBatch(VT_PARCH) < 0 && TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH2) >= 0 && TestBatch(VT_PMARK) < 0;
+        }
+        g_nearZ = 1; g_nearAt = 4850;                                  /* (up) */
+        ViewBuild(1920, 1080, TestTauFor(0.975f * y0), 4950);          /* (a quarter of its fade on) */
+        float m = g_pcam.mz;
+        int a4 = (int)(255 * 0.25f * m + 0.5f), na = TestAlphaAt(VT_PNEAR), za = TestAlphaAt(VT_PARCH), ka = TestAlphaAt(VT_PMARK);
+        seen0 = TestBatch(VT_PNEAR) < TestBatch(VT_PARCH) && na >= 0 && abs(na - za) <= 1 && abs(za - a4) <= 2 && abs(ka - a4) <= 2 && m > 0.5f;
+        ViewBuild(1920, 1080, TestTauFor(0.98f * y0), 5300);
+        na = TestAlphaAt(VT_PNEAR); za = TestAlphaAt(VT_PARCH);
+        seen0 &= na >= 0 && abs(na - za) <= 1 && abs(za - (int)(255 * g_pcam.mz + 0.5f)) <= 1;
+        int none = 1;                                                  /* (their job ended without a sheet) */
+        g_viewScreen++;
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = 3;                                               /* (in the capital Elwynn's box holds) */
+        g_nearZ = -1;
+        ViewBuild(1920, 1080, 0.0f, 6000);
+        ViewBuild(1920, 1080, TestTauFor(0.96f * y0), 6100);
+        none &= TestBatch(VT_PARCH) < 0 && TestBatch(VT_PMARK) < 0;
+        g_nearNone = 1; g_nearNoneAt = 6150;
+        ViewBuild(1920, 1080, TestTauFor(0.965f * y0), 6250);
+        none &= TestBatch(VT_PNEAR) < 0 && abs(TestAlphaAt(VT_PARCH) - (int)(255 * 0.25f * g_pcam.mz + 0.5f)) <= 2 && g_pcam.mz > 0.5f;
+        g_nearNone = 0;
+        int last = 1;                                                  /* (neither as the last close-up begins) */
+        g_viewScreen++;
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = 3;                                               /* (in the capital Elwynn's box holds) */
+        g_nearZ = -1;
+        ViewBuild(1920, 1080, 0.0f, 7000);
+        ViewBuild(1920, 1080, TestTauFor(y0 - 0.01f), 7100);
+        last &= TestBatch(VT_PARCH) < 0 && TestBatch(VT_PMARK) < 0;
+        ViewBuild(1920, 1080, TestTauFor(y0 + 0.002f), 7200);         /* (there: the zone alone from now) */
+        ViewBuild(1920, 1080, TestTauFor(y0 + 0.004f), 7300);
+        int zq = (int)(255 * 0.25f * g_pcam.mz + 0.5f);
+        last &= abs(TestAlphaAt(VT_PARCH) - zq) <= 2 && abs(TestAlphaAt(VT_PMARK) - zq) <= 2 && TestBatch(VT_PNEAR) < 0 && g_pcam.mz > 0.5f;
+        g_nearZ = 1; g_nearAt = 7400;                                  /* (the sheet up after: on its own, from its own time) */
+        ViewBuild(1920, 1080, TestTauFor(y0 + 0.006f), 7500);
+        last &= abs(TestAlphaAt(VT_PARCH) - (int)(255 * 0.75f * g_pcam.mz + 0.5f)) <= 2 && abs(TestAlphaAt(VT_PNEAR) - (int)(255 * 0.25f * g_pcam.mz + 0.5f)) <= 2;
+        int later = 1;                                                 /* (the zone made again after a sheet still good) */
+        g_viewScreen++;
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = 3;
+        g_nearZ = 1; g_nearAt = 100; g_zoneAt = 8000;
+        ViewBuild(1920, 1080, 0.0f, 7900);
+        ViewBuild(1920, 1080, TestTauFor(0.97f * y0), 8100);
+        zq = (int)(255 * 0.25f * g_pcam.mz + 0.5f);
+        later &= abs(TestAlphaAt(VT_PARCH) - zq) <= 2 && abs(TestAlphaAt(VT_PNEAR) - zq) <= 2 && abs(TestAlphaAt(VT_PMARK) - zq) <= 2 && g_pcam.mz > 0.5f;
+        g_zoneAt = 0;
+        int reaim = 1;                                                 /* (shown for a spot in the zone, then re-aimed on the same */
+        g_viewScreen++;                                                /* screen to the capital in it: it stays) */
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = -1; g_nearZ = -1;                               /* (a spot in the zone, not the capital) */
+        ViewBuild(1920, 1080, 0.0f, 9000);
+        ViewBuild(1920, 1080, TestTauFor(0.85f * y0), 9500);
+        reaim &= TestAlphaAt(VT_PARCH) > 0;
+        g_parchCity = 3; g_parchForX = x + 5; g_parchAt = 9600;
+        ViewBuild(1920, 1080, TestTauFor(0.9f * y0), 9700);
+        reaim &= TestAlphaAt(VT_PARCH) > 0 && TestAlphaAt(VT_PMARK) > 0 && TestBatch(VT_PNEAR) < 0;
+        TestCitySpan(2560, 1080, 0, 0, 1, x, y, &sy0, &sy1);
+        g_nearZ = 1; g_nearAt = was;
+        g_nearMap = 0; g_parchCity = -1; g_parchNearOn = 0;
+        TestMarkUp(0);
+        printf("  the zone and its zones nearby together (the last close-up from %.3f of the glide on 1920 x 1080, %.3f on 2560 x 1080): held over its continent %s, up together %s; their job ended without one: the zone alone %s; neither by the last close-up: alone from it, the sheet after %s; the zone made after a sheet still good: together %s; shown, then re-aimed to the capital: stays %s\n",
+               y0, sy0, held ? "yes" : "NO", seen0 ? "yes" : "NO", none ? "yes" : "NO", last ? "yes" : "NO", later ? "yes" : "NO", reaim ? "yes" : "NO");
+        Check(held && seen0 && none && y0 > 0.5f && y0 < 0.96f && sy0 < 0.96f, "in a capital, the zone round it and its zones nearby appear together (his, 11 Oct: \"all appearing at the same time\"): their sheet made after the zone is up and its glide begun, the zone and its marker held and the glide going on over its continent's until the sheet is up, then both from that moment, the same alpha at the arrival in the same frame, the marker with them; their job ended without a sheet: the zone alone from then");
+        Check(last, "in a capital, the zones nearby not settled as the last close-up begins (where the city's own page starts to come up, before the camera lands: the verifiers' find, 11 Oct, a first visit held to the bar's end): the zone and its marker come up alone from there (his to confirm), the sheet after it on its own from its own time");
+        Check(later, "in a capital, the zone's painting made again after a sheet still good (the zone's time later than the sheet's): the zone, the sheet and the marker come up together from the zone's time, at the same alpha");
+        Check(reaim, "a zone shown for a spot in it, then the view re-aimed on the same screen to the capital it holds: the zone stays shown (never taken away to be held for the zones nearby)");
+    }
+    /* in a capital, together by the parchment's work: the worker still making the sheet as the zone's glide goes on, the zone
+     * held; the sheet up, both from that frame; the job ended without a sheet (no memory for it) or OpenGL refusing it: the
+     * zone from that frame, alone; a job for another arrival ending so: not this one's */
+    {
+        float y0, y1;
+        g_viewScreen++;
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = 3; g_ptry.city = 1;                              /* (in the capital; its own page not asked for here) */
+        g_parchOn = 1; g_ptry.world = 1; g_ptry.cont = g_ptry.zone = 1; g_pmadeKnown = 0; g_pmadeFull = g_parchFullOn = 0; g_scrKnown = 0; g_scrSeq++;
+        g_zoneK = 1; g_parchNearOn = NEAR_C1800 + 1; g_nearZ = -1; g_ptry.nearby = 0; g_pj.state = 0; g_pjUp = -1;
+        TestCitySpan(1920, 1080, 0, 0, 1, x, y, &y0, &y1);
+        g_pjWorker = 1;
+        ParchWork(20000);
+        ok = g_pj.state == 1 && g_pj.kind == PJ_NEAR;
+        ViewBuild(1920, 1080, 0.0f, 20000);
+        for (int k = 1; k <= 6; k++) {
+            ParchWork(20000 + 100 * (DWORD)k);
+            ViewBuild(1920, 1080, TestTauFor(0.95f * y0 * (float)k / 6), 20000 + 100 * (DWORD)k);
+            ok &= g_pj.state == 1 && TestBatch(VT_PARCH) < 0 && TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH2) >= 0;
+        }
+        ParchWorkerTurn();                                             /* (the worker: made) */
+        ParchWork(20700);                                              /* (up) */
+        ok &= g_nearZ == 1 && g_nearAt == 20700 && g_pj.state == 0;
+        ViewBuild(1920, 1080, TestTauFor(0.96f * y0), 20800);
+        int na = TestAlphaAt(VT_PNEAR), za = TestAlphaAt(VT_PARCH);
+        ok &= TestBatch(VT_PNEAR) < TestBatch(VT_PARCH) && na >= 0 && abs(na - za) <= 1 && abs(za - (int)(255 * 0.25f * g_pcam.mz + 0.5f)) <= 2 && g_pcam.mz > 0.5f;
+        g_pjWorker = 0; g_pj.state = 0;
+        Check(ok, "in a capital, the zone round it and its zones nearby together by the parchment's work: the worker still making the sheet as the zone's glide goes on, the zone held and its continent's drawn; the sheet up, the zone and the sheet from that frame at the same alpha");
+        int fail = 1;                                                  /* (the job ended without a sheet: no memory for it) */
+        g_viewScreen++;
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = 3; g_ptry.city = 1; g_ptry.cont = g_ptry.zone = 1; g_zoneK = 1; g_nearZ = -1; g_ptry.nearby = 0;
+        g_pjWorker = 1;
+        ParchWork(21020);
+        fail &= g_pj.state == 1 && g_pj.kind == PJ_NEAR && !g_nearNone;
+        ViewBuild(1920, 1080, 0.0f, 21020);
+        ViewBuild(1920, 1080, TestTauFor(0.95f * y0), 21100);
+        fail &= TestBatch(VT_PARCH) < 0;
+        shim_refuse_size = (size_t)2048 * 2048 * 4; shim_refuse_n = 1;
+        ParchWorkerTurn();                                             /* (the worker: not made) */
+        shim_refuse_n = 0;
+        ParchWork(21200);
+        fail &= g_nearNone == 1 && g_nearNoneAt == 21200 && g_nearZ == -1 && g_pj.state == 0;
+        ViewBuild(1920, 1080, TestTauFor(0.96f * y0), 21300);
+        fail &= TestBatch(VT_PNEAR) < 0 && abs(TestAlphaAt(VT_PARCH) - (int)(255 * 0.25f * g_pcam.mz + 0.5f)) <= 2 && g_pcam.mz > 0.5f;
+        g_pjWorker = 0; g_pj.state = 0;
+        int refused = 1;                                               /* (made, OpenGL refusing it) */
+        g_viewScreen++;
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = 3; g_ptry.city = 1; g_ptry.cont = g_ptry.zone = 1; g_zoneK = 1; g_nearZ = -1; g_ptry.nearby = 0; g_nearNone = 0;
+        g_pj.state = 0; g_pjUp = -1;                                   /* (no worker: made and given to OpenGL in one call) */
+        ViewBuild(1920, 1080, 0.0f, 22000);
+        ViewBuild(1920, 1080, TestTauFor(0.95f * y0), 22100);
+        refused &= TestBatch(VT_PARCH) < 0;
+        g_upFail = 1;
+        ParchWork(22200);
+        g_upFail = 0;
+        refused &= g_nearNone == 1 && g_nearNoneAt == 22200 && g_nearZ == -1 && LogSays("OpenGL would not take the zones nearby; the zone alone over its continent");
+        ViewBuild(1920, 1080, TestTauFor(0.96f * y0), 22300);
+        refused &= TestBatch(VT_PNEAR) < 0 && abs(TestAlphaAt(VT_PARCH) - (int)(255 * 0.25f * g_pcam.mz + 0.5f)) <= 2 && g_pcam.mz > 0.5f;
+        int other = 1;                                                 /* (a job for another arrival ending without a sheet) */
+        g_nearNone = 0;
+        g_pj.z = 1; g_pj.map = 0; g_pj.x = x + 40; g_pj.y = y;
+        ParchNearNone(23000);
+        other &= !g_nearNone;
+        g_pj.x = x; g_pj.y = y + 40;
+        ParchNearNone(23000);
+        other &= !g_nearNone;
+        g_pj.y = y; g_pj.z = 2;
+        ParchNearNone(23000);
+        other &= !g_nearNone;
+        g_pj.z = 1;
+        ParchNearNone(23000);
+        other &= g_nearNone == 1 && g_nearNoneAt == 23000;
+        g_nearNone = 0; g_parchCity = -1; g_ptry.city = 0;
+        printf("  in a capital by the parchment's work: no memory for the sheet, the zone from then %s; OpenGL refusing it, the zone from then %s; another arrival's job: not this one's %s\n",
+               fail ? "yes" : "NO", refused ? "yes" : "NO", other ? "yes" : "NO");
+        Check(fail && refused && other, "in a capital, by the parchment's work: the zones nearby's job ending without a sheet (no memory for it) or OpenGL refusing their sheet settles them, the zone coming up alone from that frame; a job for another arrival (either coordinate, another zone) ending so settles nothing");
+    }
 
     /* a sheet for an arrival no longer wanted (re-aimed as it is made, the worker's): stale, stopped, the arrival found again */
     TestGlideArrive(0, 1, 0, x, y, 2000);
@@ -9503,6 +9934,435 @@ static void TestPaperClient(const char *client)
 }
 /* ---- the style: the map and the bar, each the player's (his decision, 10 Oct 2026), and the /cinderload window ---- */
 #define STYLE_REL "Data/CinderLoad/style.txt"
+/* ---- an arrival in a capital (his, 11 Oct 2026, from his film of a login in Stormwind's Trade District: "It should be
+ * the entire zone with the surrounding zones as they get more and more transparent as it gets further away from the
+ * character, all appearing at the same time"; his pick: the city's own map only in the last close-up, at the landing):
+ * the zone round the capital is the arrival's zone, the city's own page over it as the view lands ---- */
+static unsigned TestStrOff(const char *strs, unsigned n, const char *name)
+{
+    for (unsigned i = 1; i < n; i++) if (!strs[i - 1] && !strcmp(strs + i, name)) return i;
+    return 0;
+}
+static void TestCityArrival(void)
+{
+    Fresh("city");
+    GameDir();
+    TestGlideState();
+    /* the tables: a continent; Elwynn and Westfall, both painting Stormwind (its box not inside Elwynn's); Dun Morogh,
+     * whose piece there names the Gates, holding Ironforge's box, and a larger zone holding it too; a zone page inside
+     * Westfall's box, an entrance's, one Elwynn's map paints; a capital with none round it, and one inside an instance's */
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Westfall\0Stormwind\0DunMorogh\0Ironforge\0Big\0Mulgore\0Entrance\0Tunnels\0Lone\0Inst\0Lone2\0";
+    static const char *const nm[13] = { "Azeroth", "Elwynn", "Westfall", "Stormwind", "DunMorogh", "Ironforge", "Big", "Mulgore", "Entrance",
+                                        "Tunnels", "Lone", "Inst", "Lone2" };
+    static const unsigned id[13] = { 14, 30, 39, 301, 27, 341, 50, 9, 514, 700, 900, 901, 902 }, ar[13] = { 0, 12, 40, 1519, 1, 1537, 60, 215, 1581, 1769, 1700, 1800, 1801 };
+    static const float box[13][4] = { { 16000, -19200, 7466, -16000 }, { 1535, -1935, -7939, -10254 }, { 3016, -483, -9400, -11733 },
+                                      { 1722, -14, -7995, -9154 }, { 1802, -3122, -3877, -7160 }, { -713, -1504, -4569, -5096 },
+                                      { 3000, -4000, -3000, -8000 }, { 2000, 0, -9500, -10000 }, { 1793, 1343, -11054, -11354 },
+                                      { -1000, -1500, -9000, -9500 }, { -15000, -16000, 5000, 4000 }, { -12000, -14000, 7000, 3000 },
+                                      { -12500, -13000, 6000, 5500 } };
+    unsigned wv[13 * 8];
+    for (int i = 0; i < 13; i++) {
+        unsigned r[8] = { id[i], 0, ar[i], TestStrOff(wstr, sizeof wstr, nm[i]), TestF(box[i][0]), TestF(box[i][1]), TestF(box[i][2]), TestF(box[i][3]) };
+        memcpy(wv + 8 * i, r, sizeof r);
+    }
+    static unsigned char wma[1024], wmo[512];
+    static const char ostr[] = "\0STORMWIND\0TUNNELS\0WSTORM\0GATES\0";
+    unsigned ov[4 * 17] = { 0 };
+    static const unsigned orow[4][13] = { { 1, 30, 1519, 0, 0, 0, 0, 0, 1, 100, 100, 300, 100 }, { 2, 30, 1769, 0, 0, 0, 0, 0, 11, 50, 50, 600, 400 },
+                                          { 3, 39, 1519, 0, 0, 0, 0, 0, 19, 50, 50, 100, 100 }, { 4, 27, 809, 0, 0, 0, 0, 0, 26, 80, 80, 500, 300 } };
+    for (int i = 0; i < 4; i++) memcpy(ov + 17 * i, orow[i], sizeof orow[i]);
+    ParchTables(wma, TestWdbc(wma, 13, 8, wv, wstr, sizeof wstr), wmo, TestWdbc(wmo, 4, 17, ov, ostr, sizeof ostr));
+    unsigned av[14 * 11] = { 0 };                                      /* AreaTable: id, map, parent, bit, flags .. field 10 */
+    static const unsigned arow[14][5] = { { 1, 0, 0, 1, 0x40 }, { 12, 0, 0, 2, 0x40 }, { 40, 0, 0, 3, 0x40 }, { 60, 0, 0, 4, 0x40 },
+                                          { 87, 0, 12, 5, 0x40 }, { 215, 0, 0, 6, 0x40 }, { 809, 0, 1, 7, 0x40 }, { 1519, 0, 0, 8, 0x138 },
+                                          { 1537, 0, 0, 9, 0x138 }, { 1581, 0, 0, 10, 0 }, { 1700, 0, 0, 11, 0x138 }, { 1769, 0, 0, 12, 0x40 },
+                                          { 1800, 0, 0, 13, 0 }, { 1801, 0, 0, 14, 0x138 } };
+    for (int i = 0; i < 14; i++) memcpy(av + 11 * i, arow[i], sizeof arow[i]);
+    static unsigned char atb[1024];
+    ParchAreas(atb, TestWdbc(atb, 14, 11, av, "\0", 1));
+    g_mapDirN = 0; g_waN = 0;                                          /* (no terrain: the arrival's zone by the boxes) */
+    int ok = g_pzN == 13 && g_ppN == 4 && ParchCityZone(3) == 1 && ParchCityZone(5) == 4 && ParchCityZone(10) == -1 && ParchCityZone(12) == -1;
+    for (int i = 0; i < 13; i++) if (i != 3 && i != 5) ok &= ParchCityZone(i) == -1;
+    ok &= ParchCityZone(-1) == -1 && ParchCityZone(g_pzN) == -1;
+    Check(ok, "an arrival in a capital takes the zone round it: the zone page whose own map paints the city (Stormwind on Elwynn's, though its box is not inside Elwynn's; of two that paint it, the smaller), else the smallest open-world zone page whose box holds the city's (Ironforge in Dun Morogh, whose own piece there names the Gates; not a larger zone round it too); a capital with none round it, or only an instance's page: none; no page but a capital's changes (a zone page inside another's box, an entrance's, one another zone's map paints, a zone, the continent)");
+
+    /* the paintings: Elwynn's and Stormwind's own tiles; no continent's */
+    static const char *pn[24];
+    static char pb[24][64];
+    const char *pd[24];
+    unsigned pl[24];
+    for (int i = 0; i < 24; i++) {
+        snprintf(pb[i], sizeof pb[i], "Interface\\WorldMap\\%s\\%s%d.blp", i < 12 ? "Elwynn" : "Stormwind", i < 12 ? "Elwynn" : "Stormwind", i % 12 + 1);
+        pn[i] = pb[i];
+        pd[i] = (const char *)TestPalBlp(256, 256, i < 12 ? 0x60A040 : 0xB0B0B0, 0, &pl[i]);
+    }
+    MakeMpq("Data/interface.MPQ", 24, pn, pd, pl);
+    for (int i = 0; i < 24; i++) free((void *)pd[i]);
+    /* the arrival in Stormwind (its box the smallest holding it): the zone round it, Elwynn, its zone; the city's own page
+     * made once Elwynn's is up, and logged */
+    g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_pjWorker = 0; g_upN = 0; g_upFail = 0;
+    g_destMap = 0; g_destWX = -8828; g_destWY = 605; g_destZOk = 0; g_scrKnown = 0; g_scrSeq++; g_viewScreen = 31; g_parchFullOn = 0;
+    ParchWork(5000);
+    ok = g_parchWant == 1 && g_parchCity == 3 && g_parchWantCont == 0 &&
+         LogSays("the arrival (map 0, -8828, 605) is in Stormwind, by the smallest box holding it (no terrain file to read); a capital: its zone the one round it, Elwynn, whole with its zones nearby, Stormwind's own map over it as the view lands");
+    for (int f = 1; f < 30 && g_cityUp != 3; f++) ParchWork(5000 + 10 * (DWORD)f);
+    int iz = -1, ic = -1;
+    for (int k = 0; k < g_upN; k++) { if (g_upOrder[k] == VT_PARCH && iz < 0) iz = k; if (g_upOrder[k] == VT_PCITY && ic < 0) ic = k; }
+    ok &= g_parchZone == 1 && g_cityUp == 3 && g_cityK == 1 && g_cityTW == 1024 && iz >= 0 && ic > iz && g_viewTex[VT_PCITY] && !g_parchPx &&
+          LogSays("Elwynn painted from the client's map (256-px tiles, 2 of its 2 overlay pieces") &&
+          LogSays("the parchment: Stormwind's own map painted from the client's map (256-px tiles, 0 of its 0 overlay pieces, its explored areas not known) in ") &&
+          LogSays("it comes up over Elwynn as the view lands");
+    {                                                                  /* (the next screen, the same arrival: nothing made again) */
+        int n = g_upN;
+        DWORD at = g_cityAt;
+        g_viewScreen++;
+        for (int f = 0; f < 10; f++) ParchWork(6000 + 10 * (DWORD)f);
+        ok &= g_upN == n && g_cityAt == at && g_cityUp == 3 && g_parchCity == 3 && g_parchWant == 1;
+    }
+    Check(ok, "an arrival in Stormwind by the parchment's work: its zone the zone round it (Elwynn), logged; the city's own page painted the same way once Elwynn's is up, given to OpenGL after it and logged; the next screen with the same arrival: nothing made again");
+    /* the city's own page made before the zones nearby (the verifiers' find, 12 Oct: behind their job, which on a first
+     * visit reads their lands from the terrain for seconds, a short first visit to Orgrimmar or Thunder Bluff never showed
+     * it): with the worker, the city's job posted as soon as its zone is up, the zones nearby's after it; their job still
+     * the worker's at the landing, the city's page up and drawn whole over its zone there */
+    {
+        int kinds[16], nk = 0, ic = -1, in = -1, nearWas = g_parchNearOn;
+        g_viewScreen++; g_parchForX = 0;                               /* (a new screen, the arrival found anew) */
+        g_parchZone = -1; g_cityUp = -1; g_viewTex[VT_PCITY] = 0; g_nearZ = -1; g_nearNone = 0; g_parchNearOn = NEAR_C1800 + 1;
+        g_pjWorker = 1; g_pj.state = 0; g_pjUp = -1;
+        for (int f = 0; f < 60; f++) {
+            ParchWork(8000 + 10 * (DWORD)f);
+            if (g_pj.state != 1) continue;
+            if (nk == 0 || kinds[nk - 1] != g_pj.kind || g_pj.kind == PJ_FIND) { if (nk < 16) kinds[nk++] = g_pj.kind; }
+            if (g_pj.kind != PJ_NEAR) ParchWorkerTurn();               /* (the zones nearby's job left the worker's, still reading) */
+        }
+        for (int k = 0; k < nk; k++) { if (kinds[k] == PJ_CITY && ic < 0) ic = k; if (kinds[k] == PJ_NEAR && in < 0) in = k; }
+        ok = ic >= 0 && in > ic && g_pj.state == 1 && g_pj.kind == PJ_NEAR && g_cityUp == 3 && g_viewTex[VT_PCITY] && g_parchZone == 1;
+        float y0, y1;
+        TestCitySpan(1920, 1080, 0, 0, 1, -8828, 605, &y0, &y1);
+        int fallback = g_nearZ != 1 && !g_nearNone;
+        ViewBuild(1920, 1080, 0.0f, 8700);
+        ViewBuild(1920, 1080, TestTauFor(y0 - 0.01f), 9000);
+        ok &= TestBatch(VT_PCITY) < 0;                                 /* (not before its span) */
+        ViewBuild(1920, 1080, 1.0f, 12000);
+        ok &= fallback && TestBatch(VT_PCITY) >= 0 && TestBatch(VT_PARCH) >= 0 && TestBatch(VT_PNEAR) < 0 &&
+              TestVertNear(TestBatch(VT_PCITY), 960, 540)->c[3] == 255;
+        printf("  in Stormwind by the parchment's work with the worker: the jobs posted in turn");
+        for (int k = 0; k < nk; k++) printf(" %d", kinds[k]);
+        printf(" (city %d, zones nearby %d)\n", PJ_CITY, PJ_NEAR);
+        InterlockedExchange(&g_pj.state, 3); ParchWorkerTurn();       /* (the zones nearby's job let go) */
+        g_pjWorker = 0; g_pj.state = 0; g_parchNearOn = nearWas;
+        Check(ok, "in a capital, the city's own page made before the zones nearby (the verifiers' find, 12 Oct: behind their job, a short first visit never showed it): its job posted once its zone is up, theirs after; their job still the worker's at the landing, the city's page up, none before its span and drawn whole over its zone at the landing");
+    }
+    /* a non-capital arrival (Goldshire): unchanged, its own zone, no city's page, the landing on its zone as before */
+    g_destWX = -9464; g_destWY = 62; g_viewScreen++;
+    {
+        int n = g_upN, made = 0;
+        for (int f = 0; f < 10; f++) ParchWork(7000 + 10 * (DWORD)f);
+        for (int k = n; k < g_upN && k < 16; k++) made |= g_upOrder[k] == VT_PCITY;
+        ok = g_parchWant == 1 && g_parchCity == -1 && !made && LogSays("the arrival (map 0, -9464, 62) is in Elwynn, by the smallest box holding it (no terrain file to read)") &&
+             !LogSays("the arrival (map 0, -9464, 62) is in Elwynn, by the smallest box holding it (no terrain file to read); a capital");
+    }
+    TestGlideArrive(0, 1, 0, -9464, 62, 2000);                         /* (its paintings up, the city's still up from before) */
+    g_worldUp = 1; g_viewTex[VT_PWORLD] = 1; g_worldTW = 2048; g_worldK = 2; g_worldAt = 0;
+    g_cityUp = 3; g_viewTex[VT_PCITY] = 1; g_cityTW = 2048; g_cityK = 2; g_cityAt = 0;
+    float fx, fy;
+    ParchSpot(0, -9464, 62, &fx, &fy);
+    ParchView vz = ParchEnd(1920, 1080, ParchBox(1), PARCH_ZOOM, fx, fy);
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    ok &= TestBatch(VT_PCITY) < 0 && TestBatch(VT_PARCH) >= 0 && Near(g_pcam.v.s, vz.s, 1e-3 * vz.s) && Near(g_pcam.v.x, fx, 1e-4) &&
+          TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255;
+    Check(ok, "a non-capital arrival unchanged (Goldshire): its own zone (Elwynn), no city's page made or drawn, the glide landing on its zone's framing as before");
+
+    /* drawn: the city's own page over its zone only in the last close-up, as the zone's painting is drawn larger than its
+     * texels (where each finer painting comes up over the one under it), whole at the landing, which frames the zone */
+    TestGlideArrive(0, 1, 0, -8828, 605, 2000);
+    g_parchCity = 3;
+    ParchSpot(0, -8828, 605, &fx, &fy);
+    int okd = 1;
+    float lo = 1;
+    static const int win[2][2] = { { 1920, 1080 }, { 2560, 1080 } };
+    for (int w = 0; w < 2; w++) {
+        float W = (float)win[w][0], H = (float)win[w][1], px = H / PARCH_REF_H, y0, y1;
+        ParchRect zr = ParchBox(1);
+        ParchView va = ParchStart(W, H, 1, ParchBox(0)), vb = ParchEnd(W, H, zr, PARCH_ZOOM, fx, fy);
+        ParchSpan(&va, &vb, px * (float)(PARCH_MAP_W * 2) / (zr.x1 - zr.x0), PARCH_MAG0, PARCH_MAG1, &y0, &y1);
+        if (y0 < lo) lo = y0;
+        TestGlideArrive(0, 1, 0, -8828, 605, 2000);
+        g_parchCity = 3;
+        ViewBuild(W, H, 0.0f, 2000);
+        int before = 1;
+        for (int k = 1; k <= 9; k++) {                                 /* (all the way to just before its span: none) */
+            float e = y0 * (float)k / 10;
+            ViewBuild(W, H, TestTauFor(e), 2000 + 100 * (DWORD)k);
+            before &= TestBatch(VT_PCITY) < 0 && (k < 7 || TestBatch(VT_PARCH) >= 0);   /* (the zone well up by then) */
+        }
+        float em = 0.5f * (y0 + y1);
+        ViewBuild(W, H, TestTauFor(em), 3200);
+        int cb = TestBatch(VT_PCITY), mid = cb >= 0 ? TestVertNear(cb, g_pcam.px, g_pcam.py)->c[3] : -1;
+        int want = (int)(255 * ParchMix(g_pcam.e, y0, y1) + 0.5f);
+        ViewBuild(W, H, 1.0f, 9000);
+        cb = TestBatch(VT_PCITY);
+        int zb = TestBatch(VT_PARCH), whole = cb >= 0 ? TestVertNear(cb, W / 2, H / 2)->c[3] : -1;
+        printf("  the city's own page over its zone (%gx%g): from %.3f to %.3f of the glide; halfway %d (as drawn %d), at the landing %d\n", W, H, y0, y1, want, mid, whole);
+        okd &= before && y0 > 0.8f && y1 > y0 && y1 <= 1 && mid > 20 && mid < 235 && abs(mid - want) <= 2 && whole == 255 && zb >= 0 && cb > zb &&
+               Near(g_pcam.v.s, vb.s, 1e-3 * vb.s);
+    }
+    TestGlideArrive(0, 1, 0, -8828, 605, 2000);                        /* (B: blooming from the character as the zone does) */
+    g_parchCity = 3; g_parchFade = PARCH_FADE_B;
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    okd &= TestBatch(VT_PCITY) >= 0 && TestVertNear(TestBatch(VT_PCITY), 960, 540)->c[3] == 255;
+    g_parchFade = PARCH_FADE_A;
+    g_viewScreen++;                                                    /* (its zone held for its zones nearby: neither drawn short */
+    TestGlideArrive(0, 1, 0, -8828, 605, 2000);                        /* of the last close-up; from it, both, whole at the landing) */
+    g_parchCity = 3; g_parchNearOn = NEAR_ZONE + 1; g_nearZ = -1;
+    {
+        float hy0, hy1;
+        TestCitySpan(1920, 1080, 1, 0, 1, -8828, 605, &hy0, &hy1);
+        ViewBuild(1920, 1080, 0.0f, 2000);
+        ViewBuild(1920, 1080, TestTauFor(hy0 - 0.01f), 3000);
+        okd &= TestBatch(VT_PCITY) < 0 && TestBatch(VT_PARCH) < 0;
+        ViewBuild(1920, 1080, TestTauFor(hy0 + 0.005f), 3100);
+        ViewBuild(1920, 1080, 1.0f, 3500);
+        okd &= TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255 && TestVertNear(TestBatch(VT_PCITY), 960, 540)->c[3] == 255;
+    }
+    g_parchNearOn = 0;
+    TestGlideArrive(0, 1, 0, -8828, 605, 2000);                        /* (its zone's painting not up, being made again: */
+    g_parchCity = 3; g_parchZone = -1;                                 /* the city's page not drawn on its own) */
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    okd &= TestBatch(VT_PCITY) < 0 && TestBatch(VT_PARCH) < 0 && TestBatch(VT_PARCH2) >= 0;
+    g_parchZone = 1;
+    g_cityUp = -1;                                                     /* (not up: none) */
+    ViewBuild(1920, 1080, 1.0f, 9000);
+    okd &= TestBatch(VT_PCITY) < 0 && TestBatch(VT_PARCH) >= 0;
+    Check(okd, "the city's own page drawn over its zone only in the last close-up (his pick): none until the zone's painting is drawn larger than its texels (past 80% of the glide on 16:9 and 21:9), coming up as each finer painting does, whole at the landing, which frames the zone round it; blooming with B; held with its zone for the zones nearby, short of the last close-up, both whole at the landing; never without its zone; none until it is up");
+
+    g_parchCity = -1; g_cityUp = -1; g_viewTex[VT_PCITY] = 0; g_worldUp = 0; g_viewTex[VT_PWORLD] = 0;
+    g_mapDirN = 0; g_waN = 0;
+    TestGlideState();
+}
+/* the real client's capitals (read only): each one's zone round it, his login in Stormwind's Trade District taking Elwynn
+ * with the city's own page over it as the view lands, and that page only in the last close-up on his screen */
+/* the land prepared ahead on the client's own files (his design, 10 Oct: built once, from the player's own files, on their
+ * own disk): every zone page's land made, a turn at a time, none failing; each the same bytes as made alone on a first
+ * visit; then a first visit to Stormwind, Orgrimmar or Thunder Bluff reads no terrain for its zones nearby */
+static void TestWarmClient(const char *client)
+{
+    Fresh("warm-client");
+    if (!LinkClient(client)) return;
+    GameDir();
+    TestGlideState();
+    g_landPrint = 0;
+    ParchRead();
+    int pages = 0;
+    for (int i = 0; i < g_pzN; i++) pages += g_pz[i].area > 0;
+    g_parchAsked = 1; g_prepareOn = 1; g_pj.state = 0; g_pjWorker = 0;
+    TestWarmSession();
+    TestWarmQuiet(1000000);
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    int turns = 1;
+    while (LandWarmTurn() && turns < 1000) turns++;
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    double ms = (double)(b.tv_sec - a.tv_sec) * 1e3 + (double)(b.tv_nsec - a.tv_nsec) / 1e6;
+    int ok = g_warm.state == 2 && g_warm.n > 100 && g_warm.n <= pages && g_warm.made == g_warm.n && !g_warm.failed && turns == g_warm.n + 1 &&
+             LogSays("the parchment: preparing once, off the game's thread at quiet moments, the land of ") &&
+             LogSays("the parchment: the land of ") && LogSays(" zone pages prepared in ") && !LogSays("could not be read, tried again");
+    int made = g_warm.made, tiles = g_warm.tiles;
+    unsigned kb = (g_warm.bytes + 1023) / 1024;
+    static const struct { const char *n; int map; } kz[9] = { { "Elwynn", 0 }, { "Stormwind", 0 }, { "DunMorogh", 0 }, { "Ironforge", 0 },
+        { "Durotar", 1 }, { "Orgrimmar", 1 }, { "Mulgore", 1 }, { "ThunderBluff", 1 }, { "Barrens", 1 } };
+    int same = 1;
+    for (int k = 0; k < 9; k++) {                                      /* (each the same as made alone, as a first visit) */
+        int z = TestZoneRow(kz[k].n, kz[k].map);
+        char rel[96];
+        static unsigned char w1[1 << 17], w2[1 << 17];
+        if (z < 0) { same = 0; continue; }
+        snprintf(rel, sizeof rel, "Data/CinderLoad/land-%s.bin", g_pz[z].name);
+        int n1 = TestBytes(rel, w1, (int)sizeof w1);
+        TestBytesGone(rel);
+        ParchLand L = { 0 };
+        const char *why = "";
+        same &= ParchLandMake(z, &L, &why) && !L.fromFile;
+        ParchLandFree(&L);
+        int n2 = TestBytes(rel, w2, (int)sizeof w2);
+        same &= n1 > LAND_HEAD && n2 == n1 && !memcmp(w1, w2, (size_t)n1);
+    }
+    static const struct { const char *z; int map; float x, y; } kv[3] = { { "Elwynn", 0, -8828, 605 }, { "Durotar", 1, 1629, -4373 }, { "Mulgore", 1, -1277, 124 } };
+    int read[3] = { -1, -1, -1 }, laid[3] = { 0, 0, 0 };
+    for (int k = 0; k < 3; k++) {                                      /* (a first visit's zones nearby, per zone as by default) */
+        static ParchNear N;
+        const char *why = "";
+        int z = TestZoneRow(kv[k].z, kv[k].map);
+        if (z < 0) { ok = 0; continue; }
+        int got = ParchNearMake(z, ParchContinent(kv[k].map), kv[k].map, kv[k].x, kv[k].y, 0, 0, NULL, 2, &N, &why);
+        read[k] = N.tiles + N.unread; laid[k] = got ? N.laid : 0;
+        ParchFree();
+        ok &= got && N.laid == N.n && N.n > 0 && read[k] == 0;
+    }
+    printf("  the land prepared on the client's files: %d of %d zone pages in %.1f s here (%d terrain files read), %u KB kept; the same as made alone: %s; "
+           "then a first visit's zones nearby read %d (Stormwind's Trade District, %d laid), %d (Orgrimmar's Valley of Strength, %d), %d (Thunder Bluff, %d) terrain files\n",
+           made, pages, ms / 1000, tiles, kb, same ? "yes" : "NO", read[0], laid[0], read[1], laid[1], read[2], laid[2]);
+    ok &= same && tiles > 1000 && kb > 100 && kb < 1024;
+    Check(ok, "the land prepared ahead on the client's files: every zone page's land made, a zone a turn, none failing, logged as it starts and ends; each the same bytes as made alone on a first visit (the capitals, the zones round them, the Barrens); then a first visit's zones nearby read no terrain (Stormwind's Trade District, Orgrimmar's Valley of Strength, Thunder Bluff)");
+    g_parchAsked = 0; g_warmBusy = 1; TestWarmSession();
+}
+static void TestCityClient(const char *client)
+{
+    Fresh("city-client");
+    if (!LinkClient(client)) return;
+    GameDir();
+    TestGlideState();
+    g_landPrint = 0;
+    ParchRead();
+    static const struct { const char *city, *zone; int map; } kCap[7] = {
+        { "Stormwind", "Elwynn", 0 }, { "Orgrimmar", "Durotar", 1 }, { "Ironforge", "DunMorogh", 0 }, { "ThunderBluff", "Mulgore", 1 },
+        { "Darnassus", "Teldrassil", 1 }, { "Undercity", "Tirisfal", 0 }, { "AlahThalas", "ThalassianHighlands", 0 } };
+    int ok = 1, caps = 0;
+    for (int i = 0; i < g_pzN; i++) {
+        int r = AreaRow(g_pz[i].area);
+        if (r >= 0 && (g_atFlags[r] & AREA_CAPITAL)) caps++;
+        else ok &= ParchCityZone(i) == -1;
+    }
+    char m[700] = "";
+    for (int k = 0; k < 7; k++) {
+        int c = TestZoneRow(kCap[k].city, kCap[k].map), z = TestZoneRow(kCap[k].zone, kCap[k].map), got = c >= 0 ? ParchCityZone(c) : -2;
+        snprintf(m + strlen(m), sizeof m - strlen(m), "%s%s in %s", k ? ", " : "", kCap[k].city, got >= 0 ? g_pz[got].name : "none");
+        ok &= c >= 0 && z >= 0 && got == z;
+    }
+    static const char *const kNot[9] = { "Mulgore", "Moonglade", "Hyjal", "BlackrockMountain", "CavernsOfTime", "DeadminesEntrance", "TimbermawTunnels",
+                                         "DireMaulEntrance", "WindhornCanyonEntrance" };
+    for (int k = 0; k < 9; k++) { int i = TestZoneRow(kNot[k], k == 0 || k == 1 || k == 2 || k == 4 || k == 6 || k == 7 || k == 8 ? 1 : 0); ok &= i >= 0 && ParchCityZone(i) == -1; }
+    printf("  the client's capitals and the zones round them: %s (%d capitals)\n", m, caps);
+    ok &= caps == 7 && LogSays("an arrival in a capital takes the zone round it, the city's own map over it as the view lands: Stormwind in Elwynn, Orgrimmar in Durotar, Ironforge in DunMorogh, ThunderBluff in Mulgore, Darnassus in Teldrassil, Undercity in Tirisfal, AlahThalas in ThalassianHighlands");
+    Check(ok, "the client's seven capitals each take the zone round it (Stormwind Elwynn, Orgrimmar Durotar, Ironforge Dun Morogh, Thunder Bluff Mulgore, Darnassus Teldrassil, the Undercity Tirisfal, Alah'Thalas the Thalassian Highlands), logged as the tables are read; no other page (Mulgore, Moonglade, Hyjal, Blackrock Mountain, the Caverns of Time, Timbermaw's, the entrances')");
+
+    /* his login in the Trade District (map 0, -8828, 605, 95 high): Stormwind as the client finds it, Elwynn its
+     * zone, painted whole, then Stormwind's own page; Orgrimmar's gates Durotar; Goldshire unchanged */
+    int elw = TestZoneRow("Elwynn", 0), sw = TestZoneRow("Stormwind", 0), dur = TestZoneRow("Durotar", 1), org = TestZoneRow("Orgrimmar", 1), way = -1;
+    int az = ParchZoneAt(0, -8828, 605, 95, 1, &way), oz = ParchZoneAt(1, 1633, -4439, 0, 0, &way), gz = ParchZoneAt(0, -9464, 62, 0, 0, &way);
+    ok = az == sw && ParchCityZone(az) == elw && oz == org && ParchCityZone(oz) == dur && gz == elw && ParchCityZone(gz) == -1;
+    g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_pjWorker = 0; g_upN = 0; g_upFail = 0; g_parchNearOn = 0; g_parchFullOn = 1;
+    g_destMap = 0; g_destWX = -8828; g_destWY = 605; g_destWZ = 95; g_destZOk = 1; g_scrKnown = 0; g_scrSeq++; g_viewScreen = 41;
+    for (int f = 0; f < 40 && g_cityUp != sw; f++) ParchWork(1000 + 10 * (DWORD)f);
+    ok &= g_parchWant == elw && g_parchCity == sw && g_parchZone == elw && g_cityUp == sw && g_cityK == g_zoneK &&
+          LogSays("the arrival (map 0, -8828, 605, 95 high) is in Stormwind, by ") &&
+          LogSays(", as the client; a capital: its zone the one round it, Elwynn, whole with its zones nearby, Stormwind's own map over it as the view lands") &&
+          LogSays("the parchment: Elwynn painted from the client's map (") && LogSays("the parchment: Stormwind's own map painted from the client's map (") &&
+          LogSays("it comes up over Elwynn as the view lands");
+    float fx, fy;
+    ParchSpot(0, -8828, 605, &fx, &fy);
+    ViewBuild(5120, 2160, 0.0f, 2000);
+    ViewBuild(5120, 2160, 1.0f, 12000);
+    int cb = TestBatch(VT_PCITY), zb = TestBatch(VT_PARCH);
+    ParchView vz = ParchEnd(5120, 2160, ParchBox(elw), PARCH_ZOOM, fx, fy);
+    ok &= cb >= 0 && zb >= 0 && cb > zb && TestVertNear(cb, 2560, 1080)->c[3] == 255 && TestVertNear(zb, 2560, 1080)->c[3] == 255 && Near(g_pcam.v.s, vz.s, 1e-3 * vz.s);
+    Check(ok, "his login in Stormwind's Trade District (map 0, -8828, 605, 95 high), on the client's files: Stormwind as the client finds it, the zone round it, Elwynn, the arrival's zone, painted whole, then Stormwind's own page, both given to OpenGL and logged; at the landing on his 5120 x 2160 the glide frames Elwynn and the city's page is whole over it; Orgrimmar's gates take Durotar; Goldshire keeps Elwynn, no city");
+
+    /* the city's page only in the last close-up, for each capital, on his screen and two others */
+    ok = 1;
+    char sp[900] = "";
+    for (int k = 0; k < 7; k++) {
+        int c = TestZoneRow(kCap[k].city, kCap[k].map), z = TestZoneRow(kCap[k].zone, kCap[k].map), cont = ParchContinent(kCap[k].map);
+        if (c < 0 || z < 0 || cont < 0) { ok = 0; continue; }
+        float cx, cy;
+        ParchSpot(kCap[k].map, 0.5f * (g_pz[c].t + g_pz[c].b), 0.5f * (g_pz[c].l + g_pz[c].r), &cx, &cy);
+        static const int scr[3][2] = { { 5120, 2160 }, { 2560, 1600 }, { 1920, 1080 } };
+        snprintf(sp + strlen(sp), sizeof sp - strlen(sp), "%s%s", k ? "; " : "", kCap[k].city);
+        for (int s2 = 0; s2 < 3; s2++) {
+            float W = (float)scr[s2][0], H = (float)scr[s2][1], px = H / PARCH_REF_H, y0, y1;
+            ParchRect zr = ParchBox(z);
+            ParchView va = ParchStart(W, H, 1, ParchBox(cont)), vb = ParchEnd(W, H, zr, PARCH_ZOOM, cx, cy);
+            ParchSpan(&va, &vb, px * (float)(PARCH_MAP_W * 2) / (zr.x1 - zr.x0), PARCH_MAG0, PARCH_MAG1, &y0, &y1);
+            snprintf(sp + strlen(sp), sizeof sp - strlen(sp), " %.2f-%.2f", y0, y1);
+            ok &= y0 >= 0.8f && y1 > y0 && y1 <= 1;
+        }
+    }
+    printf("  the city's own page over its zone, glide 5120x2160, 2560x1600, 1920x1080: %s\n", sp);
+    Check(ok, "each capital's own page comes up only in the last close-up of the glide onto the zone round it (past 80% of it on 5120 x 2160, 2560 x 1600 and 1920 x 1080), whole at the landing");
+
+    /* the zones nearby from the Trade District with Elwynn the zone: Elwynn's neighbours (Westfall, Duskwood, Redridge,
+     * Northwind among them; never Stormwind) */
+    ParchNear *N = &g_pj.nearby;
+    const char *why = "";
+    int has[4] = { 0, 0, 0, 0 }, sws = 0;
+    ok = ParchNearMake(elw, ParchContinent(0), 0, -8828, 605, 0, 0, NULL, 2, N, &why) && N->laid == N->n;
+    for (int k = 0; k < N->n; k++) {
+        const char *n = g_pz[N->row[k]].name;
+        has[0] |= !strcmp(n, "Westfall"); has[1] |= !strcmp(n, "Duskwood"); has[2] |= !strcmp(n, "Redridge"); has[3] |= !strcmp(n, "Northwind");
+        sws |= N->row[k] == sw;
+    }
+    printf("  the zones nearby from the Trade District under Elwynn: %d laid of %d, %d terrain files read\n", N->laid, N->n, N->tiles);
+    ParchFree();
+    ok &= has[0] && has[1] && has[2] && has[3] && !sws;
+    Check(ok, "the zones nearby from his login spot with the zone round Stormwind its zone: Elwynn's own neighbours (Westfall, Duskwood, Redridge, Northwind among them), every one laid, never Stormwind's page");
+
+    /* their lands on a first visit (none kept): each terrain tile read once for them all (the verifiers' find, 11 Oct: a
+     * capital's first visit read Mulgore's neighbours' tiles over and over, 711 files), the lands as each made alone */
+    {
+        static unsigned char kept[24][1 << 16];
+        static int keptN[24];
+        int rows[24], nr = 0, alone = 0, same = 1;
+        rows[nr++] = elw;
+        for (int i = 0; i < g_pzN && nr < 24; i++) if (ParchNearMay(elw, i, -8828, 605, 0)) rows[nr++] = i;
+        char rel[96];
+        for (int k = 0; k < nr; k++) { snprintf(rel, sizeof rel, "Data/CinderLoad/land-%s.bin", g_pz[rows[k]].name); TestBytesGone(rel); }
+        long live = shim_heap_live;
+        ok = ParchNearMake(elw, ParchContinent(0), 0, -8828, 605, 0, 0, NULL, 2, N, &why) && N->laid == N->n;
+        int once = N->tiles;
+        ParchFree();
+        ok &= !g_tileKeep.on && shim_heap_live == live;
+        for (int k = 0; k < 64 * 64; k++) ok &= g_tileKeep.t[k] == NULL;
+        for (int k = 0; k < nr; k++) {                                 /* (each zone's land alone, as before) */
+            snprintf(rel, sizeof rel, "Data/CinderLoad/land-%s.bin", g_pz[rows[k]].name);
+            keptN[k] = TestBytes(rel, kept[k], (int)sizeof kept[k]);
+            TestBytesGone(rel);
+            ParchLand L = { 0 };
+            const char *lw = "";
+            ok &= ParchLandMake(rows[k], &L, &lw) && L.tiles > 0;
+            alone += L.tiles;
+            ParchLandFree(&L);
+            static unsigned char again[1 << 16];
+            int n2 = TestBytes(rel, again, (int)sizeof again);
+            same &= keptN[k] > 40 && n2 == keptN[k] && !memcmp(again, kept[k], (size_t)n2);
+        }
+        printf("  their lands on a first visit: %d terrain files read for %d zones' lands, %d read one zone at a time; the lands the same: %s\n", once, nr, alone, same ? "yes" : "NO");
+        ok &= same && once > 0 && once < alone;
+        Check(ok, "the zones nearby on a first visit (their lands not yet kept, his login spot under Elwynn): each terrain tile read once for all their lands, fewer files than one zone at a time, each land kept just as when made alone, nothing of the reading kept after");
+    }
+
+    /* Darnassus with its zones nearby on, by the parchment's work: Teldrassil the zone round it; no zone's land touches
+     * Teldrassil's, so the zones nearby end without a sheet, and Teldrassil comes up from then, well before the last close-up */
+    {
+        int tel = TestZoneRow("Teldrassil", 1), darn = TestZoneRow("Darnassus", 1);
+        TestGlideState();
+        g_parchOn = 1; g_ptry.world = 1; g_worldUp = 0; g_pjWorker = 0; g_upN = 0; g_upFail = 0; g_parchFullOn = 1;
+        g_parchNearOn = NEAR_ZONE + 1;
+        g_destMap = 1; g_destWX = 9952; g_destWY = 2280; g_destZOk = 0; g_scrKnown = 0; g_scrSeq++; g_viewScreen = 61;
+        DWORD t = 30000;
+        for (int f = 0; f < 80 && !(g_nearNone && g_cityUp == darn); f++) ParchWork(t += 10);
+        ok = tel >= 0 && darn >= 0 && g_parchWant == tel && g_parchCity == darn && g_parchZone == tel && g_nearNone && g_nearZ == -1 &&
+             LogSays("no zones nearby, fade zone (no zone's land touches its own)");
+        DWORD at = g_nearNoneAt;
+        float y0, y1;
+        TestCitySpan(1920, 1080, 0, ParchContinent(1), tel, 9952, 2280, &y0, &y1);
+        ViewBuild(1920, 1080, 0.0f, t);
+        ViewBuild(1920, 1080, TestTauFor(0.6f * y0), t + 100);
+        int za = TestAlphaAt(VT_PARCH);
+        ViewBuild(1920, 1080, TestTauFor(0.7f * y0), t + 100 + PARCH_FADE_MS);
+        int zb = TestAlphaAt(VT_PARCH);
+        printf("  Darnassus by the work, its zones nearby on: zone %s, %s, settled %s (at %lu); Teldrassil drawn at %d then %d (its mix %.2f) before the last close-up at %.2f\n",
+               g_parchWant >= 0 ? g_pz[g_parchWant].name : "-", g_parchCity >= 0 ? g_pz[g_parchCity].name : "-", g_nearNone ? "yes" : "NO", (unsigned long)at, za, zb, g_pcam.mz, y0);
+        ok &= za > 0 && abs(zb - (int)(255 * g_pcam.mz + 0.5f)) <= 1 && g_pcam.mz > 0.5f && 0.7f * y0 < y0 - 0.05f;
+        Check(ok, "Darnassus on the client's files with the zones nearby on, by the parchment's work: Teldrassil the zone round it, its zones nearby ending without a sheet (no zone's land touches Teldrassil's), which settles them: Teldrassil comes up from then, well before the last close-up");
+        g_parchNearOn = 0; g_parchCity = -1; g_nearNone = 0;
+    }
+    ParchLandFree(&g_land); ParchFree();
+    g_parchFullOn = 0; g_destZOk = 0;
+    TestGlideState();
+}
 static void TestStyle(void)
 {
     int ok, map, bar, full;
@@ -10075,6 +10935,38 @@ static void TestLookStyle(void)
     ok &= g_saberStyle == (SABER_PULSE | SABER_RAW);
     g_pzN = pzN;
     Check(ok, "each screen takes Neo's qualities from the look as it opens (pulse and raw by default, as before), logged as they change");
+}
+/* the style's prepare line (the land prepared ahead: on unless style.txt says off, his to confirm) */
+static void TestPrepareStyle(void)
+{
+    int on = 7;
+    int ok = StylePrepare("map parchment\r\nprepare off\r\n", &on) == 1 && on == 0;
+    ok &= StylePrepare("PREPARE=On", &on) == 1 && on == 1 && StylePrepare("prepare: off", &on) == 1 && on == 0 && StylePrepare("Prepare\tON", &on) == 1 && on == 1;
+    on = 7;
+    ok &= StylePrepare("# prepare off\nmap parchment\n", &on) == 0 && StylePrepare("prepare offline", &on) == 0 && StylePrepare("prepared off", &on) == 0 &&
+          StylePrepare("prepare", &on) == 0 && StylePrepare("prepare # off", &on) == 0 && StylePrepare("prepare x off", &on) == 0 &&
+          StylePrepare("fade off", &on) == 0 && StylePrepare(NULL, &on) == 0 && on == 7;
+    ok &= StylePrepare("prepare off\nprepare on", &on) == 1 && on == 1 && StylePrepare("prepare on\nprepare bogus\nprepare off", &on) == 1 && on == 0;
+    Check(ok, "the style's prepare line: \"prepare\" and on or off (case aside, after spaces, '=' or ':'); the last one named counts; a note, another word, none: not named");
+
+    Fresh("style-prepare"); GameDir();
+    g_prepareOn = 0; g_prepareNamed = 1;
+    StyleLoad();
+    ok = g_prepareOn == 1 && !g_prepareNamed;                          /* (no style.txt: on) */
+    const char *t;
+    Put(STYLE_REL, "map parchment\r\nbar retro\r\nareas discovered\r\n");
+    StyleLoad();
+    ok &= g_prepareOn == 1 && !g_prepareNamed && StyleSet(0, 1, 0, "a test") == 1 && (t = Get(STYLE_REL)) && !strstr(t, "prepare");
+    Put(STYLE_REL, "map parchment\r\nbar retro\r\nareas full\r\nfade third\r\nprepare off\r\n");
+    StyleLoad();
+    ok &= g_prepareOn == 0 && g_prepareNamed && g_nearFade == NEAR_THIRD && g_mapFull == 1 &&
+          StyleSet(1, 0, 1, "a test") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nmap parchment\r\nbar neo\r\nareas full\r\nfade third\r\nthick 100\r\n") &&
+          strstr(t, "\r\nquality pulse raw\r\nprepare off\r\n") && strlen(t) < 1500;   /* (after the look's lines, as the window writes them) */
+    Put(STYLE_REL, "prepare on\r\n");
+    StyleLoad();
+    ok &= g_prepareOn == 1 && g_prepareNamed && StyleSet(0, 0, 0, "a test") == 1 && (t = Get(STYLE_REL)) && strstr(t, "\r\nprepare on\r\n");
+    Check(ok, "the land prepared ahead at start: on without style.txt or without its prepare line (never pinned into the file); style.txt's prepare off read beside the other lines and written back with a choice made in game, as prepare on is");
+    g_prepareOn = 1; g_prepareNamed = 0; g_nearFade = PARCH_NEAR_FADE; g_nearFadeNamed = 0;
 }
 static void TestStyleFiles(void)
 {
@@ -10951,8 +11843,13 @@ int main(int argc, char **argv)
     TestNearbyMake();
     TestNearbyStyle();
     TestLookStyle();
+    TestPrepareStyle();
+    TestCityArrival();
+    TestLandWarm();
     if (g_client) TestNearbyClient(g_client);
     if (g_client) TestPaperClient(g_client);
+    if (g_client) TestCityClient(g_client);
+    if (g_client) TestWarmClient(g_client);
     if (fails) printf("%d of %d checks FAILED\n", fails, checks); else printf("all %d checks passed\n", checks);
     return fails != 0;
 }

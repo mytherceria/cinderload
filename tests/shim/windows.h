@@ -149,7 +149,10 @@ static int shim_thread_prio, shim_events_set;
 static HANDLE CreateThread(void *sa, size_t st, LPTHREAD_START_ROUTINE f, LPVOID arg, DWORD fl, DWORD *id)
 { (void)sa; (void)st; (void)fl; (void)id; shim_threads++; shim_thread_fn = f; shim_thread_arg = arg; return (HANDLE)(long)1000; }
 #define THREAD_PRIORITY_BELOW_NORMAL (-1)
-static BOOL SetThreadPriority(HANDLE t, int p) { (void)t; shim_thread_prio = p; return TRUE; }
+#define THREAD_PRIORITY_IDLE (-15)
+static int shim_thread_prio_low;                    /* the lowest priority set since a test zeroed it */
+static BOOL SetThreadPriority(HANDLE t, int p) { (void)t; shim_thread_prio = p; if (p < shim_thread_prio_low) shim_thread_prio_low = p; return TRUE; }
+static HANDLE GetCurrentThread(void) { return (HANDLE)(long)-2; }
 static HANDLE CreateEventA(void *sa, BOOL manual, BOOL initial, const char *name)
 { (void)sa; (void)manual; (void)initial; (void)name; return (HANDLE)(long)1000; }
 static BOOL SetEvent(HANDLE e) { (void)e; shim_events_set++; return TRUE; }
