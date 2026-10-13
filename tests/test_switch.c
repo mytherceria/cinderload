@@ -5117,6 +5117,10 @@ static SYSTEMTIME TodUtc(int y, int mo, int d, int h, int mi, int s, int ms)
 }
 static void TestTimeOfDay(void)
 {
+    /* (0.3.0's time of day, its switches all on as 0.3.0 had them: the machinery is kept, but off on 0.4.0's satellite,
+     * his rule of 13 Oct 2026, broad daylight always: TestDaylight, below) */
+    unsigned todStyle = g_todStyle;
+    g_todStyle = TOD_GRADE | TOD_DISC | TOD_ARC | TOD_CITY | TOD_CLOUDS;
     /* the clock: his minimap's 9:03 at 7:03 UTC (0:03 PDT, 7 Oct); the EU's summer time ends 25 Oct 2026, begins 29 Mar */
     SYSTEMTIME u = TodUtc(2026, 10, 7, 7, 3, 0, 0);
     int ok = Near(TodServerMinutes(&u), 9 * 60 + 3, 1e-3) && TodWeekday(2026, 10, 25) == 0 && TodWeekday(2026, 3, 29) == 0 &&
@@ -5297,6 +5301,46 @@ static void TestTimeOfDay(void)
     DxtDecode(blp + b.off[0], 4, 4, 3, rgba);
     ok &= rgba[3] == 255 && rgba[7] == 0 && rgba[11] == 0 && rgba[15] == 255 && rgba[0] == 255 && rgba[2] == 0;
     Check(ok, "the client's minimap art read as it is: DXT3, its alpha four bits a texel");
+    g_todStyle = todStyle;
+}
+/* 0.4.0's satellite in broad daylight, always (his rule, 13 Oct 2026: "broad daylight, always. No day/night, no
+ * realm-clock light on the 0.4.0 satellite"): at any hour of the realm's clock the world map and its overlay as painted
+ * (no grade), no sun or moon in the top right (its picture not even read: TOD_DISC off), no capitals' lights, the clouds
+ * as at noon. */
+static void TestDaylight(void)
+{
+    float W = 1600, H = 675, keepForce = g_todForce;
+    memcpy(g_bgUV, kWholeUV, sizeof kWholeUV);
+    g_viewTex[VT_TIME] = 1; g_viewTex[VT_SPARK] = 1; g_viewTex[VT_LABELS] = 1;
+    g_map.ok = 1; g_map.m[0].ok = g_map.m[1].ok = 1;
+    for (int c = 0; c < 2; c++) { g_map.m[c].au = 0.5f; g_map.m[c].bu = 1 / 40000.0f; g_map.m[c].av = 0.5f; g_map.m[c].bv = -1 / 40000.0f; }
+    int ok = !(g_todStyle & TOD_DISC);                                   /* (the client's sun and moon not read at all) */
+    float hours[5] = { 0, 345, 720, 1245, 1380 };                       /* midnight, dawn, noon, sunset, night */
+    for (int k = 0; k < 5; k++) {
+        g_todForce = hours[k];
+        ViewListStart(); TodSet();
+        ViewRect(VT_MAP, 0, 0, W, H, 0, 0, 1, 1, 0xFFFFFFFFu);
+        ViewRect(VT_LABELS, 100, 100, 120, 120, 0, 0, 1, 1, 0xFFFFFFFFu);
+        TodCityBuild(W, H, 1000);
+        TodGrade(W, 0, g_vvN);
+        TodDiscBuild(W, H);
+        ok &= g_todAt < 0 && g_vbN == 2 && g_vvN == 8 && g_vb[0].tex == VT_MAP && g_vb[1].tex == VT_LABELS;
+        for (int i = 0; i < g_vvN; i++) ok &= g_vv[i].c[0] == 255 && g_vv[i].c[1] == 255 && g_vv[i].c[2] == 255 && g_vv[i].c[3] == 255;
+    }
+    /* the clouds at midnight and at dawn exactly as at noon, their shadows the map's own light */
+    CloudTileMake(1); CloudParse(g_ctile, sizeof g_ctile);
+    CloudGrid(100, 0, -1, 0, 0, 0);
+    g_shipAsp = W / H; g_destOk = 0; g_skyOn = 1;
+    static unsigned noon[CLOUD_TEX_W * CLOUD_TEX_H];
+    g_todForce = 720; TodSet(); CloudMake(W, H, 5000000);
+    memcpy(noon, g_cloudPx[g_cloudFront], sizeof noon);
+    g_todForce = 0; TodSet(); CloudMake(W, H, 5000000);
+    ok &= !memcmp(noon, g_cloudPx[g_cloudFront], sizeof noon);
+    g_todForce = 345; TodSet(); CloudMake(W, H, 5000000);
+    ok &= !memcmp(noon, g_cloudPx[g_cloudFront], sizeof noon) && Near(g_cj.sunU, CLOUD_SUN_U, 0.01) && Near(g_cj.sunV, CLOUD_SUN_V, 0.01);
+    g_todForce = keepForce; g_skyOn = 0; g_sky.ok = 0; g_cloudOk = 0; g_cloudShownOk = 0; g_cj.on = 0; g_map.ok = 0;
+    g_viewTex[VT_TIME] = 0; g_viewTex[VT_SPARK] = 0; g_viewTex[VT_LABELS] = 0;
+    Check(ok, "0.4.0's satellite in broad daylight at every hour (his rule, 13 Oct 2026): the map and its names as painted at midnight, dawn, noon, sunset and night, no sun or moon (its picture not read), no capitals' lights, the clouds as at noon");
 }
 
 /* Slice 5 (9 Oct): the view on by default. view-off.txt is the player's switch, ahead of all; on Windows itself a game
@@ -12405,6 +12449,7 @@ int main(int argc, char **argv)
     TestSky();
     TestClouds();
     TestTimeOfDay();
+    TestDaylight();
     TestViewDefault();
     TestVanillaBar();
     TestBarSize();

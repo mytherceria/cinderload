@@ -4487,7 +4487,12 @@ static void SkyWind(float v, float *east, float *north)
 #define TOD_ARC    4u            /* crossing its arc through its day or night (without it, still, as on the minimap) */
 #define TOD_CITY   8u            /* the capitals' lights by night */
 #define TOD_CLOUDS 16u           /* the clouds' colours, light and shadows by the hour */
-static unsigned g_todStyle = TOD_GRADE | TOD_DISC | TOD_ARC | TOD_CITY | TOD_CLOUDS;
+/* All off for 0.4.0 (his rule, 13 Oct 2026, with the satellite's switch to the 3D render: "broad daylight, always. No
+ * day/night, no realm-clock light on the 0.4.0 satellite"): the world map, its overlay and the clouds as painted, at
+ * noon's light, whatever the realm's clock says, and no sun or moon (its picture not read). The switches and their light
+ * are kept as 0.3.0 had them (TOD_GRADE | TOD_DISC | TOD_ARC | TOD_CITY | TOD_CLOUDS) for a later call. Only the
+ * satellite ever used them; the parchment is lit by its candle, as before. */
+static unsigned g_todStyle = 0;
 static float g_todForce = -1;    /* minutes into the realm's day to show instead of its clock (previews, tests); -1 its clock */
 #define TOD_DAWN   330.0f        /* 5:30, the client's own */
 #define TOD_DUSK   1260.0f       /* 9 pm */
@@ -12943,9 +12948,13 @@ static int ViewOpen(const char **why)
             Log(ViewSkyUp() ? "  the view's sky: its clouds' picture made with OpenGL, given anew about 30 times a second"
                             : "  the view's sky: OpenGL would not make its clouds' picture; the weather is left out");
         int hm = (int)TodMinutes();
-        wsprintfA(m, "  the time of day: the realm's clock (Central European) at %02d:%02d; its sun or moon %s", hm / 60, hm % 60,
-                  g_viewTex[VT_TIME] ? "from the client's minimap" : "not shown (Interface\\Minimap\\UI-TOD-Indicator was not read)");
-        Log(m);
+        if (!g_todStyle)
+            Log("  the time of day: off, the satellite in broad daylight always (his rule for 0.4.0)");
+        else {
+            wsprintfA(m, "  the time of day: the realm's clock (Central European) at %02d:%02d; its sun or moon %s", hm / 60, hm % 60,
+                      g_viewTex[VT_TIME] ? "from the client's minimap" : "not shown (Interface\\Minimap\\UI-TOD-Indicator was not read)");
+            Log(m);
+        }
     }
     g_view.w = w; g_view.h = h;
     static int clickLogged;                              /* whole again after the last screen's fade, and the mouse through */
