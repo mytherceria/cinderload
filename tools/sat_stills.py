@@ -355,6 +355,12 @@ def main():
         h = min(h, 0.5)
         cu, cv = min(max(cu, h), 1 - h), min(max(cv, h), 1 - h)          # inside the picture, as DriftStep clamps
         views.append((nm.lower().replace(' ', ''), 'one continent: ' + nm, cu, cv, h))
+    for stem, title, c, x, y in PLACES[:1] + PLACES[3:5]:            # a later screen's start: h = 0.5 sqrt(hEnd / 0.5)
+        au, bu, av, bv = S.table[c]
+        h = 0.5 * math.sqrt(0.5 * LANDING_YD * abs(bv) / 0.5)
+        cu, cv = min(max(au + bu * y, h), 1 - h), min(max(av + bv * x, h), 1 - h)
+        views.append(('later-' + stem, 'a later screen\'s start over %s (%d yd tall)' % (title.split(' (')[0],
+                      round(2 * h / abs(bv))), cu, cv, h))
     for stem, what, cu, cv, h in (views if not only or 'world' in only else []):
         old = S.labels(S.view(S.old, cu, cv, h, HW, HH), cu, cv, h)
         new = S.labels(S.view(S.new, cu, cv, h, HW, HH), cu, cv, h)

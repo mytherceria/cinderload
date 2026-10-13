@@ -38,13 +38,17 @@ import numpy as np
 
 W3D = os.path.expanduser('~/Desktop/RavenCraft-Dev-Archive/inbox/world3d/data')
 SHALLOW_YD = 3.0     # PLACEHOLDER (his call): the render's water is all its own up to this depth (yards) ...
-DEEP_YD = 24.0       # PLACEHOLDER (his call): ... and all 0.3.0's painted sea from this depth on
+DEEP_YD = 150.0      # PLACEHOLDER (his call): ... and all 0.3.0's sea from this depth on. 24 left 0.3.0's minimap
+                     # water between the 3D shallows and the painted sea, and the minimap draws some of it as the sea
+                     # floor (tan off Theramore, purple-grey off Durotar); at 150 the render's own water reaches the
+                     # painted sea and still touches only 0.02% of 0.3.0's open sea (sea.bin >= 0.5). Stills 19-21.
 LEVEL_YD = 1.0       # water within this of the sea's level is sea (if it joins the ocean); blended out by twice this
+EDGE_YD = 80.0       # a guard, not a look: the render fades out over this much before a tile the world has no file for
 OCEAN = 2            # wtype: the client's ocean liquid
 LAND_D = -50.0       # the depth land counts as, far from the sea (enough to be alpha 1 whatever the placeholders)
 FLOOR_YD = -400.0    # dry ground below this is the open ocean's floor (the client's empty ocean tiles lie at -515;
                      # the lowest land is Un'Goro's floor at -311)
-VERSION = 5          # the rule's version: caches made by an older rule are not used
+VERSION = 6          # the rule's version: caches made by an older rule are not used
 
 
 def tile_file(c_map, X, Y, root=W3D):
@@ -131,14 +135,20 @@ class Continent:
         d = np.where(oc & (H == 0.0), 1e3, d)                 # the client's unset ground, wet or dry
         d = np.where(open_sea, 1e3, d)
         self.d = d.astype(np.float32)
+        # the guard at the world data's own edge: within EDGE_YD of a tile with no file, the render fades out, so land
+        # or shallows the client cuts straight at a tile's edge (the islet at Azeroth 23_59, whose neighbour has no
+        # file) never end in a straight line in the sea
+        dist = ndimage.distance_transform_edt(~open_sea).astype(np.float32) * (533.33333 / 128)
+        self.f = smoothstep(0.0, EDGE_YD, dist).astype(np.float32)
         self.level = level
         if log:
             log('  %s: %d tiles with a file, sea level %.2f, %d water bodies at the level, %d of them the sea' % (
                 c_map, len(have), level, n, len(seed[seed > 0])))
 
     def tile_depth(self, X, Y):
+        """[129,129,2]: the depth and the edge guard's fade at the tile's corners (land_alpha takes both)."""
         r, c = (Y - self.Y0) * 128, (X - self.X0) * 128
-        return self.d[r:r + 129, c:c + 129]
+        return np.stack([self.d[r:r + 129, c:c + 129], self.f[r:r + 129, c:c + 129]], -1)
 
 
 def land_alpha(depth, n, shallow=SHALLOW_YD, deep=DEEP_YD):
@@ -149,8 +159,13 @@ def land_alpha(depth, n, shallow=SHALLOW_YD, deep=DEEP_YD):
     s = (np.arange(n, dtype=np.float64) + 0.5) * 128.0 / n          # pixel centres in corner units
     i0 = np.clip(np.floor(s).astype(int), 0, 127)
     f = (s - i0).astype(np.float32)
-    d = np.minimum(depth, 1e3)
-    top = d[i0][:, i0] * (1 - f)[None, :] + d[i0][:, i0 + 1] * f[None, :]
-    bot = d[i0 + 1][:, i0] * (1 - f)[None, :] + d[i0 + 1][:, i0 + 1] * f[None, :]
-    dd = top * (1 - f)[:, None] + bot * f[:, None]
-    return (1.0 - smoothstep(shallow, deep, dd)).astype(np.float32)
+
+    def bilinear(g):
+        top = g[i0][:, i0] * (1 - f)[None, :] + g[i0][:, i0 + 1] * f[None, :]
+        bot = g[i0 + 1][:, i0] * (1 - f)[None, :] + g[i0 + 1][:, i0 + 1] * f[None, :]
+        return top * (1 - f)[:, None] + bot * f[:, None]
+    fade = 1.0
+    if depth.ndim == 3:                                              # Continent.tile_depth: the depth and the guard
+        depth, fade = depth[..., 0], bilinear(depth[..., 1])
+    dd = bilinear(np.minimum(depth, 1e3))
+    return ((1.0 - smoothstep(shallow, deep, dd)) * fade).astype(np.float32)

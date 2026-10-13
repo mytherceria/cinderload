@@ -25,7 +25,8 @@ Usage: STORMLIB=/path/to/libstorm.so python3 sat_overview.py <master dir> <0.3.0
   --sea-src       the kit's 8 Oct build (w-<shape>/world-<shape>.png and CinderMap.blp): 0.3.0's pictures lossless,
                   used when proven to be the shipped ones; default inbox/loading-screens/living-map/repack-20261008
 Writes <out>/world-<shape>.png (the new picture, 4096 x 4096), <out>/CinderMap-<shape>.blp, <out>/old-<shape>.png
-(0.3.0's, decoded) and <out>/alpha-<shape>.png (the land alpha on the picture, for checking).
+(0.3.0's), <out>/sea-<shape>.png (0.3.0's softened under the blend: make_sat.py's sea) and <out>/alpha-<shape>.png (the
+land alpha on the picture, for checking).
 """
 import concurrent.futures as cf, ctypes, io, math, os, struct, sys
 import numpy as np
@@ -40,6 +41,8 @@ SIDE = 4096
 P = 128                                  # mosaic pixels a client tile: 4.17 yd, finer than the picture's 7.2 yd texel
 SHAPES = ('16x10', '16x9', '21x9', '32x9')
 OLD_BLP = {}
+SOFT_TEXELS = 2.0        # 0.3.0's picture softened by this (texels) under the render's blend, never where alpha is 0
+SOFT_RAMP = 5.0          # fully softened from alpha 0.2 up
 DEEP_FILL = (50, 82, 112)                # the render's own deep water, where it drew no tile (never shown: alpha 0)
 CLIENT = os.path.expanduser('~/Games/RavenCraft-fogtest/Data')
 WORK = os.path.expanduser('~/.cache/claude-scratch/sat040-assets')
@@ -248,9 +251,19 @@ def build_shape(shape, pack_dir, mos, out, log=print, sea_src=None):
         take = am > alpha[sl]
         alpha[sl] = np.where(take, am, alpha[sl])
         new[sl] = np.where(take[..., None], np.asarray(im, np.float32), new[sl])
-    pic = old.astype(np.float32) * (1 - alpha[..., None]) + new * alpha[..., None]
+    # where the render comes in (alpha > 0), 0.3.0's picture under it is softened first: there it is mostly the
+    # minimap's own coastal water, drawn in 17-yard texels and DXT blocks, and blending through it showed its staircase
+    # at the landing (Durotar's coast, 13 Oct). Where the alpha is 0 it is untouched, to the byte.
+    from scipy import ndimage
+    g = np.clip(alpha * SOFT_RAMP, 0, 1)[..., None]
+    soft = np.stack([ndimage.gaussian_filter(old[..., k].astype(np.float32), SOFT_TEXELS) for k in range(3)], -1)
+    sea = old.astype(np.float32) * (1 - g) + soft * g
+    del soft, g
+    pic = sea * (1 - alpha[..., None]) + new * alpha[..., None]
     pic = np.clip(pic + 0.5, 0, 255).astype(np.uint8)
     os.makedirs(out, exist_ok=True)
+    Image.fromarray(np.clip(sea + 0.5, 0, 255).astype(np.uint8)).save(os.path.join(out, 'sea-%s.png' % shape))
+    del sea
     png = os.path.join(out, 'world-%s.png' % shape)
     Image.fromarray(pic).save(png)
     Image.fromarray(old).save(os.path.join(out, 'old-%s.png' % shape))

@@ -20,7 +20,10 @@ PLACEHOLDER (his call): the tile size. 512 px (about 1 px a yard, his Elwynn pic
 is the client's own minimap size. Both are built by default; he picks one, and only that archive ships.
 
 Usage: STORMLIB=/path/to/libstorm.so python3 make_sat.py <master dir> <0.3.0 packs dir> <out dir>
-         [--px 512,256] [--sea-shape 21x9] [--best] [--no-sea] [--jobs N] [--only c_X_Y,...]
+         [--px 512,256] [--sea-shape 21x9] [--sea-png <ov dir>/sea-21x9.png] [--best] [--no-sea] [--jobs N]
+         [--only c_X_Y,...]
+  --sea-png  sat_overview.py's sea-<shape>.png: 0.3.0's picture softened where the render blends in, so a tile's sea is
+             the overview's to the texel; without it, the shipped BLP decoded (the same where the alpha is 0)
   --best   ImageMagick's DXT1 cluster fit (about 2 dB closer, about 300 times slower: some 20 minutes on 32 threads)
   --only   just these tiles, for a look (no archive)
 Writes <out>/<px>/CinderSat.MPQ, <out>/<px>/sat.txt, <out>/<px>/tiles/<c>_<X>_<Y>.blp, <out>/<px>/BUILD.txt; then reads
@@ -159,6 +162,7 @@ def main():
     jobs = int(opt('--jobs', str(min(30, os.cpu_count() or 4))))
     only = opt('--only', None)
     client = opt('--client', CLIENT)
+    sea_png = opt('--sea-png', None)
     best, no_sea = flag('--best'), flag('--no-sea')
     master, packs, out = (os.path.expanduser(a) for a in args[:3])
     for px in pxs:
@@ -189,6 +193,11 @@ def main():
     table, _ = satgeo.read_map_txt(pk.read('CinderLoad\\map.txt').decode('ascii'))
     pk.close()
     old = np.ascontiguousarray(decode(0)[..., :3])
+    if sea_png:                                         # sat_overview.py's sea: 0.3.0's, softened under the blend only
+        soft = np.asarray(Image.open(sea_png).convert('RGB'))
+        if soft.shape != old.shape or np.abs(soft.astype(np.int16) - old).mean() > 4:
+            raise SystemExit('%s is not the %s overview\'s sea' % (sea_png, sea_shape))
+        old = np.ascontiguousarray(soft)
     G.update(master=master, out=out, pxs=pxs, best=best, depth=depth,
              sea={c: sea_sampler(old, table, c) for c in (0, 1)})
     print('%d tiles to build at %s px (sea from %s, %s fit, %d workers)' % (
@@ -225,7 +234,9 @@ def main():
                   'archive %d bytes (%.1f MB), its files %d bytes before zlib (%.1f MB)' % (
                       size, size / 1e6, raw, raw / 1e6),
                   'MPQ format version %d, hash table %d, block table %d, sectors %d bytes' % (ver, hc, bc, 512 << shift),
-                  'sea from 0.3.0\'s %s CinderMap.blp; DXT1 %s fit' % (sea_shape, 'cluster' if best else 'range'),
+                  'sea from 0.3.0\'s %s CinderMap.blp%s; DXT1 %s fit' % (
+                      sea_shape, ' softened under the blend (%s)' % os.path.basename(sea_png) if sea_png else '',
+                      'cluster' if best else 'range'),
                   'StormLib read back: every file identical',
                   line,
                   'sha256 %s' % sha]
