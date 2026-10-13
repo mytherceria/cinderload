@@ -13666,7 +13666,8 @@ static void ModeTurnStart(void)
  * frame, the RavenCraft logo on it), each on its own, on both maps; MAP AREAS, the parchment's: Discovered (only the
  * overlay pieces this character has found, as the client's world map shows them) | Full map (every piece, as though all
  * were found: his words, 11 Oct, "we could have a switch that turns on the full map as though it were fully discovered,
- * but it should default to only what they've discovered"). Defaults: the parchment, retro, discovered. Chosen in game
+ * but it should default to only what they've discovered"). Defaults: the parchment, retro, the full map (his later call, 11
+ * Oct, "the entire map (all zones/subzones) explored"). Chosen in game
  * (the /cinderload window and its words, below) and kept in Data\CinderLoad\style.txt, written here, so it holds over
  * restarts; a choice counts from the next loading screen. Until a choice is made in game (no style.txt), the old switch
  * files still say what they said: parchment.txt the parchment with vanilla's bar, bar-vanilla.txt vanilla's bar on the
@@ -14038,8 +14039,8 @@ static int StyleApply(const Style *st, const char *how)
         char lk[200];
         StyleLookText(lk, &st->look, ", ");
         int fd = st->fade >= 0 && st->fade < NEAR_FADES ? st->fade : 0;
-        wsprintfA(m, "style: the zones nearby out to %d yards, their fade %s, the bar's look %s (%s), from the next loading screen; %s", st->nearYd,
-                  kNearWord[fd], lk, how, kept);
+        wsprintfA(m, "style: the zones nearby, their fade %s, the bar's look %s (%s), from the next loading screen; %s", kNearWord[fd], lk, how,
+                  kept);                                              /* (no reach: style.txt's nearby line is kept, never drawn) */
         Log(m);
     }
     return 1;

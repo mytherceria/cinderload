@@ -11491,7 +11491,7 @@ static void TestSwitchesPath(void)
           g_look.quality == (int)(SABER_LIQUID | SABER_RAW) && g_nearFade == NEAR_THIRD && g_nearFadeNamed && g_nearYd == PARCH_NEAR_YD &&
           (t = Get(STYLE_REL)) && !strstr(t, "\r\nnearby") &&
           strstr(t, "\r\nareas full\r\nfade third\r\nthick 125\r\nwidth own\r\nwhole off\r\neffect heat\r\nneofill blade\r\ncolour ember\r\nquality liquid raw\r\n") &&
-          LogSays("style: the zones nearby out to 1600 yards, their fade third, the bar's look thick 125, width own, whole off, effect heat, neofill blade, colour ember, quality liquid raw");
+          LogSays("style: the zones nearby, their fade third, the bar's look thick 125, width own, whole off, effect heat, neofill blade, colour ember, quality liquid raw");
     g_dispNew = 1;
     GameStep(0.0f, now + 10);
     ViewOpenFirst(1920, 1080, now + 20);
