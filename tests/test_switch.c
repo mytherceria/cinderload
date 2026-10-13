@@ -13369,6 +13369,32 @@ static void TestSatLongTile(void)
     Check(ok, "the satellite's detail: a tile whose file runs more than SAT_FILE_SLACK past its header and levels (held whole until up, the budgets counting only its levels) is not taken and not read again this session, whether the rest trails its levels or sits before them; one at the slack is taken; said in the screen's line; the heap even");
 }
 
+/* The detail's job state is the hand-off between the view's thread and its worker (what one writes before it sets the
+ * state, the other reads after it reads the state): every read and write of it an Interlocked call, the reads through
+ * SatJobState (a locked read), never a plain one the compiler may order as it likes (the runtime attack, 13 Oct: right
+ * in the 32-bit object code, but not promised). Read from dll/cinderload.c's text, as the hooks are. */
+static void TestSatHandOff(void)
+{
+    char here[1024], p[1200];
+    snprintf(here, sizeof here, "%s", __FILE__);
+    char *slash = strrchr(here, '/');
+    if (slash) *slash = 0; else snprintf(here, sizeof here, ".");
+    snprintf(p, sizeof p, "%s/../dll/cinderload.c", here);
+    FILE *f = fopen(p, "rb");
+    long n = 0;
+    if (f && !fseek(f, 0, SEEK_END)) { n = ftell(f); fseek(f, 0, SEEK_SET); }
+    char *src = n > 0 ? malloc((size_t)n + 1) : NULL;
+    if (src) { src[fread(src, 1, (size_t)n, f)] = 0; }
+    if (f) fclose(f);
+    int ok = src != NULL, all = 0, plain = 0, reads = 0;
+    for (const char *q = src; q && (q = strstr(q, "g_sj.state")) != NULL; q++) { all++; plain += q == src || q[-1] != '&'; }
+    for (const char *q = src; q && (q = strstr(q, "SatJobState()")) != NULL; q++) reads++;
+    ok &= all >= 8 && plain == 0 && reads >= 5 &&
+          strstr(src, "\nstatic LONG SatJobState(void) { return InterlockedCompareExchange(&g_sj.state, 0, 0); }\n") != NULL;
+    free(src);
+    Check(ok, "the satellite's detail: its job's state, the hand-off between the view's thread and its worker, read and written only by Interlocked calls (its reads a locked read, SatJobState), never a plain read");
+}
+
 static void TestSatellite(void)
 {
     TestSatGeometry();
@@ -13390,6 +13416,7 @@ static void TestSatellite(void)
     TestSatBatchRoom();
     TestSatFrameOrder();
     TestSatLongTile();
+    TestSatHandOff();
     TestSatHooks();
 }
 

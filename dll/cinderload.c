@@ -13635,6 +13635,11 @@ static struct {
 static struct { SatItem *t; int n, at; } g_squ = { g_satItems[1], 0, 0 };
 static volatile LONG g_sjWorker;          /* a worker runs the jobs (once started), */
 static HANDLE g_sjEvent;                  /* woken by this as each is posted */
+/* The job's state read as the hand-off it is (the worker's of a job posted, the view's of one done, or of none before it
+ * fills the next): InterlockedCompareExchange changing nothing, a locked read and a full barrier, so what the other
+ * thread wrote before it set the state is seen after it. A plain volatile read (the parchment's way, left as it is there)
+ * compiles in that order on the 32-bit build, but the compiler never promised it (the runtime attack, 13 Oct). */
+static LONG SatJobState(void) { return InterlockedCompareExchange(&g_sj.state, 0, 0); }
 
 static void SatItemsFree(SatItem *t, int n)
 {
@@ -13697,7 +13702,7 @@ static void SatJobRun(void)
     DWORD t0 = GetTickCount();
     for (int i = 0; i < g_sj.n; i++) {
         SatItem *it = &g_sj.t[i];
-        if (g_sj.state == 3) break;                              /* (stale: the rest never read) */
+        if (SatJobState() == 3) break;                           /* (stale: the rest never read) */
         char path[48];
         unsigned char *d = NULL;
         unsigned n = 0;
@@ -13710,7 +13715,7 @@ static void SatJobRun(void)
 /* The worker's loop, a pass of it (the tests run it by hand): a stale job freed, a posted one run and said done. */
 static int SatWorkerTurn(void)
 {
-    LONG s = g_sj.state;
+    LONG s = SatJobState();
     if (s == 3) { SatItemsFree(g_sj.t, g_sj.n); g_sj.n = 0; InterlockedExchange(&g_sj.state, 0); return 1; }
     if (s != 1) return 0;
     SatJobRun();
@@ -13755,7 +13760,7 @@ static void SatJobPost(void)
  * SAT_JOB_BYTES at the most. 1 when one was posted. */
 static int SatJobNext(void)
 {
-    if (g_sj.state != 0 || !g_satFor.on || g_satFor.stop) return 0;
+    if (SatJobState() != 0 || !g_satFor.on || g_satFor.stop) return 0;
     int n = 0, s3tc = g_view.s3tc != 0;
     unsigned bytes = 0, est = SatTileBytes(s3tc);
     for (int i = 0; i < g_ssN && n < SAT_JOB_TILES; i++) {
@@ -13989,8 +13994,8 @@ static void SatWork(DWORD now)
     if (!g_satFor.on) return;
     SIZE_T budget = SatUpBudget(dt), spent = 0;
     for (int steps = 0; steps < SAT_MAX + 8; steps++) {
-        if (g_squ.at >= g_squ.n && g_sj.state == 2) { SatTake(); continue; }   /* (done: up next, while the next is read) */
-        if (g_sj.state == 0 && SatJobNext()) continue;
+        if (g_squ.at >= g_squ.n && SatJobState() == 2) { SatTake(); continue; }   /* (done: up next, while the next is read) */
+        if (SatJobState() == 0 && SatJobNext()) continue;
         if (g_squ.at < g_squ.n && !g_satFor.stop && (!spent || spent + g_squ.t[g_squ.at].bytes <= budget)) {
             spent += SatUpOne(now);                              /* (the budget's bytes at the most, one tile at the least) */
             continue;
