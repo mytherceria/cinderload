@@ -504,8 +504,9 @@ static void FireTests(void)
     g_destKnownPct = 100; g_destKnownWay = 2; g_driftResets = 9; g_musicFaded = 1; g_holdLast = 9900;
     Client(0, 1, 1); FireStep(shim_ticks += 20);
     Check(LogSays("its sound (hearth) played for") && LogSays(", its fire the pack's orange, the world map from 50% in, ending 21.2x in, "
-                                                            "the arrival known at 100% (the game's, written during it), 9 resets mid-screen"),
-          "a screen's line with its bar's account at its longest: logged whole");
+                                                            "the arrival known at 100% (the game's, written during it), 9 resets mid-screen, "
+                                                            "the character list's music faded out, held 9.9 s for the floor\r\n"),
+          "a screen's line with its bar's account at its longest: logged whole, to its last word");
     g_barsOn = 0; g_mapShown = 0; g_zoomHalf = 0; g_zoomStart = 0; g_destKnownPct = -1; g_destKnownWay = 0; g_driftResets = 0;
     g_musicFaded = 0; g_holdLast = 0; g_viewH = vh;
 
@@ -6449,6 +6450,30 @@ static void TestParchment(void)
            g_pcam.e, ParchMix(g_pcam.e, z0, z1), z0, z1, TestAlphaAt(VT_PARCH));
     ok &= ParchMix(g_pcam.e, z0, z1) < 0.9f && TestAlphaAt(VT_PARCH) == 255 && g_pcam.mz == 1;
     Check(ok, "the fade A, his rule (12 Oct): the zone's painting comes up from 20% of the bar, whole once faded up, whatever the zoom (where the zoom alone would have it only partly up); none before");
+    /* each screen its own (the pre-push attack's finds, 12 Oct): a new screen at the same spot, the last screen's paintings
+     * still up (a teleport to where he stood), its arrival taken late, past 20% of the bar: up from then over the fade,
+     * never at full strength in one frame; and a screen whose arrival is taken at once: the last screen's showing and its
+     * 20% moment not carried over, the zone up from this screen's own 20% */
+    g_viewScreen = 8;
+    ViewBuild(1920, 1080, 0.0f, 20000);
+    ViewBuild(1920, 1080, 0.3f, 20300);                                 /* (past 20%, its arrival not taken: the opening) */
+    ok = TestBatch(VT_PARCH) < 0;
+    g_parchForScreen = g_viewScreen; g_parchAt = 21000;                 /* (taken late, at the same spot, the zone still up) */
+    ViewBuild(1920, 1080, 0.5f, 21000);
+    ok &= TestBatch(VT_PARCH) < 0;
+    ViewBuild(1920, 1080, 0.52f, 21000 + PARCH_FADE_MS / 4);
+    ok &= abs(TestAlphaAt(VT_PARCH) - 64) <= 2;
+    g_viewScreen = 9;                                                   /* (taken at once, at the same spot) */
+    g_parchForScreen = g_viewScreen; g_parchAt = 30000;
+    ViewBuild(1920, 1080, 0.0f, 30000);
+    ViewBuild(1920, 1080, 0.15f, 30150);
+    ok &= TestBatch(VT_PARCH) < 0;
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 30300);
+    ok &= TestBatch(VT_PARCH) < 0;
+    ViewBuild(1920, 1080, 0.25f, 30300 + PARCH_FADE_MS / 4);
+    ok &= abs(TestAlphaAt(VT_PARCH) - 64) <= 2;
+    g_viewScreen = 7;
+    Check(ok, "each screen its own: at the last screen's spot with its paintings still up, an arrival taken late (past 20% of the bar) fades the zone up from then, never at full strength in one frame; one taken at once carries nothing of the last screen's showing or its 20% moment, the zone up from this screen's own 20%");
     /* the player's marker (his pick, 11 Oct, option 1, no ripple): the world map's own arrow pointing north over a dark disc,
      * the candle's amber glow breathing over 2 s, over everything, coming up with the zone's painting */
     {

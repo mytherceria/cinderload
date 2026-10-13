@@ -945,7 +945,8 @@ static void FireClose(void)
     g_fire.channel = -1;
 }
 
-#define BAR_SHOWN_MAX 160              /* the longest about 115: its fire, the class, "the world map from halfway in ...", resets */
+#define BAR_SHOWN_MAX 320              /* the longest about 230: its fire, the class, "the world map from halfway in ...", resets,
+                                        * the music, the hold (160 cut the hold off a login's line: the pre-push attack, 12 Oct) */
 static void BarShownSince(char *out, int cap);
 static void DriftScreenGone(void);
 static void LearnScreen(char *m);
@@ -9148,8 +9149,8 @@ static DWORD ParchLater(DWORD a, DWORD b) { return (LONG)(b - a) > 0 ? b : a; }
  * sheet up, their job ended without one, or none asked for) and the bar as shown is PARCH_SHOW_BAR along, then the two
  * come up as one from that frame, with A whole at any zoom (no longer waiting for the zoom to draw it larger than its
  * texels); once shown on a screen the zone stays, wherever the view is aimed after (a re-aim's new sheet comes up on its
- * own). With the zones nearby still not settled where the zoom brought the zone up before (a first visit's terrain still
- * being read), the zone comes up alone there, its zones nearby after it when they are ready: never later than before.
+ * own). With the zones nearby still not settled by the last close-up (a first visit's terrain still being read), the zone
+ * comes up alone there, its zones nearby after it when they are ready, so the landing is never on the continent's painting.
  * The continent's name keeps its own time, by the zoom, as before. And the city's own page comes up over its zone in the
  * last close-up as the view lands, the way each finer painting comes up over the one under it. */
 static void ParchDraw(float W, float H, float shown, DWORD now)
@@ -9226,7 +9227,11 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
                                                                     * bar's PARCH_SHOW_BAR (not settled by the last close-up: alone
                                                                     * there); B, C, D: held so in a capital only */
             DWORD set = nearUp ? g_nearAt : g_nearNone && g_parchNearOn > 0 ? g_nearNoneAt : g_zoneAt;
-            DWORD at = baseZ || (!fadeA && city < 0) ? g_zoneAt : !settled ? now : fadeA ? ParchLater(set, g_showBar.at) : set;
+            DWORD at = baseZ || (!fadeA && city < 0) ? g_zoneAt : !settled ? now
+                     : fadeA ? ParchLater(ParchLater(set, g_showBar.at), g_parchAt) : set;   /* (A: never before its arrival
+                                                                    * was taken: an arrival taken late at the last screen's spot,
+                                                                    * its paintings still up, fades up from then, never at full
+                                                                    * strength in one frame: the pre-push attack's find, 12 Oct) */
             g_reveal.screen = g_viewScreen; g_reveal.z = z; g_reveal.at = ParchLater(g_zoneAt, at);
             revealed = 1;
         }
