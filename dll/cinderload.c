@@ -14647,7 +14647,7 @@ static void LuaStart(void)
     CloseHandle(t);
 }
 
-BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
+BOOL WINAPI __attribute__((noinline)) DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
@@ -14675,4 +14675,21 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     return TRUE;
 }
 
-BOOL WINAPI DllMainCRTStartup(HINSTANCE inst, DWORD reason, LPVOID reserved) { return DllMain(inst, reason, reserved); }
+#ifdef __i386__
+/* 1 when the processor has SSE2 (CPUID 1, EDX bit 26): the 32-bit build's float maths is SSE2 (build.sh), so without it
+ * nothing of the DLL runs past its entry and the game's own screens stay. */
+static int __attribute__((noinline)) CpuSse2(void)
+{
+    unsigned a, b, c, d;
+    __asm__ volatile ("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+    (void)a; (void)b; (void)c;
+    return (int)((d >> 26) & 1);
+}
+#endif
+BOOL WINAPI DllMainCRTStartup(HINSTANCE inst, DWORD reason, LPVOID reserved)
+{
+#ifdef __i386__
+    if (reason == DLL_PROCESS_ATTACH && !CpuSse2()) return TRUE;
+#endif
+    return DllMain(inst, reason, reserved);
+}
