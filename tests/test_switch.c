@@ -13329,6 +13329,46 @@ static void TestSatFrameOrder(void)
     Check(ok, "the satellite's detail through the view's frame (its list built, then SatWork, then that list drawn, or drawn again the frames after): the arrival moving within the screen re-slots the set, and the list's tiles still in it are drawn with their own textures, every one (none with another tile's), those let go left out for that frame; across a teleport, or the window hiding, none drawn; a texture is one tile's for its life");
 }
 
+/* A tile's file is held whole from its read until it is up, while SAT_JOB_BYTES and SAT_BUDGET count only its levels
+ * (the runtime attack, 13 Oct: 20 tiles with 1 MB past their levels held 23.9 MB counted as 3.4 MB; mpq_read takes a
+ * file of up to 64 MB, so a hand-made archive could ask about 2 GB of the 32-bit process). A file more than
+ * SAT_FILE_SLACK bytes longer than its header and levels is not one of ours: not taken, not read again this session. */
+static void TestSatLongTile(void)
+{
+    Fresh("sat-longtile"); GameDir();
+    SatTestReset();
+    SatTestMap(SH_21x9);
+    SatPackBegin(64);
+    unsigned n, gap = 2 * SAT_FILE_SLACK;
+    unsigned char *t = SatTestBlp(64, 0x1234, &n);
+    unsigned char *big = calloc(1, n + gap);
+    memcpy(big, t, n);
+    SatPackTile(0, 31, 49, 64, 1, 1, big, n + SAT_FILE_SLACK + 1);       /* one byte past the slack: not taken */
+    SatPackTile(0, 32, 49, 64, 1, 1, big, n + SAT_FILE_SLACK);           /* at it: taken */
+    SatPackTile(0, 30, 49, 64, 1, 1, NULL, 0);                           /* as make_sat.py writes it: taken */
+    memset(big, 0, n + gap);                                             /* its levels at the far end, past a gap: */
+    memcpy(big, t, 1172);                                                /* (the file ends where they do) */
+    memcpy(big + 1172 + gap, t + 1172, n - 1172);
+    for (int i = 0; i < SatTestLevels(64); i++) { unsigned o; memcpy(&o, big + 20 + 4 * i, 4); o += gap; memcpy(big + 20 + 4 * i, &o, 4); }
+    SatPackTile(0, 33, 49, 64, 1, 1, big, n + gap);                      /* not taken either */
+    free(big); free(t);
+    SatPackEnd();
+    SatRead();
+    TestSatGl(1, 1);
+    long heap = shim_heap_live;
+    SatNewScreen(); SatWork(1000); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    for (int f = 0; f < 10; f++) SatWork(1007 + 7 * f);
+    int ok = g_ssN == 4 && g_ss[SatSlotOf(31, 49)].st == SAT_GONE && SatBit(g_sat.bad[0], 31, 49) &&
+             g_ss[SatSlotOf(33, 49)].st == SAT_GONE && SatBit(g_sat.bad[0], 33, 49) &&
+             g_ss[SatSlotOf(32, 49)].st == SAT_UP && g_ss[SatSlotOf(30, 49)].st == SAT_UP && g_satFor.failed == 2;
+    SatScreenEnd();
+    ok &= LogSays("2 would not read (not a square DXT BLP2, or longer than its levels)");
+    SatRelease();
+    ok &= shim_heap_live == heap && TsatLive() == 0;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail: a tile whose file runs more than SAT_FILE_SLACK past its header and levels (held whole until up, the budgets counting only its levels) is not taken and not read again this session, whether the rest trails its levels or sits before them; one at the slack is taken; said in the screen's line; the heap even");
+}
+
 static void TestSatellite(void)
 {
     TestSatGeometry();
@@ -13349,6 +13389,7 @@ static void TestSatellite(void)
     TestSatParchment();
     TestSatBatchRoom();
     TestSatFrameOrder();
+    TestSatLongTile();
     TestSatHooks();
 }
 

@@ -13478,13 +13478,16 @@ static void ParchWorkerStart(void)
 #define SAT_FADE_NEAR  1.25f       /* ... whole by this (4375 yards) */
 #define SAT_UP_MS      400         /* PLACEHOLDER (his call): a tile fades up over this once it is up */
 #define SAT_DECODE_MAX 256         /* a driver without DXT: each tile decoded from its first level no wider than this */
-#define SAT_PX_MOST    1024        /* a tile wider than this is not taken */
+#define SAT_PX_MOST    1024        /* a tile wider than this is not taken, */
+#define SAT_FILE_SLACK 65536       /* nor one whose file is this much longer than its header and levels (it is held whole
+                                    * until up, the budgets counting only its levels: make_sat.py's have none past them) */
 #define SAT_JOB_TILES  16          /* a job reads at the most this many tiles, */
 #define SAT_JOB_BYTES  (3u << 20)  /* about this many bytes of texture */
 #define SAT_UP_BYTES   (2u << 20)  /* given to OpenGL a frame: the parchment's rule (ParchUpBudget), its own numbers */
 #define SAT_UP_RATE    (SAT_UP_BYTES / 6)
 #define SAT_UP_MOST    (6u << 20)
-#define SAT_E_TILE     (-100)      /* a tile read, but not a square BLP2 of DXT blocks, SAT_PX_MOST at the most */
+#define SAT_E_TILE     (-100)      /* a tile read, but not a square BLP2 of DXT blocks, SAT_PX_MOST at the most, its file
+                                    * within SAT_FILE_SLACK of its header and levels */
 #define SAT_E_SIZE     (-101)      /* no level of it this OpenGL takes */
 #define SAT_E_NOTRUN   (-102)      /* (its job went stale before it was read) */
 enum { SAT_WANT = 1, SAT_READ, SAT_HELD, SAT_UP, SAT_GONE };   /* a tile wanted, being read, read (to go up), up, not to be */
@@ -13656,6 +13659,9 @@ static int SatReady(SatItem *it, unsigned char *d, unsigned n, int s3tc, int max
 {
     BlpInfo *b = &it->b;
     if (!BlpParse(d, n, b) || !b->dxt || b->w != b->h || b->w > SAT_PX_MOST) { HeapFree(GetProcessHeap(), 0, d); return SAT_E_TILE; }
+    unsigned lv = 0;                                             /* (its levels' bytes: 1.4 MB at the most, at SAT_PX_MOST) */
+    for (int i = 0; i < b->levels; i++) lv += b->len[i];
+    if (n > 1172u + lv + SAT_FILE_SLACK) { HeapFree(GetProcessHeap(), 0, d); return SAT_E_TILE; }   /* (BLP2's header 1172) */
     unsigned most = maxTex > 0 ? (unsigned)maxTex : 8192u;
     if (!s3tc && most > SAT_DECODE_MAX) most = SAT_DECODE_MAX;
     int first = 0;
@@ -14060,7 +14066,7 @@ static void SatScreenEnd(void)
                   (unsigned long)(g_satFor.firstUp - g_satFor.since), (unsigned long)(g_satFor.lastUp - g_satFor.since));
     if (g_satFor.failed)
         wsprintfA(m + lstrlenA(m), "; %d would not read (%s)", g_satFor.failed,
-                  g_satFor.err == SAT_E_TILE ? "not a square DXT BLP2" : g_satFor.err == SAT_E_SIZE ? "too large for its OpenGL"
+                  g_satFor.err == SAT_E_TILE ? "not a square DXT BLP2, or longer than its levels" : g_satFor.err == SAT_E_SIZE ? "too large for its OpenGL"
                   : g_satFor.err == SAT_E_NOTRUN ? "stale" : mpq_error_text(g_satFor.err));
     if (g_satFor.refused) wsprintfA(m + lstrlenA(m), "; OpenGL would not take one, so no more were given it this screen");
     if (g_satFor.cut) wsprintfA(m + lstrlenA(m), "; %d more left out (the most there is room for)", g_satFor.cut);
