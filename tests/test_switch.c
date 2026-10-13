@@ -12755,8 +12755,24 @@ static void TestSatFail(void)
 
 static void TestSatNoDxt(void)
 {
-    /* a driver without DXT: each 512-px tile decoded from its level 1 (256 px), opaque, its levels as RGBA */
-    SatTestWorld("sat-nodxt", 512, 30, 32, 48, 50, 0);
+    /* a driver without DXT: each 512-px tile decoded from its level 1 (256 px), opaque, its levels as RGBA; one tile's
+     * blocks in DXT1's three-colour way, its first texel the fourth colour: black, and opaque (GL_DXT1_RGB's) */
+    Fresh("sat-nodxt"); GameDir();
+    SatTestReset();
+    SatTestMap(SH_21x9);
+    SatPackBegin(512);
+    for (int Y = 48; Y <= 50; Y++)
+        for (int X = 30; X <= 32; X++) {
+            if (X != 32 || Y != 49) { SatPackTile(0, X, Y, 512, 1, 1, NULL, 0); continue; }
+            unsigned n;
+            unsigned char *b = SatTestBlp(512, 0, &n);
+            for (unsigned k = 1172; k + 8 <= n; k += 8) { b[k] = 0x1F; b[k + 1] = 0; b[k + 2] = 0; b[k + 3] = 0xF8; b[k + 4] = 3; }
+            SatPackTile(0, X, Y, 512, 1, 1, b, n);
+            free(b);
+        }
+    SatPackEnd();
+    SatRead();
+    TestSatGl(1, 0);
     long heap = shim_heap_live;
     SatNewScreen(); SatWork(1000);
     SatArrive(0, -9464, 62);
@@ -12770,6 +12786,8 @@ static void TestSatNoDxt(void)
              g_tsat[t].px0[0] == rgb[0] && g_tsat[t].px0[1] == rgb[1] && g_tsat[t].px0[2] == rgb[2] && g_tsat[t].px0[3] == 255;
     for (int f = 0; f < 10; f++) SatWork(1200 + 17 * f);
     ok &= SatUpCount() == 9 && shim_heap_live == heap;
+    unsigned tb = g_satTex[SatSlotOf(32, 49)];
+    ok &= tb && g_tsat[tb].px0[0] == 0 && g_tsat[tb].px0[1] == 0 && g_tsat[tb].px0[2] == 0 && g_tsat[tb].px0[3] == 255;
     /* with DXT, OpenGL's largest texture under the tile: from the first level it takes */
     SatTestReset();
     SatTestWorld("sat-maxtex", 512, 30, 32, 48, 50, 1);
@@ -13030,7 +13048,7 @@ static void TestSatWorker(void)
     /* a job gone stale as it begins reads no tile */
     shim_tick_hook = SatDrop;
     SatWorkerTurn();
-    ok &= g_sj.state == 0;
+    ok &= g_sj.state == 0 && g_sj.t[0].r == SAT_E_NOTRUN;
     for (int f = 0; f < 60 && SatUpCount() < g_ssN; f++) { SatWork(1035 + 7 * f); SatWorkerTurn(); }
     ok &= SatUpCount() == g_ssN && g_ssN > 0;
     /* the view off with a job in flight: the worker's loop ends, freeing it */
