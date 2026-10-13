@@ -6104,6 +6104,8 @@ static void TestGlideArrive(int map, int want, int cont, float x, float y, DWORD
     g_parchCont = cont; g_viewTex[VT_PARCH2] = 1; g_contTW = 2048; g_contK = 2; g_contAt = 0;   /* (HD paintings) */
     g_parchZone = g_pz[want].area ? want : -1; g_viewTex[VT_PARCH] = 1; g_zoneTW = 2048; g_zoneK = 2; g_zoneAt = 0;
     g_glide.at = 0;
+    g_reveal.screen = -1; g_showBar.screen = -1;                       /* (a fresh arrival, the tests' clock begun again: its zone
+                                                                        * not shown yet, the bar not yet past PARCH_SHOW_BAR) */
 }
 static int TestBatch(int tex) { for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == tex) return b; return -1; }
 static const ViewVert *TestVertNear(int b, float x, float y)
@@ -6134,6 +6136,17 @@ static void TestCitySpan(float W, float H, int world, int c, int z, float wx, fl
     ParchRect zr = ParchBox(z);
     ParchView a = ParchStart(W, H, world, ParchBox(c)), b = ParchEnd(W, H, zr, PARCH_ZOOM, fx, fy);
     ParchSpan(&a, &b, H / PARCH_REF_H * (float)(PARCH_MAP_W * g_zoneK) / (zr.x1 - zr.x0), PARCH_MAG0, PARCH_MAG1, y0, y1);
+}
+/* where on the glide onto zone z (its continent c's painting first; world: the world's) for an arrival at wx, wy on z's
+ * map the zone's painting came up by the zoom, as the fade A had it before his 12 Oct rule (and as it still does with the
+ * zones nearby not settled by then): *z0 to *z1 */
+static void TestZoneSpan(float W, float H, int world, int c, int z, float wx, float wy, float *z0, float *z1)
+{
+    float fx, fy;
+    ParchSpot(g_pz[z].map, wx, wy, &fx, &fy);
+    ParchRect cr = ParchBox(c);
+    ParchView a = ParchStart(W, H, world, cr), b = ParchEnd(W, H, ParchBox(z), PARCH_ZOOM, fx, fy);
+    ParchSpan(&a, &b, H / PARCH_REF_H * (float)(PARCH_MAP_W * g_contK) / (cr.x1 - cr.x0), PARCH_MAG0, PARCH_MAG1, z0, z1);
 }
 /* the marker's pictures as up (their sizes only: nothing is read from them as drawn), or none */
 static void TestMarkUp(int on)
@@ -6366,6 +6379,7 @@ static void TestParchment(void)
     ok = TestBatch(VT_PWORLD) == 1 && TestBatch(VT_PARCH2) < 0 && TestBatch(VT_PARCH) < 0 && Near(g_pcam.v.s, s0, 1e-6) && g_pcam.e == 0;
     float fx, fy;
     ParchSpot(0, -9464, 62, &fx, &fy);
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2500);                       /* (the bar past PARCH_SHOW_BAR on the way: the zone shown) */
     ViewBuild(1920, 1080, 1.0f, 9000);                                 /* the bar full: landed */
     int zb = TestBatch(VT_PARCH);
     const ViewVert *mid = zb >= 0 ? TestVertNear(zb, 960, 540) : NULL;
@@ -6411,6 +6425,7 @@ static void TestParchment(void)
     }
     TestGlideArrive(0, 1, 0, -9464, 62, 2000);
     ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2500);                       /* (the bar past PARCH_SHOW_BAR on the way: the zone shown) */
     ViewBuild(1920, 1080, 0.999f, 3100);
     ok &= TestBatch(VT_PARCH) >= 0 && TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255;
     float eHigh = g_pcam.e;
@@ -6422,6 +6437,18 @@ static void TestParchment(void)
     g_zoneAt = 0;
     ok &= lateZ > 50 && lateZ < 80;
     Check(ok, "the fade A: each finer painting comes up over the coarser one as the coarser one is drawn larger than its own texels (halfway where, on a window 1080 tall as his approved films, it would be drawn 1.3 pixels a texel: the same map scale and framing on any window, 1920 x 1080 or 3840 x 2160), the zone barely begun over it as the continent is halfway up over the world's, the zone's whole well before the end");
+    /* his rule, 12 Oct: with A the zone's painting comes up from 20% of the bar, whole once faded up, whatever the zoom (no
+     * longer waiting for the zoom to draw it larger than its texels: his hearth to Stormwind showed nothing until 60%) */
+    TestGlideArrive(0, 1, 0, -9464, 62, 2000);
+    ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, 0.1f, 2100);
+    ok = TestBatch(VT_PARCH) < 0;                                       /* (short of 20%: not yet, though made) */
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2200);
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2200 + PARCH_FADE_MS);
+    printf("  the zone from 20%% of the bar: the glide at %.3f, where the zoom alone had it %.2f up (from %.3f to %.3f); drawn %d\n",
+           g_pcam.e, ParchMix(g_pcam.e, z0, z1), z0, z1, TestAlphaAt(VT_PARCH));
+    ok &= ParchMix(g_pcam.e, z0, z1) < 0.9f && TestAlphaAt(VT_PARCH) == 255 && g_pcam.mz == 1;
+    Check(ok, "the fade A, his rule (12 Oct): the zone's painting comes up from 20% of the bar, whole once faded up, whatever the zoom (where the zoom alone would have it only partly up); none before");
     /* the player's marker (his pick, 11 Oct, option 1, no ripple): the world map's own arrow pointing north over a dark disc,
      * the candle's amber glow breathing over 2 s, over everything, coming up with the zone's painting */
     {
@@ -6436,6 +6463,7 @@ static void TestParchment(void)
         TestGlideArrive(0, 1, 0, -9464, 62, 2000);
         ViewBuild(1920, 1080, 0.0f, 2000);
         ok &= TestBatch(VT_PMARK) < 0 && TestBatch(VT_PGLOW) < 0;      /* (the zone not up yet: no marker) */
+        ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2500);                   /* (the bar past PARCH_SHOW_BAR on the way: the zone shown) */
         ViewBuild(1920, 1080, 1.0f, 9500);                             /* (landed: the zone whole, the marker on the spot) */
         int gb = -1, db = -1, ab = TestBatch(VT_PMARK);
         for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex == VT_PGLOW) { if (g_vb[b].add) gb = b; else db = b; }
@@ -6460,12 +6488,14 @@ static void TestParchment(void)
         ok &= Near(g_vv[g_vb[gb].first + 2].x - g_vv[g_vb[gb].first].x, g0, 0.01) && fabsf(g0 - g1) > 10;
         TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (his window, twice as tall: twice as big) */
         ViewBuild(3840, 2160, 0.0f, 2000);
+        ViewBuild(3840, 2160, PARCH_SHOW_BAR, 2500);
         ViewBuild(3840, 2160, 1.0f, 9000);
         ab = TestBatch(VT_PMARK);
         ok &= ab >= 0 && Near(g_vv[g_vb[ab].first + 2].x - g_vv[g_vb[ab].first].x, 2 * 88, 0.01) &&
               Near(0.5f * (g_vv[g_vb[ab].first].y + g_vv[g_vb[ab].first + 2].y), 1080 - 12, 0.01);
         TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (21:9, as tall: the same size, by the height) */
         ViewBuild(2560, 1080, 0.0f, 2000);
+        ViewBuild(2560, 1080, PARCH_SHOW_BAR, 2500);
         ViewBuild(2560, 1080, 1.0f, 9000);
         ab = TestBatch(VT_PMARK);
         ok &= ab >= 0 && Near(g_vv[g_vb[ab].first + 2].x - g_vv[g_vb[ab].first].x, 88, 0.01);
@@ -6474,11 +6504,13 @@ static void TestParchment(void)
         ViewBuild(1920, 1080, 0.6f, 2500);
         ab = TestBatch(VT_PMARK);
         ok &= ab >= 0 && g_pcam.mc > 0.05f && abs(g_vv[g_vb[ab].first].c[3] - (int)(255 * g_pcam.mc + 0.5f)) <= 1;
-        TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (halfway up with the zone's painting) */
+        TestGlideArrive(0, 1, 0, -9464, 62, 2000);                     /* (a quarter up with the zone's painting) */
         ViewBuild(1920, 1080, 0.0f, 2000);
-        ViewBuild(1920, 1080, TestTauFor(0.5f * (z0 + z1)), 3000);
+        ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2500);
+        ViewBuild(1920, 1080, 0.3f, 2500 + PARCH_FADE_MS / 4);
         ab = TestBatch(VT_PMARK);
-        ok &= ab >= 0 && abs(g_vv[g_vb[ab].first].c[3] - (int)(255 * g_pcam.mz + 0.5f)) <= 1 && g_pcam.mz > 0.3f && g_pcam.mz < 0.7f;
+        int zq4 = TestAlphaAt(VT_PARCH);
+        ok &= ab >= 0 && abs(zq4 - 64) <= 2 && abs(g_vv[g_vb[ab].first].c[3] - zq4) <= 1;
         g_markUp = 0;                                                  /* (not read from the client: none) */
         ViewBuild(1920, 1080, 1.0f, 9000);
         ok &= TestBatch(VT_PMARK) < 0 && TestBatch(VT_PGLOW) < 0;
@@ -6515,6 +6547,7 @@ static void TestParchment(void)
     ViewBuild(1920, 1080, 0.0f, 2000);
     ok = TestBatch(VT_PWORLD) < 0 && TestBatch(VT_PARCH2) >= 0 && Near(g_pcam.v.s, 1920.0 / (cr0.x1 - cr0.x0), 1e-4) &&
          Near(g_pcam.v.x, 0.5 * (cr0.x0 + cr0.x1), 1e-4) && g_vv[g_vb[TestBatch(VT_PARCH2)].first].c[3] == 255;
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2500);                       /* (the bar past PARCH_SHOW_BAR on the way: the zone shown) */
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= Near(g_pcam.px, 960, 1e-3) && TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255;
     g_worldFrameOk = 1;
@@ -6541,6 +6574,7 @@ static void TestParchment(void)
      * continent's past it */
     TestGlideArrive(0, 1, 0, -10254 + 1, 1535 - 1, 2000);              /* (its box's bottom left corner) */
     ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2500);                       /* (the bar past PARCH_SHOW_BAR on the way: the zone shown) */
     ViewBuild(1920, 1080, 1.0f, 9000);
     zb = TestBatch(VT_PARCH);
     const ViewVert *z0v = zb >= 0 ? g_vv + g_vb[zb].first : NULL;
@@ -9481,15 +9515,21 @@ static void TestNearbyMake(void)
     g_nearMap = 0;
     TestGlideArrive(0, 1, 0, x, y + 10, 2000);                         /* (another arrival, by its other coordinate) */
     ViewBuild(1920, 1080, 0.0f, 5000);
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 5500);
+    ViewBuild(1920, 1080, 0.99f, 8000);                                /* (no sheet for it: alone from the last close-up) */
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
     TestGlideArrive(0, 1, 0, x + 10, y, 2000);                         /* (another arrival: its own sheet, not this one) */
     ViewBuild(1920, 1080, 0.0f, 5000);
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 5500);
+    ViewBuild(1920, 1080, 0.99f, 8000);                                /* (no sheet for it: alone from the last close-up) */
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
     TestGlideArrive(0, 1, 0, x, y, 2000);
     g_parchNearOn = 0;
     ViewBuild(1920, 1080, 0.0f, 5000);
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 5500);
+    ViewBuild(1920, 1080, 0.99f, 8000);                                /* (no sheet for it: alone from the last close-up) */
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PARCH) >= 0;
     Check(ok, "the zones nearby drawn under the arrival's zone and over its continent, coming up with the zone (the same alpha at the arrival all the way in, whole at the landing), and up after it, coming up on their own over the fade's time; not for another arrival (either coordinate) or another map, nor with none (the tests' own)");
@@ -9559,6 +9599,7 @@ static void TestNearbyMake(void)
         g_parchCity = 3;
         g_nearZ = 1; g_nearAt = 100; g_zoneAt = 8000;
         ViewBuild(1920, 1080, 0.0f, 7900);
+        ViewBuild(1920, 1080, PARCH_SHOW_BAR, 7950);
         ViewBuild(1920, 1080, TestTauFor(0.97f * y0), 8100);
         zq = (int)(255 * 0.25f * g_pcam.mz + 0.5f);
         later &= abs(TestAlphaAt(VT_PARCH) - zq) <= 2 && abs(TestAlphaAt(VT_PNEAR) - zq) <= 2 && abs(TestAlphaAt(VT_PMARK) - zq) <= 2 && g_pcam.mz > 0.5f;
@@ -9566,8 +9607,9 @@ static void TestNearbyMake(void)
         int reaim = 1;                                                 /* (shown for a spot in the zone, then re-aimed on the same */
         g_viewScreen++;                                                /* screen to the capital in it: it stays) */
         TestGlideArrive(0, 1, 0, x, y, 2000);
-        g_parchCity = -1; g_nearZ = -1;                               /* (a spot in the zone, not the capital) */
+        g_parchCity = -1;                                              /* (a spot in the zone, not the capital; its zones nearby up) */
         ViewBuild(1920, 1080, 0.0f, 9000);
+        ViewBuild(1920, 1080, PARCH_SHOW_BAR, 9200);
         ViewBuild(1920, 1080, TestTauFor(0.85f * y0), 9500);
         reaim &= TestAlphaAt(VT_PARCH) > 0;
         g_parchCity = 3; g_parchForX = x + 5; g_parchAt = 9600;
@@ -9583,6 +9625,47 @@ static void TestNearbyMake(void)
         Check(last, "in a capital, the zones nearby not settled as the last close-up begins (where the city's own page starts to come up, before the camera lands: the verifiers' find, 11 Oct, a first visit held to the bar's end): the zone and its marker come up alone from there (his to confirm), the sheet after it on its own from its own time");
         Check(later, "in a capital, the zone's painting made again after a sheet still good (the zone's time later than the sheet's): the zone, the sheet and the marker come up together from the zone's time, at the same alpha");
         Check(reaim, "a zone shown for a spot in it, then the view re-aimed on the same screen to the capital it holds: the zone stays shown (never taken away to be held for the zones nearby)");
+    }
+    /* every arrival (his rule, 12 Oct, from his film of a login and a hearth: the zone and the zones around it "should all
+     * appear together at about 20% of the bar, every time"): not a capital, its sheet still being made: the zone and its
+     * marker held past PARCH_SHOW_BAR, its continent's drawn; the sheet up: the two and the marker from that moment, at the
+     * same alpha. Both made from the start: none of them before the bar is PARCH_SHOW_BAR along, though the zoom had passed
+     * where it brought the zone up before; then together from that moment, whole at the spot once faded up */
+    {
+        DWORD was = g_nearAt;
+        float z0, z1;
+        TestZoneSpan(1920, 1080, 0, 0, 1, x, y, &z0, &z1);
+        g_parchNearOn = NEAR_C1800 + 1;
+        TestMarkUp(1);
+        g_viewScreen++;
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = -1; g_nearZ = -1;                                /* (no capital; its sheet being made) */
+        ViewBuild(1920, 1080, 0.0f, 4000);
+        int held = 1;
+        for (int k = 1; k <= 6; k++) {                                 /* (to 60% of the bar) */
+            ViewBuild(1920, 1080, 0.1f * (float)k, 4000 + 100 * (DWORD)k);
+            held &= TestBatch(VT_PARCH) < 0 && TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PMARK) < 0 && TestBatch(VT_PARCH2) >= 0;
+        }
+        g_nearZ = 1; g_nearAt = 4650;                                  /* (up) */
+        ViewBuild(1920, 1080, 0.65f, 4750);                            /* (a quarter of its fade on) */
+        int na = TestAlphaAt(VT_PNEAR), za = TestAlphaAt(VT_PARCH), ka = TestAlphaAt(VT_PMARK);
+        int together = held && abs(za - 64) <= 2 && abs(na - za) <= 1 && abs(ka - za) <= 2;
+        g_viewScreen++;                                                /* (both made from the start) */
+        TestGlideArrive(0, 1, 0, x, y, 2000);
+        g_parchCity = -1; g_nearZ = 1; g_nearAt = 0;
+        ViewBuild(1920, 1080, 0.0f, 5000);
+        ViewBuild(1920, 1080, 0.15f, 5150);
+        int gate = TestBatch(VT_PARCH) < 0 && TestBatch(VT_PNEAR) < 0 && TestBatch(VT_PMARK) < 0 && g_pcam.e > z0;
+        ViewBuild(1920, 1080, PARCH_SHOW_BAR, 5200);
+        ViewBuild(1920, 1080, 0.25f, 5200 + PARCH_FADE_MS / 4);
+        na = TestAlphaAt(VT_PNEAR); za = TestAlphaAt(VT_PARCH); ka = TestAlphaAt(VT_PMARK);
+        gate &= abs(za - 64) <= 2 && abs(na - za) <= 1 && abs(ka - za) <= 2;
+        ViewBuild(1920, 1080, 0.3f, 5200 + PARCH_FADE_MS);
+        gate &= TestAlphaAt(VT_PARCH) == 255 && TestAlphaAt(VT_PNEAR) == 255;
+        g_nearZ = 1; g_nearAt = was; g_parchNearOn = 0;
+        TestMarkUp(0);
+        Check(together, "every arrival, not only a capital (his rule, 12 Oct: \"together at about 20% of the bar, every time\"): its zones nearby still being made, the zone and its marker held past 20% of the bar with its continent's drawn; their sheet up, the zone, the sheet and the marker from that moment at the same alpha");
+        Check(gate, "the zone and its zones nearby made from the start: none of them, nor the marker, before the bar is 20% along (though the zoom had passed where it brought the zone up before); then all together from that moment at the same alpha, whole at the spot once faded up");
     }
     /* in a capital, together by the parchment's work: the worker still making the sheet as the zone's glide goes on, the zone
      * held; the sheet up, both from that frame; the job ended without a sheet (no memory for it) or OpenGL refusing it: the
@@ -10080,6 +10163,7 @@ static void TestCityArrival(void)
     ParchSpot(0, -9464, 62, &fx, &fy);
     ParchView vz = ParchEnd(1920, 1080, ParchBox(1), PARCH_ZOOM, fx, fy);
     ViewBuild(1920, 1080, 0.0f, 2000);
+    ViewBuild(1920, 1080, PARCH_SHOW_BAR, 2500);
     ViewBuild(1920, 1080, 1.0f, 9000);
     ok &= TestBatch(VT_PCITY) < 0 && TestBatch(VT_PARCH) >= 0 && Near(g_pcam.v.s, vz.s, 1e-3 * vz.s) && Near(g_pcam.v.x, fx, 1e-4) &&
           TestVertNear(TestBatch(VT_PARCH), 960, 540)->c[3] == 255;
@@ -10147,6 +10231,7 @@ static void TestCityArrival(void)
     g_parchZone = 1;
     g_cityUp = -1;                                                     /* (not up: none) */
     ViewBuild(1920, 1080, 1.0f, 9000);
+    ViewBuild(1920, 1080, 1.0f, 9500);
     okd &= TestBatch(VT_PCITY) < 0 && TestBatch(VT_PARCH) >= 0;
     Check(okd, "the city's own page drawn over its zone only in the last close-up (his pick): none until the zone's painting is drawn larger than its texels (past 80% of the glide on 16:9 and 21:9), coming up as each finer painting does, whole at the landing, which frames the zone round it; blooming with B; held with its zone for the zones nearby, short of the last close-up, both whole at the landing; never without its zone; none until it is up");
 
@@ -10274,6 +10359,7 @@ static void TestCityClient(const char *client)
     float fx, fy;
     ParchSpot(0, -8828, 605, &fx, &fy);
     ViewBuild(5120, 2160, 0.0f, 2000);
+    ViewBuild(5120, 2160, PARCH_SHOW_BAR, 2500);
     ViewBuild(5120, 2160, 1.0f, 12000);
     int cb = TestBatch(VT_PCITY), zb = TestBatch(VT_PARCH);
     ParchView vz = ParchEnd(5120, 2160, ParchBox(elw), PARCH_ZOOM, fx, fy);
@@ -10368,6 +10454,7 @@ static void TestCityClient(const char *client)
         float y0, y1;
         TestCitySpan(1920, 1080, 0, ParchContinent(1), tel, 9952, 2280, &y0, &y1);
         ViewBuild(1920, 1080, 0.0f, t);
+        ViewBuild(1920, 1080, PARCH_SHOW_BAR, t + 50);
         ViewBuild(1920, 1080, TestTauFor(0.6f * y0), t + 100);
         int za = TestAlphaAt(VT_PARCH);
         ViewBuild(1920, 1080, TestTauFor(0.7f * y0), t + 100 + PARCH_FADE_MS);

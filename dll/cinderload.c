@@ -8783,6 +8783,9 @@ static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, f
 #define PARCH_LATE_SPARE 100          /* (or less: landed this long before the screen goes, EVEN_EARLY_MS - VIEW_WORLD_GAP_MS after the
                                        * bar is full) */
 #define PARCH_NAME_FADE 2.0f          /* the continent's name fades out over this much more zoom once wider than the window */
+#define PARCH_SHOW_BAR  0.20f         /* the zone and its zones nearby come up together once the bar as shown is this far, or
+                                       * as soon after as both are made (his rule, 12 Oct 2026, from his film of a login and a
+                                       * hearth: "the earlier we can get the zones and adjoining zones to show up the better") */
 #define PARCH_REAIM_MAX 0.98f         /* an arrival changed past this much of the glide (or after it): a fresh glide from there */
 enum { PARCH_FADE_A, PARCH_FADE_B, PARCH_FADE_C, PARCH_FADE_D };
 static const unsigned char kParchFrame[20] = { 0x30, 0x37, 0xC4, 0x3C, 0x75, 0xCF, 0x82, 0x3C, 0x00, 0x00, 0xA7, 0x41,
@@ -9018,6 +9021,7 @@ static DWORD g_cityAt;
 static unsigned char g_cmadeBits[EXPLORED_BYTES];
 /* the zone shown with its zones nearby (ParchDraw): on which of the view's screens, which zone, and from when */
 static struct { LONG screen; int z; DWORD at; } g_reveal = { -1, -1, 0 };
+static struct { LONG screen; DWORD at; } g_showBar = { -1, 0 };   /* (the screen's bar as shown first PARCH_SHOW_BAR along, then) */
 static LONG g_parchScrSeen = -1;              /* the view's screen the paper last drew for, and when it began */
 static DWORD g_parchScrAt;
 /* This screen's glide (one segment of it): the arrival it is for (g_parchAt) on the view's screen, the view it starts
@@ -9137,18 +9141,17 @@ static void ParchMarkDraw(float x, float y, float W, float H, DWORD now, float a
 static DWORD ParchLater(DWORD a, DWORD b) { return (LONG)(b - a) > 0 ? b : a; }
 /* This frame's paper: dark, the world's painting coming up over it as a screen begins, the camera on the opening until
  * the arrival is taken, then gliding (above) on the even bar as shown (shown: never back), the finer paintings coming up
- * one of four ways (g_parchFade), all by candlelight. In a capital (his, 11 Oct 2026, from his film of a login in
- * Stormwind: the zone round it "with the surrounding zones ... all appearing at the same time"), the zone and its zones
- * nearby come up together: the zone's painting is held, the glide going on over the coarser paintings, until this
- * arrival's zones nearby are settled (their sheet up, their job ended without one, or none asked for), then the two come
- * up as one from the later of their times; once shown on a screen the zone stays, wherever the view is aimed after (a
- * re-aim's new sheet comes up on its own, as before); elsewhere, as before (HIS CALL: the same for every arrival). HIS TO
- * CONFIRM: with the zones nearby still not settled as the last close-up begins (where the city's own page starts to come
- * up over its zone; a first visit's terrain still being read: the verifiers' find, 11 Oct, that held to the bar's end it
- * left the camera still over the continent's painting for seconds), the zone comes up alone there, its zones nearby after
- * it when they are ready, so the landing is never on the continent's painting (no new number; a fixed wait would be the
- * other way). And the city's own page comes up over its zone in that last close-up as the view lands, the way each finer
- * painting comes up over the one under it. */
+ * one of four ways (g_parchFade), all by candlelight. For every arrival (his rule, 12 Oct 2026, from his film of a login
+ * and a hearth: the zone and the zones around it "should all appear together at about 20% of the bar, every time"; 11
+ * Oct, in a capital: "all appearing at the same time"), the zone and its zones nearby come up together: the zone's
+ * painting is held, the glide going on over the coarser paintings, until this arrival's zones nearby are settled (their
+ * sheet up, their job ended without one, or none asked for) and the bar as shown is PARCH_SHOW_BAR along, then the two
+ * come up as one from that frame, with A whole at any zoom (no longer waiting for the zoom to draw it larger than its
+ * texels); once shown on a screen the zone stays, wherever the view is aimed after (a re-aim's new sheet comes up on its
+ * own). With the zones nearby still not settled where the zoom brought the zone up before (a first visit's terrain still
+ * being read), the zone comes up alone there, its zones nearby after it when they are ready: never later than before.
+ * The continent's name keeps its own time, by the zoom, as before. And the city's own page comes up over its zone in the
+ * last close-up as the view lands, the way each finer painting comes up over the one under it. */
 static void ParchDraw(float W, float H, float shown, DWORD now)
 {
     ParchMesh(-1, W, H, 0, 0, W, H, 0, 0, 0, 0, 1, 1, 0);         /* the dark paper (while the paintings are made, and under them) */
@@ -9207,23 +9210,30 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
     float mk = blend ? g_glide.mk0 + (1 - g_glide.mk0) * ParchMix(e, cs0, cs1) : 1;
     int city = arrive ? g_parchCity : -1;                           /* (in a capital: its own page; its zone the one round it) */
     g_pcam.mk = mk; g_pcam.mc = g_pcam.mz = g_pcam.my = 0; g_pcam.y = city;
-    float ye0 = 1, ye1 = 1;                                         /* (in a capital: where on this glide the city's own page */
-    if (city >= 0 && zoneUp) {                                      /* comes up over its zone, the last close-up) */
+    float ye0 = 1, ye1 = 1;                                         /* (the last close-up: where on this glide a capital's own page */
+    if (zoneUp) {                                                   /* comes up over its zone, and A shows a zone alone whose zones
+                                                                    * nearby are not settled by then) */
         ParchRect zr = ParchBox(z);
         ParchSpan(&a, &b, px * (float)(PARCH_MAP_W * g_zoneK) / (zr.x1 - zr.x0), PARCH_MAG0, mag1, &ye0, &ye1);
     }
     int revealed = g_reveal.screen == g_viewScreen && g_reveal.z == z;   /* (this screen's zone shown already: it stays) */
-    if (zoneUp && !revealed) {                                      /* in a capital, held for its zones nearby (never over bare paper) */
-        int settled = city < 0 || g_parchNearOn <= 0 || nearUp || g_nearNone || !(world || contUp);
-        if (settled || e >= ye0) {                                  /* (HIS TO CONFIRM: not settled by the last close-up, alone there) */
-            DWORD at = city < 0 ? g_zoneAt : !settled ? now : nearUp ? g_nearAt : g_nearNone && g_parchNearOn > 0 ? g_nearNoneAt : g_zoneAt;
+    int fadeA = fade == PARCH_FADE_A, baseZ = !world && c < 0;     /* (A: his; B, C, D as they were; the zone the coarsest: */
+    if (shown >= PARCH_SHOW_BAR && g_showBar.screen != g_viewScreen) { g_showBar.screen = g_viewScreen; g_showBar.at = now; }
+    if (zoneUp && !revealed) {                                      /* whole from the start) */
+        int settled = g_parchNearOn <= 0 || nearUp || g_nearNone || !(world || contUp);
+        if (baseZ || (fadeA ? (settled && shown >= PARCH_SHOW_BAR) || e >= ye0   /* A, every arrival: held for its zones nearby, */
+                            : city < 0 || settled || e >= ye0)) {  /* the two together from the later of their times and the
+                                                                    * bar's PARCH_SHOW_BAR (not settled by the last close-up: alone
+                                                                    * there); B, C, D: held so in a capital only */
+            DWORD set = nearUp ? g_nearAt : g_nearNone && g_parchNearOn > 0 ? g_nearNoneAt : g_zoneAt;
+            DWORD at = baseZ || (!fadeA && city < 0) ? g_zoneAt : !settled ? now : fadeA ? ParchLater(set, g_showBar.at) : set;
             g_reveal.screen = g_viewScreen; g_reveal.z = z; g_reveal.at = ParchLater(g_zoneAt, at);
             revealed = 1;
         }
     }
-    int zoneShow = zoneUp && revealed;                              /* (elsewhere than a capital: as before, from its own time) */
-    DWORD zoneFrom = g_zoneAt, nearFrom = g_nearAt;
-    if (city >= 0) { zoneFrom = ParchLater(g_zoneAt, g_reveal.at); nearFrom = ParchLater(g_nearAt, g_reveal.at); }
+    int zoneShow = zoneUp && revealed;
+    DWORD zoneFrom = g_zoneAt, nearFrom = g_nearAt;                 /* (from the zone's showing; a sheet up after: on its own) */
+    if (fadeA || city >= 0) { zoneFrom = ParchLater(g_zoneAt, g_reveal.at); nearFrom = ParchLater(g_nearAt, g_reveal.at); }
     float zoneUp01 = zoneShow ? ParchUp01(now, zoneFrom) : 0;
     float reach = ParchSqrt(W * W + H * H);
     /* the continent's name, the world's (its continent's own painted out of its painting), fading out once it is wider
@@ -9257,7 +9267,8 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         float tw = (float)(layer ? g_zoneTW : g_contTW), K = (float)(layer ? g_zoneK : g_contK), pw = PARCH_MAP_W * K, ph = PARCH_MAP_H * K;
         ParchRect r = layer ? ParchBox(z) : cr;
         float up01 = layer ? zoneUp01 : ParchUp01(now, g_contAt), m0 = layer ? g_glide.mz0 : g_glide.mc0;
-        float m = base ? 1 : m0 + (1 - m0) * ParchMix(e, e0, e1);   /* (re-aimed: on from where it was, never back) */
+        float m = base || (layer && fade == PARCH_FADE_A) ? 1       /* (A: the zone whole once shown, at any zoom) */
+                : m0 + (1 - m0) * ParchMix(e, e0, e1);              /* (re-aimed: on from where it was, never back) */
         if (layer) g_pcam.mz = m; else g_pcam.mc = m;
         const ParchRect *clip = !layer && world ? &wr : NULL;
         int matched = blend && !base && g_viewTex[mslot] && (layer ? g_zoneMatch == z : g_contMatch == c);
@@ -9302,7 +9313,7 @@ static void ParchDraw(float W, float H, float shown, DWORD now)
         ParchLayerT(VT_PWORD0 + wc, (float)g_wordTW[wc], (float)g_wordTH[wc], (float)P->w, (float)P->h, nr, v, W, H, wup * named, 0, NULL, NULL);
     }
     /* the player's marker over them all, coming up with the finest painting under it */
-    if (arrive) ParchMarkDraw(g_pcam.px, g_pcam.py, W, H, now, zoneUp ? g_pcam.mz * (city >= 0 ? zoneUp01 : 1) : contUp && z < 0 ? g_pcam.mc : 0);
+    if (arrive) ParchMarkDraw(g_pcam.px, g_pcam.py, W, H, now, zoneUp ? g_pcam.mz * (fadeA || city >= 0 ? zoneUp01 : 1) : contUp && z < 0 ? g_pcam.mc : 0);
 }
 
 /* ---- the paintings' making, a frame at a time (the view's thread) ---- */
