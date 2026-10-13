@@ -3,7 +3,8 @@ pick: "the 3D top-down render of the whole world with half-size trees", broad da
 so every overlay and map.txt line of 0.3.0 stays as it is.
 
 For each screen shape:
-  - the sea is 0.3.0's own picture for that shape, decoded from its shipped CinderMap.blp: the painted Great Sea, its
+  - the sea is 0.3.0's own picture for that shape (its lossless source from the kit's 8 Oct build when that is proven
+    to be the shipped one, else the shipped CinderMap.blp decoded): the painted Great Sea, its
     depth shading, coast lines, compass roses and rhumb lines, and (inside the tiles the client's minimap drew) the
     minimap's own water, all exactly where 0.3.0 had them;
   - the land is the 3D master (tiles/half, 1024 px a client tile), each tile area-averaged to 128 px, then laid into
@@ -21,6 +22,8 @@ Usage: STORMLIB=/path/to/libstorm.so python3 sat_overview.py <master dir> <0.3.0
   <0.3.0 packs>   the folder with 0.3.0's LoadingScreens-<shape>.MPQ (read only: CinderMap.blp and map.txt)
   --client        the client the 0.3.0 map was stitched from (its WorldMapArea for the hidden zone); default fogtest
   --work          where the 128-px mosaics are cached (about 400 MB); default ~/.cache/claude-scratch/sat040-assets
+  --sea-src       the kit's 8 Oct build (w-<shape>/world-<shape>.png and CinderMap.blp): 0.3.0's pictures lossless,
+                  used when proven to be the shipped ones; default inbox/loading-screens/living-map/repack-20261008
 Writes <out>/world-<shape>.png (the new picture, 4096 x 4096), <out>/CinderMap-<shape>.blp, <out>/old-<shape>.png
 (0.3.0's, decoded) and <out>/alpha-<shape>.png (the land alpha on the picture, for checking).
 """
@@ -36,9 +39,11 @@ Image.MAX_IMAGE_PIXELS = None
 SIDE = 4096
 P = 128                                  # mosaic pixels a client tile: 4.17 yd, finer than the picture's 7.2 yd texel
 SHAPES = ('16x10', '16x9', '21x9', '32x9')
+OLD_BLP = {}
 DEEP_FILL = (50, 82, 112)                # the render's own deep water, where it drew no tile (never shown: alpha 0)
 CLIENT = os.path.expanduser('~/Games/RavenCraft-fogtest/Data')
 WORK = os.path.expanduser('~/.cache/claude-scratch/sat040-assets')
+SEA_SRC = os.path.expanduser('~/Desktop/RavenCraft-Dev-Archive/inbox/loading-screens/living-map/repack-20261008')
 
 
 class Mpq:
@@ -199,13 +204,33 @@ def place(mos_img, table, c, X0, Y0, n_tiles_x, n_tiles_y, resample):
     return mos_img.resize((ix1 - ix0, iy1 - iy0), resample, box=box), (ix0, iy0)
 
 
-def build_shape(shape, pack_dir, mos, out, log=print):
+def old_picture(shape, old_blp, sea_src, log=print):
+    """0.3.0's picture for the shape: its lossless source when the kit's build of 8 Oct is on this machine and proven
+    to be the shipped one (its CinderMap.blp byte for byte the pack's; write_blp re-encodes that PNG to the same bytes,
+    checked 13 Oct), so every 4 x 4 block of open sea encodes to 0.3.0's own bytes again; else the shipped BLP decoded."""
+    import hashlib
+    info, decode = read_blp(old_blp)
+    shipped = decode(0)[..., :3]
+    d = os.path.join(sea_src, 'w-%s' % shape) if sea_src else None
+    if d and os.path.exists(os.path.join(d, 'CinderMap.blp')) and os.path.exists(os.path.join(d, 'world-%s.png' % shape)):
+        if hashlib.sha256(open(os.path.join(d, 'CinderMap.blp'), 'rb').read()).digest() == hashlib.sha256(old_blp).digest():
+            png = np.asarray(Image.open(os.path.join(d, 'world-%s.png' % shape)).convert('RGB'))
+            err = np.abs(png.astype(np.int16) - shipped).mean()
+            if png.shape == shipped.shape and err < 3:
+                log('  %s: the sea from 0.3.0\'s lossless source %s (the shipped BLP is its encoding; mean DXT1 '
+                    'difference %.2f)' % (shape, os.path.join(d, 'world-%s.png' % shape), err))
+                return info, png
+        log('  %s: %s is not the shipped picture\'s source; the shipped BLP decoded instead' % (shape, d))
+    return info, shipped
+
+
+def build_shape(shape, pack_dir, mos, out, log=print, sea_src=None):
     pk = Mpq(os.path.join(pack_dir, 'LoadingScreens-%s.MPQ' % shape))
     old_blp = pk.read('Interface\\Glues\\LoadingScreens\\CinderMap.blp')
     table, _ = satgeo.read_map_txt(pk.read('CinderLoad\\map.txt').decode('ascii'))
     pk.close()
-    info, decode = read_blp(old_blp)
-    old = decode(0)[..., :3]
+    info, old = old_picture(shape, old_blp, sea_src, log)
+    OLD_BLP[shape] = old_blp
     if old.shape[:2] != (SIDE, SIDE):
         raise SystemExit('%s: 0.3.0 CinderMap.blp is %s' % (shape, old.shape))
     new = np.zeros((SIDE, SIDE, 3), np.float32)
@@ -236,6 +261,13 @@ def build_shape(shape, pack_dir, mos, out, log=print):
         raise SystemExit('%s: the new CinderMap.blp is %s, 0.3.0\'s was %s' % (shape, info2, info))
     back = decode2(0)[..., :3].astype(np.int16)
     err = np.abs(back - pic.astype(np.int16)).mean()
+    # the open sea to the byte: level 0's 4 x 4 blocks against 0.3.0's, wherever the picture did not change
+    newb = np.frombuffer(open(blp, 'rb').read(), np.uint8, SIDE * SIDE // 2, info2['offs'][0]).reshape(-1, 8)
+    oldb = np.frombuffer(OLD_BLP[shape], np.uint8, SIDE * SIDE // 2, info['offs'][0]).reshape(-1, 8)
+    same_px = (pic == old).all(-1).reshape(SIDE // 4, 4, SIDE // 4, 4).all((1, 3)).reshape(-1)
+    same_b = (newb == oldb).all(1)
+    log('  %s: of the %d blocks whose pixels are 0.3.0\'s, %d encode to 0.3.0\'s own bytes (%d blocks changed)' % (
+        shape, int(same_px.sum()), int((same_b & same_px).sum()), int((~same_px).sum())))
     log('  %s: CinderMap.blp %d bytes, %d levels, decodes (mean DXT1 error %.2f levels); land on %.1f%% of the picture'
         % (shape, size, levels, err, 100 * (alpha > 0.5).mean()))
     return png, blp
@@ -245,6 +277,7 @@ if __name__ == '__main__':
     args = [a for a in sys.argv[1:]]
     opt = lambda k, d: (args.pop(args.index(k) + 1), args.remove(k))[0] if k in args else d
     client, work = opt('--client', CLIENT), opt('--work', WORK)
+    sea_src = opt('--sea-src', SEA_SRC)
     master, packs, out = (os.path.expanduser(a) for a in args[:3])
     shapes = args[3:] or list(SHAPES)
     os.makedirs(work, exist_ok=True)
@@ -256,4 +289,4 @@ if __name__ == '__main__':
     for n, j, c, X, Y, dx, dy in worst[:16]:
         print('  %3d px (jump %.2f) at %s %d_%d toward %+d,%+d' % (n, j, satgeo.MAPS[c], X, Y, dx, dy))
     for s in shapes:
-        build_shape(s, packs, mos, out)
+        build_shape(s, packs, mos, out, sea_src=sea_src)
