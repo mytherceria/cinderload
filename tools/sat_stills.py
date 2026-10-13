@@ -5,7 +5,7 @@ LabelsBuild draws them (labels.txt items whose band holds the view's half height
 sized for a 2160-row screen). Not a film: no clouds, waves, ships or glow (those are 0.3.0's, unchanged).
 
 Usage: STORMLIB=/path/to/libstorm.so python3 sat_stills.py <0.3.0 packs> <ov dir> <sat dir> <out dir> [shape
-         [<master dir> [world,landing,coasts]]]   (with the master: also the coast close-ups, the mask's evidence)
+         [<master dir> [world,landing,coasts,bands]]]   (with the master: also the coast close-ups, the mask's evidence)
   <ov dir>   sat_overview.py's output (CinderMap-<shape>.blp, alpha-<shape>.png)
   <sat dir>  make_sat.py's output (<px>/sat.txt, <px>/tiles/*.blp) for 512 and 256
 Writes numbered JPEGs (quality 92) and stills.txt (what each one is).
@@ -234,6 +234,67 @@ def coasts(S, master, sat_dir, save, shape):
              'is, its own sea' % (title, tall))
 
 
+def band_still(S, master, c, x, y, tall, deeps=(24, 60, 150), W=900, H=700):
+    """How far out the render's own water runs (satmask's DEEP_YD, PLACEHOLDER his call): 0.3.0 | the detail made with
+    each depth, the render's water fading into 0.3.0's sea between SHALLOW_YD and that depth."""
+    import satmask
+    from make_sat import sea_sampler
+    wide = tall * W / H
+    x0, x1 = x + tall / 2, x - tall / 2
+    y0, y1 = y + wide / 2, y - wide / 2
+    au, bu, av, bv = S.table[c]
+    u0, u1, v0, v1 = au + bu * y0, au + bu * y1, av + bv * x0, av + bv * x1
+    N = S.old.size[0]
+    old = S.old.resize((W, H), Image.BILINEAR, box=(u0 * N, v0 * N, u1 * N, v1 * N))
+    Xa, Ya, _, _ = satgeo.tile_of(x0, y0)
+    Xb, Yb, _, _ = satgeo.tile_of(x1, y1)
+    tiles, _ = satgeo.master_tiles(master)
+    have = {(cc, X, Y) for cc, X, Y, _ in tiles}
+    cont = satmask.Continent(satgeo.MAPS[c], Xa, Xb, Ya, Yb)
+    sea = sea_sampler(np.asarray(S.old), S.table, c)
+    P = 1024
+    nx, ny = Xb - Xa + 1, Yb - Ya + 1
+    raw = np.zeros((ny * P, nx * P, 3), np.float32)
+    sw = np.zeros((ny * P, nx * P, 3), np.float32)
+    dep = {}
+    for Y in range(Ya, Yb + 1):
+        for X in range(Xa, Xb + 1):
+            sl = (slice((Y - Ya) * P, (Y - Ya + 1) * P), slice((X - Xa) * P, (X - Xa + 1) * P))
+            sw[sl] = sea(X, Y)
+            if (c, X, Y) in have:
+                raw[sl] = np.asarray(Image.open(satgeo.master_path(master, c, X, Y)).convert('RGB'))
+            dep[X, Y] = cont.tile_depth(X, Y)
+    box = tuple(b * P for b in ((satgeo.ORIGIN - y0) / satgeo.TILE - Xa, (satgeo.ORIGIN - x0) / satgeo.TILE - Ya,
+                                (satgeo.ORIGIN - y1) / satgeo.TILE - Xa, (satgeo.ORIGIN - x1) / satgeo.TILE - Ya))
+    panels = [old]
+    for deep in deeps:
+        a = np.zeros((ny * P, nx * P), np.float32)
+        for (X, Y), d in dep.items():
+            if (c, X, Y) in have:
+                a[(Y - Ya) * P:(Y - Ya + 1) * P, (X - Xa) * P:(X - Xa + 1) * P] = satmask.land_alpha(
+                    d, P, satmask.SHALLOW_YD, deep)
+        comp = raw * a[..., None] + sw * (1 - a[..., None])
+        panels.append(Image.fromarray(np.clip(comp + 0.5, 0, 255).astype(np.uint8)).resize((W, H), Image.LANCZOS, box=box))
+    return panels
+
+
+def bands(S, master, save, shape, deeps=(24, 60, 150)):
+    for stem, title, c, x, y, tall in COASTS[:3]:
+        p = band_still(S, master, c, x, y, tall, deeps)
+        t = ['0.3.0'] + ['render water out to %d yd deep%s' % (d, ' (placeholder)' if d == satmask_default() else '')
+                         for d in deeps]
+        head = titled([Image.new('RGB', (sum(i.width for i in p) + 12 * (len(p) - 1), 1))],
+                      ['How far the 3D render\'s own water reaches: %s (%d yd tall)' % (title, tall)], size=40)
+        save(stack([head, titled(p, t, size=30)], gap=6), 'band-' + stem.split('-', 1)[1],
+             '%s: 0.3.0 | the detail with the render\'s water fading into 0.3.0\'s sea by depth %s yards '
+             '(satmask DEEP_YD, PLACEHOLDER his call)' % (title, ', '.join(map(str, deeps))))
+
+
+def satmask_default():
+    import satmask
+    return int(satmask.DEEP_YD)
+
+
 def titled(panels, titles, gap=12, size=40):
     """Panels side by side, each under a white title on black (his eyes: contrast)."""
     f = font(size)
@@ -329,6 +390,8 @@ def main():
              'the ground shows)' % (title, LANDING_YD, shape, SW, SH))
     if master and (not only or 'coasts' in only):
         coasts(S, master, sat, save, shape)
+    if master and (not only or 'bands' in only):
+        bands(S, master, save, shape)
     open(os.path.join(out, 'stills-%s.txt' % shape), 'w').write('\n'.join(notes) + '\n')
 
 

@@ -173,11 +173,41 @@ def test_built_archive():
             check(diff < 6, '%d: the tile is the master on land (mean difference %.2f)' % (px, diff))
 
 
+def test_open_sea_is_030s_bytes():
+    """Wherever the land alpha is 0 over a whole 4 x 4 block, the new CinderMap.blp's level-0 block is 0.3.0's own
+    bytes (the sea's source is 0.3.0's lossless picture, which write_blp encodes to the shipped file)."""
+    import numpy as np
+    from PIL import Image
+    from blp import read_blp
+    from sat_overview import Mpq
+    for shape in ('16x10', '16x9', '21x9', '32x9'):
+        pn, pa = os.path.join(OV, 'CinderMap-%s.blp' % shape), os.path.join(OV, 'alpha-%s.png' % shape)
+        pp = os.path.join(PACKS, 'LoadingScreens-%s.MPQ' % shape)
+        if not (os.path.exists(pn) and os.path.exists(pa) and os.path.exists(pp)) or 'STORMLIB' not in os.environ:
+            skip('overview or pack for %s' % shape)
+            continue
+        a = Mpq(pp)
+        old = a.read('Interface\\Glues\\LoadingScreens\\CinderMap.blp')
+        a.close()
+        new = open(pn, 'rb').read()
+        io, _ = read_blp(old)
+        inn, _ = read_blp(new)
+        ob = np.frombuffer(old, np.uint8, 4096 * 4096 // 2, io['offs'][0]).reshape(-1, 8)
+        nb = np.frombuffer(new, np.uint8, 4096 * 4096 // 2, inn['offs'][0]).reshape(-1, 8)
+        al = np.asarray(Image.open(pa)).reshape(1024, 4, 1024, 4).max((1, 3)).reshape(-1)
+        sea = al == 0
+        same = (ob == nb).all(1)
+        check(sea.sum() > 700000 and same[sea].all(), '%s: all %d open-sea blocks are 0.3.0\'s bytes (%d differ)' % (
+            shape, int(sea.sum()), int((~same[sea]).sum())))
+        check(not same[al == 255].all(), '%s: the land blocks did change (the new picture is in)' % shape)
+
+
 if __name__ == '__main__':
     test_contract_maths()
     test_w3d_naming()
     test_map_txt_agrees()
     test_alignment_on_the_pictures()
+    test_open_sea_is_030s_bytes()
     test_built_archive()
     print('%d checks, %d failed' % (checks, fails))
     sys.exit(1 if fails else 0)

@@ -111,13 +111,13 @@ def hidden_tiles(data):
 
 
 def _tile_job(job):
-    master, c, X, Y, hidden, depth = job
+    master, c, X, Y, hidden, depth, shallow, deep = job
     if hidden:
         return c, X, Y, None, None
     im = np.asarray(Image.open(satgeo.master_path(master, c, X, Y)).convert('RGB'), np.float32)
     k = im.shape[0] // P
     rgb = im.reshape(P, k, P, k, 3).mean((1, 3))                      # the exact area average, 8 x 8 into 1
-    a = satmask.land_alpha(depth, P * 4)
+    a = satmask.land_alpha(depth, P * 4, shallow, deep)
     a = a.reshape(P, 4, P, 4).mean((1, 3))                            # the mask at 4x, then averaged: a soft coast
     return c, X, Y, np.clip(rgb + 0.5, 0, 255).astype(np.uint8), a.astype(np.float32)
 
@@ -143,9 +143,11 @@ def mosaics(master, hidden, work, log=print):
         rgb[:] = DEEP_FILL
         alpha = np.zeros(((Y1 - Y0 + 1) * P, (X1 - X0 + 1) * P), np.float32)
         cont = satmask.Continent(satgeo.MAPS[c], X0, X1, Y0, Y1, log=log)
-        jobs = [(master, c, X, Y, (X, Y) in hidden[c], cont.tile_depth(X, Y).copy()) for X, Y in mine]
+        jobs = [(master, c, X, Y, (X, Y) in hidden[c], cont.tile_depth(X, Y).copy(), satmask.SHALLOW_YD, satmask.DEEP_YD)
+                for X, Y in mine]
         del cont
-        with cf.ProcessPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as ex:
+        with cf.ProcessPoolExecutor(max_workers=min(16, os.cpu_count() or 4),
+                                    mp_context=__import__('multiprocessing').get_context('fork')) as ex:
             for _, X, Y, t, a in ex.map(_tile_job, jobs, chunksize=8):
                 if t is None:
                     continue
