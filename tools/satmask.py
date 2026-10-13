@@ -7,8 +7,8 @@ render's water is drawn see-through over the sea floor (its shader: alpha 1 - ex
 over 30 yards), so on its pixels the shallows, wet sand and beach run into one another; the heights know exactly where
 the ocean is and how deep. (The stills that decided it: ASSETS.md, "The mask".)
 
-Source: the world3d export the render itself read (w3d format, ~/Desktop/RavenCraft-Dev-Archive/inbox/world3d/data;
-reader ~/Projects/cindermap/tools/world3d/w3d.py), one .npz per client tile:
+Source: the world3d export the render itself read (w3d format, $W3D_DATA or $SAT_INBOX/world3d/data;
+the world3d tools' own reader), one .npz per client tile:
   outer [129,129] heights at the cell corners, water [129,129] the liquid's surface (NaN none), wmask [128,128] the
   cells the liquid is drawn in, wtype [16,16] per chunk (2 = ocean; 1 water/river, 3 magma, 4 slime).
 
@@ -37,7 +37,7 @@ PLACEHOLDER (his call): SHALLOW_YD and DEEP_YD, how far out the render's own sha
 import os
 import numpy as np
 
-W3D = os.path.expanduser('~/Desktop/RavenCraft-Dev-Archive/inbox/world3d/data')
+W3D = os.environ.get('W3D_DATA', os.path.join(os.environ.get('SAT_INBOX', 'inputs'), 'world3d', 'data'))
 SHALLOW_YD = 3.0     # PLACEHOLDER (his call): the render's water is all its own up to this depth (yards) ...
 DEEP_YD = 150.0      # PLACEHOLDER (his call): ... and all 0.3.0's sea from this depth on. 24 left 0.3.0's minimap
                      # water between the 3D shallows and the painted sea, and the minimap draws some of it as the sea

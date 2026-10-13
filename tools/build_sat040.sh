@@ -6,11 +6,12 @@
 set -e
 OUT=${1:?usage: build_sat040.sh <out dir>}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-INBOX=$HOME/Desktop/RavenCraft-Dev-Archive/inbox
+INBOX=${SAT_INBOX:-inputs}      # the build's inputs: the master, 0.3.0's assets, the w3d export
 MASTER=${MASTER:-$INBOX/azeroth-topdown-2026-10-13}
 PACKS030=${PACKS030:-$INBOX/cinderload-release-0.3.0-tonight/assets}
-WORK=${WORK:-$HOME/.cache/claude-scratch/sat040-assets/final}
+WORK=${WORK:-build/sat040}
 export STORMLIB=${STORMLIB:?set STORMLIB to the path of libstorm.so}
+export WOW_DATA=${WOW_DATA:?set WOW_DATA to the game client Data folder, read only}
 run() { systemd-run --user --scope -q -p MemoryMax=8G -p MemorySwapMax=1G -- "$@"; }
 
 rm -rf "$WORK" && mkdir -p "$WORK" "$OUT/packs" "$OUT/stills"

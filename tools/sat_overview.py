@@ -20,10 +20,10 @@ Usage: STORMLIB=/path/to/libstorm.so python3 sat_overview.py <master dir> <0.3.0
          [--client <client Data dir>] [--work <scratch dir>]
   <master dir>    the 3D master (index.json, tiles/half/<Map>/<X>_<Y>.png)
   <0.3.0 packs>   the folder with 0.3.0's LoadingScreens-<shape>.MPQ (read only: CinderMap.blp and map.txt)
-  --client        the client the 0.3.0 map was stitched from (its WorldMapArea for the hidden zone); default fogtest
-  --work          where the 128-px mosaics are cached (about 400 MB); default ~/.cache/claude-scratch/sat040-assets
+  --client        the client the 0.3.0 map was stitched from (its WorldMapArea for the hidden zone); default $WOW_DATA
+  --work          where the 128-px mosaics are cached (about 400 MB); default build/sat040
   --sea-src       the kit's 8 Oct build (w-<shape>/world-<shape>.png and CinderMap.blp): 0.3.0's pictures lossless,
-                  used when proven to be the shipped ones; default inbox/loading-screens/living-map/repack-20261008
+                  used when proven to be the shipped ones; default $SAT_INBOX/loading-screens/living-map/repack-20261008
 Writes <out>/world-<shape>.png (the new picture, 4096 x 4096), <out>/CinderMap-<shape>.blp, <out>/old-<shape>.png
 (0.3.0's), <out>/sea-<shape>.png (0.3.0's softened under the blend: make_sat.py's sea) and <out>/alpha-<shape>.png (the
 land alpha on the picture, for checking).
@@ -44,9 +44,9 @@ OLD_BLP = {}
 SOFT_TEXELS = 2.0        # 0.3.0's picture softened by this (texels) under the render's blend, never where alpha is 0
 SOFT_RAMP = 5.0          # fully softened from alpha 0.2 up
 DEEP_FILL = (50, 82, 112)                # the render's own deep water, where it drew no tile (never shown: alpha 0)
-CLIENT = os.path.expanduser('~/Games/RavenCraft-fogtest/Data')
-WORK = os.path.expanduser('~/.cache/claude-scratch/sat040-assets')
-SEA_SRC = os.path.expanduser('~/Desktop/RavenCraft-Dev-Archive/inbox/loading-screens/living-map/repack-20261008')
+CLIENT = os.environ.get('WOW_DATA', '')
+WORK = os.path.join('build', 'sat040')
+SEA_SRC = os.path.join(os.environ.get('SAT_INBOX', 'inputs'), 'loading-screens', 'living-map', 'repack-20261008')
 
 
 class Mpq:
