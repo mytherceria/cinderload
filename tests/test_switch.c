@@ -11648,11 +11648,11 @@ static void LuaRealClient(const char *client)
  * the overlay black only before the view steps, BlurStep's ending on every screen and the world's frames counted first:
  * the harness must see his find in it. */
 enum { LK_PARCH, LK_SAT, LK_BLACK, LK_WORLD, LK_LIST, LK_N };
-typedef struct { float w[LK_N]; } Look;
-static Look LookOne(int k) { Look l; memset(&l, 0, sizeof l); l.w[k] = 1; return l; }
-static Look LookMix(Look a, Look b, float t)            /* (1 - t) a + t b */
+typedef struct { float w[LK_N]; } Seen;
+static Seen SeenOne(int k) { Seen l; memset(&l, 0, sizeof l); l.w[k] = 1; return l; }
+static Seen SeenMix(Seen a, Seen b, float t)            /* (1 - t) a + t b */
 {
-    Look l;
+    Seen l;
     for (int k = 0; k < LK_N; k++) l.w[k] = (1 - t) * a.w[k] + t * b.w[k];
     return l;
 }
@@ -11681,7 +11681,7 @@ typedef struct {
  * PresentOrder's explore and lay (PresentLay's: what PresentLays says, laid over the frame). */
 static int g_hLaid, g_hNoSheet, g_hAllN, g_hBlackN, g_hExploreN, g_hLayN, g_hLayLoading;
 static LONG g_hFramesAtExplore, g_hFramesAtLay;
-static Look g_hContent, g_hCap;
+static Seen g_hContent, g_hCap;
 static void HarnessAll(void) { g_hLaid = OV_ALL; g_hAllN++; }
 static int HarnessBlack(void) { if (g_hNoSheet) return 0; g_hLaid = OV_BLACK; g_hBlackN++; return 1; }
 static void HarnessExplore(void) { g_hExploreN++; g_hFramesAtExplore = g_worldFrames; }
@@ -11694,9 +11694,9 @@ static void HarnessLay(unsigned char *gx, int loading)
     g_hLayN++; g_hLayLoading = loading; g_hFramesAtLay = g_worldFrames;
     float a = 0, dim = (float)g_blurDim / 100.0f;
     int mode = PresentLays(loading, GetTickCount(), &a);
-    if (mode == 1) { g_hCap = g_hContent; g_hContent = LookMix(g_hContent, LookOne(LK_BLACK), a * dim); }
+    if (mode == 1) { g_hCap = g_hContent; g_hContent = SeenMix(g_hContent, SeenOne(LK_BLACK), a * dim); }
     else if (mode == 2) {
-        g_hContent = LookMix(LookMix(g_hContent, g_hCap, a), LookOne(LK_BLACK), a * dim);
+        g_hContent = SeenMix(SeenMix(g_hContent, g_hCap, a), SeenOne(LK_BLACK), a * dim);
         InterlockedExchange(&g_worldLaid, g_worldLaid + 1);
     }
 }
@@ -11714,7 +11714,7 @@ static SceneSaw SceneRun(const Scene *s, int old, const char *csv)
     g_blurUsed = 0; g_dissolveAt = 0; g_blurFrom = g_blurTo = 0; g_loadFrame = 0; g_exPending = 0;
     g_dispNew = 1;
     g_hNoSheet = s->noSheet;
-    Look front = LookOne(LK_LIST);
+    Seen front = SeenOne(LK_LIST);
     g_hCap = front;
     float alpha = 0;
     int view = 0;                                            /* 0 not open, 1 showing, 2 its screen gone, 3 fading, 4 gone */
@@ -11726,10 +11726,10 @@ static SceneSaw SceneRun(const Scene *s, int old, const char *csv)
         DWORD now = base + (DWORD)t;
         shim_ticks = now;
         int screen = t >= 0 && t < s->goneAt, frame = 0;
-        Look content = front;
+        Seen content = front;
         /* the game's thread: a frame, presented */
         if (t < 0) {
-            if (!(t % 16)) { frame = 1; content = LookOne(LK_LIST); }
+            if (!(t % 16)) { frame = 1; content = SeenOne(LK_LIST); }
         } else if (t <= s->loadEnd) {
             if (!(t % 16) || t == s->loadEnd) {
                 frame = 1;
@@ -11749,13 +11749,13 @@ static SceneSaw SceneRun(const Scene *s, int old, const char *csv)
                     OverlayFrame(now, HarnessAll, HarnessBlack);
                     black = g_hLaid == OV_BLACK;
                 }
-                content = LookOne(black ? LK_BLACK : LK_SAT);   /* the pack's world map, unless black over it */
+                content = SeenOne(black ? LK_BLACK : LK_SAT);   /* the pack's world map, unless black over it */
                 saw.loading++;
                 saw.black += black;
             }
         } else if (t == s->worldAt || (t >= s->stillTo && !((t - s->stillTo) % 16))) {
             frame = 1;
-            content = LookOne(LK_WORLD);
+            content = SeenOne(LK_WORLD);
         }
         if (frame) {                                         /* (PrePresent: only with its hook) */
             if (s->blur && old) {                            /* (2f7e72b's: the world's frame counted first) */
@@ -11764,8 +11764,8 @@ static SceneSaw SceneRun(const Scene *s, int old, const char *csv)
                 if (!loading) InterlockedExchange(&g_worldFrames, g_worldFrames + 1);
                 float a = 0, dim = (float)g_blurDim / 100.0f;
                 int mode = BlurStep(loading, now, &a);
-                if (mode == 1) { g_hCap = content; content = LookMix(content, LookOne(LK_BLACK), a * dim); }
-                else if (mode == 2) content = LookMix(LookMix(content, g_hCap, a), LookOne(LK_BLACK), a * dim);
+                if (mode == 1) { g_hCap = content; content = SeenMix(content, SeenOne(LK_BLACK), a * dim); }
+                else if (mode == 2) content = SeenMix(SeenMix(content, g_hCap, a), SeenOne(LK_BLACK), a * dim);
             } else if (s->blur) {
                 g_hContent = content;
                 PresentOrder(NULL, HarnessExplore, HarnessLay);
@@ -11798,7 +11798,7 @@ static SceneSaw SceneRun(const Scene *s, int old, const char *csv)
             else { alpha = 0; view = 4; }
         }
         /* what shows */
-        Look on = LookMix(front, LookOne(g_parchOn ? LK_PARCH : LK_SAT), alpha);
+        Seen on = SeenMix(front, SeenOne(g_parchOn ? LK_PARCH : LK_SAT), alpha);
         if (t >= 0) {
             if (on.w[LK_SAT] > saw.sat) saw.sat = on.w[LK_SAT];
             if (on.w[LK_PARCH] > saw.parch) saw.parch = on.w[LK_PARCH];
