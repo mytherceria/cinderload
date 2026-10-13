@@ -13217,6 +13217,118 @@ static void TestSatHooks(void)
     Check(ok, "the 32-bit hooks call what the tests run for the satellite's detail: the view's thread reads its index and starts its worker as it starts, works it each frame after the parchment's, ends it with the screen beside ParchScreenEnd, lets its textures go as its window hides (after the fade, or a new screen first); the view's going stops it; ViewFrame binds the detail's textures past the slots; ViewBuild draws it straight after the map; glDeleteTextures loaded; the parchment's own upload, worker, work and screen end hold nothing of it");
 }
 
+/* The detail's texture names, each noted with the tile it was made for (a name is one tile's for its life): how many
+ * are now in another tile's slot (none, ever) */
+static int g_tnC[TSAT_NAMES], g_tnX[TSAT_NAMES], g_tnY[TSAT_NAMES];
+static int SatNamesNote(void)
+{
+    int moved = 0;
+    for (int i = 0; i < g_ssN; i++) {
+        unsigned nm = g_satTex[i];
+        if (!nm || nm >= TSAT_NAMES) continue;
+        if (!g_tnC[nm]) { g_tnC[nm] = g_ss[i].c + 1; g_tnX[nm] = g_ss[i].X; g_tnY[nm] = g_ss[i].Y; }
+        else moved += g_tnC[nm] != g_ss[i].c + 1 || g_tnX[nm] != g_ss[i].X || g_tnY[nm] != g_ss[i].Y;
+    }
+    return moved;
+}
+/* The list just built (SatBuild): the tile each detail batch was built for; how many */
+static int g_tlC[VIEW_BATCHES + SAT_MAX], g_tlX[VIEW_BATCHES + SAT_MAX], g_tlY[VIEW_BATCHES + SAT_MAX];
+static int SatListNote(void)
+{
+    int n = 0;
+    for (int b = 0; b < g_vbN; b++) {
+        int t = g_vb[b].tex;
+        g_tlC[b] = -1;
+        if (t < VT_COUNT || t - VT_COUNT >= g_ssN) continue;
+        g_tlC[b] = g_ss[t - VT_COUNT].c; g_tlX[b] = g_ss[t - VT_COUNT].X; g_tlY[b] = g_ss[t - VT_COUNT].Y;
+        n++;
+    }
+    return n;
+}
+/* That list as ViewFrame would draw it now (each batch bound to ViewTexName of its tex): *own drawn with its own tile's
+ * texture, *wrong with another tile's, *keptOut left out though its tile is still up in the set, *left left out with its
+ * tile gone from it */
+static void SatListDrawn(int *own, int *wrong, int *keptOut, int *left)
+{
+    *own = *wrong = *keptOut = *left = 0;
+    for (int b = 0; b < g_vbN; b++) {
+        if (g_vb[b].tex < VT_COUNT || g_tlC[b] < 0) continue;
+        int c = g_tlC[b], X = g_tlX[b], Y = g_tlY[b];
+        int i = g_satFor.on && g_satFor.c == c ? SatSlotOf(X, Y) : -1;
+        int up = i >= 0 && i < g_ssN && g_ss[i].c == c && g_ss[i].X == X && g_ss[i].Y == Y && g_ss[i].st == SAT_UP && g_satTex[i];
+        unsigned nm = ViewTexName(g_vb[b].tex);
+        if (!nm) { if (up) (*keptOut)++; else (*left)++; continue; }
+        if (nm >= TSAT_NAMES || g_tnC[nm] != c + 1 || g_tnX[nm] != X || g_tnY[nm] != Y) (*wrong)++;
+        else (*own)++;
+    }
+}
+/* The view's frame is ViewBuild (the list), then SatWork, then ViewFrame drawing that list; a list also stands for the
+ * next frames when ViewStepLocked builds none. The detail's batches name the set's slots, and SatWork re-slots the set
+ * when the arrival moves within a screen (both attacks, 13 Oct: 101 of 104 tiles, 133 of 136 at Goldshire, drawn with
+ * ANOTHER tile's picture for that frame). Now the list drawn after it never binds a tile another tile's texture: a tile
+ * kept is drawn with its own, one let go is left out (the overview there) for that frame. */
+static void TestSatFrameOrder(void)
+{
+    Fresh("sat-frameorder"); GameDir();
+    SatTestReset();
+    SatTestMap(SH_21x9);
+    SatPackBegin(64);
+    SatPackBlock(0, 20, 43, 45, 53, 64);                                 /* (wider than the set: tiles leave and come as it moves) */
+    SatPackBlock(1, 30, 40, 13, 19, 64);                                 /* (Moonglade's, for a teleport) */
+    SatPackEnd();
+    SatRead();
+    TestSatGl(1, 1);
+    memset(g_tnC, 0, sizeof g_tnC);
+    float W = 5120, H = 2160;
+    int own, wrong, keptOut, left, moved = 0;
+    SatNewScreen(); SatWork(1000); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    for (int f = 0; f < 30; f++) { SatWork(1007 + 7 * f); moved += SatNamesNote(); }
+    int ok = g_ssN > 0 && SatUpCount() == g_ssN;
+    /* the frame: its list built, then the arrival found a tile east (the game's NEW_WORLD after the character list's
+     * place, or a later way): SatWork re-slots the set, then that list drawn */
+    ViewListStart(); SatBuild(W, H, 3000);
+    int built = SatListNote();
+    SatListDrawn(&own, &wrong, &keptOut, &left);
+    ok &= built > 100 && own == built;                                   /* (the control: all drawn, each its own) */
+    SatArrive(0, -9464, 62 - 533.33f);
+    int made = g_tsatMade;
+    SatWork(3006); moved += SatNamesNote();
+    SatListDrawn(&own, &wrong, &keptOut, &left);
+    ok &= g_tsatMade > made && g_ss[0].X == 32;                          /* (the set moved, its new tiles up the same call) */
+    ok &= wrong == 0 && keptOut == 0 && own == built && left == 0;
+    /* the next frame's list, then four tiles further east: the tiles leaving the set (the screen's west) left out, the
+     * rest drawn with their own; and no list built the frame after (the last quads stand), a tile further: the same */
+    ViewListStart(); SatBuild(W, H, 3012);
+    built = SatListNote();
+    SatArrive(0, -9464, 62 - 5 * 533.33f);
+    made = g_tsatMade;
+    SatWork(3018); moved += SatNamesNote();
+    SatListDrawn(&own, &wrong, &keptOut, &left);
+    ok &= g_tsatMade > made && wrong == 0 && keptOut == 0 && left > 0 && own > 0 && own + left == built;
+    SatArrive(0, -9464, 62 - 6 * 533.33f);
+    SatWork(3024); moved += SatNamesNote();
+    SatListDrawn(&own, &wrong, &keptOut, &left);
+    ok &= wrong == 0 && keptOut == 0 && left > 0 && own > 0 && own + left == built;
+    /* a teleport across continents between a list and its drawing: Kalimdor's tiles up in the same call, none drawn in
+     * Azeroth's places */
+    ViewListStart(); SatBuild(W, H, 3030);
+    built = SatListNote();
+    SatArrive(1, 7980, -2501);
+    made = g_tsatMade;
+    SatWork(3036); moved += SatNamesNote();
+    SatListDrawn(&own, &wrong, &keptOut, &left);
+    ok &= built > 0 && g_satFor.c == 1 && g_tsatMade > made && wrong == 0 && own == 0 && left == built;
+    /* the window hiding (SatRelease) between a list and its drawing: none of it drawn */
+    SatView(1, 7980, -2501, 3500);
+    ViewListStart(); SatBuild(W, H, 3600);
+    built = SatListNote();
+    SatRelease();
+    SatListDrawn(&own, &wrong, &keptOut, &left);
+    ok &= built > 0 && wrong == 0 && own == 0 && left == built && moved == 0;
+    SatTestReset(); g_map.ok = 0;
+    Check(ok, "the satellite's detail through the view's frame (its list built, then SatWork, then that list drawn, or drawn again the frames after): the arrival moving within the screen re-slots the set, and the list's tiles still in it are drawn with their own textures, every one (none with another tile's), those let go left out for that frame; across a teleport, or the window hiding, none drawn; a texture is one tile's for its life");
+}
+
 static void TestSatellite(void)
 {
     TestSatGeometry();
@@ -13236,6 +13348,7 @@ static void TestSatellite(void)
     TestSatViewOff();
     TestSatParchment();
     TestSatBatchRoom();
+    TestSatFrameOrder();
     TestSatHooks();
 }
 

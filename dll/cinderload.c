@@ -13879,6 +13879,8 @@ static int SatWant(int c, float x, float y, LONG screen, DWORD now)
         SatSlot *s = &g_ss[i];
         s->c = (short)c; s->X = k[i].X; s->Y = k[i].Y; s->st = SAT_WANT; s->pad = 0; s->at = 0; s->bytes = 0;
     }
+    static int remap[SAT_MAX];                                   /* (the last set's slot j: its tile's slot now, or -1) */
+    for (int j = 0; j < oldN; j++) remap[j] = -1;
     for (int j = 0; j < oldN; j++) {                             /* (a tile up still wanted keeps its texture) */
         if (!oldTex[j] || old[j].st != SAT_UP || old[j].c != c) continue;
         int i = SatBit(g_sat.has[c], old[j].X, old[j].Y) ? g_ssAt[old[j].Y * SAT_GRID + old[j].X] - 1 : -1;
@@ -13886,7 +13888,16 @@ static int SatWant(int c, float x, float y, LONG screen, DWORD now)
         g_ss[i].st = SAT_UP; g_ss[i].at = old[j].at; g_ss[i].bytes = old[j].bytes;
         g_satTex[i] = oldTex[j]; oldTex[j] = 0;
         g_satFor.upBytes += old[j].bytes;
+        remap[j] = i;
     }
+    /* This frame's list was built before SatWork (ViewBuild, then SatWork, then ViewFrame), and stands for the frames
+     * after while ViewStepLocked builds none: its detail quads name the last set's slots. Each now names its own tile's
+     * slot, or none (a tile not kept: left out until the next list), so no quad is drawn with another tile's texture. */
+    for (int b = 0; b < g_vbN; b++)
+        if (g_vb[b].tex >= VT_COUNT) {
+            int j = g_vb[b].tex - VT_COUNT;
+            g_vb[b].tex = j < oldN && remap[j] >= 0 ? VT_COUNT + remap[j] : VT_COUNT + SAT_MAX;   /* (past the slots: no name) */
+        }
     int g = 0;
     for (int j = 0; j < oldN; j++) if (oldTex[j]) gone[g++] = oldTex[j];
     if (g) SatTexGone(gone, g);
