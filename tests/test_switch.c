@@ -10172,6 +10172,14 @@ static void TestWarmClient(const char *client)
              LogSays("the parchment: the land of ") && LogSays(" zone pages prepared in ") && !LogSays("could not be read, tried again");
     int made = g_warm.made, tiles = g_warm.tiles;
     unsigned kb = (g_warm.bytes + 1023) / 1024;
+    long disk = 0;                                                     /* (the files the turns made, as the log counts them) */
+    for (int k = 0; k < g_warm.n && disk >= 0; k++) {
+        char p[700];
+        snprintf(p, sizeof p, "%sData/CinderLoad/land-%s.bin", shim_gamedir, g_pz[g_warm.order[k]].name);
+        FILE *f = fopen(p, "rb");
+        if (!f) { disk = -1; break; }
+        fseek(f, 0, SEEK_END); disk += ftell(f); fclose(f);
+    }
     static const struct { const char *n; int map; } kz[9] = { { "Elwynn", 0 }, { "Stormwind", 0 }, { "DunMorogh", 0 }, { "Ironforge", 0 },
         { "Durotar", 1 }, { "Orgrimmar", 1 }, { "Mulgore", 1 }, { "ThunderBluff", 1 }, { "Barrens", 1 } };
     int same = 1;
@@ -10202,10 +10210,10 @@ static void TestWarmClient(const char *client)
         ParchFree();
         ok &= got && N.laid == N.n && N.n > 0 && read[k] == 0;
     }
-    printf("  the land prepared on the client's files: %d of %d zone pages in %.1f s here (%d terrain files read), %u KB kept; the same as made alone: %s; "
+    printf("  the land prepared on the client's files: %d of %d zone pages in %.1f s here (%d terrain files read), %u KB kept (%ld bytes on disk); the same as made alone: %s; "
            "then a first visit's zones nearby read %d (Stormwind's Trade District, %d laid), %d (Orgrimmar's Valley of Strength, %d), %d (Thunder Bluff, %d) terrain files\n",
-           made, pages, ms / 1000, tiles, kb, same ? "yes" : "NO", read[0], laid[0], read[1], laid[1], read[2], laid[2]);
-    ok &= same && tiles > 1000 && kb > 100 && kb < 1024;
+           made, pages, ms / 1000, tiles, kb, disk, same ? "yes" : "NO", read[0], laid[0], read[1], laid[1], read[2], laid[2]);
+    ok &= same && tiles > 1000 && disk == (long)g_warm.bytes && kb > 100 && kb < 2048;
     Check(ok, "the land prepared ahead on the client's files: every zone page's land made, a zone a turn, none failing, logged as it starts and ends; each the same bytes as made alone on a first visit (the capitals, the zones round them, the Barrens); then a first visit's zones nearby read no terrain (Stormwind's Trade District, Orgrimmar's Valley of Strength, Thunder Bluff)");
     g_parchAsked = 0; g_warmBusy = 1; TestWarmSession();
 }

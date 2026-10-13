@@ -13330,7 +13330,8 @@ static int LandWarmTurn(void)
     g_warmRun = 0;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     g_warm.tiles += g_wland.tiles;
-    if (ok) g_warm.bytes += LAND_HEAD + (unsigned)(g_wland.w * g_wland.h + 3) / 4;
+    if (ok) g_warm.bytes += LAND_HEAD + (unsigned)(g_wland.w * g_wland.h + 3) / 4 + (unsigned)(g_wland.w * g_wland.h);   /* (its file:
+                                                                 * the marks and each chunk's neighbour's page, ParchLandMake) */
     ParchLandFree(&g_wland);
     g_warm.ms += GetTickCount() - now;
     if (g_warmStop) { LandWarmPause(); return 0; }               /* (stopped: this zone again, whole, next time) */
