@@ -3,7 +3,7 @@ the contract's tile maths against a known place in the game's own data, the axes
 pictures themselves, and the built files against the contract.
 
   python3 tests/test_sat.py [<0.3.0 packs dir> [<built sat dir> [<built overview dir>]]]
-Defaults: the inbox's 0.3.0 assets, ~/.cache/claude-scratch/sat040-assets/sat and .../ov. A part whose inputs are not
+Defaults: the inbox's 0.3.0 assets, ~/.cache/claude-scratch/sat040-assets/final/sat and .../final/ov (build_sat040.sh's). A part whose inputs are not
 on this machine is skipped and says so. Exit 0 when every check that ran passed.
 """
 import glob, os, struct, sys
@@ -12,8 +12,8 @@ import satgeo
 
 INBOX = os.path.expanduser('~/Desktop/RavenCraft-Dev-Archive/inbox')
 PACKS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(INBOX, 'cinderload-release-0.3.0-tonight', 'assets')
-SAT = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser('~/.cache/claude-scratch/sat040-assets/sat')
-OV = sys.argv[3] if len(sys.argv) > 3 else os.path.expanduser('~/.cache/claude-scratch/sat040-assets/ov')
+SAT = sys.argv[2] if len(sys.argv) > 2 else os.path.expanduser('~/.cache/claude-scratch/sat040-assets/final/sat')
+OV = sys.argv[3] if len(sys.argv) > 3 else os.path.expanduser('~/.cache/claude-scratch/sat040-assets/final/ov')
 W3D = os.path.join(INBOX, 'world3d', 'data')
 MASTER = os.path.join(INBOX, 'azeroth-topdown-2026-10-13')
 checks = fails = 0
