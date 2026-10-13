@@ -12519,12 +12519,12 @@ static void TestSatIndex(void)
         "t 0 31 49\r\nt 0 32 49\n"
         "\tt\t1  40 28  # Orgrimmar\n"
         "t 0 31 49\n"                                        /* (the same twice: once) */
-        "t 2 31 49\nt 0 64 49\nt 0 31 -1\nt 0 3x 49\nt 0 31\nt 0 31 49 7\nt0 1 1\n"   /* (none of these) */
+        "t 2 31 49\nt 0 64 49\nt 0 31 -1\nt 0 3x 49\nt 0 31\nt 0 5 5 7\nt0 1 1\n"   /* (none of these) */
         "levels 99\npx 384\nwhat 1 2 3\n"
         "t 1 0 63";                                          /* (the last line without its end) */
     int ok = SatParse(good, (unsigned)strlen(good)) && g_sat.px == 512 && g_sat.levels == 8 && g_sat.tiles == 4;
     ok &= SatBit(g_sat.has[0], 31, 49) && SatBit(g_sat.has[0], 32, 49) && SatBit(g_sat.has[1], 40, 28) && SatBit(g_sat.has[1], 0, 63);
-    ok &= !SatBit(g_sat.has[1], 31, 49) && !SatBit(g_sat.has[0], 40, 28) && !SatBit(g_sat.has[0], 1, 1);
+    ok &= !SatBit(g_sat.has[1], 31, 49) && !SatBit(g_sat.has[0], 40, 28) && !SatBit(g_sat.has[0], 1, 1) && !SatBit(g_sat.has[0], 5, 5);
     static const char noPx[] = "levels 8\nt 0 31 49\n", noTiles[] = "px 256\nlevels 7\n# none\n", odd[] = "px 300\nt 0 1 1\n";
     ok &= !SatParse(noPx, sizeof noPx - 1) && !SatParse(noTiles, sizeof noTiles - 1) && !SatParse(odd, sizeof odd - 1);
     ok &= SatParse("px 256\nt 1 2 3", 14) && g_sat.px == 256 && g_sat.tiles == 1 && SatBit(g_sat.has[1], 2, 3);
@@ -12824,8 +12824,14 @@ static void TestSatRefused(void)
     ok &= LogSays("OpenGL would not take one, so no more were given it this screen");
     SatRelease();
     ok &= TsatLive() == 0;
+    /* an OpenGL without glDeleteTextures: the detail off (its textures could never go), said; none made */
+    SatTestReset();
+    SatTestWorld("sat-nodelete", 64, 28, 34, 47, 51, 1);
+    gl.DeleteTextures = NULL;
+    SatNewScreen(); SatWork(3000); SatArrive(0, -9464, 62); SatWork(3007);
+    ok &= !g_sat.ok && g_tsatMade == 0 && g_ssN == 0 && LogSays("this OpenGL has no glDeleteTextures, so the satellite draws its world map alone");
     SatTestReset(); g_map.ok = 0;
-    Check(ok, "the satellite's detail: OpenGL refusing a tile (its memory full): its texture deleted at once, that tile never drawn, none more given to OpenGL or read this screen, every byte freed, said in the screen's line");
+    Check(ok, "the satellite's detail: OpenGL refusing a tile (its memory full): its texture deleted at once, that tile never drawn, none more given to OpenGL or read this screen, every byte freed, said in the screen's line; an OpenGL without glDeleteTextures: the detail off, said, nothing made");
 }
 
 static void TestSatDraw(void)
@@ -12904,12 +12910,19 @@ static void TestSatDraw(void)
     SatFrame(5007 + 400, W, H);
     ok &= SatBatchOf(32, 49) < 0 && g_vv[g_vb[SatBatchOf(31, 49)].first + 1].c[3] == 0;   /* (31_49's corner at it: none) */
     g_ss[s].st = SAT_UP;
-    /* only this screen's set, for its arrival's continent */
+    /* only this screen's set, for its arrival's continent: ViewBuild draws before SatWork each frame (the view's thread),
+     * so on the frame the arrival changes, or a new screen begins, the set it has is not that arrival's */
+    ViewListStart(); SatBuild(W, H, 5500);
+    ok &= SatBatches(NULL) > 0;                                          /* (the control: this screen, this continent) */
     g_destMap = 1;
-    SatFrame(5500, W, H);
+    ViewListStart(); SatBuild(W, H, 5500);
     ok &= SatBatches(NULL) == 0;
     g_destMap = 0; g_destOk = 0;
-    SatBuild(W, H, 5500);
+    ViewListStart(); SatBuild(W, H, 5500);
+    ok &= SatBatches(NULL) == 0;
+    g_destOk = 1;
+    InterlockedIncrement(&g_viewScreen);                                 /* (a new screen, the same arrival, before its SatWork) */
+    ViewListStart(); SatBuild(W, H, 5500);
     ok &= SatBatches(NULL) == 0;
     SatTestReset(); g_map.ok = 0;
     Check(ok, "the satellite's detail drawn straight over the world map, one batch a tile, each where map.txt puts it through the view's corners (Goldshire's inn at its own pixel of its tile), neighbours meeting exactly: none while the view is 7000 yards tall or more (twice the end), whole by 4375 (1.25 times), even between; each tile fading up over 400 ms once up, a tile not up not drawn and its neighbours soft toward it; the set's edge soft; tiles off the screen left out; only this screen's set, for its arrival's continent");
