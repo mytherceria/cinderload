@@ -12538,7 +12538,7 @@ static void TestSatMissing(void)
     SatTestReset();
     long heap = shim_heap_live;
     SatRead();
-    int ok = !g_sat.ok && LogSays("no Data\\CinderLoad\\CinderSat.MPQ, so the satellite draws its world map alone, as 0.3.0 did");
+    int ok = !g_sat.ok && LogSays("no Data\\CinderLoad\\CinderSat.MPQ, so the satellite is 0.3.0's in broad daylight (the 3D overview, no detail)");
     SatWorkerStart();
     ok &= !g_sjWorker;                                                   /* (no worker for nothing) */
     SatTestMap(SH_21x9); g_mapShown = 1;
@@ -12557,9 +12557,9 @@ static void TestSatMissing(void)
     SatPackTile(0, 31, 49, 64, 0, 1, NULL, 0);
     SatPackEnd();
     SatRead();
-    ok &= !g_sat.ok && LogSays("names no tile size (px), so the satellite draws its world map alone, as 0.3.0 did");
+    ok &= !g_sat.ok && LogSays("names no tile size (px), so the satellite is 0.3.0's in broad daylight (the 3D overview, no detail)");
     SatTestReset(); g_viewTex[VT_MAP] = 0; g_map.ok = 0;
-    Check(ok, "the satellite's detail: no Data\\CinderLoad\\CinderSat.MPQ, or an index it cannot use: said in the log, no worker, nothing read or given to OpenGL, and the satellite's frame as 0.3.0 drew it (the map, then the overlay, no detail)");
+    Check(ok, "the satellite's detail: no Data\\CinderLoad\\CinderSat.MPQ, or an index it cannot use: said in the log, no worker, nothing read or given to OpenGL, and the satellite's frame 0.3.0's in broad daylight (the 3D overview, then the overlay, no detail)");
 }
 
 static void TestSatSet(void)
@@ -12829,7 +12829,7 @@ static void TestSatRefused(void)
     SatTestWorld("sat-nodelete", 64, 28, 34, 47, 51, 1);
     gl.DeleteTextures = NULL;
     SatNewScreen(); SatWork(3000); SatArrive(0, -9464, 62); SatWork(3007);
-    ok &= !g_sat.ok && g_tsatMade == 0 && g_ssN == 0 && LogSays("this OpenGL has no glDeleteTextures, so the satellite draws its world map alone");
+    ok &= !g_sat.ok && g_tsatMade == 0 && g_ssN == 0 && LogSays("this OpenGL has no glDeleteTextures, so the satellite is 0.3.0's in broad daylight (the 3D overview, no detail)");
     SatTestReset(); g_map.ok = 0;
     Check(ok, "the satellite's detail: OpenGL refusing a tile (its memory full): its texture deleted at once, that tile never drawn, none more given to OpenGL or read this screen, every byte freed, said in the screen's line; an OpenGL without glDeleteTextures: the detail off, said, nothing made");
 }

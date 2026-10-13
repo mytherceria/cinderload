@@ -24,6 +24,8 @@ Download the latest release from [Releases](https://github.com/mytherceria/cinde
 3. Put CinderSat.MPQ in Data/CinderLoad too: the satellite's detail, one file for every screen shape. Without it the satellite shows its world map alone, without the sharper land as it lands.
 4. Start the game. CinderLoad reads your resolution from WTF/Config.wtf and copies the matching pack into place as Data/patch-~.MPQ.
 
+Upgrading from 0.3.0: replace CinderLoad.dll and the pack for your screen shape in Data/CinderLoad with this release's, and add CinderSat.MPQ to Data/CinderLoad (step 3). Leave Data/patch-~.MPQ alone: as the game starts, CinderLoad finds the new pack and copies it into place itself. The dlls.txt line and your choices in Data/CinderLoad/style.txt stay as they are.
+
 Strongly recommended, though not required: the HD world map patch, Data/patch-M.mpq ("Reforged HD Patch-M" in the RavenCraft launcher). It makes the parchment sharp with 512-pixel map tiles; without it CinderLoad works just the same, but the client's own 256-pixel tiles are used and look soft. Its Faithful variant installs as Data/patch-M_faithful.mpq, which CinderLoad does not read.
 
 To remove: delete CinderLoad.dll, its dlls.txt line, the folder Data/CinderLoad (with what CinderLoad keeps there, such as your choice in style.txt, each character's explored areas in explored-*.bin and explored-*.txt, and each zone's land, read once from the client's terrain, in land-*.bin), Data/patch-~.MPQ and Data/patch-~.cinderload.

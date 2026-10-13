@@ -13451,7 +13451,7 @@ static void ParchWorkerStart(void)
  *                    indices, X = floor((ORIGIN - y) / TILE), Y = floor((ORIGIN - x) / TILE) for the world's x (north)
  *                    and y (west), ORIGIN 32 tiles
  * and each tile, CinderSat\<c>_<X>_<Y>.blp, a BLP2 of DXT1 blocks, no alpha, every level down to 4 x 4. No archive, or
- * no index it can use: the satellite exactly as 0.3.0 drew it (the overview alone), said once in the log.
+ * no index it can use: 0.3.0's satellite in broad daylight (the 3D overview alone, no detail), said once in the log.
  * Which tiles: the arrival's landing view (the end's height of the world, the view's u, v square, kept inside the
  * picture as DriftStep keeps it) and SAT_RING tiles round it, the nearest the arrival first, as many as SAT_MAX and
  * SAT_BUDGET's bytes of texture hold. A worker thread of their own (never the parchment's) reads them, a job of a few at
@@ -13562,14 +13562,14 @@ static void SatRead(void)
     if (r == MPQ_OK) g_sat.ok = SatParse((const char *)d, n);
     if (d) HeapFree(GetProcessHeap(), 0, d);
     if (r == MPQ_E_NO_ARCHIVE)
-        Log("  the satellite's detail: no Data\\CinderLoad\\CinderSat.MPQ, so the satellite draws its world map alone, as 0.3.0 did");
+        Log("  the satellite's detail: no Data\\CinderLoad\\CinderSat.MPQ, so the satellite is 0.3.0's in broad daylight (the 3D overview, no detail)");
     else if (r != MPQ_OK) {
-        wsprintfA(m, "  the satellite's detail: Data\\CinderLoad\\CinderSat.MPQ's %s would not read (%s), so the satellite draws "
-                  "its world map alone, as 0.3.0 did", SAT_INDEX, mpq_error_text(r));
+        wsprintfA(m, "  the satellite's detail: Data\\CinderLoad\\CinderSat.MPQ's %s would not read (%s), so the satellite is "
+                  "0.3.0's in broad daylight (the 3D overview, no detail)", SAT_INDEX, mpq_error_text(r));
         Log(m);
     } else if (!g_sat.ok) {
-        wsprintfA(m, "  the satellite's detail: Data\\CinderLoad\\CinderSat.MPQ's %s names %s, so the satellite draws its world "
-                  "map alone, as 0.3.0 did", SAT_INDEX, g_sat.px ? "no tile" : "no tile size (px)");
+        wsprintfA(m, "  the satellite's detail: Data\\CinderLoad\\CinderSat.MPQ's %s names %s, so the satellite is 0.3.0's in "
+                  "broad daylight (the 3D overview, no detail)", SAT_INDEX, g_sat.px ? "no tile" : "no tile size (px)");
         Log(m);
     } else {
         wsprintfA(m, "  the satellite's detail: %d tiles of %d px (%d levels) in Data\\CinderLoad\\CinderSat.MPQ, read round each "
@@ -13973,7 +13973,7 @@ static void SatWork(DWORD now)
     if (!g_sat.ok || *(volatile int *)&g_parchOn) return;
     if (gl.TexImage2D && !gl.DeleteTextures) {                  /* (its textures could never go: none made) */
         g_sat.ok = 0;
-        Log("  the satellite's detail: this OpenGL has no glDeleteTextures, so the satellite draws its world map alone, as 0.3.0 did");
+        Log("  the satellite's detail: this OpenGL has no glDeleteTextures, so the satellite is 0.3.0's in broad daylight (the 3D overview, no detail)");
         return;
     }
     DWORD dt = now - g_sworkAt;
