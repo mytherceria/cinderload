@@ -2669,11 +2669,30 @@ static void DriftScreenGone(void)
     StepUnlock(held);
 }
 
+/* The view's glide on the living map (0.4.1; his note after his first look at 0.4.0, 13 Oct 2026: "there's some
+ * optimizations to how it pans and zooms still"). His film of that session, measured frame by frame: on every login the
+ * zoom came to a dead stop about two and a half seconds before the end (the bar waiting near full on the game, the old
+ * approach done by 90% of it), then the push closer leapt in on its own in the last second, at nearly twice the glide's
+ * fastest. The parchment's glide instead (his rule for it, 10 Oct: "a single smooth continuous pan and zoom"): ONE zoom
+ * about a fixed point from where the screen opens to where it lands (ParchPath: every point on a straight line, nothing
+ * turns), the log of the zoom eased by ParchEase on the view's even bar, landed as the bar is full; the push closer
+ * (BLUR_PUSH, his 4 Oct rule) its last stretch, so the landing is 0.4.0's own, and no second glide at the end. Only the
+ * view's frames take it; without the view the game's frames move the zoom as they always did. */
+typedef struct { double x, y, s; } ParchView;     /* a camera: its middle on the world map's frame (map tiles), pixels a tile */
+static float ParchEase(float t);
+static float ParchEaseOn(float t, float v);
+static double ParchLn(double x);
+static ParchView ParchPath(ParchView a, ParchView b, float e);
+/* the view's glide on the living map, its one segment (begun again only when the arrival moves): from a, its log zoom L
+ * to its landing, on the bar from d0, its time t (never back), re-aimed (again) on at pace v */
+static struct { int on, again; float d0, t, v, du, dv, vh, vu, vv; double L; ParchView a; } g_vg;   /* (vh, vu, vv: the view as it left it) */
+
 /* The thread that moves the zoom (see GameStep), a new screen always the game's. p: the bar, 0..1. A new screen (no
  * frame for a second, or another map) starts again; within a screen the bar only goes up (4 Oct 2026: it dips for a
  * frame at the very end, and the view used to jump back out to the whole world). With the world map: from the whole
  * world, the view zooms evenly (in steps of the same ratio) onto where the player arrives, its middle following the
- * zoom, the approach done by about 90% of the bar so the end of it rests on them. Otherwise: the picture drifts in. */
+ * zoom, the approach done by about 90% of the bar so the end of it rests on them; with the view, its glide (above).
+ * Otherwise: the picture drifts in. */
 static void DriftStep(float p, DWORD now)
 {
     /* A new screen: the worker says so (it watches the loading screen's layer), or, only if there is no worker, the
@@ -2692,6 +2711,7 @@ static void DriftStep(float p, DWORD now)
         g_destMap = -1;
         g_titleMapId = -1;
         g_settleTo = 0;
+        g_vg.on = 0;                                                /* (the view's glide begins again) */
         InterlockedExchange(&g_destKnownPct, -1);
         ArrivalSnap();
         InterlockedExchange(&g_zoomHalf, g_zoomScreens > 0);
@@ -2727,7 +2747,38 @@ static void DriftStep(float p, DWORD now)
         } else if (g_destOk) {
             du = g_destU; dv = g_destV; hEnd = g_destH;
         }
-        if (g_destOk) {
+        if (g_destOk && g_viewSteps) {                              /* the view's: one glide, the push its last stretch */
+            float h1 = hEnd / BLUR_PUSH;                            /* where it lands: 0.4.0's after its push */
+            ParchView b;
+            b.s = 1 / (double)h1;
+            b.x = FireClamp(du, h1, 1 - h1); b.y = FireClamp(dv, h1, 1 - h1);
+            if (!g_vg.on || du != g_vg.du || dv != g_vg.dv ||       /* begun: from the view as it is (a later screen's, known */
+                g_viewH != g_vg.vh || g_viewU != g_vg.vu || g_viewV != g_vg.vv) {   /* from its start: halfway in, as 0.4.0);
+                                                                    * the arrival moved, or the game's frames moved the view
+                                                                    * since: from the view as it is, on at the zoom's pace */
+                float z0 = g_zoomHalf ? g_zoomStart : 0, m0 = g_zoomHalf ? LATER_MIDDLE + (1 - LATER_MIDDLE) * (z0 - LATER_START) / (1 - LATER_START) : 0;
+                ParchView a;
+                if (snap) {
+                    float h0 = 0.5f * (float)FireExp((double)(z0 * MapLn(hEnd / 0.5f)));
+                    a.s = 1 / (double)h0;
+                    a.x = FireClamp(0.5f + (du - 0.5f) * m0, h0, 1 - h0); a.y = FireClamp(0.5f + (dv - 0.5f) * m0, h0, 1 - h0);
+                } else { a.s = 1 / (double)g_viewH; a.x = g_viewU; a.y = g_viewV; }
+                double L = ParchLn(b.s) - ParchLn(a.s);
+                float rate = 0;                                     /* (the last segment's pace: its log zoom per bar) */
+                if (g_vg.on && g_vg.d0 < 0.999f) {
+                    float t0 = g_vg.t, e0 = g_vg.again ? ParchEaseOn(t0, g_vg.v) : ParchEase(t0);
+                    float e1 = g_vg.again ? ParchEaseOn(t0 + 1e-3f, g_vg.v) : ParchEase(t0 + 1e-3f);
+                    rate = (float)(g_vg.L * (e1 - e0) / 1e-3f / (1 - g_vg.d0));
+                }
+                g_vg.again = g_vg.on && rate > 0;
+                g_vg.v = g_vg.again && L > 1e-3 ? FireClamp((float)(rate * (1 - g_drift) / L), 0, 4) : 0;
+                g_vg.on = 1; g_vg.a = a; g_vg.L = L; g_vg.d0 = g_drift; g_vg.t = 0; g_vg.du = du; g_vg.dv = dv;
+            }
+            float t = g_vg.d0 < 0.999f ? FireClamp((g_drift - g_vg.d0) / (1 - g_vg.d0), 0, 1) : 1;
+            if (t > g_vg.t) g_vg.t = t;                             /* (never back) */
+            ParchView v = ParchPath(g_vg.a, b, g_vg.again ? ParchEaseOn(g_vg.t, g_vg.v) : ParchEase(g_vg.t));
+            cu = (float)v.x; cv = (float)v.y; h = (float)(1 / v.s);
+        } else if (g_destOk) {
             float z0 = g_zoomHalf ? g_zoomStart : 0;
             e = z0 + (1 - z0) * e;                                  /* after the first: from g_zoomStart in */
             h = 0.5f * (float)FireExp((double)(e * MapLn(hEnd / 0.5f)));
@@ -2743,7 +2794,8 @@ static void DriftStep(float p, DWORD now)
             float pb = BlurAmount(now);                             /* through the blur, closer still */
             if (pb > 0) h *= (float)FireExp(-(double)pb * MapLn(BLUR_PUSH));
         }
-        if (g_settleTo && g_destOk) {                               /* the hold's glide in: on the clock, not the bar */
+        if (g_settleTo && g_destOk && !g_viewSteps) {               /* the hold's glide in: on the clock, not the bar (the
+                                                                    * game's frames; the view's glide lands with its bar) */
             LONG span = (LONG)(g_settleTo - g_settleFrom);
             float t = span > 0 ? FireClamp((float)(LONG)(now - g_settleFrom) / (float)span, 0, 1) : 1;
             float s = t * t * (3 - 2 * t);
@@ -2761,6 +2813,7 @@ static void DriftStep(float p, DWORD now)
             g_viewV += (cv - g_viewV) * a;
             g_viewH += (h - g_viewH) * a;
         }
+        if (g_viewSteps) { g_vg.vh = g_viewH; g_vg.vu = g_viewU; g_vg.vv = g_viewV; }
         cu = g_viewU; cv = g_viewV; h = g_viewH;
         if (cu < h) cu = h;
         if (cu > 1 - h) cu = 1 - h;
@@ -8810,7 +8863,7 @@ static void ParchMesh(int tex, float W, float H, float x0, float y0, float x1, f
 enum { PARCH_FADE_A, PARCH_FADE_B, PARCH_FADE_C, PARCH_FADE_D };
 static const unsigned char kParchFrame[20] = { 0x30, 0x37, 0xC4, 0x3C, 0x75, 0xCF, 0x82, 0x3C, 0x00, 0x00, 0xA7, 0x41,
                                                0x00, 0x80, 0xFA, 0x41, 0x00, 0x00, 0x00, 0x42 };   /* 1/41.75 1/62.625 20.875 31.3125 32 */
-typedef struct { double x, y, s; } ParchView;     /* a camera: its middle on the world map's frame (map tiles), pixels a tile */
+/* (ParchView, a camera: above, with the living map's glide) */
 typedef struct { float x0, y0, x1, y1; } ParchRect;   /* a painting's place on that frame (map tiles) */
 static struct { int ok; float ox, oy, s; } g_wmc[2];  /* WorldMapContinent.dbc: each continent's place on the world map */
 static int g_worldFrameOk;                             /* the client's world map frame as read (the world's painting usable) */

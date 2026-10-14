@@ -3774,28 +3774,25 @@ static void ViewTests(void)
         DWORD planWas = g_planEndAt;
         HoldFrame();
         ok &= g_testFrames > 1 && g_stepLock.held == 0 && g_settleTo != 0;
-        /* with the view, its last glide lands as the world appears (the hold's end, the machine's freeze, the world's moment
-         * after the screen goes), the push closer its last stretch: it landed by the hold's end and pushed in half a second
-         * (his 00:22 clip, 5 Oct: "rushes to get to stormwind fully zoomed in and then just sits there") */
+        /* with the view, the even bar's end is known at the hold (the hold's end, the machine's freeze, the world's moment
+         * after the screen goes), and the view's glide lands with that bar, the push closer its last stretch (0.4.1: his film
+         * of 13 Oct, the view stopped dead short of its landing as the bar waited on the game, then the push leapt in on its
+         * own and was cut off moving as the screen went); the game's own settle, for its frames, never moves the view's */
         {
             LONG fz = g_lnN[g_screenKind] > 0 ? g_lnFreeze[g_screenKind] : FREEZE_GUESS_MS;
-            DWORD land = g_settleTo, at2 = shim_ticks;
+            DWORD land = g_settleTo, at2 = shim_ticks, goes = land - VIEW_WORLD_GAP_MS;
             float hEnd = g_destH / BLUR_PUSH, lastH = 1;
             ok &= g_settleView == 1 && (LONG)(land - planWas) >= fz + VIEW_WORLD_GAP_MS && g_evenEndAt == land;   /* (with the view, no
                                                                * hurry to settle: on to the plan, his 10 Oct "it rushes"; the even bar lands with it) */
-            ViewStep(1.0f, at2, 1000, 500);
-            ok &= g_viewH > hEnd * 1.3f;                                      /* the push still to come at the hold's end */
             int down = 1;
-            for (DWORD tt = at2; (LONG)(tt - land) <= 0; tt += 7) { ViewStep(1.0f, tt, 1000, 500); down &= g_viewH <= lastH + 1e-6f; lastH = g_viewH; }
-            ViewStep(1.0f, land + 7, 1000, 500);
+            for (DWORD tt = at2; (LONG)(tt - goes) <= 0; tt += 7) { ViewStep(1.0f, tt, 1000, 500); down &= g_viewH <= lastH + 1e-6f; lastH = g_viewH; }
             ok &= down && fabsf(g_viewH - hEnd) < 1e-3f * hEnd + 1e-6f && fabsf(g_viewU - g_destU) < 1e-4f && fabsf(g_viewV - g_destV) < 1e-4f;
-        }
-        {                                                                    /* already closer than that: it never backs out */
-            DWORD at3 = g_settleTo + 100;
+            DWORD at3 = goes + 7;                                            /* the game's settle asked closer still: not the view's */
+            float vh = g_viewH;
             g_settleH = g_destH / BLUR_PUSH * 0.5f; g_settleU = g_destU; g_settleV = g_destV;
             g_settleFrom = at3; g_settleTo = at3 + 1000;
             ViewStep(1.0f, at3 + 500, 1000, 500);
-            ok &= g_viewH <= g_settleH * 1.0001f;
+            ok &= fabsf(g_viewH - vh) < 1e-3f * hEnd && fabsf(g_viewH - hEnd) < 1e-3f * hEnd;   /* (on its landing, not half of it) */
         }
         PutFloat(HOLD_BAR_VA, 0.0f); g_holdOn = 0; g_lnN[1] = 0; g_holdMs = HOLD_MS;
         /* the screen ends: the next begins on the game's thread again */
@@ -13395,8 +13392,129 @@ static void TestSatHandOff(void)
     Check(ok, "the satellite's detail: its job's state, the hand-off between the view's thread and its worker, read and written only by Interlocked calls (its reads a locked read, SatJobState), never a plain read");
 }
 
+/* One satellite load through the DLL's own steps (the game's frames, its hold at a full bar, the view's frames 7 ms
+ * apart, as his 138 a second), as TestGlideLoad does the parchment's: the game's bar full at full ms (it stalls near half,
+ * drawing nothing for stretches, as his logins of 13 Oct did), this machine's learned time and freeze, the floor; a later
+ * screen of the session (from halfway in) or the first; the screen going cut ms before its plan says (a freeze shorter
+ * than learned). The view's frames stop as the screen goes (ViewThread: its last frame then waits for the world). Out,
+ * a frame each: the log of the view's height and the arrival on a W x H window. */
+#define SG_MAXF 6000
+static float g_sgLh[SG_MAXF], g_sgX[SG_MAXF], g_sgY[SG_MAXF];
+static int g_sgN;
+static void TestSatGlideLoad(DWORD full, LONG learned, LONG freeze, LONG hold, int later, LONG cut, float W, float H)
+{
+    Fresh("sat-glide");
+    GameDir();
+    TestGlideState();
+    g_parchOn = 0; g_ovOn = 0; g_sat.ok = 0;
+    g_map.ok = 1; g_map.m[0].ok = g_map.m[1].ok = 1; g_map.endYards = 3500; g_map.pace = 7;
+    g_map.m[0].bu = g_map.m[0].bv = 1e-5f; g_map.m[0].au = g_map.m[0].av = 0.5f;
+    g_mapShown = 1; g_driftOn = 1; g_screenWatch = 1; g_holdOn = 1; g_holdMs = hold; g_blurOn = 1; g_blurMs = BLUR_MS;
+    for (int k = 0; k < 2; k++) { g_lnN[k] = learned ? 3 : 0; g_lnMs[k] = learned; g_lnFreeze[k] = freeze; }
+    g_holdDone = 0; g_settleTo = 0; g_settleView = 0; g_blurFrom = g_blurTo = 0;
+    g_evenOn = 0; g_evenU = 0; g_evenEndAt = 0; g_viewSteps = 0; g_dispAt = 0; g_gameAt = 0; g_driftAt = 0;
+    g_holdFrame = TestHoldStub;
+    InitializeCriticalSection(&g_stepLock);
+    g_viewOn = 1;
+    Poke(BAR_MAP_VA, 0);
+    Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, -5000.0f); PutFloat(MAP_DEST_Y_VA, 10000.0f);
+    DriftScreenGone();                                                /* the last screen ended elsewhere */
+    PutFloat(MAP_DEST_X_VA, -9464.0f); PutFloat(MAP_DEST_Y_VA, 62.0f); /* Goldshire, written before this one began */
+    g_zoomScreens = later ? 1 : 0;
+    unsigned one = 0x3F800000u;
+    DWORD base = 9000000, nextGame = base, endAt = 0;
+    int held = 0, gone = 0;
+    g_sgN = 0;
+    for (int f = 0; g_sgN < SG_MAXF && !gone; f++) {
+        DWORD now = base + (DWORD)f * 7;
+        shim_ticks = now;
+        while (!held && (LONG)(nextGame - now) <= 0) {
+            float k = (float)(nextGame - base) / (float)full, p = k >= 1 ? 1 : k < 0.45f ? k : k < 0.95f ? 0.54f : k;
+            int stall = k > 0.6f && k < 0.95f && ((int)(k * 40) % 3);
+            if (!stall || p >= 0.999f) GameStep(p, nextGame);
+            if (p >= 0.999f) {
+                memcpy(shim_module + (HOLD_BAR_VA - 0x400000u), &one, 4);
+                shim_ticks = nextGame;
+                HoldFrame();
+                endAt = (g_evenEndAt ? g_evenEndAt - VIEW_WORLD_GAP_MS : nextGame + 1000) - (DWORD)cut;   /* (the screen goes) */
+                held = 1;
+            }
+            nextGame += 33;
+        }
+        if (held && (LONG)(now - endAt) >= 0) gone = 1;
+        if (gone || !ViewStep(g_gameMax, now, W, H)) continue;
+        float u0 = g_bgUV[4], vt = g_bgUV[5], du = g_bgUV[2] - u0, dv = g_bgUV[3] - vt;
+        g_sgLh[g_sgN] = logf(0.5f * dv);
+        g_sgX[g_sgN] = (g_destU - u0) / du * W; g_sgY[g_sgN] = (g_destV - vt) / dv * H;
+        g_sgN++;
+    }
+    memset(shim_module + (HOLD_BAR_VA - 0x400000u), 0, 4);
+    g_holdMs = HOLD_MS; g_holdOn = 0; g_blurOn = 0; g_viewOn = 0; g_viewSteps = 0; g_mapShown = 0; g_driftOn = 0; g_screenWatch = 0;
+    g_zoomScreens = 0; g_destEndOk = 0; g_settleTo = 0; g_settleView = 0; g_map.ok = 0;
+    for (int k = 0; k < 2; k++) g_lnN[k] = g_lnMs[k] = g_lnFreeze[k] = 0;
+}
+/* Its zoom's pace (the log of the view's height, a frame) measured: peak, its fastest; restart, the most it moves again
+ * after it has once all but stopped short of its landing (under a twentieth of its pace so far, once past half of peak), of
+ * its pace before; last, its pace as the screen
+ * goes (of peak, the mean of the last three frames: a glide cut off still moving stops dead there); jump, its largest
+ * change of pace a frame (of peak); landed, its last frame the landing (0.4.0's after its push), the arrival in the middle;
+ * straight, the arrival on one line to the middle, never back. */
+static void TestSatGlideMeasure(float W, float H, float *restart, float *last, float *jump, int *landed, int *straight)
+{
+    float peak = 0, most = 0, change = 0, before = 0, hEnd = 0.5f * 3500 * 1e-5f, lhLand = logf(hEnd / BLUR_PUSH);
+    int stopped = -1;
+    for (int i = 1; i < g_sgN; i++) { float s = g_sgLh[i - 1] - g_sgLh[i]; if (s > peak) peak = s; }
+    for (int i = 1; i < g_sgN; i++) {                               /* (all but stopped short of its landing: of its pace so far) */
+        float s = g_sgLh[i - 1] - g_sgLh[i];
+        if (stopped < 0 && before > 0.5f * peak && s < 0.05f * before && g_sgLh[i] > lhLand + 0.05f) stopped = i;
+        if (stopped < 0 && s > before) before = s;
+        if (stopped >= 0 && s > most) most = s;
+    }
+    for (int i = 2; i < g_sgN; i++) {
+        float a = g_sgLh[i - 2] - g_sgLh[i - 1], b = g_sgLh[i - 1] - g_sgLh[i];
+        if (fabsf(b - a) > change) change = fabsf(b - a);
+    }
+    float tail = g_sgN > 4 ? (g_sgLh[g_sgN - 4] - g_sgLh[g_sgN - 1]) / 3 : 0;
+    *restart = before > 0 ? most / before : 99;
+    *last = peak > 0 ? tail / peak : 99;
+    *jump = peak > 0 ? change / peak : 99;
+    *landed = g_sgN > 10 && fabsf(g_sgLh[g_sgN - 1] - logf(hEnd / BLUR_PUSH)) < 0.01f && Near(g_sgX[g_sgN - 1], W / 2, 0.5) &&
+              Near(g_sgY[g_sgN - 1], H / 2, 0.5);
+    float x0 = g_sgX[0], y0 = g_sgY[0], x1 = W / 2, y1 = H / 2, L = sqrtf((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0));
+    int ok = L > 1;
+    float along = -1;
+    for (int i = 0; i < g_sgN && ok; i++) {
+        float ux = (x1 - x0) / L, uy = (y1 - y0) / L, a = (g_sgX[i] - x0) * ux + (g_sgY[i] - y0) * uy;
+        if (fabsf((g_sgX[i] - x0) * uy - (g_sgY[i] - y0) * ux) > 0.02f * L || a < along - 1e-3f * L) ok = 0;
+        along = a;
+    }
+    *straight = ok;
+}
+/* 0.4.1 (his look at 0.4.0, 13 Oct: "there's some optimizations to how it pans and zooms still"; his film measured):
+ * the living map's glide with the view is one zoom from where the screen opens to its landing, the push closer its last
+ * stretch: never a dead stop and then a second glide, never cut off moving as the screen goes, the landing 0.4.0's */
+static void TestSatGlide(void)
+{
+    float r[3], l[3], j[3];
+    int land[3], str[3];
+    TestSatGlideLoad(7700, 7700, 1700, HOLD_MS, 1, 0, 2560, 1080);   /* his logins of 13 Oct (a later screen, from halfway in) */
+    TestSatGlideMeasure(2560, 1080, &r[0], &l[0], &j[0], &land[0], &str[0]);
+    TestSatGlideLoad(7700, 7700, 1700, HOLD_MS, 0, 0, 2560, 1080);   /* a session's first, from the whole world */
+    TestSatGlideMeasure(2560, 1080, &r[1], &l[1], &j[1], &land[1], &str[1]);
+    TestSatGlideLoad(300, 600, 900, HOLD_MS, 1, 300, 2560, 1080);    /* his teleport: the floor holds it; its freeze 0.3 s short */
+    TestSatGlideMeasure(2560, 1080, &r[2], &l[2], &j[2], &land[2], &str[2]);
+    printf("  the satellite's glide (a later login, a first login, a teleport its freeze short): moving again after all but stopping "
+           "%.2f, %.2f, %.2f of its fastest; its pace as the screen goes %.2f, %.2f, %.2f; its largest change of pace a frame %.3f, %.3f, %.3f; "
+           "landed %d %d %d, straight %d %d %d\n", r[0], r[1], r[2], l[0], l[1], l[2], j[0], j[1], j[2], land[0], land[1], land[2],
+           str[0], str[1], str[2]);
+    int ok = 1;
+    for (int k = 0; k < 3; k++) ok &= r[k] < 0.1f && l[k] < 0.05f && j[k] < 0.1f && land[k] && str[k];
+    Check(ok, "the satellite's glide with the view (a later login as his of 13 Oct, a first, a teleport whose freeze is shorter than learned): one zoom from where it opens to its landing, the push closer its last stretch, never all but stopping and then moving again, never cut off moving as the screen goes, no sudden change of pace, the arrival on one line to the middle, the landing 0.4.0's after its push");
+}
+
 static void TestSatellite(void)
 {
+    TestSatGlide();
     TestSatGeometry();
     TestSatIndex();
     TestSatMissing();
