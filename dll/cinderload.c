@@ -13796,6 +13796,7 @@ static struct {
 static struct { SatItem *t; int n, at; } g_squ = { g_satItems[1], 0, 0 };
 static volatile LONG g_sjWorker;          /* a worker runs the jobs (once started), */
 static HANDLE g_sjEvent;                  /* woken by this as each is posted */
+static int g_sjTried;                     /* (its thread asked for: once a session, never again, even when it could not be) */
 /* The job's state read as the hand-off it is (the worker's of a job posted, the view's of one done, or of none before it
  * fills the next): InterlockedCompareExchange changing nothing, a locked read and a full barrier, so what the other
  * thread wrote before it set the state is seen after it. A plain volatile read (the parchment's way, left as it is there)
@@ -13895,13 +13896,12 @@ static DWORD WINAPI SatWorker(LPVOID arg)
     SatWorkerTurn();                                             /* (a job gone stale as the view went: freed) */
     return 0;
 }
-/* At the view's start, once the archive's index is read: the detail's worker, a thread of its own at a lower priority
- * than the view's (the parchment's is its own: ParchWorker). Without it, a job runs at once on the view's thread. It
- * also makes the hidden ground's masks (0.4.1, SatHide*), so it starts with the client's world map tables read even
- * without the archive (no detail then, the masks alone); without it no mask is made at all, never on the view's thread. */
-static void SatWorkerStart(void)
+/* The detail's worker, a thread of its own at a lower priority than the view's (the parchment's is its own:
+ * ParchWorker), asked for once a session. Without it, a detail job runs at once on the view's thread. It also makes the
+ * hidden ground's masks (0.4.1, SatHide*); without it no mask is made at all, never on the view's thread. */
+static void SatWorkerMake(void)
 {
-    if ((!g_sat.ok && !g_parchTablesOk) || g_sjWorker) return;
+    g_sjTried = 1;
     g_sjEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
     InterlockedExchange(&g_sjWorker, 1);                         /* (before it runs: its loop's) */
     HANDLE t = g_sjEvent ? CreateThread(NULL, 0, SatWorker, NULL, 0, NULL) : NULL;
@@ -13916,6 +13916,14 @@ static void SatWorkerStart(void)
     CloseHandle(t);
     Log(g_sat.ok ? "  the satellite's detail: its tiles read by a worker thread of their own, given to OpenGL a few MB a frame"
                  : "  the satellite's hidden ground: its masks made by a worker thread of their own (no detail without CinderSat.MPQ)");
+}
+/* At the view's start, once the archive's index is read: the worker, as 0.4.0 started it (with the archive only, whichever
+ * map is chosen). Without the archive it is started by the hidden ground's first mask wanted (SatHideWork), so the
+ * parchment, the full map and a session that never hides any ground start none, as with 0.4.0. */
+static void SatWorkerStart(void)
+{
+    if (!g_sat.ok || g_sjWorker || g_sjTried) return;
+    SatWorkerMake();
 }
 /* The job's tiles from the view's thread to the worker (their inputs in it already), or run at once without one. */
 static void SatJobPost(void)
@@ -14606,8 +14614,11 @@ static void SatHideWork(int known, int c, float x, float y, LONG screen, DWORD n
     if (seq != g_shSeq) { g_shSeq = seq; g_shKnown = g_scrKnown; for (int i = 0; i < EXPLORED_BYTES; i++) g_shBits[i] = g_scrBits[i]; }
     if (g_sh.on && g_sh.screen != screen) SatHideDrop();         /* (another screen's: never drawn on this one) */
     int want = known && (c == 0 || c == 1) && g_map.m[c].ok && g_shKnown && !g_parchFullOn && g_parchTablesOk && g_ppN > 0 &&
-               !(gl.TexImage2D && !gl.DeleteTextures) && g_sjWorker;   /* (made by the worker alone: never on the view's thread,
-                                                                    * where its reads of the client's archives would stop the view) */
+               !(gl.TexImage2D && !gl.DeleteTextures);
+    if (want && !g_sjWorker && !g_sjTried) SatWorkerMake();      /* (without CinderSat.MPQ: the worker for the masks alone, started
+                                                                    * the first time one is wanted, never for nothing) */
+    want = want && g_sjWorker;                                  /* (made by the worker alone: never on the view's thread, where its
+                                                                    * reads of the client's archives would stop the view) */
     if (!want) { if (g_sh.on) SatHideDrop(); return; }
     if (!g_sh.on || c != g_sh.c || x != g_sh.x || y != g_sh.y) {   /* (the arrival known, or moved) */
         int zs[SAT_HIDE_ZONES], looked = 0, nz = SatHideZones(c, x, y, zs, &looked), same = g_sh.on && c == g_sh.c && nz == g_sh.nz;

@@ -12461,7 +12461,7 @@ static void SatTestReset(void)
 {
     SatRelease();
     for (int k = 0; k < 4 && g_sj.state == 3; k++) SatWorkerTurn();   /* (a job left stale freed, as its worker would) */
-    InterlockedExchange(&g_sjWorker, 0);
+    InterlockedExchange(&g_sjWorker, 0); g_sjTried = 0;
     g_sat.ok = 0;
     g_parchOn = 0; g_destOk = 0; g_destMap = -1;
     TestSatGl(0, 0);
@@ -13788,12 +13788,13 @@ static void TestSatHideWorkerOnly(void)
     long heap = shim_heap_live;
     int ok = !g_sat.ok;
     SatWorkerStart();
-    ok &= g_sjWorker == 1 && LogSays("its masks made by a worker thread of their own");
+    ok &= !g_sjWorker;                                                   /* (none at the view's start without it, as 0.4.0) */
     g_parchFullOn = 0; g_viewShown = 0.25f;
     memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[125 >> 3] |= 1 << (125 & 7);   /* (Northshire found, Goldshire not) */
     g_scrKnown = 2; InterlockedIncrement(&g_scrSeq);
     SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
     for (int f = 0; f < 3; f++, t += 7) SatFrame(t, 5120, 2160);
+    ok &= g_sjWorker == 1 && LogSays("its masks made by a worker thread of their own");   /* (the first mask wanted starts it) */
     int posted = g_shj.state == 1 && g_sh.stage == 1;                    /* (posted, left to the worker: not made in a frame) */
     SatWorkerTurn();
     for (int f = 0; f < 3; f++, t += 7) SatFrame(t, 5120, 2160);
@@ -13814,6 +13815,46 @@ static void TestSatHideWorkerOnly(void)
     ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
     g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
     SatTestReset(); g_map.ok = 0;
+}
+/* The second attack on 0.4.1 (14 Oct): without CinderSat.MPQ, 0.4.0 started no worker at all; the hidden ground's worker
+ * is started only by its first mask wanted, never for the parchment (the default map), the full map (the default areas),
+ * a character's areas not known, or the client's tables not read */
+static void TestSatHideWorkerNone(void)
+{
+    DWORD t = 12000;
+    Fresh("sat-hide-noworker"); GameDir();
+    SatTestReset(); SatTestMap(SH_21x9);
+    SatRead();
+    SatHideTables2();
+    TestSatGl(1, 1);
+    long heap = shim_heap_live;
+    int threads = shim_threads, ok = !g_sat.ok;
+    SatWorkerStart();                                                   /* (the view's start: as 0.4.0, none without the archive) */
+    memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[125 >> 3] |= 1 << (125 & 7);
+    g_scrKnown = 2; InterlockedIncrement(&g_scrSeq);
+    for (int k = 0; k < 4; k++) {                                       /* the parchment; the full map; areas not known; no tables */
+        g_parchOn = k == 0; g_parchFullOn = k == 1; g_viewShown = 0.25f;
+        if (k == 2) { g_scrKnown = 0; InterlockedIncrement(&g_scrSeq); }
+        if (k == 3) { g_scrKnown = 2; InterlockedIncrement(&g_scrSeq); g_parchTablesOk = 0; }
+        SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+        for (int f = 0; f < 4; f++, t += 7) SatFrame(t, 5120, 2160);
+        SatScreenEnd(); SatRelease();
+    }
+    ok &= !g_sjWorker && shim_threads == threads && !LogSays("by a worker thread of their own") && g_shj.state == 0;
+    g_parchOn = 0; g_parchFullOn = 0; g_parchTablesOk = 1;              /* then the satellite, the areas as discovered: started, once */
+    for (int k = 0; k < 2; k++) {
+        SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+        for (int f = 0; f < 4; f++, t += 7) { SatFrame(t, 5120, 2160); SatWorkerTurn(); }
+        SatScreenEnd(); SatRelease();
+    }
+    SatWorkerTurn();
+    ok &= g_sjWorker == 1 && shim_threads == threads + 1 && shim_thread_fn == SatWorker && LogSays("its masks made by a worker thread of their own");
+    SatTestReset();
+    ok &= TsatLive() == 0 && shim_heap_live == heap && g_shj.state == 0;
+    Check(ok, "the satellite's hidden ground (the second attack on 0.4.1): without CinderSat.MPQ no worker is started at the view's start (as 0.4.0), nor on the parchment, the full map, a character's areas not known or the tables not read; the first mask wanted starts it, once a session (said); the heap even");
+    ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
+    g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
+    g_map.ok = 0;
 }
 
 /* The attack on 0.4.1 (14 Oct): the arrival moved a few yards within the screen (a login's place, the list's and then the
@@ -14225,6 +14266,7 @@ static void TestSatellite(void)
     TestSatArriveWait();
     TestSatHide();
     TestSatHideWorkerOnly();
+    TestSatHideWorkerNone();
     TestSatHideOrder();
     TestSatHideLand();
     TestSatHideSteps();
