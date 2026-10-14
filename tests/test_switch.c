@@ -13159,7 +13159,7 @@ static void TestSatBatchRoom(void)
     ViewRect(VT_MAP, 0, 0, 1, 1, 0, 0, 1, 1, 0);
     int ok = 1;
     for (int i = 0; i < SAT_MAX + 5; i++) {
-        ViewVert *q = ViewQuadNew(VT_COUNT + i);
+        ViewVert *q = ViewQuadNew(VT_COUNT + (i < SAT_MAX ? i : SAT_MAX));   /* (past them: the name that names none) */
         ok &= (q != NULL) == (i < SAT_MAX);
     }
     ok &= g_vbN == 1 + SAT_MAX && !g_vbFull && g_vbSat == SAT_MAX;
@@ -13174,8 +13174,25 @@ static void TestSatBatchRoom(void)
     ok &= ViewTexName(-1) == 0 && ViewTexName(VT_SEA) == 7 && ViewTexName(VT_COUNT) == 9 && ViewTexName(VT_COUNT + SAT_MAX - 1) == 11 &&
           ViewTexName(VT_COUNT + SAT_MAX) == 0;
     g_viewTex[VT_SEA] = 0; g_satTex[0] = 0; g_satTex[SAT_MAX - 1] = 0;
+    /* 0.4.1: the hidden ground's masks in room of their own, after a full detail and a full overlay, cutting nothing */
+    ViewListStart();
+    ViewRect(VT_MAP, 0, 0, 1, 1, 0, 0, 1, 1, 0);
+    for (int i = 0; i < SAT_MAX; i++) ViewQuadNew(VT_COUNT + i);
+    int okHide = 1;
+    for (int i = 0; i < SAT_HIDE_ZONES + 3; i++) {
+        ViewVert *q = ViewQuadNew(SAT_HIDE_TEX0 + (i < SAT_HIDE_ZONES ? i : SAT_HIDE_ZONES - 1));
+        okHide &= (q != NULL) == (i < SAT_HIDE_ZONES);
+    }
+    okHide &= g_vbN == 1 + SAT_MAX + SAT_HIDE_ZONES && !g_vbFull && g_vbHide == SAT_HIDE_ZONES && g_vqHide == SAT_HIDE_ZONES;
+    for (int i = 0; i < VIEW_BATCHES + 8; i++) ViewRect(i & 1 ? VT_SEA : VT_MARKS, 0, 0, 1, 1, 0, 0, 1, 1, 0);
+    okHide &= g_vbN - g_vbSat - g_vbHide == VIEW_BATCHES && g_vbFull;   /* (the overlay's own room: as before) */
+    g_shTex[0] = 13; g_shTex[SAT_HIDE_ZONES - 1] = 15;
+    okHide &= ViewTexName(SAT_HIDE_TEX0) == 13 && ViewTexName(SAT_HIDE_TEX0 + SAT_HIDE_ZONES - 1) == 15 && ViewTexName(SAT_HIDE_TEX0 - 1) == 0 &&
+              ViewTexName(SAT_HIDE_TEX0 + SAT_HIDE_ZONES) == 0;
+    g_shTex[0] = 0; g_shTex[SAT_HIDE_ZONES - 1] = 0;
     ViewListStart();
     Check(ok, "the view's list: the detail's tiles in room of their own (SAT_MAX of them, the next left out without cutting the rest), the map's, the overlay's and the bar's VIEW_BATCHES and quads as before; a batch's picture by slot, or by tile past the slots");
+    Check(okHide, "the view's list (0.4.1): the hidden ground's masks in room of their own after the detail's (SAT_HIDE_ZONES of them, the next left out, nothing cut), each by its own name past the tiles' and the one that names none");
 }
 
 static void TestSatHooks(void)
@@ -13512,9 +13529,156 @@ static void TestSatGlide(void)
     Check(ok, "the satellite's glide with the view (a later login as his of 13 Oct, a first, a teleport whose freeze is shorter than learned): one zoom from where it opens to its landing, the push closer its last stretch, never all but stopping and then moving again, never cut off moving as the screen goes, no sudden change of pace, the arrival on one line to the middle, the landing 0.4.0's after its push");
 }
 
+/* 0.4.1 (his note of 13 Oct after his first look at 0.4.0: the satellite "would show the entire zone even if you hadn't
+ * explored it yet (saw this on Hadati and Val)"): with the map's areas as discovered, the ground this screen's character
+ * has not found is hidden on the satellite by the parchment's own data and rule (the explored bits, the world map's
+ * pieces, PieceFound), over the overview and the detail, and no detail tile is drawn before it is */
+static void SatHideTables(void)
+{
+    static unsigned av[2 * 25];                                         /* AreaTable: Northshire (bit 125), Goldshire (bit 548) */
+    memset(av, 0, sizeof av);
+    av[0] = 9; av[3] = 125; av[10] = 1; av[25] = 87; av[28] = 548; av[35] = 1;
+    static unsigned char atb[512];
+    ParchAreas(atb, TestWdbc(atb, 2, 25, av, "\0", 1));
+    static const char wstr[] = "\0Azeroth\0Elwynn\0";                   /* the continent, and Elwynn's own box */
+    unsigned wv[16] = { 1, 0, 0, 1, TestF(16000), TestF(-16000), TestF(16000), TestF(-16000),
+                        30, 0, 12, 9, TestF(1535.4f), TestF(-1935.4f), TestF(-7939.6f), TestF(-10254.2f) };
+    static unsigned char wma[256], wmo[512];
+    unsigned wn = TestWdbc(wma, 2, 8, wv, wstr, sizeof wstr);
+    static const char ostr[] = "\0NORTH\0GOLD\0";                      /* Northshire's piece (two tiles wide), Goldshire's round the inn */
+    unsigned ov[2 * 17] = { 0 };
+    unsigned o0[13] = { 1, 30, 9, 0, 0, 0, 0, 0, 1, 300, 200, 600, 40 }, o1[13] = { 2, 30, 87, 0, 0, 0, 0, 0, 7, 200, 150, 350, 380 };
+    memcpy(ov, o0, sizeof o0); memcpy(ov + 17, o1, sizeof o1);
+    ParchTables(wma, wn, wmo, TestWdbc(wmo, 2, 17, ov, ostr, sizeof ostr));
+    g_parchTablesOk = 1;
+    static const char *tn[16];
+    static char tb[16][64];
+    const char *td[16];
+    unsigned tl[16];
+    for (int i = 0; i < 16; i++) {                                      /* its twelve tiles, then its pieces' (opaque) */
+        if (i < 12) snprintf(tb[i], sizeof tb[i], "Interface\\WorldMap\\Elwynn\\Elwynn%d.blp", i + 1);
+        else snprintf(tb[i], sizeof tb[i], "Interface\\WorldMap\\Elwynn\\%s%d.blp", i < 14 ? "NORTH" : "GOLD", (i - 12) % 2 + 1);
+        tn[i] = tb[i];
+        td[i] = (const char *)TestPalBlp(256, 256, 0x406020, i < 12 ? 0 : 1, &tl[i]);
+    }
+    MakeMpq("Data/interface.MPQ", 16, tn, td, tl);
+    for (int i = 0; i < 16; i++) free((void *)td[i]);
+}
+/* this screen's character: Northshire found (Goldshire too when both), known from its file */
+static void SatHideBits(int both, LONG known)
+{
+    memset(g_scrBits, 0, EXPLORED_BYTES);
+    g_scrBits[125 >> 3] |= 1 << (125 & 7);
+    if (both) g_scrBits[548 >> 3] |= 1 << (548 & 7);
+    g_scrKnown = known;
+    InterlockedIncrement(&g_scrSeq);
+}
+/* the hidden ground's batch and the detail's quads in the list now */
+static int SatHideBatch(void) { for (int b = 0; b < g_vbN; b++) if (g_vb[b].tex >= SAT_HIDE_TEX0) return b; return -1; }
+static void TestSatHide(void)
+{
+    SatTestWorld("sat-hide", 64, 25, 40, 45, 54, 1);
+    SatHideTables();
+    long heap = shim_heap_live;
+    /* the mask, by the parchment's rule: Goldshire's piece not found, hidden; Northshire's found, not; neither, not */
+    unsigned char *px = malloc(SAT_HIDE_BYTES), *sc = malloc(3 * SAT_HIDE_PX * SAT_HIDE_PX);
+    SatHideBits(0, 2);
+    int hidden = SatHideMake(1, g_scrBits, px, sc, sc + SAT_HIDE_PX * SAT_HIDE_PX, sc + 2 * SAT_HIDE_PX * SAT_HIDE_PX);
+#define MASK_AT(cx, cy) px[4 * ((int)((cy) * SAT_HIDE_PX / 668.0f) * SAT_HIDE_PX + (int)((cx) * SAT_HIDE_PX / 1002.0f)) + 3]
+    int mk = hidden > 1000 && MASK_AT(425, 440) == 255 && MASK_AT(750, 140) == 0 && MASK_AT(200, 600) == 0 &&
+             px[0] == (unsigned char)(SAT_HIDE_RGB >> 16) && MASK_AT(350, 440) == 255 && MASK_AT(342, 440) >= 128 &&
+             MASK_AT(330, 440) == 0;                                     /* (grown about 8 of the page's pixels past its edge) */
+    int sw = g_seaW, sh = g_seaH;                                       /* the open sea, as the overview has it: never hidden */
+    unsigned char seaKeep[4];
+    memcpy(seaKeep, g_seaMask, 4); memset(g_seaMask, 255, 4); g_seaW = g_seaH = 2;
+    mk &= SatHideMake(1, g_scrBits, px, sc, sc + SAT_HIDE_PX * SAT_HIDE_PX, sc + 2 * SAT_HIDE_PX * SAT_HIDE_PX) == 0;
+    memcpy(g_seaMask, seaKeep, 4); g_seaW = sw; g_seaH = sh;
+    SatHideBits(1, 2);
+    mk &= SatHideMake(1, g_scrBits, px, sc, sc + SAT_HIDE_PX * SAT_HIDE_PX, sc + 2 * SAT_HIDE_PX * SAT_HIDE_PX) == 0;
+    free(px); free(sc);
+    Check(mk, "the satellite's hidden ground (0.4.1): a zone's mask from the world map's own pieces, by the parchment's rule (PieceFound on this screen's character's bits): where a piece not found lies, hidden, grown a little into the gaps; where a piece found lies, or none, not; never the open sea; every piece found, nothing hidden");
+
+    /* a login at Goldshire, the areas as discovered, Goldshire not found: its zone's mask made and up, over Elwynn's box,
+     * coming up at a fifth of the bar; the detail drawn only once it is up */
+    g_parchFullOn = 0; g_viewShown = 0.05f;
+    SatHideBits(0, 2);
+    SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    DWORD t = 5000;
+    for (int f = 0; f < 6; f++, t += 7) SatFrame(t, 5120, 2160);
+    int ok = g_sh.on && g_sh.stage == 3 && g_sh.up == 1 && g_sh.n == 1 && !strcmp(g_pz[g_sh.z[0]].name, "Elwynn") && g_shTex[0] &&
+             g_tsat[g_shTex[0]].rgba && g_tsat[g_shTex[0]].w0 == SAT_HIDE_PX && g_tsat[g_shTex[0]].levels == 9 &&
+             g_tsat[g_shTex[0]].maxLevel == 8 && g_tsat[g_shTex[0]].minf == GL_LINEAR_MIPMAP_LINEAR_ && SatUpCount() == g_ssN && g_ssN > 0;
+    ok &= SatBatches(NULL) == 0 && SatHideBatch() < 0;                  /* (the bar under a fifth: neither yet, the overview alone) */
+    g_viewShown = 0.25f;
+    SatFrame(t, 5120, 2160); t += 7;                                     /* (the bar at a fifth: it begins to come up) */
+    int hb = SatHideBatch();
+    ok &= hb < 0 || TestVertNear(hb, 0, 0)->c[3] < 40;
+    t += PARCH_FADE_MS + 20;
+    SatFrame(t, 5120, 2160);
+    hb = SatHideBatch();
+    ok &= hb >= 0 && g_vb[hb].count == 4 && ViewTexName(g_vb[hb].tex) == g_shTex[0] && g_vv[g_vb[hb].first].c[3] == 255;
+    if (hb >= 0) {                                                       /* (over Elwynn's box exactly, through the view's corners) */
+        const ViewVert *q = &g_vv[g_vb[hb].first];
+        float u0 = g_bgUV[4], vt = g_bgUV[5], du = g_bgUV[2] - u0, dv = g_bgUV[3] - vt;
+        float xl = (g_map.m[0].au + g_map.m[0].bu * 1535.4f - u0) / du * 5120, yt = (g_map.m[0].av + g_map.m[0].bv * -7939.6f - vt) / dv * 2160;
+        ok &= Near(q[0].x, xl, 0.5) && Near(q[0].y, yt, 0.5) && q[0].u == 0 && q[0].v == 0 && q[2].u == 1 && q[2].v == 1;
+        int first = -1;
+        ok &= SatBatches(&first) > 1 && first < hb;                      /* (the detail now, under it) */
+    }
+    ok &= g_vb[0].tex == VT_MAP;
+    Check(ok, "the satellite's hidden ground (0.4.1): with the areas as discovered and the character's bits known, its zones' masks made by the worker's turn and given to OpenGL (RGBA, every level, smooth), drawn over the zone's box on the world map straight over the detail; up with the parchment's zones at a fifth of the bar, the detail not drawn before");
+    /* the arrival taken again a little way off within the screen (a login: the game's own place after the list's), the
+     * list standing: the masks stand, drawn that very frame with their own textures, and every frame after */
+    hb = SatHideBatch();
+    unsigned name0 = g_shTex[0];
+    SatArrive(0, -9464 + 40, 62 - 25);
+    SatWork(t + 7);                                                       /* (the detail's set re-slotted, its list's batches renamed) */
+    ok = hb >= 0 && g_vb[hb].tex == SAT_HIDE_TEX0 && ViewTexName(g_vb[hb].tex) == name0 && name0 && !g_tsat[name0].deleted &&
+         g_sh.stage == 3 && g_sh.up == 1;
+    SatFrame(t + 14, 5120, 2160);
+    hb = SatHideBatch();
+    ok &= hb >= 0 && ViewTexName(g_vb[hb].tex) == name0 && g_vv[g_vb[hb].first].c[3] == 255 && SatBatches(NULL) > 1;
+    SatScreenEnd();
+    ok &= LogSays("the satellite's areas, as discovered: ground not found hidden in 1 of the 1 zones round the arrival (Elwynn)");
+    SatRelease();
+    ok &= TsatLive() == 0 && !g_sh.on;
+    Check(ok, "the satellite's hidden ground (0.4.1): the arrival taken again within the screen and its zones (a login's place, the list's and then the game's), the masks stand, drawn that very frame with their own textures (the detail's renaming never touches them); its line in the log; its textures gone with the detail's");
+
+    /* the full map chosen, the bits not known, or every piece found: nothing hidden, the detail as 0.4.0 drew it */
+    int nh = 1;
+    for (int k = 0; k < 3; k++) {
+        g_parchFullOn = k == 0; g_viewShown = 0.5f;
+        SatHideBits(k == 2, k == 1 ? 0 : 1);
+        SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+        for (int f = 0; f < 8; f++, t += 7) SatFrame(t, 5120, 2160);
+        t += PARCH_FADE_MS + 20;
+        SatFrame(t, 5120, 2160);
+        nh &= SatHideBatch() < 0 && SatBatches(NULL) > 1 && g_tsatErr == 0;
+        if (k == 2) { SatScreenEnd(); nh &= LogSays("every one of the 1 zones round the arrival found whole, nothing hidden"); }
+        SatRelease();
+    }
+    g_parchFullOn = 0;
+    /* the explored bits read for the satellite with the areas as discovered (the parchment's read, its rule unchanged
+     * for the parchment); the full map with the satellite: not read, as 0.4.0 */
+    int asked = g_parchAsked, full = g_mapFull;
+    g_parchAsked = 0; g_mapFull = 0;
+    nh &= ExploreAsked();
+    g_mapFull = 1;
+    nh &= !ExploreAsked();
+    g_parchAsked = 1;
+    nh &= ExploreAsked();
+    g_parchAsked = asked; g_mapFull = full;
+    nh &= shim_heap_live == heap;
+    Check(nh, "the satellite's hidden ground (0.4.1): the full map chosen, this character's areas not known, or every piece round the arrival found: nothing hidden, the detail drawn as 0.4.0 drew it; the explored bits read for the satellite only with the areas as discovered; the heap even");
+    ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
+    g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
+    SatTestReset(); g_map.ok = 0;
+}
+
 static void TestSatellite(void)
 {
     TestSatGlide();
+    TestSatHide();
     TestSatGeometry();
     TestSatIndex();
     TestSatMissing();

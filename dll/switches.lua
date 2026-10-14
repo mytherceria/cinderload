@@ -1,6 +1,6 @@
 -- CinderLoad's choices in game: /cinderload opens a window of its own (his design, 11 Oct 2026: "you type that and a
 -- moveable vanilla-plus looking menu pops up on screen"), the mockup he approved (PANEL-MOCKUP, 11 Oct): the loading
--- screen's map (Parchment | Satellite) and the parchment's map areas (Discovered | Full map) and how its zones nearby
+-- screen's map (Parchment | Satellite) and the map areas, both maps' (Discovered | Full map) and how its zones nearby
 -- fade (four ways, his pick of 11 Oct: each zone whole, each zone's nearest third, a circle of 3,600 or 1,800 yards), the
 -- loading bar (Retro | Neo), its thickness and width (sliders) or the whole width of the screen (Retro's alone: Neo is
 -- always the whole width), its texture / effect (Heat | Smooth | Blade light, each bar its own) in the class's colour or
@@ -591,7 +591,7 @@ function CL.Build()
     CL.Radio(L + 14, 184, "map", "parchment", "Parchment")
     CL.Radio(L + 176, 184, "map", "satellite", "Satellite")
     CL.Line(L + 10, 214, CW - 20)
-    CL.Text(CL.host, L + 14, 226, "Map areas, on the parchment", 13, 1)
+    CL.Text(CL.host, L + 14, 226, "Map areas", 13, 1)
     CL.Radio(L + 14, 250, "areas", "discovered", "Discovered")
     CL.Radio(L + 176, 250, "areas", "full", "Full map")
     CL.Line(L + 10, 278, CW - 20)

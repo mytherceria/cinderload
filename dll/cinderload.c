@@ -5836,7 +5836,16 @@ static unsigned g_viewTex[VT_COUNT];
  * tile i's, g_satTex[i] OpenGL's name for it (0 while it has none). */
 #define SAT_MAX 320               /* tiles at the most (the 32x9 landing and the ring round it: 270) */
 static unsigned g_satTex[SAT_MAX];
-static unsigned ViewTexName(int t) { return t < 0 ? 0 : t < VT_COUNT ? g_viewTex[t] : t - VT_COUNT < SAT_MAX ? g_satTex[t - VT_COUNT] : 0; }
+/* (0.4.1) The ground this character has not found, hidden on the satellite (SatHide*, below): one mask a zone, past the
+ * tiles and the one name past them that names none (a batch's tex SAT_HIDE_TEX0 + k is zone k's, g_shTex[k] its name). */
+#define SAT_HIDE_ZONES 16             /* zones round the arrival at the most */
+#define SAT_HIDE_TEX0  (VT_COUNT + SAT_MAX + 1)
+static unsigned g_shTex[SAT_HIDE_ZONES];
+static unsigned ViewTexName(int t)
+{
+    return t < 0 ? 0 : t < VT_COUNT ? g_viewTex[t] : t - VT_COUNT < SAT_MAX ? g_satTex[t - VT_COUNT]
+         : t >= SAT_HIDE_TEX0 && t - SAT_HIDE_TEX0 < SAT_HIDE_ZONES ? g_shTex[t - SAT_HIDE_TEX0] : 0;
+}
 typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define SABER_COL_PX   6          /* the blade's columns: one every this many pixels across the window */
 #define SABER_COLS_MAX 1024       /* and at the most this many */
@@ -5861,12 +5870,14 @@ typedef struct { float x, y, u, v; unsigned char c[4]; } ViewVert;
 #define TITLE_QUADS_ROOM (6 * 3 * TITLE_CHARS)  /* a name and its three-part line (the outgoing ones are gone before
                                                   * the new come in), three layers a letter, and room to spare */
 #define VIEW_BATCHES   48         /* the map's, the overlay's and the bar's batches, */
-static ViewVert g_vv[(VIEW_QUADS_MAX + SAT_MAX) * 4];
-static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES + SAT_MAX];   /* tex: a VT_ slot, or -1 for plain colour
-                                                                * (VT_COUNT and past: the satellite's detail tiles) */
+static ViewVert g_vv[(VIEW_QUADS_MAX + SAT_MAX + SAT_HIDE_ZONES) * 4];
+static struct { int tex, add, first, count; } g_vb[VIEW_BATCHES + SAT_MAX + SAT_HIDE_ZONES];   /* tex: a VT_ slot, or -1 for
+                                                                * plain colour (VT_COUNT and past: the satellite's detail tiles,
+                                                                * then its hidden ground's masks) */
 static int g_vbN, g_vvN, g_vbFull;
 static int g_vbSat, g_vqSat;      /* and the detail's, a batch a tile, in room of their own (SAT_MAX of each) */
-static void ViewListStart(void) { g_vbN = g_vvN = g_vbFull = 0; g_vbSat = g_vqSat = 0; }
+static int g_vbHide, g_vqHide;    /* and the hidden ground's, a batch a zone (SAT_HIDE_ZONES of each) */
+static void ViewListStart(void) { g_vbN = g_vvN = g_vbFull = 0; g_vbSat = g_vqSat = 0; g_vbHide = g_vqHide = 0; }
 
 /* Room for one more quad of picture tex, added (add 1), premultiplied (2) or drawn over: its four corners, in the last batch when that is
  * the same picture's the same way; NULL once the list is full (that quad and every one after it left out, so nothing is
@@ -5875,19 +5886,23 @@ static void ViewListStart(void) { g_vbN = g_vvN = g_vbFull = 0; g_vbSat = g_vqSa
  * VIEW_BATCHES as before. */
 static ViewVert *ViewQuadMode(int tex, int add)
 {
-    int sat = tex >= VT_COUNT;
-    if (g_vbFull || (sat && g_vqSat >= SAT_MAX)) return (ViewVert *)NULL;   /* (a tile left out: it is under all the rest) */
-    if (!sat && g_vvN - 4 * g_vqSat + 4 > VIEW_QUADS_MAX * 4) return g_vbFull = 1, (ViewVert *)NULL;
+    int hide = tex >= SAT_HIDE_TEX0, sat = tex >= VT_COUNT && !hide;
+    if (g_vbFull || (sat && g_vqSat >= SAT_MAX) || (hide && g_vqHide >= SAT_HIDE_ZONES)) return (ViewVert *)NULL;   /* (a tile
+                                                                * left out: it is under all the rest) */
+    if (!sat && !hide && g_vvN - 4 * (g_vqSat + g_vqHide) + 4 > VIEW_QUADS_MAX * 4) return g_vbFull = 1, (ViewVert *)NULL;
     if (!g_vbN || g_vb[g_vbN - 1].tex != tex || g_vb[g_vbN - 1].add != add) {
         if (sat && g_vbSat >= SAT_MAX) return (ViewVert *)NULL;
-        if (!sat && g_vbN - g_vbSat >= VIEW_BATCHES) return g_vbFull = 1, (ViewVert *)NULL;
+        if (hide && g_vbHide >= SAT_HIDE_ZONES) return (ViewVert *)NULL;
+        if (!sat && !hide && g_vbN - g_vbSat - g_vbHide >= VIEW_BATCHES) return g_vbFull = 1, (ViewVert *)NULL;
         g_vb[g_vbN].tex = tex; g_vb[g_vbN].add = add; g_vb[g_vbN].first = g_vvN; g_vb[g_vbN].count = 0;
         g_vbN++;
         g_vbSat += sat;
+        g_vbHide += hide;
     }
     ViewVert *v = &g_vv[g_vvN];
     g_vvN += 4;
     g_vqSat += sat;
+    g_vqHide += hide;
     g_vb[g_vbN - 1].count += 4;
     return v;
 }
@@ -8579,12 +8594,16 @@ static int ExploreLoad(unsigned lo, unsigned hi, unsigned char *bits)
     return ok && got == EXPLORED_BYTES;
 }
 static volatile LONG g_exPending;                /* this screen's were not read live: read once as the world shows */
+/* Read for the parchment, as 0.3.0; and for the satellite with the map's areas as discovered (0.4.1, his note of 13 Oct:
+ * the satellite "would show the entire zone even if you hadn't explored it yet", on Hadati and Val): the same bits, read
+ * the same way, its ground hidden by the same rule (SatHide). */
+static int ExploreAsked(void) { return *(volatile int *)&g_parchAsked || !*(volatile int *)&g_mapFull; }
 /* The game's thread, as the world shows after a screen whose start had no player to read (a login): read once, and kept
  * for the next login (his note, 10 Oct: the zones all still showed; a character that only ever logged in would never
  * have been read). */
 static void ExploreAfterLoad(void)
 {
-    if (!g_parchAsked || !g_parchTablesOk) return;
+    if (!ExploreAsked() || !g_parchTablesOk) return;
     unsigned char bits[EXPLORED_BYTES];
     unsigned lo = 0, hi = 0;
     if (ExploreRead(bits, &lo, &hi)) ExploreSave(bits, lo, hi);
@@ -8592,7 +8611,7 @@ static void ExploreAfterLoad(void)
 /* The game's thread, as a screen begins: this screen's character's explored areas, once (above), for the parchment. */
 static void ExploreAtLoad(void)
 {
-    if (!g_parchAsked || !g_parchTablesOk) return;
+    if (!ExploreAsked() || !g_parchTablesOk) return;
     unsigned char bits[EXPLORED_BYTES];
     unsigned lo = 0, hi = 0;
     int known = 0;
@@ -13766,11 +13785,13 @@ static void SatJobRun(void)
     g_sj.ran = GetTickCount() - t0;
 }
 /* The worker's loop, a pass of it (the tests run it by hand): a stale job freed, a posted one run and said done. */
+static int SatHideTurn(void);
 static int SatWorkerTurn(void)
 {
+    int hid = SatHideTurn();                                     /* (the hidden ground's masks first: 0.4.1) */
     LONG s = SatJobState();
     if (s == 3) { SatItemsFree(g_sj.t, g_sj.n); g_sj.n = 0; InterlockedExchange(&g_sj.state, 0); return 1; }
-    if (s != 1) return 0;
+    if (s != 1) return hid;
     SatJobRun();
     if (InterlockedCompareExchange(&g_sj.state, 2, 1) == 3) { SatItemsFree(g_sj.t, g_sj.n); g_sj.n = 0; InterlockedExchange(&g_sj.state, 0); }
     return 1;
@@ -13958,7 +13979,7 @@ static int SatWant(int c, float x, float y, LONG screen, DWORD now)
      * after while ViewStepLocked builds none: its detail quads name the last set's slots. Each now names its own tile's
      * slot, or none (a tile not kept: left out until the next list), so no quad is drawn with another tile's texture. */
     for (int b = 0; b < g_vbN; b++)
-        if (g_vb[b].tex >= VT_COUNT) {
+        if (g_vb[b].tex >= VT_COUNT && g_vb[b].tex < VT_COUNT + SAT_MAX) {   /* (the tiles' batches: never the hidden ground's) */
             int j = g_vb[b].tex - VT_COUNT;
             g_vb[b].tex = j < oldN && remap[j] >= 0 ? VT_COUNT + remap[j] : VT_COUNT + SAT_MAX;   /* (past the slots: no name) */
         }
@@ -14014,6 +14035,351 @@ static unsigned SatUpOne(DWORD now)
     SatItemsFree(it, 1);
     return b;
 }
+/* ---- the ground this character has not found, hidden (0.4.1: his note after his first look at 0.4.0, 13 Oct 2026, "it
+ * would show the entire zone even if you hadn't explored it yet (saw this on Hadati and Val)") ----
+ * With the map's areas as discovered and this screen's character's explored areas known, the satellite hides what the
+ * parchment leaves blank, by the parchment's own data and rule: the bits ExploreAtLoad reads as the screen begins (live, or
+ * the character's explored-<guid>.bin at a login), each zone's world map overlay pieces (WorldMapOverlay.dbc, g_pp), and
+ * PieceFound (the client's own: a piece is found when one of its areas is). For each zone round the arrival (its page's
+ * box meeting the landing view and SAT_RING tiles round it, as the detail's set), the worker lays every piece's own art
+ * (Interface\WorldMap\<zone>\<piece><n>.blp, read from the client, placed as ParchMake places it) into a mask over the
+ * zone's page: where a piece not found lies, grown SAT_HIDE_GROW into the gaps between pieces, less where a piece found
+ * lies, never over the open sea (the overlay's sea.bin, as the parchment's cut to the zone's land leaves the sea), softened.
+ * Drawn straight over the overview and the detail and under every overlay, each mask over its page's box
+ * on the world map, in SAT_HIDE_RGB: the satellite's blank, as the parchment's paper is its (PLACEHOLDER, his call). It
+ * comes up as the parchment's zones do (his rule, 12 Oct: at PARCH_SHOW_BAR of the bar, over PARCH_FADE_MS, once made),
+ * and the detail waits for it: no detail tile is drawn on such a screen until its masks are up, so a tile of ground not
+ * found never shows. The full map chosen, or the character's areas not known: nothing hidden, as the parchment paints
+ * the whole zone then. */
+static DWORD SatArgb(float a);
+#define SAT_HIDE_PX    256           /* each zone's mask, a side (its page's 1002 x 668 drawn into it) */
+#define SAT_HIDE_GROW  2             /* the pieces not found grown by this many of its texels into the gaps (about 30 yards) */
+#define SAT_HIDE_SOFT  2             /* and its edge softened by this many passes of a three-wide box */
+#define SAT_HIDE_SEA0  0.3f          /* never over the open sea: hidden less from where the overview's sea (sea.bin) is this open, */
+#define SAT_HIDE_SEA1  0.7f          /* and not at all from this */
+#define SAT_HIDE_RGB   0x2B2F33u     /* PLACEHOLDER (his call): the hidden ground's one colour, a dark slate */
+#define SAT_HIDE_BYTES ((SIZE_T)SAT_HIDE_PX * SAT_HIDE_PX * 4 * 4 / 3 + 64)   /* a mask and its smaller copies, RGBA */
+/* the worker's job (the detail's pattern, its own state): 0 none, 1 posted, 2 done, 3 stale (the worker frees it) */
+static struct {
+    volatile LONG state;
+    int n, z[SAT_HIDE_ZONES], hidden[SAT_HIDE_ZONES];
+    unsigned char *px[SAT_HIDE_ZONES];
+    unsigned char bits[EXPLORED_BYTES];
+    DWORD ran;
+} g_shj;
+/* the view's: wanted for this screen (on), what for, how far (stage: 0 to post, 1 being made, 2 going up, 3 up), its
+ * zones' masks (z, px until up), and when it was up, and when the bar came to PARCH_SHOW_BAR */
+static struct {
+    int on, c, stage, n, up, failed, looked, nz;
+    LONG screen;
+    float x, y;
+    int z[SAT_HIDE_ZONES], zs[SAT_HIDE_ZONES];   /* (zs, nz: the zones round the arrival, those with ground hidden or not) */
+    unsigned char *px[SAT_HIDE_ZONES];
+    DWORD readyAt, barAt, ms;
+} g_sh;
+static unsigned char g_shBits[EXPLORED_BYTES];   /* this screen's character's, as the screen began (the parchment's g_pbits idiom) */
+static LONG g_shSeq = -1, g_shKnown;
+static LONG SatHideState(void) { return InterlockedCompareExchange(&g_shj.state, 0, 0); }
+static void SatHideJobFree(void)
+{
+    for (int k = 0; k < g_shj.n; k++) if (g_shj.px[k]) { HeapFree(GetProcessHeap(), 0, g_shj.px[k]); g_shj.px[k] = NULL; }
+    g_shj.n = 0;
+}
+/* bytes (S x S), each texel the most of the 3 x 3 round it, passes times (into tmp and back) */
+static void SatHideGrow(unsigned char *m, unsigned char *tmp, int S, int passes, int box)
+{
+    for (int k = 0; k < passes; k++) {
+        for (int y = 0; y < S; y++)
+            for (int x = 0; x < S; x++) {
+                unsigned most = 0, sum = 0, n = 0;
+                for (int j = -1; j <= 1; j++)
+                    for (int i = -1; i <= 1; i++) {
+                        int xx = x + i, yy = y + j;
+                        if (xx < 0 || yy < 0 || xx >= S || yy >= S) continue;
+                        unsigned v = m[yy * S + xx];
+                        if (v > most) most = v;
+                        sum += v; n++;
+                    }
+                tmp[y * S + x] = (unsigned char)(box ? (sum + n / 2) / n : most);
+            }
+        for (int i = 0; i < S * S; i++) m[i] = tmp[i];
+    }
+}
+/* Zone z's mask (the worker's): its pieces laid as ParchMake lays them (the twelve tiles' size gives its texels a page
+ * pixel: 256, or 512 in HD), found ones into f, the rest into u, then the hidden ground (u grown, less f, softened) into
+ * out's alpha in SAT_HIDE_RGB, with its smaller copies. f, u, t: S x S of scratch. The texels hidden (over a 32nd). */
+static int SatHideMake(int z, const unsigned char *bits, unsigned char *out, unsigned char *f, unsigned char *u, unsigned char *t)
+{
+    const int S = SAT_HIDE_PX, c = g_pz[z].map;
+    const char *name = g_pz[z].name;
+    for (int i = 0; i < S * S; i++) f[i] = u[i] = 0;
+    unsigned tw = 0, th = 0;
+    unsigned char *one = ParchTile(name, name, 1, &tw, &th);       /* (the zone's own first tile: its pages' texel size) */
+    if (!one) return 0;
+    HeapFree(GetProcessHeap(), 0, one);
+    float K = (float)tw / 256;
+    if (tw != 256 && tw != 512) return 0;
+    for (int p = 0; p < g_ppN; p++) {
+        const ParchPiece *P = &g_pp[p];
+        if (P->zone != g_pz[z].id) continue;
+        unsigned char *m = PieceFound(P, bits) ? f : u;
+        int nw = (P->w + 255) / 256, nh = (P->h + 255) / 256;
+        for (int j = 0; j < nh; j++)
+            for (int q = 0; q < nw; q++) {
+                unsigned w = 0, h = 0;
+                unsigned char *pt = ParchTile(name, P->tex, j * nw + q + 1, &w, &h);
+                if (!pt) continue;
+                int x0 = P->ox + q * 256, y0 = P->oy + j * 256;
+                int cw = P->w - q * 256 < 256 ? P->w - q * 256 : 256, ch = P->h - j * 256 < 256 ? P->h - j * 256 : 256;
+                for (int my = 0; my < S; my++) {
+                    float cy = ((float)my + 0.5f) * PARCH_MAP_H / S - (float)y0;
+                    if (cy < 0 || cy >= (float)ch) continue;
+                    int ty = (int)(cy * K);
+                    if (ty >= (int)h) continue;
+                    for (int mx = 0; mx < S; mx++) {
+                        float cx = ((float)mx + 0.5f) * PARCH_MAP_W / S - (float)x0;
+                        if (cx < 0 || cx >= (float)cw) continue;
+                        int tx = (int)(cx * K);
+                        if (tx >= (int)w) continue;
+                        unsigned char a = pt[4 * ((unsigned)ty * w + (unsigned)tx) + 3];
+                        if (a > m[my * S + mx]) m[my * S + mx] = a;
+                    }
+                }
+                HeapFree(GetProcessHeap(), 0, pt);
+            }
+    }
+    SatHideGrow(u, t, S, SAT_HIDE_GROW, 0);
+    int hidden = 0;
+    const ParchZone *Z = &g_pz[z];
+    for (int my = 0; my < S; my++)
+        for (int mx = 0; mx < S; mx++) {
+            int i = my * S + mx;
+            unsigned keep = 255u - f[i];
+            if (g_seaW && c >= 0 && c <= 1 && g_map.m[c].ok) {          /* (never the open sea, as the overview has it: a piece's
+                                                                    * art runs over the water round a coast or an island, where
+                                                                    * the parchment's cut to its land leaves the sea) */
+                float wy = Z->l + (Z->r - Z->l) * ((float)mx + 0.5f) / S, wx = Z->t + (Z->b - Z->t) * ((float)my + 0.5f) / S;
+                float sea = SeaAt(g_map.m[c].au + g_map.m[c].bu * wy, g_map.m[c].av + g_map.m[c].bv * wx);
+                float k = FireClamp((sea - SAT_HIDE_SEA0) / (SAT_HIDE_SEA1 - SAT_HIDE_SEA0), 0, 1);
+                keep = (unsigned)((float)keep * (1 - k * k * (3 - 2 * k)) + 0.5f);
+            }
+            u[i] = (unsigned char)((unsigned)u[i] * keep / 255u);
+        }
+    SatHideGrow(u, t, S, SAT_HIDE_SOFT, 1);
+    SIZE_T at = 0;
+    for (int w = S; w >= 1; w /= 2) {                               /* (its smaller copies, each a box of the one before) */
+        unsigned char *o = out + at;
+        for (int y = 0; y < w; y++)
+            for (int x = 0; x < w; x++) {
+                unsigned a;
+                if (w == S) a = u[y * S + x];
+                else {
+                    const unsigned char *b = out + at - (SIZE_T)(2 * w) * (2 * w) * 4;
+                    a = (b[4 * ((2 * y) * 2 * w + 2 * x) + 3] + b[4 * ((2 * y) * 2 * w + 2 * x + 1) + 3] +
+                         b[4 * ((2 * y + 1) * 2 * w + 2 * x) + 3] + b[4 * ((2 * y + 1) * 2 * w + 2 * x + 1) + 3] + 2) / 4;
+                }
+                o[4 * (y * w + x)] = (unsigned char)(SAT_HIDE_RGB >> 16); o[4 * (y * w + x) + 1] = (unsigned char)(SAT_HIDE_RGB >> 8);
+                o[4 * (y * w + x) + 2] = (unsigned char)SAT_HIDE_RGB; o[4 * (y * w + x) + 3] = (unsigned char)a;
+                if (w == S && a > 8) hidden++;
+            }
+        at += (SIZE_T)w * w * 4;
+    }
+    return hidden;
+}
+/* The job posted, run (the worker's thread, or at once without one): each zone's mask, a zone with nothing hidden let go;
+ * stopping between zones once stale. */
+static void SatHideRun(void)
+{
+    DWORD t0 = GetTickCount();
+    const SIZE_T S2 = (SIZE_T)SAT_HIDE_PX * SAT_HIDE_PX;
+    unsigned char *scratch = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, 3 * S2);
+    for (int k = 0; k < g_shj.n; k++) {
+        g_shj.hidden[k] = 0; g_shj.px[k] = NULL;
+        if (!scratch || SatHideState() == 3) continue;
+        unsigned char *o = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, SAT_HIDE_BYTES);
+        if (!o) continue;
+        g_shj.hidden[k] = SatHideMake(g_shj.z[k], g_shj.bits, o, scratch, scratch + S2, scratch + 2 * S2);
+        if (g_shj.hidden[k]) g_shj.px[k] = o; else HeapFree(GetProcessHeap(), 0, o);
+    }
+    if (scratch) HeapFree(GetProcessHeap(), 0, scratch);
+    g_shj.ran = GetTickCount() - t0;
+}
+/* The worker's pass at it (SatWorkerTurn's first): a stale job freed, a posted one run and said done. */
+static int SatHideTurn(void)
+{
+    LONG s = SatHideState();
+    if (s == 3) { SatHideJobFree(); InterlockedExchange(&g_shj.state, 0); return 1; }
+    if (s != 1) return 0;
+    SatHideRun();
+    if (InterlockedCompareExchange(&g_shj.state, 2, 1) == 3) { SatHideJobFree(); InterlockedExchange(&g_shj.state, 0); }
+    return 1;
+}
+/* The view's: what this screen hid, its masks and their textures let go, its job stale (or, done, freed). */
+static void SatHideDrop(void)
+{
+    LONG was = InterlockedCompareExchange(&g_shj.state, 3, 1);
+    if (was == 2) { SatHideJobFree(); InterlockedExchange(&g_shj.state, 0); }
+    for (int k = 0; k < g_sh.n; k++) if (g_sh.px[k]) { HeapFree(GetProcessHeap(), 0, g_sh.px[k]); g_sh.px[k] = NULL; }
+    unsigned names[SAT_HIDE_ZONES];
+    int n = 0;
+    for (int k = 0; k < SAT_HIDE_ZONES; k++) if (g_shTex[k]) { names[n++] = g_shTex[k]; g_shTex[k] = 0; }
+    if (n && gl.DeleteTextures) gl.DeleteTextures(n, names);
+    g_sh.on = 0; g_sh.n = g_sh.up = 0; g_sh.stage = 0;
+}
+/* The zones round the arrival (continent c, world x, y): every zone page of its continent with pieces whose box meets the
+ * landing view (the end's height, as the detail's set has it) and SAT_RING tiles round it, the arrival's own first, then
+ * the nearest; SAT_HIDE_ZONES at the most. Their count (and how many met it, *looked). */
+static int SatHideZones(int c, float x, float y, int *z, int *looked)
+{
+    float bv = g_map.m[c].bv < 0 ? -g_map.m[c].bv : g_map.m[c].bv, h = 0.5f * g_map.endYards * bv;
+    *looked = 0;
+    if (!(g_map.m[c].bu < 0 || g_map.m[c].bu > 0) || !(bv > 0) || !(h > 0)) return 0;
+    if (h > 0.5f) h = 0.5f;
+    float du = g_map.m[c].au + g_map.m[c].bu * y, dv = g_map.m[c].av + g_map.m[c].bv * x;
+    float cu = FireClamp(du, h, 1 - h), cv = FireClamp(dv, h, 1 - h);
+    float ya = (cu - h - g_map.m[c].au) / g_map.m[c].bu, yb = (cu + h - g_map.m[c].au) / g_map.m[c].bu;
+    float xa = (cv - h - g_map.m[c].av) / g_map.m[c].bv, xb = (cv + h - g_map.m[c].av) / g_map.m[c].bv;
+    float ring = SAT_RING * SAT_TILE;
+    float ylo = (ya < yb ? ya : yb) - ring, yhi = (ya < yb ? yb : ya) + ring, xlo = (xa < xb ? xa : xb) - ring, xhi = (xa < xb ? xb : xa) + ring;
+    float d[SAT_HIDE_ZONES];
+    int n = 0;
+    for (int i = 0; i < g_pzN; i++) {
+        const ParchZone *Z = &g_pz[i];
+        if (Z->map != c || !Z->area || !(Z->l > ylo && Z->r < yhi && Z->t > xlo && Z->b < xhi)) continue;
+        int pieces = 0;
+        for (int p = 0; p < g_ppN && !pieces; p++) pieces = g_pp[p].zone == Z->id;
+        if (!pieces) continue;
+        (*looked)++;
+        float ex = x > Z->t ? x - Z->t : x < Z->b ? Z->b - x : 0, ey = y > Z->l ? y - Z->l : y < Z->r ? Z->r - y : 0, dd = ex * ex + ey * ey;
+        if (n == SAT_HIDE_ZONES && dd >= d[n - 1]) continue;
+        int at = n < SAT_HIDE_ZONES ? n++ : n - 1;
+        while (at > 0 && d[at - 1] > dd) { d[at] = d[at - 1]; z[at] = z[at - 1]; at--; }
+        d[at] = dd; z[at] = i;
+    }
+    return n;
+}
+/* Mask k given to OpenGL (its name made once): its levels, smooth between them, clamped at its edges. 1 when taken. */
+static int SatHideTexUp(int k)
+{
+    unsigned name = g_shTex[k];
+    while (gl.GetError()) {}
+    if (!name) gl.GenTextures(1, &name);
+    if (!name) return 0;
+    gl.BindTexture(GL_TEXTURE_2D_, name);
+    gl.PixelStorei(GL_UNPACK_ALIGNMENT_, 1);
+    SIZE_T at = 0;
+    int lv = 0;
+    for (int w = SAT_HIDE_PX; w >= 1; w /= 2, lv++) {
+        gl.TexImage2D(GL_TEXTURE_2D_, lv, GL_RGBA8_, w, w, 0, GL_RGBA_, GL_UNSIGNED_BYTE_, g_sh.px[k] + at);
+        at += (SIZE_T)w * w * 4;
+    }
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAX_LEVEL_, lv - 1);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, GL_LINEAR_MIPMAP_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, GL_LINEAR_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_S_, GL_CLAMP_TO_EDGE_);
+    gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_WRAP_T_, GL_CLAMP_TO_EDGE_);
+    if (gl.GetError()) { gl.DeleteTextures(1, &name); g_shTex[k] = 0; return 0; }
+    g_shTex[k] = name;
+    return 1;
+}
+/* The screen gone (SatScreenEnd's first): its job stale (the masks up stay for the fade); its line in the log. */
+static void SatHideScreenEnd(void)
+{
+    if (SatHideState() == 1) InterlockedCompareExchange(&g_shj.state, 3, 1);
+    if (!g_sh.on || g_sh.screen != g_viewScreen) return;
+    char m[400];
+    int len = wsprintfA(m, "  the satellite's areas, as discovered: ");
+    if (g_sh.stage < 3) len += wsprintfA(m + len, "the ground not found not made in time (%d zones round the arrival), so no detail shown", g_sh.looked);
+    else if (!g_sh.n) len += wsprintfA(m + len, "every one of the %d zones round the arrival found whole, nothing hidden", g_sh.looked);
+    else {
+        len += wsprintfA(m + len, "ground not found hidden in %d of the %d zones round the arrival (", g_sh.up, g_sh.looked);
+        for (int k = 0; k < g_sh.up && len < 300; k++) len += wsprintfA(m + len, "%s%s", k ? ", " : "", g_pz[g_sh.z[k]].name);
+        len += wsprintfA(m + len, "), made in %lu ms", (unsigned long)g_sh.ms);
+    }
+    if (g_sh.failed) wsprintfA(m + len, "; OpenGL would not take a mask, so no detail shown");
+    Log(m);
+}
+/* The view's thread, each frame of a satellite screen (SatWork's first): this screen's character's bits taken as the
+ * screen began; for the arrival known (c, x, y) on this screen, its zones' masks asked for, taken when made, and given to
+ * OpenGL two a frame. Nothing when the full map is chosen or the bits are not known. */
+static void SatHideWork(int known, int c, float x, float y, LONG screen, DWORD now)
+{
+    LONG seq = g_scrSeq;
+    if (seq != g_shSeq) { g_shSeq = seq; g_shKnown = g_scrKnown; for (int i = 0; i < EXPLORED_BYTES; i++) g_shBits[i] = g_scrBits[i]; }
+    if (g_sh.on && g_sh.screen != screen) SatHideDrop();         /* (another screen's: never drawn on this one) */
+    int want = known && (c == 0 || c == 1) && g_map.m[c].ok && g_shKnown && !g_parchFullOn && g_parchTablesOk && g_ppN > 0 &&
+               !(gl.TexImage2D && !gl.DeleteTextures);
+    if (!want) { if (g_sh.on) SatHideDrop(); return; }
+    if (!g_sh.on || c != g_sh.c || x != g_sh.x || y != g_sh.y) {   /* (the arrival known, or moved) */
+        int zs[SAT_HIDE_ZONES], looked = 0, nz = SatHideZones(c, x, y, zs, &looked), same = g_sh.on && c == g_sh.c && nz == g_sh.nz;
+        for (int k = 0; same && k < nz; k++) same = zs[k] == g_sh.zs[k];
+        if (same) { g_sh.x = x; g_sh.y = y; }                       /* (moved within the same zones: the login's place taken again
+                                                                    * from the game's own after the list's: the masks stand) */
+        else {
+            SatHideDrop();
+            g_sh.on = 1; g_sh.c = c; g_sh.x = x; g_sh.y = y; g_sh.screen = screen; g_sh.stage = 0; g_sh.failed = 0;
+            g_sh.readyAt = g_sh.barAt = 0; g_sh.ms = 0; g_sh.looked = looked; g_sh.nz = nz;
+            for (int k = 0; k < nz; k++) g_sh.zs[k] = zs[k];
+        }
+    }
+    if (g_sh.stage == 0 && SatHideState() == 0) {                  /* (posted once the last job is all gone) */
+        g_shj.n = g_sh.nz;
+        for (int k = 0; k < g_sh.nz; k++) g_shj.z[k] = g_sh.zs[k];
+        for (int i = 0; i < EXPLORED_BYTES; i++) g_shj.bits[i] = g_shBits[i];
+        g_shj.ran = 0;
+        g_sh.stage = 1;
+        InterlockedExchange(&g_shj.state, 1);
+        if (!g_sjWorker) { SatHideRun(); InterlockedExchange(&g_shj.state, 2); }
+        else SetEvent(g_sjEvent);
+    }
+    if (g_sh.stage == 1 && SatHideState() == 2) {                  /* made: its masks the view's, to go up */
+        g_sh.n = 0;
+        for (int k = 0; k < g_shj.n; k++)
+            if (g_shj.px[k]) { g_sh.z[g_sh.n] = g_shj.z[k]; g_sh.px[g_sh.n++] = g_shj.px[k]; g_shj.px[k] = NULL; }
+        g_sh.ms = g_shj.ran;
+        g_shj.n = 0;
+        InterlockedExchange(&g_shj.state, 0);
+        g_sh.up = 0; g_sh.stage = 2;
+    }
+    for (int k = 0; g_sh.stage == 2 && k < 2 && g_sh.up < g_sh.n; k++) {
+        int ok = gl.TexImage2D ? SatHideTexUp(g_sh.up) : (g_shTex[g_sh.up] = 0x5B000000u + (unsigned)g_sh.up + 1, 1);
+        HeapFree(GetProcessHeap(), 0, g_sh.px[g_sh.up]); g_sh.px[g_sh.up] = NULL;
+        if (!ok) { g_sh.failed = 1; break; }
+        g_sh.up++;
+    }
+    if (g_sh.stage == 2 && (g_sh.up == g_sh.n || g_sh.failed)) { g_sh.stage = 3; g_sh.readyAt = now ? now : 1; }
+}
+/* How far the hidden ground is up now (ViewBuild's, under the step lock): -1 none wanted on this screen; else 0 until its
+ * masks are all up and the bar as shown has come to PARCH_SHOW_BAR, then whole over PARCH_FADE_MS (the parchment's zones'
+ * time). */
+static float SatHideShown(DWORD now)
+{
+    if (!g_sh.on || g_sh.screen != g_viewScreen) return -1;
+    if (g_viewShown >= PARCH_SHOW_BAR && !g_sh.barAt) g_sh.barAt = now ? now : 1;
+    if (g_sh.stage < 3 || !g_sh.barAt) return 0;
+    DWORD from = (LONG)(g_sh.barAt - g_sh.readyAt) > 0 ? g_sh.barAt : g_sh.readyAt;
+    return FireClamp((float)(LONG)(now - from) / PARCH_FADE_MS, 0, 1);
+}
+/* Each zone's mask over its page's box on the world map (map.txt's line for its continent), through the view's corners. */
+static void SatHideBuild(float W, float H, float a)
+{
+    int c = g_sh.c;
+    float u0 = g_bgUV[4], vt = g_bgUV[5], du = g_bgUV[2] - u0, dv = g_bgUV[3] - vt;
+    if (!(a > 0) || !(du > 0) || !(dv > 0) || g_sh.stage < 3) return;
+    DWORD col = SatArgb(a);
+    for (int k = 0; k < g_sh.up; k++) {
+        if (!g_shTex[k]) continue;
+        const ParchZone *Z = &g_pz[g_sh.z[k]];
+        float ul = g_map.m[c].au + g_map.m[c].bu * Z->l, ur = g_map.m[c].au + g_map.m[c].bu * Z->r;
+        float vn = g_map.m[c].av + g_map.m[c].bv * Z->t, vs = g_map.m[c].av + g_map.m[c].bv * Z->b;
+        float x0 = (ul - u0) / du * W, x1 = (ur - u0) / du * W, y0 = (vn - vt) / dv * H, y1 = (vs - vt) / dv * H;
+        if ((x1 > x0 ? x1 : x0) <= 0 || (x1 < x0 ? x1 : x0) >= W || (y1 > y0 ? y1 : y0) <= 0 || (y1 < y0 ? y1 : y0) >= H) continue;
+        ViewVert *q = ViewQuadNew(SAT_HIDE_TEX0 + k);
+        if (!q) return;
+        ViewVertSet(q, x0, y0, 0, 0, col); ViewVertSet(q + 1, x1, y0, 1, 0, col);
+        ViewVertSet(q + 2, x1, y1, 1, 1, col); ViewVertSet(q + 3, x0, y1, 0, 1, col);
+    }
+}
 /* The bytes a frame given to OpenGL, by the time since the last frame (the parchment's rule, ParchUpBudget, with its own
  * numbers): SAT_UP_RATE a ms, never less than SAT_UP_BYTES nor more than SAT_UP_MOST. */
 static SIZE_T SatUpBudget(DWORD dt)
@@ -14028,7 +14394,13 @@ static void SatRelease(void);
 static DWORD g_sworkAt;                                  /* the last frame's SatWork (its clock) */
 static void SatWork(DWORD now)
 {
-    if (!g_sat.ok || *(volatile int *)&g_parchOn) return;
+    if (*(volatile int *)&g_parchOn) return;
+    int held = StepLock(), known = g_destOk, c = g_destMap;
+    float x = g_destWX, y = g_destWY;
+    LONG screen = g_viewScreen;
+    StepUnlock(held);
+    SatHideWork(known, c, x, y, screen, now);                   /* (the ground not found, hidden: with or without the detail) */
+    if (!g_sat.ok) return;
     if (gl.TexImage2D && !gl.DeleteTextures) {                  /* (its textures could never go: none made) */
         g_sat.ok = 0;
         Log("  the satellite's detail: this OpenGL has no glDeleteTextures, so the satellite is 0.3.0's in broad daylight (the 3D overview, no detail)");
@@ -14036,10 +14408,6 @@ static void SatWork(DWORD now)
     }
     DWORD dt = now - g_sworkAt;
     g_sworkAt = now;
-    int held = StepLock(), known = g_destOk, c = g_destMap;
-    float x = g_destWX, y = g_destWY;
-    LONG screen = g_viewScreen;
-    StepUnlock(held);
     if (g_satFor.on && g_satFor.screen != screen) SatRelease();  /* (another screen's: never drawn on this one) */
     if (known && (c == 0 || c == 1) && g_map.m[c].ok &&
         (!g_satFor.on || c != g_satFor.c || x != g_satFor.x || y != g_satFor.y))
@@ -14080,14 +14448,21 @@ static DWORD SatArgb(float a) { return (DWORD)(int)(FireClamp(a, 0, 1) * 255.0f 
  * map.txt puts its tile on the picture, through the view's corners (g_bgUV), its corners as strong as the tiles round
  * them, all of it by the zoom: nothing while the view is SAT_FADE_FAR times the end's height or more, whole by
  * SAT_FADE_NEAR. Only this screen's set, for its arrival's continent. */
+static void SatTilesBuild(float W, float H, DWORD now, float hide);
 static void SatBuild(float W, float H, DWORD now)
+{
+    float hide = SatHideShown(now);                             /* (-1: nothing hidden on this screen) */
+    SatTilesBuild(W, H, now, hide < 0 ? 1 : g_sh.failed ? 0 : hide);   /* (the detail waits for it: never a tile of ground not found) */
+    if (hide > 0 && g_destOk && g_destMap == g_sh.c) SatHideBuild(W, H, hide);
+}
+static void SatTilesBuild(float W, float H, DWORD now, float hide)
 {
     if (!g_satFor.on || !g_ssN || !g_destOk || g_destMap != g_satFor.c || g_satFor.screen != g_viewScreen) return;
     int c = g_satFor.c;
     float bv = g_map.m[c].bv < 0 ? -g_map.m[c].bv : g_map.m[c].bv, end = g_map.endYards;
     float u0 = g_bgUV[4], vt = g_bgUV[5], du = g_bgUV[2] - u0, dv = g_bgUV[3] - vt;
     if (!(bv > 0) || !(end > 0) || !(du > 0) || !(dv > 0)) return;
-    float zoom = FireClamp((SAT_FADE_FAR * end - dv / bv) / ((SAT_FADE_FAR - SAT_FADE_NEAR) * end), 0, 1);
+    float zoom = FireClamp((SAT_FADE_FAR * end - dv / bv) / ((SAT_FADE_FAR - SAT_FADE_NEAR) * end), 0, 1) * hide;
     if (zoom <= 0) return;
     for (int i = 0; i < g_ssN; i++) {
         const SatSlot *s = &g_ss[i];
@@ -14107,8 +14482,10 @@ static void SatBuild(float W, float H, DWORD now)
 }
 /* The screen gone (the view's thread, beside ParchScreenEnd): the job stale and the tiles not up freed, nothing more read
  * this screen; its line in the log. The textures stay for the view's last frame and its fade (SatRelease then). */
+static void SatHideScreenEnd(void);
 static void SatScreenEnd(void)
 {
+    SatHideScreenEnd();
     SatDrop();
     if (!g_satFor.on) return;
     g_satFor.stop = 1;
@@ -14135,6 +14512,7 @@ static void SatScreenEnd(void)
 static void SatRelease(void)
 {
     static unsigned names[SAT_MAX];
+    SatHideDrop();                                               /* (the hidden ground's masks too) */
     SatDrop();
     int n = 0;
     for (int i = 0; i < SAT_MAX; i++) if (g_satTex[i]) { names[n++] = g_satTex[i]; g_satTex[i] = 0; }
