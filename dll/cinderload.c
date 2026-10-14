@@ -2881,7 +2881,9 @@ static void HoldFrame(void)
     if (g_destOk) {
         float rem = g_viewH > g_destH && g_destH < 0.5f ? MapLn(g_viewH / g_destH) / MapLn(0.5f / g_destH) : 0;
         float du = g_viewU - g_destU, dv = g_viewV - g_destV, off = (du < 0 ? -du : du) + (dv < 0 ? -dv : dv);
-        if ((rem > SETTLE_NEAR || off > SETTLE_NEAR * 2 * g_viewH) && (LONG)(now + HOLD_SETTLE_MS - endAt) > 0)
+        float tol = SETTLE_NEAR * 2 * (g_viewSteps ? g_destH : g_viewH);    /* (the view's: as far off as 0.4.0's, though its
+                                                                    * glide is closer in by its push: the hold never longer for it) */
+        if ((rem > SETTLE_NEAR || off > tol) && (LONG)(now + HOLD_SETTLE_MS - endAt) > 0)
             endAt = now + HOLD_SETTLE_MS;
         g_settleFrom = now;
         g_settleTo = (LONG)(endAt - now) > 0 ? endAt : now + 1;

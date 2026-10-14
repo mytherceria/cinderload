@@ -13418,6 +13418,7 @@ static void TestSatHandOff(void)
 #define SG_MAXF 6000
 static float g_sgLh[SG_MAXF], g_sgX[SG_MAXF], g_sgY[SG_MAXF];
 static int g_sgN;
+static DWORD g_sgEnd;                                                  /* (the screen went this long after it began) */
 static void TestSatGlideLoad(DWORD full, LONG learned, LONG freeze, LONG hold, int later, LONG cut, float W, float H)
 {
     Fresh("sat-glide");
@@ -13454,6 +13455,7 @@ static void TestSatGlideLoad(DWORD full, LONG learned, LONG freeze, LONG hold, i
                 shim_ticks = nextGame;
                 HoldFrame();
                 endAt = (g_evenEndAt ? g_evenEndAt - VIEW_WORLD_GAP_MS : nextGame + 1000) - (DWORD)cut;   /* (the screen goes) */
+                g_sgEnd = endAt - base;
                 held = 1;
             }
             nextGame += 33;
@@ -13516,6 +13518,7 @@ static void TestSatGlide(void)
     int land[3], str[3];
     TestSatGlideLoad(7700, 7700, 1700, HOLD_MS, 1, 0, 2560, 1080);   /* his logins of 13 Oct (a later screen, from halfway in) */
     TestSatGlideMeasure(2560, 1080, &r[0], &l[0], &j[0], &land[0], &str[0]);
+    DWORD end0 = g_sgEnd;                                              /* (the hold not lengthened: the view all but on its landing) */
     TestSatGlideLoad(7700, 7700, 1700, HOLD_MS, 0, 0, 2560, 1080);   /* a session's first, from the whole world */
     TestSatGlideMeasure(2560, 1080, &r[1], &l[1], &j[1], &land[1], &str[1]);
     TestSatGlideLoad(300, 600, 900, HOLD_MS, 1, 300, 2560, 1080);    /* his teleport: the floor holds it; its freeze 0.3 s short */
@@ -13526,7 +13529,8 @@ static void TestSatGlide(void)
            str[0], str[1], str[2]);
     int ok = 1;
     for (int k = 0; k < 3; k++) ok &= r[k] < 0.1f && l[k] < 0.05f && j[k] < 0.1f && land[k] && str[k];
-    Check(ok, "the satellite's glide with the view (a later login as his of 13 Oct, a first, a teleport whose freeze is shorter than learned): one zoom from where it opens to its landing, the push closer its last stretch, never all but stopping and then moving again, never cut off moving as the screen goes, no sudden change of pace, the arrival on one line to the middle, the landing 0.4.0's after its push");
+    ok &= end0 == 7722 + BLUR_MS + 1700;                               /* (the game done at 7722, its blur, its freeze: no settle added) */
+    Check(ok, "the satellite's glide with the view (a later login as his of 13 Oct, a first, a teleport whose freeze is shorter than learned): one zoom from where it opens to its landing, the push closer its last stretch, never all but stopping and then moving again, never cut off moving as the screen goes, no sudden change of pace, the arrival on one line to the middle, the landing 0.4.0's after its push, the hold no longer for it when it is all but there");
 }
 
 /* 0.4.1 (his note of 13 Oct after his first look at 0.4.0: the satellite "would show the entire zone even if you hadn't
