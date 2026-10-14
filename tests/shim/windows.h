@@ -54,7 +54,36 @@ extern int shim_threads;                             /* threads CreateThread was
 extern DWORD shim_ticks;                             /* what GetTickCount says */
 extern int shim_screen_w, shim_screen_h;
 
-static void ShimPath(char *out, const char *in) { strcpy(out, in); for (char *p = out; *p; p++) if (*p == '\\') *p = '/'; }
+/* Windows opens a file whatever the case of its name (the client's own folder has patch-3.mpq where the DLL asks for
+ * patch-3.MPQ, as the game under Wine finds it). With shim_nocase set (a harness reading a real client's folder; the
+ * suites leave it off), a path that is not there as written is looked for one part at a time without regard to case. */
+static int shim_nocase;
+#include <dirent.h>
+#include <strings.h>
+static void ShimNoCase(char *p)
+{
+    struct stat st;
+    if (!shim_nocase || !p[0] || stat(p, &st) == 0) return;
+    char *s = p[0] == '/' ? p + 1 : p;
+    while (*s) {
+        char *e = strchr(s, '/');
+        if (e) *e = 0;
+        if (s[0] && stat(p, &st) != 0) {
+            char dir[1024];
+            size_t n = (size_t)(s - p);
+            if (n) { memcpy(dir, p, n); dir[n] = 0; } else strcpy(dir, ".");
+            DIR *d = opendir(dir);
+            struct dirent *de;
+            while (d && (de = readdir(d)) != NULL)
+                if (strlen(de->d_name) == strlen(s) && !strcasecmp(de->d_name, s)) { memcpy(s, de->d_name, strlen(s)); break; }
+            if (d) closedir(d);
+        }
+        if (!e) break;
+        *e = '/';
+        s = e + 1;
+    }
+}
+static void ShimPath(char *out, const char *in) { strcpy(out, in); for (char *p = out; *p; p++) if (*p == '\\') *p = '/'; ShimNoCase(out); }
 static HANDLE ToHandle(int fd) { return fd < 0 ? INVALID_HANDLE_VALUE : (HANDLE)(long)(fd + 1); }
 static int Fd(HANDLE h) { return (int)(long)h - 1; }
 
