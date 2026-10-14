@@ -13826,6 +13826,14 @@ static void TestSatLandFile(int z, int other, float split, int north)
     TestBytesPut(rel, f, LAND_HEAD + bytes);
     free(f);
 }
+/* The stack where the worker's turn will have its frames, filled with -1 (no zone's row), as the game's worker leaves it
+ * after other work: whatever a frame of the job reads before it writes it is then not what an earlier job left there (the
+ * third attack on 0.4.1, 14 Oct). */
+static __attribute__((noinline)) void TestStackSpoil(void)
+{
+    volatile int spoil[4096];
+    for (int i = 0; i < 4096; i++) spoil[i] = -1;
+}
 /* the job for Elwynn and Duskwood (or Elwynn alone: Duskwood not round the arrival) on bits, made by the worker's turn:
  * Elwynn's mask's alpha at world x, y (0 none made) */
 static int TestSatHideAt(int el, int dw, const unsigned char *bits, float x, float y)
@@ -13833,6 +13841,7 @@ static int TestSatHideAt(int el, int dw, const unsigned char *bits, float x, flo
     g_shj.n = dw >= 0 ? 2 : 1; g_shj.z[0] = el; g_shj.z[1] = dw;
     memcpy(g_shj.bits, bits, EXPLORED_BYTES);
     InterlockedExchange(&g_shj.state, 1);
+    TestStackSpoil();
     SatHideTurn();
     const ParchZone *Z = &g_pz[el];
     int mx = (int)((y - Z->l) / (Z->r - Z->l) * SAT_HIDE_PX), my = (int)((x - Z->t) / (Z->b - Z->t) * SAT_HIDE_PX);
@@ -13868,6 +13877,16 @@ static void TestSatHideLand(void)
     int both = TestSatHideAt(el, dw, neither, -9480, 0), near = TestSatHideAt(el, dw, neither, -9440, 0);
     int outFound = TestSatHideAt(el, -1, found, -9480, 0), outNot = TestSatHideAt(el, -1, neither, -9480, 0);
     Check(both >= 192 && near >= 192 && outFound < 64 && outNot >= 192, "the satellite's hidden ground (the second attack on 0.4.1): where the neighbour's ground under a zone's band is not found either, the zone's mask still hides it (no seam where two zones' ground not found meet); a neighbour not round the arrival by its own rule too: its ground found shown, not found hidden");
+    /* (the third attack on 0.4.1, 14 Oct) a zone round the arrival whose land lies under another's mask is laid once, as the
+     * job's: never laid again as a zone beyond it, for the cut alone, because it comes later in the job's list (Duskwood
+     * after Elwynn, Elwynn after Duskwood); Duskwood not round the arrival is laid for the cut, once */
+    TestSatHideAt(el, dw, found, -9480, 0);
+    int laidEl = g_shj.beyond;
+    TestSatHideAt(dw, el, found, -9480, 0);
+    int laidDw = g_shj.beyond;
+    TestSatHideAt(el, -1, found, -9480, 0);
+    int laidOut = g_shj.beyond;
+    Check(laidEl == 0 && laidDw == 0 && laidOut == 1, "the satellite's hidden ground (the third attack on 0.4.1): the zones round the arrival are each laid once for the cut, never laid again as zones beyond them when they come later in the job's list (on the game's worker, whatever its stack held: about 200 ms more of every mask job natively); a zone beyond them laid once");
     /* a zone's land not kept yet: its mask as before, over its border, and said in the log */
     TestBytesGone("Data/CinderLoad/land-Elwynn.bin");
     int before = TestSatHideAt(el, dw, found, -9480, 0);

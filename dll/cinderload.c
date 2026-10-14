@@ -14085,6 +14085,7 @@ static struct {
     unsigned char *px[SAT_HIDE_ZONES];
     unsigned char bits[EXPLORED_BYTES];
     unsigned landless;                       /* (bit k: zone k's mask not cut to its land, its land not kept: SatHideCut) */
+    int beyond;                              /* (zones not round the arrival laid for the cut alone: SatHideRun) */
     DWORD ran;
 } g_shj;
 /* the view's: wanted for this screen (on), what for, how far (stage: 0 to post, 1 being made, 2 going up, 3 up), its
@@ -14302,8 +14303,10 @@ static void SatHideRun(void)
     unsigned char *scratch = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(5 + n) * S2);   /* (f, t, the one cut, it
                                                                     * uncut, its texels cut; then each zone's as laid) */
     g_shj.landless = 0;
+    for (int k = 0; k < n; k++) zz[k] = g_shj.z[k];                 /* (all of them before any is looked at: a zone round the
+                                                                    * arrival later in the list is never taken for one beyond) */
     for (int k = 0; k < n; k++) {
-        g_shj.hidden[k] = 0; g_shj.px[k] = NULL; laid[k] = 0; zz[k] = g_shj.z[k];
+        g_shj.hidden[k] = 0; g_shj.px[k] = NULL; laid[k] = 0;
         raw[k] = scratch ? scratch + (SIZE_T)(5 + k) * S2 : NULL;
         if (!scratch || SatHideState() == 3) continue;
         laid[k] = SatHideLay(zz[k], g_shj.bits, raw[k], scratch, scratch + S2, NULL);
@@ -14356,6 +14359,7 @@ static void SatHideRun(void)
         if (g_shj.hidden[k]) g_shj.px[k] = o; else HeapFree(GetProcessHeap(), 0, o);
         if (g_shj.hidden[k] && cuts < 0) g_shj.landless |= 1u << k;
     }
+    g_shj.beyond = m - n;
     for (int k = 0; k < n; k++) ParchLandFree(&land[k]);
     if (more) HeapFree(GetProcessHeap(), 0, more);
     if (scratch) HeapFree(GetProcessHeap(), 0, scratch);
