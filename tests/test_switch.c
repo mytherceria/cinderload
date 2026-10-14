@@ -13798,6 +13798,95 @@ static void TestSatHideOrder(void)
     SatTestReset(); g_map.ok = 0;
 }
 
+/* The second attack on 0.4.1 (14 Oct): a zone's piece not found runs past its border onto its neighbour's land (the
+ * parchment's paper band), as Elwynn's GOLD does here 343 yards onto Duskwood's land (Elwynn's land north of x = -9433.3,
+ * a chunk's edge, Duskwood's south of it, as their land files say), over Duskwood's own piece DUSKP; and DUSKP's art runs
+ * onto Elwynn's land too, over GOLD. Zone row z's land file as LandMakeAs reads it (the archives' print, its box, its sum): its own
+ * north (or south) of x = split, the rest inside page other's box that zone's (LAND_THEIRS). */
+static void TestSatLandFile(int z, int other, float split, int north)
+{
+    float ax, ay, bx, by;
+    LandChunkAt(g_pz[z].t, g_pz[z].l, &ax, &ay);
+    LandChunkAt(g_pz[z].b, g_pz[z].r, &bx, &by);
+    int gx0 = (int)ax - 1, gy0 = (int)ay - 1, w = (int)bx + 1 - gx0 + 1, h = (int)by + 1 - gy0 + 1, bytes = (w * h + 3) / 4 + w * h;
+    unsigned char *f = calloc((size_t)(LAND_HEAD + bytes), 1);
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) {
+            int k = j * w + i, gx = gx0 + i, gy = gy0 + j;
+            float x = (32 - ((float)gy + 0.5f) / 16) * PARCH_TILE_YD;
+            int mark = (north ? x > split : x < split) ? 1 : LandInBox(other, gx, gy) ? LAND_THEIRS : 0;
+            f[LAND_HEAD + k / 4] |= (unsigned char)(mark << (2 * (k % 4)));
+            if (mark == LAND_THEIRS) f[LAND_HEAD + bytes - w * h + k] = (unsigned char)other;
+        }
+    unsigned head[10] = { LAND_MAGIC, LAND_VERSION, LandPrint(), (unsigned)g_pz[z].id, (unsigned)g_pz[z].area, (unsigned)gx0, (unsigned)gy0,
+                          (unsigned)w, (unsigned)h, LandSum(f + LAND_HEAD, bytes) };
+    for (int k = 0; k < 10; k++) memcpy(f + 4 * k, &head[k], 4);
+    char rel[96];
+    snprintf(rel, sizeof rel, "Data/CinderLoad/land-%s.bin", g_pz[z].name);
+    TestBytesPut(rel, f, LAND_HEAD + bytes);
+    free(f);
+}
+/* the job for Elwynn and Duskwood (or Elwynn alone: Duskwood not round the arrival) on bits, made by the worker's turn:
+ * Elwynn's mask's alpha at world x, y (0 none made) */
+static int TestSatHideAt(int el, int dw, const unsigned char *bits, float x, float y)
+{
+    g_shj.n = dw >= 0 ? 2 : 1; g_shj.z[0] = el; g_shj.z[1] = dw;
+    memcpy(g_shj.bits, bits, EXPLORED_BYTES);
+    InterlockedExchange(&g_shj.state, 1);
+    SatHideTurn();
+    const ParchZone *Z = &g_pz[el];
+    int mx = (int)((y - Z->l) / (Z->r - Z->l) * SAT_HIDE_PX), my = (int)((x - Z->t) / (Z->b - Z->t) * SAT_HIDE_PX);
+    int a = g_shj.px[0] ? g_shj.px[0][4 * (my * SAT_HIDE_PX + mx) + 3] : 0;
+    SatHideJobFree(); InterlockedExchange(&g_shj.state, 0);
+    return a;
+}
+static void TestSatHideLand(void)
+{
+    SatTestWorld("sat-hide-land", 64, 25, 40, 45, 56, 1);
+    SatHideTables2();
+    static const char mstr[] = "\0Azeroth\0";
+    unsigned mv[3] = { 0, 1, 0 };
+    static unsigned char mpd[64];
+    ParchMaps(mpd, TestWdbc(mpd, 1, 3, mv, mstr, sizeof mstr));
+    g_landPrint = 0;
+    int el = SatHideRow("Elwynn"), dw = SatHideRow("Duskwood");
+    TestSatLandFile(el, dw, -9420, 1);                                  /* (the chunks' middles: their edge at -9433.3) */
+    TestSatLandFile(dw, el, -9420, 0);
+    SatWorkerStart();
+    long heap = shim_heap_live;
+    unsigned char found[EXPLORED_BYTES], neither[EXPLORED_BYTES];       /* (Northshire found, Goldshire not; DUSKP found, or not) */
+    memset(found, 0, sizeof found); found[125 >> 3] |= 1 << (125 & 7); memcpy(neither, found, sizeof found); found[600 >> 3] |= 1 << (600 & 7);
+    /* Duskwood's ground found, under GOLD's art past Elwynn's border (47 and 127 yards south of it): shown */
+    int theirs = TestSatHideAt(el, dw, found, -9480, 0), far = TestSatHideAt(el, dw, found, -9560, -200);
+    Check(theirs < 64 && far < 64, "the satellite's hidden ground (the second attack on 0.4.1): a zone's piece not found whose art runs past its border onto its neighbour's land (the parchment's paper band) does not hide the neighbour's ground found there");
+    /* Elwynn's own ground not found, under DUSKP's art found past Duskwood's border: hidden whole, to its border (a yard and a
+     * half short of it, in a texel whose middle is Duskwood's) */
+    int own = TestSatHideAt(el, dw, found, -9350, 0), edge = TestSatHideAt(el, dw, found, -9432, 0), deep = TestSatHideAt(el, dw, found, -9310, 200);
+    Check(own >= 240 && edge >= 240 && deep >= 240, "the satellite's hidden ground (the second attack on 0.4.1): a zone's own ground not found stays hidden whole to its border where its neighbour's piece found runs over it (a mask never shows it for another zone's art)");
+    /* the neighbour's ground there not found either: hidden by both, no seam at the border; and a neighbour not round the
+     * arrival (its rule read for the cut alone): its ground found shown, not found still hidden */
+    int both = TestSatHideAt(el, dw, neither, -9480, 0), near = TestSatHideAt(el, dw, neither, -9440, 0);
+    int outFound = TestSatHideAt(el, -1, found, -9480, 0), outNot = TestSatHideAt(el, -1, neither, -9480, 0);
+    Check(both >= 192 && near >= 192 && outFound < 64 && outNot >= 192, "the satellite's hidden ground (the second attack on 0.4.1): where the neighbour's ground under a zone's band is not found either, the zone's mask still hides it (no seam where two zones' ground not found meet); a neighbour not round the arrival by its own rule too: its ground found shown, not found hidden");
+    /* a zone's land not kept yet: its mask as before, over its border, and said in the log */
+    TestBytesGone("Data/CinderLoad/land-Elwynn.bin");
+    int before = TestSatHideAt(el, dw, found, -9480, 0);
+    memcpy(g_scrBits, found, EXPLORED_BYTES); g_scrKnown = 2; InterlockedIncrement(&g_scrSeq);
+    g_parchFullOn = 0; g_viewShown = 0.25f;
+    SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    DWORD t = 9000;
+    for (int f = 0; f < 16; f++, t += 7) { SatFrame(t, 5120, 2160); SatWorkerTurn(); }
+    SatScreenEnd(); SatRelease();
+    for (int k = 0; k < 3; k++) SatWorkerTurn();
+    int ok = before == 255 && LogSays("ground not found hidden in 1 of the 2 zones round the arrival (Elwynn)") &&
+             LogSays("not cut to their land, not kept yet: Elwynn") && TsatLive() == 0 && shim_heap_live == heap;
+    Check(ok, "the satellite's hidden ground (the second attack on 0.4.1): a zone whose land is not kept yet (Data/CinderLoad/land-<zone>.bin, made with the parchment) hides as before, over its border, and the screen's line in the log names it; the heap even");
+    ParchMaps(NULL, 0); g_landPrint = 0;
+    ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
+    g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
+    SatTestReset(); g_map.ok = 0;
+}
+
 /* 0.4.1 (his film of 13 Oct: the Moonglade teleport opened on the whole world for four frames, then leapt 2.9 times
  * closer in one frame to halfway in): a later screen whose arrival the game writes only after it began shows nothing
  * (black, the view's first list) until it is known, then opens halfway in; never past VIEW_ARRIVE_WAIT_MS (then the
@@ -13845,6 +13934,7 @@ static void TestSatellite(void)
     TestSatHide();
     TestSatHideWorkerOnly();
     TestSatHideOrder();
+    TestSatHideLand();
     TestSatGeometry();
     TestSatIndex();
     TestSatMissing();

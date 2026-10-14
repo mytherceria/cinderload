@@ -9888,8 +9888,9 @@ static int LandWarmTile(void);
  * body's sum, else from the tiles (and its file written when every tile was read): 1 when made (its land may be none: a
  * city inside its building, an instance's map), 0 and why not (a tile that could not be read among them: none kept).
  * While the land is prepared ahead (g_warmRun), it stops at a tile when told to (LandWarmTile: a loading screen, a job),
- * none kept; with g_landKeptOnly, 0 for a land not kept. */
-static int ParchLandMake(int z, ParchLand *L, const char **why)
+ * none kept; with g_landKeptOnly (or keptOnly), 0 for a land not kept. LandAsKept: its kept file alone, read and checked
+ * the same way, never made (it touches nothing but L: any thread, as the satellite's worker reads it). */
+static int LandMakeAs(int z, ParchLand *L, const char **why, int keptOnly)
 {
     ParchLandFree(L);
     L->tiles = 0; L->fromFile = 0; L->unread = 0;
@@ -9925,7 +9926,7 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
         HeapFree(GetProcessHeap(), 0, file);
         return 1;
     }
-    if (g_landKeptOnly) { HeapFree(GetProcessHeap(), 0, file); ParchLandFree(L); *why = kLandNotKept; return 0; }
+    if (keptOnly) { HeapFree(GetProcessHeap(), 0, file); ParchLandFree(L); *why = kLandNotKept; return 0; }
     static int area[256];
     static unsigned char dry[256];
     static signed char theirs[PARCH_ZONES];
@@ -9975,6 +9976,8 @@ static int ParchLandMake(int z, ParchLand *L, const char **why)
     HeapFree(GetProcessHeap(), 0, file);
     return 1;
 }
+static int ParchLandMake(int z, ParchLand *L, const char **why) { return LandMakeAs(z, L, why, g_landKeptOnly); }
+static int LandAsKept(int z, ParchLand *L, const char **why) { return LandMakeAs(z, L, why, 1); }
 /* ---- the cut (his pick, 11 Oct ~01:10, after GRADIENT, CUT and COMBO were mocked on Elwynn: "go with the COMBO"; and on
  * seeing it: "the blur starts too early and the gradient to transparency starts too early and the cut should maybe go
  * ... 50 to 100 pixels bigger in every direction around the cut so that the blur doesn't take away anything from inside
@@ -14081,12 +14084,14 @@ static struct {
     int n, z[SAT_HIDE_ZONES], hidden[SAT_HIDE_ZONES];
     unsigned char *px[SAT_HIDE_ZONES];
     unsigned char bits[EXPLORED_BYTES];
+    unsigned landless;                       /* (bit k: zone k's mask not cut to its land, its land not kept: SatHideCut) */
     DWORD ran;
 } g_shj;
 /* the view's: wanted for this screen (on), what for, how far (stage: 0 to post, 1 being made, 2 going up, 3 up), its
  * zones' masks (z, px until up), and when it was up, and when the bar came to PARCH_SHOW_BAR */
 static struct {
     int on, c, stage, n, up, failed, looked, nz;
+    unsigned landless;                       /* (bit k: mask k not cut to its zone's land, as g_shj's) */
     LONG screen;
     float x, y;
     int z[SAT_HIDE_ZONES], zs[SAT_HIDE_ZONES];   /* (zs, nz: the zones round the arrival, those with ground hidden or not) */
@@ -14121,10 +14126,12 @@ static void SatHideGrow(unsigned char *m, unsigned char *tmp, int S, int passes,
         for (int i = 0; i < S * S; i++) m[i] = tmp[i];
     }
 }
-/* Zone z's mask (the worker's): its pieces laid as ParchMake lays them (the twelve tiles' size gives its texels a page
- * pixel: 256, or 512 in HD), found ones into f, the rest into u, then the hidden ground (u grown, less f, softened) into
- * out's alpha in SAT_HIDE_RGB, with its smaller copies. f, u, t: S x S of scratch. The texels hidden (over a 32nd). */
-static int SatHideMake(int z, const unsigned char *bits, unsigned char *out, unsigned char *f, unsigned char *u, unsigned char *t)
+/* Zone z's ground not found, its edge not yet softened (the worker's): its pieces laid as ParchMake lays them (the twelve
+ * tiles' size gives its texels a page pixel: 256, or 512 in HD), found ones into f, the rest into u, then u grown, less
+ * f, never over the open sea. u, f, t: S x S. box: NULL, or only the pieces' tiles meeting that world box (x from, x
+ * to, y from, y to: a neighbour laid for the cut alone, SatHideRun) read. 1 when laid, 0 when its pages could not be
+ * read. */
+static int SatHideLay(int z, const unsigned char *bits, unsigned char *u, unsigned char *f, unsigned char *t, const float *box)
 {
     const int S = SAT_HIDE_PX, c = g_pz[z].map;
     const char *name = g_pz[z].name;
@@ -14143,10 +14150,16 @@ static int SatHideMake(int z, const unsigned char *bits, unsigned char *out, uns
         for (int j = 0; j < nh; j++)
             for (int q = 0; q < nw; q++) {
                 unsigned w = 0, h = 0;
-                unsigned char *pt = ParchTile(name, P->tex, j * nw + q + 1, &w, &h);
-                if (!pt) continue;
                 int x0 = P->ox + q * 256, y0 = P->oy + j * 256;
                 int cw = P->w - q * 256 < 256 ? P->w - q * 256 : 256, ch = P->h - j * 256 < 256 ? P->h - j * 256 : 256;
+                if (box) {                                          /* (its tile's box on the world: meeting that box, or not read) */
+                    const ParchZone *Z = &g_pz[z];
+                    float ya = Z->l + (Z->r - Z->l) * (float)x0 / PARCH_MAP_W, yb = Z->l + (Z->r - Z->l) * (float)(x0 + cw) / PARCH_MAP_W;
+                    float xa = Z->t + (Z->b - Z->t) * (float)y0 / PARCH_MAP_H, xb = Z->t + (Z->b - Z->t) * (float)(y0 + ch) / PARCH_MAP_H;
+                    if ((xa > xb ? xa : xb) < box[0] || (xa < xb ? xa : xb) > box[1] || (ya > yb ? ya : yb) < box[2] || (ya < yb ? ya : yb) > box[3]) continue;
+                }
+                unsigned char *pt = ParchTile(name, P->tex, j * nw + q + 1, &w, &h);
+                if (!pt) continue;
                 for (int my = 0; my < S; my++) {
                     float cy = ((float)my + 0.5f) * PARCH_MAP_H / S - (float)y0;
                     if (cy < 0 || cy >= (float)ch) continue;
@@ -14165,7 +14178,6 @@ static int SatHideMake(int z, const unsigned char *bits, unsigned char *out, uns
             }
     }
     SatHideGrow(u, t, S, SAT_HIDE_GROW, 0);
-    int hidden = 0;
     const ParchZone *Z = &g_pz[z];
     for (int my = 0; my < S; my++)
         for (int mx = 0; mx < S; mx++) {
@@ -14181,7 +14193,14 @@ static int SatHideMake(int z, const unsigned char *bits, unsigned char *out, uns
             }
             u[i] = (unsigned char)((unsigned)u[i] * keep / 255u);
         }
-    SatHideGrow(u, t, S, SAT_HIDE_SOFT, 1);
+    return 1;
+}
+/* u (S x S: the ground not found, softened) into out's alpha in SAT_HIDE_RGB, with its smaller copies. The texels
+ * hidden (over a 32nd). */
+static int SatHideOut(const unsigned char *u, unsigned char *out)
+{
+    const int S = SAT_HIDE_PX;
+    int hidden = 0;
     SIZE_T at = 0;
     for (int w = S; w >= 1; w /= 2) {                               /* (its smaller copies, each a box of the one before) */
         unsigned char *o = out + at;
@@ -14202,21 +14221,143 @@ static int SatHideMake(int z, const unsigned char *bits, unsigned char *out, uns
     }
     return hidden;
 }
-/* The job posted, run (the worker's thread, never the view's): each zone's mask, a zone with nothing hidden let go;
- * stopping between zones once stale. */
+/* Zone z's mask whole, as laid (SatHideLay, then SatHideOut): f, u, t: S x S of scratch. The texels hidden. (The tests'
+ * look at one zone's mask by the rule alone; SatHideRun's are cut to their land.) */
+__attribute__((unused)) static int SatHideMake(int z, const unsigned char *bits, unsigned char *out, unsigned char *f, unsigned char *u, unsigned char *t)
+{
+    if (!SatHideLay(z, bits, u, f, t, NULL)) return 0;
+    SatHideGrow(u, t, SAT_HIDE_PX, SAT_HIDE_SOFT, 1);
+    return SatHideOut(u, out);
+}
+/* ---- each zone's mask cut to its land (the second attack on 0.4.1, 14 Oct: a zone's piece not found runs 100 to 250
+ * yards past its border, as the parchment's paper band does, and its mask hid the neighbour's ground there even where
+ * the neighbour's own piece is found; on the fog client's own files, in cells of 10 yards, 1,651 of ground found hidden
+ * round Goldshire for one character, 7,914 round Theramore for another) ----
+ * The parchment's own land (ParchLand, as kept in Data\CinderLoad\land-<zone>.bin: LandAsKept, never made here) says,
+ * chunk by chunk, whose ground each texel of a zone's mask lies on. On another zone's land that may be laid under it
+ * (LAND_THEIRS, inside that zone's page's box: where the parchment's paper past its border gives way to that zone's own
+ * painting, ParchLandCut), the mask hides no more than that zone's own rule hides there (its ground not found, as laid,
+ * before either is softened; a zone not round the arrival laid for this alone, only near that ground, its mask not
+ * drawn): the neighbour's ground found shows, and its ground not found stays hidden, by both where both are drawn, so no
+ * seam where two zones' ground not found meet. Only a texel wholly on that land is cut, and the edge is softened outward
+ * only, so the zone's own ground stays hidden to its border and the edge fades over the neighbour's (as the parchment's
+ * cut: whole inside, fading past it). Its own land, the sea (SatHideLay), a capital's, a zone whose pages could not be
+ * read: as before. A zone whose land is not kept (not made yet: the land is made while the parchment is chosen,
+ * LandWarmTurn, or on a parchment's first visit): its mask as before, over its border, said in the log. Measured on the
+ * fog client's own files at 17 places on both continents for three characters (cells of 10 yards): the ground found
+ * hidden down by 87 to 100 in 100 everywhere it was (1,651 to 166 round Goldshire, 7,914 to 579 round Theramore, 812 to
+ * 0 round Goldshire for another), the ground not found shown up by 7 cells at most of a zone round the arrival. */
+#define SAT_HIDE_MORE  16            /* zones not round the arrival laid for the cut alone (their land under these masks), at most */
+/* The page whose land (LAND_THEIRS on L's grid) world x, y lies on, or -1. */
+static int SatHidePage(const ParchLand *L, float wx, float wy)
+{
+    float gx, gy;
+    LandChunkAt(wx, wy, &gx, &gy);
+    int cx = (int)gx - (gx < 0), cy = (int)gy - (gy < 0);
+    return LandTheirs(L, cx, cy) ? L->pg[(cy - L->gy0) * L->w + cx - L->gx0] : -1;
+}
+/* Zone k's ground not found (u, as laid) cut on the land of zones zz[0..m) (all laid but k: the job's, then neighbours
+ * laid for the cut), its texels cut marked in cut: how many, or -1 when its land is not kept (L none: nothing cut). */
+static int SatHideCut(int k, const ParchLand *L, const int *zz, int m, unsigned char *const *raw, const int *laid, unsigned char *u,
+                      unsigned char *cut)
+{
+    const int S = SAT_HIDE_PX;
+    const ParchZone *Z = &g_pz[zz[k]];
+    for (int i = 0; i < S * S; i++) cut[i] = 0;
+    if (!L->m) return -1;
+    int n = 0;
+    float dy = (Z->r - Z->l) / S, dx = (Z->b - Z->t) / S;
+    for (int my = 0; my < S; my++)
+        for (int mx = 0; mx < S; mx++) {
+            int i = my * S + mx, j = -1;
+            if (!u[i]) continue;
+            float wy = Z->l + dy * ((float)mx + 0.5f), wx = Z->t + dx * ((float)my + 0.5f);
+            int pg = SatHidePage(L, wx, wy);                         /* (the texel's middle and its four corners, all that
+                                                                    * zone's land: a texel touching this zone's own keeps it) */
+            if (pg < 0 || SatHidePage(L, wx - 0.5f * dx, wy - 0.5f * dy) != pg || SatHidePage(L, wx - 0.5f * dx, wy + 0.5f * dy) != pg ||
+                SatHidePage(L, wx + 0.5f * dx, wy - 0.5f * dy) != pg || SatHidePage(L, wx + 0.5f * dx, wy + 0.5f * dy) != pg) continue;
+            for (int q = 0; q < m && j < 0; q++) if (q != k && zz[q] == pg) j = q;
+            if (j < 0 || !laid[j]) continue;                        /* (that zone's rule not known: as before) */
+            const ParchZone *N = &g_pz[pg];
+            int nx = (int)((wy - N->l) / (N->r - N->l) * S), ny = (int)((wx - N->t) / (N->b - N->t) * S);
+            nx = nx < 0 ? 0 : nx >= S ? S - 1 : nx;                 /* (a chunk's middle in its box: the nearest of its texels) */
+            ny = ny < 0 ? 0 : ny >= S ? S - 1 : ny;
+            if (raw[j][ny * S + nx] < u[i]) { u[i] = raw[j][ny * S + nx]; cut[i] = 1; n++; }
+        }
+    return n;
+}
+/* The job posted, run (the worker's thread, never the view's): each zone's ground not found laid; its land as kept; the
+ * zones not round the arrival whose land lies under that ground laid too (SAT_HIDE_MORE at most: their rule for the cut,
+ * no mask of their own); then each zone's cut to its land against the others' (SatHideCut) and made its mask, a zone
+ * with nothing hidden let go; stopping between zones once stale. */
 static void SatHideRun(void)
 {
     DWORD t0 = GetTickCount();
     const SIZE_T S2 = (SIZE_T)SAT_HIDE_PX * SAT_HIDE_PX;
-    unsigned char *scratch = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, 3 * S2);
-    for (int k = 0; k < g_shj.n; k++) {
-        g_shj.hidden[k] = 0; g_shj.px[k] = NULL;
+    const int S = SAT_HIDE_PX;
+    int n = g_shj.n, m = n, zz[SAT_HIDE_ZONES + SAT_HIDE_MORE], laid[SAT_HIDE_ZONES + SAT_HIDE_MORE];
+    unsigned char *raw[SAT_HIDE_ZONES + SAT_HIDE_MORE], *more = NULL;
+    float box[SAT_HIDE_ZONES + SAT_HIDE_MORE][4];                   /* (each neighbour's: the world under these masks, x, y) */
+    static ParchLand land[SAT_HIDE_ZONES];                           /* (the worker's alone) */
+    unsigned char *scratch = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(5 + n) * S2);   /* (f, t, the one cut, it
+                                                                    * uncut, its texels cut; then each zone's as laid) */
+    g_shj.landless = 0;
+    for (int k = 0; k < n; k++) {
+        g_shj.hidden[k] = 0; g_shj.px[k] = NULL; laid[k] = 0; zz[k] = g_shj.z[k];
+        raw[k] = scratch ? scratch + (SIZE_T)(5 + k) * S2 : NULL;
         if (!scratch || SatHideState() == 3) continue;
-        unsigned char *o = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, SAT_HIDE_BYTES);
-        if (!o) continue;
-        g_shj.hidden[k] = SatHideMake(g_shj.z[k], g_shj.bits, o, scratch, scratch + S2, scratch + 2 * S2);
-        if (g_shj.hidden[k]) g_shj.px[k] = o; else HeapFree(GetProcessHeap(), 0, o);
+        laid[k] = SatHideLay(zz[k], g_shj.bits, raw[k], scratch, scratch + S2, NULL);
+        const char *why = "";
+        if (laid[k] && !LandAsKept(zz[k], &land[k], &why)) ParchLandFree(&land[k]);
+        const ParchZone *Z = &g_pz[zz[k]];
+        float ex = (Z->t - Z->b) / S, ey = (Z->l - Z->r) / S;          /* (a texel, yards: the room round each point) */
+        ex = ex < 0 ? -ex : ex; ey = ey < 0 ? -ey : ey;
+        for (int i = 0; land[k].m && i < S * S; i++) {                /* (its neighbours under it, not round the arrival) */
+            if (!raw[k][i]) continue;
+            float wx = Z->t + (Z->b - Z->t) * ((float)(i / S) + 0.5f) / S, wy = Z->l + (Z->r - Z->l) * ((float)(i % S) + 0.5f) / S;
+            int pg = SatHidePage(&land[k], wx, wy), at = -1;
+            for (int q = n; pg >= 0 && q < m && at < 0; q++) if (zz[q] == pg) at = q;
+            for (int q = 0; pg >= 0 && q < n; q++) if (zz[q] == pg) pg = -1;
+            if (pg < 0 || (at < 0 && m == SAT_HIDE_ZONES + SAT_HIDE_MORE)) continue;
+            if (at < 0) { at = m++; zz[at] = pg; box[at][0] = box[at][2] = 1e30f; box[at][1] = box[at][3] = -1e30f; }
+            if (wx - ex < box[at][0]) box[at][0] = wx - ex;
+            if (wx + ex > box[at][1]) box[at][1] = wx + ex;
+            if (wy - ey < box[at][2]) box[at][2] = wy - ey;
+            if (wy + ey > box[at][3]) box[at][3] = wy + ey;
+        }
     }
+    if (scratch && m > n) more = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(m - n) * S2);
+    for (int k = n; k < m; k++) {                                   /* (laid for the cut alone, only what lies near that ground,
+                                                                    * its own texels' growth round it too; none: as before) */
+        const ParchZone *N = &g_pz[zz[k]];
+        float ex = (N->t - N->b) / S * (SAT_HIDE_GROW + 1), ey = (N->l - N->r) / S * (SAT_HIDE_GROW + 1);
+        ex = ex < 0 ? -ex : ex; ey = ey < 0 ? -ey : ey;
+        box[k][0] -= ex; box[k][1] += ex; box[k][2] -= ey; box[k][3] += ey;
+        raw[k] = more ? more + (SIZE_T)(k - n) * S2 : NULL;
+        laid[k] = more && SatHideState() != 3 && SatHideLay(zz[k], g_shj.bits, raw[k], scratch, scratch + S2, box[k]);
+    }
+    for (int k = 0; k < n; k++) {
+        if (!laid[k] || SatHideState() == 3) continue;
+        unsigned char *o = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, SAT_HIDE_BYTES), *t = scratch + S2, *u = scratch + 2 * S2;
+        unsigned char *w = scratch + 3 * S2, *cut = scratch + 4 * S2;
+        if (!o) continue;
+        for (SIZE_T i = 0; i < S2; i++) u[i] = raw[k][i];
+        int cuts = SatHideCut(k, &land[k], zz, m, raw, laid, u, cut);
+        SatHideGrow(u, t, SAT_HIDE_PX, SAT_HIDE_SOFT, 1);
+        if (cuts > 0) {                                             /* (softened outward only: a texel not cut as it was uncut, so
+                                                                    * the zone's own ground stays whole to its border and the edge
+                                                                    * fades over the neighbour's ground found, as the parchment's
+                                                                    * cut fades past its border) */
+            for (SIZE_T i = 0; i < S2; i++) w[i] = raw[k][i];
+            SatHideGrow(w, t, SAT_HIDE_PX, SAT_HIDE_SOFT, 1);
+            for (SIZE_T i = 0; i < S2; i++) if (!cut[i]) u[i] = w[i];
+        }
+        g_shj.hidden[k] = SatHideOut(u, o);
+        if (g_shj.hidden[k]) g_shj.px[k] = o; else HeapFree(GetProcessHeap(), 0, o);
+        if (g_shj.hidden[k] && cuts < 0) g_shj.landless |= 1u << k;
+    }
+    for (int k = 0; k < n; k++) ParchLandFree(&land[k]);
+    if (more) HeapFree(GetProcessHeap(), 0, more);
     if (scratch) HeapFree(GetProcessHeap(), 0, scratch);
     g_shj.ran = GetTickCount() - t0;
 }
@@ -14303,7 +14444,7 @@ static void SatHideScreenEnd(void)
 {
     if (SatHideState() == 1) InterlockedCompareExchange(&g_shj.state, 3, 1);
     if (!g_sh.on || g_sh.screen != g_viewScreen) return;
-    char m[400];
+    char m[720];                                                    /* (the names below stop past 300 and 560: room for the rest) */
     int len = wsprintfA(m, "  the satellite's areas, as discovered: ");
     if (g_sh.stage < 3) len += wsprintfA(m + len, "the ground not found not made in time (%d zones round the arrival), so no detail shown", g_sh.looked);
     else if (!g_sh.n) len += wsprintfA(m + len, "every one of the %d zones round the arrival found whole, nothing hidden", g_sh.looked);
@@ -14311,6 +14452,11 @@ static void SatHideScreenEnd(void)
         len += wsprintfA(m + len, "ground not found hidden in %d of the %d zones round the arrival (", g_sh.up, g_sh.looked);
         for (int k = 0; k < g_sh.up && len < 300; k++) len += wsprintfA(m + len, "%s%s", k ? ", " : "", g_pz[g_sh.z[k]].name);
         len += wsprintfA(m + len, "), made in %lu ms", (unsigned long)g_sh.ms);
+        if (g_sh.landless) {                                        /* (SatHideCut: as before, over their borders) */
+            len += wsprintfA(m + len, "; not cut to their land, not kept yet: ");
+            for (int k = 0, n = 0; k < g_sh.up && len < 560; k++)
+                if (g_sh.landless & (1u << k)) len += wsprintfA(m + len, "%s%s", n++ ? ", " : "", g_pz[g_sh.z[k]].name);
+        }
     }
     if (g_sh.failed) wsprintfA(m + len, "; OpenGL would not take a mask, so no detail shown");
     Log(m);
@@ -14354,9 +14500,12 @@ static void SatHideWork(int known, int c, float x, float y, LONG screen, DWORD n
         SetEvent(g_sjEvent);
     }
     if (g_sh.stage == 1 && SatHideState() == 2) {                  /* made: its masks the view's, to go up */
-        g_sh.n = 0;
+        g_sh.n = 0; g_sh.landless = 0;
         for (int k = 0; k < g_shj.n; k++)
-            if (g_shj.px[k]) { g_sh.z[g_sh.n] = g_shj.z[k]; g_sh.px[g_sh.n++] = g_shj.px[k]; g_shj.px[k] = NULL; }
+            if (g_shj.px[k]) {
+                if (g_shj.landless & (1u << k)) g_sh.landless |= 1u << g_sh.n;
+                g_sh.z[g_sh.n] = g_shj.z[k]; g_sh.px[g_sh.n++] = g_shj.px[k]; g_shj.px[k] = NULL;
+            }
         g_sh.ms = g_shj.ran;
         g_shj.n = 0;
         InterlockedExchange(&g_shj.state, 0);
