@@ -14329,7 +14329,12 @@ static void SatHideWork(int known, int c, float x, float y, LONG screen, DWORD n
     if (!want) { if (g_sh.on) SatHideDrop(); return; }
     if (!g_sh.on || c != g_sh.c || x != g_sh.x || y != g_sh.y) {   /* (the arrival known, or moved) */
         int zs[SAT_HIDE_ZONES], looked = 0, nz = SatHideZones(c, x, y, zs, &looked), same = g_sh.on && c == g_sh.c && nz == g_sh.nz;
-        for (int k = 0; same && k < nz; k++) same = zs[k] == g_sh.zs[k];
+        for (int k = 0; same && k < nz; k++) {                      /* (the same zones, in any order: a few yards can turn two of
+                                                                    * them nearer first, and the masks need nothing new) */
+            int in = 0;
+            for (int j = 0; j < nz && !in; j++) in = zs[k] == g_sh.zs[j];
+            same = in;
+        }
         if (same) { g_sh.x = x; g_sh.y = y; }                       /* (moved within the same zones: the login's place taken again
                                                                     * from the game's own after the list's: the masks stand) */
         else {

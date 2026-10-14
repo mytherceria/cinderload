@@ -13764,6 +13764,40 @@ static void TestSatHideWorkerOnly(void)
     SatTestReset(); g_map.ok = 0;
 }
 
+/* The attack on 0.4.1 (14 Oct): the arrival moved a few yards within the screen (a login's place, the list's and then the
+ * game's) so that the same zones round it come in another order */
+static void TestSatHideOrder(void)
+{
+    /* a few yards move the arrival from just inside Duskwood's page to inside both pages: the same zones in another
+     * order; the masks stand, not made again, the detail not held back again */
+    SatTestWorld("sat-hide-order", 64, 25, 40, 45, 56, 1);
+    SatHideTables2();
+    int el = SatHideRow("Elwynn"), dw = SatHideRow("Duskwood");
+    SatWorkerStart();
+    g_parchFullOn = 0; g_viewShown = 0.25f;
+    memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[125 >> 3] |= 1 << (125 & 7); g_scrBits[600 >> 3] |= 1 << (600 & 7);
+    g_scrKnown = 2; InterlockedIncrement(&g_scrSeq);
+    SatNewScreen(); SatArrive(0, -10260, 0); SatView(0, -10260, 0, 3500);
+    DWORD t = 7000;
+    for (int f = 0; f < 16; f++, t += 7) { SatFrame(t, 5120, 2160); SatWorkerTurn(); }
+    int z0[SAT_HIDE_ZONES], l0, z1[SAT_HIDE_ZONES], l1, n0 = SatHideZones(0, -10260, 0, z0, &l0), n1 = SatHideZones(0, -10240, 0, z1, &l1);
+    int ordered = n0 == 2 && n1 == 2 && z0[0] == dw && z0[1] == el && z1[0] == el && z1[1] == dw;   /* (the order turned, the set the same) */
+    unsigned name0 = g_shTex[0];
+    int up = g_sh.stage == 3 && g_sh.up == 1 && name0 != 0;
+    SatArrive(0, -10240, 0);
+    t += PARCH_FADE_MS + 20;
+    SatFrame(t, 5120, 2160);
+    int ok = ordered && up && g_sh.stage == 3 && g_sh.up == 1 && g_shTex[0] == name0 && !g_tsat[name0].deleted && SatHideBatch() >= 0 &&
+         SatDetailBatches() > 0;
+    SatScreenEnd(); SatRelease();
+    for (int k = 0; k < 3; k++) SatWorkerTurn();
+    ok &= TsatLive() == 0;
+    Check(ok, "the satellite's hidden ground (the attack on 0.4.1): the arrival moved a few yards within the screen so the same zones round it come in another order: its masks stand (not dropped and made again, the detail not held back meanwhile)");
+    ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
+    g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
+    SatTestReset(); g_map.ok = 0;
+}
+
 /* 0.4.1 (his film of 13 Oct: the Moonglade teleport opened on the whole world for four frames, then leapt 2.9 times
  * closer in one frame to halfway in): a later screen whose arrival the game writes only after it began shows nothing
  * (black, the view's first list) until it is known, then opens halfway in; never past VIEW_ARRIVE_WAIT_MS (then the
@@ -13810,6 +13844,7 @@ static void TestSatellite(void)
     TestSatArriveWait();
     TestSatHide();
     TestSatHideWorkerOnly();
+    TestSatHideOrder();
     TestSatGeometry();
     TestSatIndex();
     TestSatMissing();
