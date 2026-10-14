@@ -13583,6 +13583,7 @@ static void TestSatHide(void)
 {
     SatTestWorld("sat-hide", 64, 25, 40, 45, 54, 1);
     SatHideTables();
+    SatWorkerStart();                                                   /* (its worker's: the masks are made only there) */
     long heap = shim_heap_live;
     /* the mask, by the parchment's rule: Goldshire's piece not found, hidden; Northshire's found, not; neither, not */
     unsigned char *px = malloc(SAT_HIDE_BYTES), *sc = malloc(3 * SAT_HIDE_PX * SAT_HIDE_PX);
@@ -13608,7 +13609,7 @@ static void TestSatHide(void)
     SatHideBits(0, 2);
     SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
     DWORD t = 5000;
-    for (int f = 0; f < 6; f++, t += 7) SatFrame(t, 5120, 2160);
+    for (int f = 0; f < 14; f++, t += 7) { SatFrame(t, 5120, 2160); SatWorkerTurn(); }
     int ok = g_sh.on && g_sh.stage == 3 && g_sh.up == 1 && g_sh.n == 1 && !strcmp(g_pz[g_sh.z[0]].name, "Elwynn") && g_shTex[0] &&
              g_tsat[g_shTex[0]].rgba && g_tsat[g_shTex[0]].w0 == SAT_HIDE_PX && g_tsat[g_shTex[0]].levels == 9 &&
              g_tsat[g_shTex[0]].maxLevel == 8 && g_tsat[g_shTex[0]].minf == GL_LINEAR_MIPMAP_LINEAR_ && SatUpCount() == g_ssN && g_ssN > 0;
@@ -13654,7 +13655,7 @@ static void TestSatHide(void)
         g_parchFullOn = k == 0; g_viewShown = 0.5f;
         SatHideBits(k == 2, k == 1 ? 0 : 1);
         SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
-        for (int f = 0; f < 8; f++, t += 7) SatFrame(t, 5120, 2160);
+        for (int f = 0; f < 14; f++, t += 7) { SatFrame(t, 5120, 2160); SatWorkerTurn(); }
         t += PARCH_FADE_MS + 20;
         SatFrame(t, 5120, 2160);
         nh &= SatHideBatch() < 0 && SatBatches(NULL) > 1 && g_tsatErr == 0;
@@ -13674,6 +13675,90 @@ static void TestSatHide(void)
     g_parchAsked = asked; g_mapFull = full;
     nh &= shim_heap_live == heap;
     Check(nh, "the satellite's hidden ground (0.4.1): the full map chosen, this character's areas not known, or every piece round the arrival found: nothing hidden, the detail drawn as 0.4.0 drew it; the explored bits read for the satellite only with the areas as discovered; the heap even");
+    ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
+    g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
+    SatTestReset(); g_map.ok = 0;
+}
+
+/* The attack on 0.4.1 (14 Oct): Elwynn and a neighbour south of it whose page overlaps its own (Duskwood's here, its box
+ * from -9300 down), as the client's are: Elwynn's piece GOLD (Goldshire) and Duskwood's piece DUSKP, DUSKP lying over
+ * GOLD's northern part on the world, as a zone's piece's art runs past its border onto its neighbour */
+static void SatHideTables2(void)
+{
+    static unsigned av[3 * 25];                                         /* AreaTable: Northshire 125, Goldshire 548, Duskwood's 600 */
+    memset(av, 0, sizeof av);
+    av[0] = 9; av[3] = 125; av[10] = 1; av[25] = 87; av[28] = 548; av[35] = 1; av[50] = 42; av[53] = 600; av[60] = 1;
+    static unsigned char atb[768];
+    ParchAreas(atb, TestWdbc(atb, 3, 25, av, "\0", 1));
+    static const char wstr[] = "\0Azeroth\0Elwynn\0Duskwood\0";
+    unsigned wv[24] = { 1, 0, 0, 1, TestF(16000), TestF(-16000), TestF(16000), TestF(-16000),
+                        30, 0, 12, 9, TestF(1535.4f), TestF(-1935.4f), TestF(-7939.6f), TestF(-10254.2f),
+                        31, 0, 10, 16, TestF(1535.4f), TestF(-1935.4f), TestF(-9300.0f), TestF(-11614.6f) };
+    static unsigned char wma[256], wmo[512];
+    unsigned wn = TestWdbc(wma, 3, 8, wv, wstr, sizeof wstr);
+    static const char ostr[] = "\0NORTH\0GOLD\0DUSKP\0";
+    unsigned ov[3 * 17] = { 0 };
+    unsigned o0[13] = { 1, 30, 9, 0, 0, 0, 0, 0, 1, 300, 200, 600, 40 }, o1[13] = { 2, 30, 87, 0, 0, 0, 0, 0, 7, 200, 150, 350, 380 };
+    unsigned o2[13] = { 3, 31, 42, 0, 0, 0, 0, 0, 12, 200, 80, 350, 0 };
+    memcpy(ov, o0, sizeof o0); memcpy(ov + 17, o1, sizeof o1); memcpy(ov + 34, o2, sizeof o2);
+    ParchTables(wma, wn, wmo, TestWdbc(wmo, 3, 17, ov, ostr, sizeof ostr));
+    g_parchTablesOk = 1;
+    static char tb[29][64];
+    const char *tn[29], *td[29];
+    unsigned tl[29];
+    for (int i = 0; i < 29; i++) {                                      /* both zones' twelve tiles, then the pieces' (opaque) */
+        if (i < 12) snprintf(tb[i], sizeof tb[i], "Interface\\WorldMap\\Elwynn\\Elwynn%d.blp", i + 1);
+        else if (i < 24) snprintf(tb[i], sizeof tb[i], "Interface\\WorldMap\\Duskwood\\Duskwood%d.blp", i - 11);
+        else if (i < 28) snprintf(tb[i], sizeof tb[i], "Interface\\WorldMap\\Elwynn\\%s%d.blp", i < 26 ? "NORTH" : "GOLD", (i - 24) % 2 + 1);
+        else snprintf(tb[i], sizeof tb[i], "Interface\\WorldMap\\Duskwood\\DUSKP1.blp");
+        tn[i] = tb[i];
+        td[i] = (const char *)TestPalBlp(256, 256, 0x406020, i < 24 ? 0 : 1, &tl[i]);
+    }
+    MakeMpq("Data/interface.MPQ", 29, tn, td, tl);
+    for (int i = 0; i < 29; i++) free((void *)td[i]);
+}
+static int SatDetailBatches(void) { int n = 0; for (int b = 0; b < g_vbN; b++) n += g_vb[b].tex >= VT_COUNT && g_vb[b].tex < SAT_HIDE_TEX0; return n; }
+static int SatHideRow(const char *name) { for (int i = 0; i < g_pzN; i++) if (!strcmp(g_pz[i].name, name)) return i; return -1; }
+/* The attack on 0.4.1 (14 Oct): the hidden ground's masks are made by reading the client's archives (11 zones round
+ * Goldshire: 288 MB read in 74,767 calls, 180 ms on this machine, more under Wine), which on the view's thread would stop
+ * the view for that long */
+static void TestSatHideWorkerOnly(void)
+{
+    DWORD t = 9000;
+    /* never on the view's thread: without CinderSat.MPQ the worker still starts for the masks, and the view's frames
+     * only post the job (its reads of the client's archives on the worker); with no worker at all, nothing hidden and
+     * nothing made */
+    Fresh("sat-hide-noarchive"); GameDir();
+    SatTestReset(); SatTestMap(SH_21x9);
+    SatRead();
+    SatHideTables2();
+    TestSatGl(1, 1);
+    long heap = shim_heap_live;
+    int ok = !g_sat.ok;
+    SatWorkerStart();
+    ok &= g_sjWorker == 1 && LogSays("its masks made by a worker thread of their own");
+    g_parchFullOn = 0; g_viewShown = 0.25f;
+    memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[125 >> 3] |= 1 << (125 & 7);   /* (Northshire found, Goldshire not) */
+    g_scrKnown = 2; InterlockedIncrement(&g_scrSeq);
+    SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    for (int f = 0; f < 3; f++, t += 7) SatFrame(t, 5120, 2160);
+    int posted = g_shj.state == 1 && g_sh.stage == 1;                    /* (posted, left to the worker: not made in a frame) */
+    SatWorkerTurn();
+    for (int f = 0; f < 3; f++, t += 7) SatFrame(t, 5120, 2160);
+    t += PARCH_FADE_MS + 20;
+    SatFrame(t, 5120, 2160);
+    ok &= posted && g_sh.stage == 3 && SatHideBatch() >= 0 && SatDetailBatches() == 0;
+    SatScreenEnd(); SatRelease();
+    int made = g_tsatMade;
+    InterlockedExchange(&g_sjWorker, 0);                                 /* (its thread could not be started) */
+    SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    for (int f = 0; f < 3; f++, t += 7) SatFrame(t, 5120, 2160);
+    t += PARCH_FADE_MS + 20;
+    SatFrame(t, 5120, 2160);
+    ok &= made > 0 && g_shj.state == 0 && !g_sh.on && SatHideBatch() < 0 && g_tsatMade == made;
+    SatRelease();
+    ok &= TsatLive() == 0 && shim_heap_live == heap;
+    Check(ok, "the satellite's hidden ground (the attack on 0.4.1): its masks are made on the worker's thread only, never in the view's frame (its reads of the client's archives would stop the view): without CinderSat.MPQ the worker starts for them (said), the view's frames post the job and draw the masks once the worker has made them; with no worker, nothing hidden, nothing made; the heap even");
     ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
     g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
     SatTestReset(); g_map.ok = 0;
@@ -13724,6 +13809,7 @@ static void TestSatellite(void)
     TestSatGlide();
     TestSatArriveWait();
     TestSatHide();
+    TestSatHideWorkerOnly();
     TestSatGeometry();
     TestSatIndex();
     TestSatMissing();
