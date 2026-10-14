@@ -17,6 +17,7 @@ Ultrawide and widescreen loading screens for the 1.12 World of Warcraft client. 
 
 - The satellite hides what your character has not discovered, as the parchment does, when Map areas is Discovered.
 - The satellite glides in one smooth zoom onto where you arrive: no more stopping short of the end and then rushing in.
+- A teleport on the satellite opens straight on its start, halfway in, without a moment of the whole world first.
 
 CinderLoad began inside [Azeroth Atmosphere](https://github.com/mytherceria/azeroth-atmosphere) and has its own home here from 0.1.6 on.
 
