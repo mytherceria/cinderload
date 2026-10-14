@@ -13679,9 +13679,50 @@ static void TestSatHide(void)
     SatTestReset(); g_map.ok = 0;
 }
 
+/* 0.4.1 (his film of 13 Oct: the Moonglade teleport opened on the whole world for four frames, then leapt 2.9 times
+ * closer in one frame to halfway in): a later screen whose arrival the game writes only after it began shows nothing
+ * (black, the view's first list) until it is known, then opens halfway in; never past VIEW_ARRIVE_WAIT_MS (then the
+ * whole world, as before); a login's (known at once) and a session's first are as they were */
+static void TestSatArriveWait(void)
+{
+    Fresh("sat-arrive-wait");
+    g_mapShown = 1;
+    { const char *mt = "map 0 3f000000 b7a7c5ac 3f000000 b7a7c5ac\nend 3000\n"; MapParse(mt, (unsigned)strlen(mt)); }
+    Poke(BAR_MAP_VA, 0);
+    g_classSure = 0; g_holdMs = 0; g_driftOn = 1; g_screenWatch = 1; g_parchOn = 0; g_ovOn = 0;
+    InitializeCriticalSection(&g_stepLock);
+    g_viewOn = 1;
+    float hEnd = 0.5f * 3000 * 2e-5f, h0 = 0.5f * powf(hEnd / 0.5f, LATER_START);
+    int ok = 1, waitOk = 1, laterOk = 1;
+    for (int run = 0; run < 3; run++) {                                  /* a teleport; one never written; a session's first */
+        Poke(MAP_DEST_MAP_VA, 0); PutFloat(MAP_DEST_X_VA, -5000.0f); PutFloat(MAP_DEST_Y_VA, 10000.0f);
+        DriftScreenGone();                                               /* the last screen left the arrival here */
+        g_zoomScreens = run == 2 ? 0 : 1;
+        DWORD t = 4000000 + 100000 * (DWORD)run;
+        GameStep(0.0f, t);                                               /* the game's first frame: nothing written yet */
+        int blackFrames = 0, wholeDrawn = 0, firstDrawnHalf = -1;
+        for (int f = 1; f < 90; f++) {
+            DWORD now = t + 7 * (DWORD)f;
+            if (run == 0 && f == 9) PutFloat(MAP_DEST_Y_VA, 15000.0f);    /* NEW_WORLD, 63 ms in */
+            ViewStep(0.01f * f / 9, now, 1000, 500);
+            int map = TestBatch(VT_MAP) >= 0;
+            if (!map) { if (!g_vbN) blackFrames++; continue; }
+            float h = 0.5f * (g_bgUV[3] - g_bgUV[5]);
+            if (h > 0.45f) wholeDrawn++;
+            if (firstDrawnHalf < 0) firstDrawnHalf = fabsf(h - h0) < 0.02f * h0;
+        }
+        if (run == 0) ok &= g_destOk && blackFrames >= 8 && blackFrames <= 10 && wholeDrawn == 0 && firstDrawnHalf == 1;
+        if (run == 1) waitOk &= !g_destOk && blackFrames >= 50 && blackFrames <= 58 && wholeDrawn > 20;   /* (400 ms, then as before) */
+        if (run == 2) laterOk &= blackFrames == 0 && wholeDrawn > 0;     /* (the session's first opens on the whole world) */
+    }
+    g_viewOn = 0; g_viewSteps = 0; g_mapShown = 0; g_driftOn = 0; g_screenWatch = 0; g_zoomScreens = 0; g_destEndOk = 0; g_zoomHalf = 0;
+    Check(ok && waitOk && laterOk, "the living map (0.4.1): a later screen whose arrival is written after it began (a teleport) shows nothing until it is known, then opens halfway in, never a frame of the whole world first; not past VIEW_ARRIVE_WAIT_MS (then the whole world, as before); a session's first opens on the whole world as before");
+}
+
 static void TestSatellite(void)
 {
     TestSatGlide();
+    TestSatArriveWait();
     TestSatHide();
     TestSatGeometry();
     TestSatIndex();

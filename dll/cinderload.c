@@ -12548,6 +12548,11 @@ static int ViewReady(LONG seen, int *ours)
 /* The view's thread, each of its frames, g_stepLock held: the bar and the zoom a step on for the game's bar p at now,
  * and the frame's quads for W x H; never while the game's thread is to begin a screen (0: nothing moved, the last quads
  * stand). */
+/* A later screen of the living map whose arrival the game writes only once the screen has begun (a teleport, 0.4.1: his
+ * film of 13 Oct, the Moonglade teleport opening on the whole world for four frames, then leaping 2.9 times closer in one
+ * frame to halfway in, his rule's start): the view's frames are its first, nothing (black), until the arrival is known,
+ * so its first picture is that start; never longer than this after the screen began (then the whole world, as before). */
+#define VIEW_ARRIVE_WAIT_MS 400
 static int ViewStepLocked(float p, DWORD now, float W, float H)
 {
     if (!(p >= 0)) p = 0;
@@ -12559,6 +12564,10 @@ static int ViewStepLocked(float p, DWORD now, float W, float H)
     if (g_driftOn) DriftStep(s, now);
     g_viewShown = s;
     if (W >= 1 && H >= 1) { g_surfW = (int)W; g_surfH = (int)H; }   /* (built for the view's own window) */
+    if (!g_parchOn && g_zoomHalf && g_screenMap && !g_destOk && (LONG)(now - g_scrStartAt) < VIEW_ARRIVE_WAIT_MS) {
+        ViewFirstList(W, H, now);                               /* (the living map's: nothing, as the view opens) */
+        return 1;
+    }
     ViewBuild(W, H, s, now);
     return 1;
 }
