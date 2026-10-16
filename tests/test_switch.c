@@ -13906,6 +13906,141 @@ static void TestSatHideLand(void)
     SatTestReset(); g_map.ok = 0;
 }
 
+/* His rule of 16 Oct, on fogtest after his look at 0.4.1 there (its style.txt says "areas discovered", picked in the
+ * /cinderload window on 12 and 13 Oct, so its satellite hid the ground not found under the dark slate): "Show everything
+ * by default." The map's areas have been the full map by default since 11 Oct (StyleLoad, g_mapFull, the window's
+ * Defaults); these pin it end to end, from Data/CinderLoad/style.txt on disk through StyleLoad and the view's StylePick
+ * to a satellite screen at Goldshire for a character who has found Northshire and not Goldshire: a fresh install shows
+ * everything, a Discovered saved in game is kept and hides as 0.4.1 hides, and a saved value that is not one of the
+ * words shows everything */
+static const char kHisStyle[] =                                         /* (fogtest's style.txt as the window wrote it, 13 Oct) */
+    "# CinderLoad's loading screens, as chosen in game (the /cinderload panel); from the next loading screen.\r\n"
+    "# map: parchment or satellite. bar: retro (the game's own bar) or neo (the blade). areas: discovered (the parchment shows only what you have discovered) or full (all of it).\r\n"
+    "# fade: how the zones nearby fade on the parchment: zone (each across its own land), third (its nearest third whole), 3600 or 1800 (a circle of that many yards).\r\n"
+    "# thick: the bar's thickness, percent of its own (50 to 200). width: percent of the screen (20 to 100), or own (its own); retro's alone, Neo is always the whole width. whole: on (the whole width of the screen) or off.\r\n"
+    "# effect: Retro's fill, heat, smooth or blade (blade light); neofill: Neo's, the same three. colour: class (your class's) or ember. quality: Neo's, any of liquid, pulse, unstable and raw, or none.\r\n"
+    "map satellite\r\n"
+    "bar retro\r\n"
+    "areas discovered\r\n"
+    "thick 100\r\n"
+    "width own\r\n"
+    "whole off\r\n"
+    "effect heat\r\n"
+    "neofill blade\r\n"
+    "colour class\r\n"
+    "quality liquid pulse unstable raw\r\n";
+/* the chunk the /cinderload window is made from begins with the choice the DLL holds, so the window opens on it */
+static int SatAreasChunk(const char *areas)
+{
+    int size = (int)sizeof kSwitchesLua + 1024;
+    char *c = malloc((size_t)size), want[120];
+    snprintf(want, sizeof want, "local CL_MAP, CL_BAR, CL_AREAS = \"%s\", \"%s\", \"%s\"\n", StyleMapName(g_parchAsked),
+             StyleBarName(g_vbarAsked), areas);
+    int ok = c && LuaChunk(c, size, g_parchAsked, g_vbarAsked, g_mapFull) > 0 && !strncmp(c, want, strlen(want));
+    free(c);
+    return ok;
+}
+/* a satellite screen at Goldshire, the map's areas as the view takes them as it opens it (StylePick), this screen's
+ * character's bits known (Northshire found, Goldshire not): 1 its ground not found hidden (Elwynn's mask up, whole), 0
+ * nothing hidden (no mask asked for, made or drawn), -1 the detail not drawn, -2 neither */
+static int SatAreasScreen(DWORD *t)
+{
+    g_viewPicked = 0; StylePick();
+    g_viewShown = 0.5f;
+    SatHideBits(0, 2);
+    SatNewScreen(); SatArrive(0, -9464, 62); SatView(0, -9464, 62, 3500);
+    for (int f = 0; f < 14; f++, *t += 7) { SatFrame(*t, 5120, 2160); SatWorkerTurn(); }
+    *t += PARCH_FADE_MS + 20;
+    SatFrame(*t, 5120, 2160);
+    int hb = SatHideBatch(), detail = SatBatches(NULL) > 1 && !g_parchOn;
+    int hidden = hb >= 0 && g_sh.on && g_sh.up == 1 && !strcmp(g_pz[g_sh.z[0]].name, "Elwynn") && g_vv[g_vb[hb].first].c[3] == 255;
+    int none = hb < 0 && !g_sh.on && g_shj.state == 0 && g_tsatErr == 0;
+    SatScreenEnd(); SatRelease();
+    for (int k = 0; k < 3; k++) SatWorkerTurn();                       /* (a job left stale freed, as its worker would) */
+    g_viewShown = 0;
+    return !detail ? -1 : hidden ? 1 : none ? 0 : -2;
+}
+static void TestSatAreasDefault(void)
+{
+    SatTestWorld("sat-areas-default", 64, 25, 40, 45, 54, 1);
+    SatHideTables();
+    SatWorkerStart();
+    int keep[] = { g_parchAsked, g_vbarAsked, g_mapFull, g_nearYd, g_nearNamed, g_nearFade, g_nearFadeNamed, g_prepareOn, g_prepareNamed,
+                   g_parchFullOn, g_parchOn, g_barVanilla, g_barThick, g_barWidth, g_barWhole, g_barEffect, g_barEmber, g_parchNearOn };
+    Look keepLook = g_look;
+    unsigned keepSaber = g_saberStyle;
+    LONG keepPicked = g_viewPicked;
+    long heap = shim_heap_live;
+    DWORD t = 20000;
+    const char *s;
+
+    /* a fresh install: no style.txt, no old switch files */
+    Unput(STYLE_REL); Unput("Data/CinderLoad/parchment.txt"); Unput("Data/CinderLoad/bar-vanilla.txt");
+    g_mapFull = 0;                                                      /* (the other way, so the load itself must say) */
+    StyleLoad();
+    int ok = g_mapFull == 1 && g_parchAsked == 1 && SatAreasChunk("full") &&
+             LogSays("style: the map parchment, the bar retro, the map's areas full, from the defaults (no choice made in game yet)");
+    g_viewPicked = 0; StylePick();
+    ok &= g_parchOn == 1 && g_parchFullOn == 1;                         /* (the parchment, the default map: every zone whole) */
+    ok &= StyleSet(0, g_vbarAsked, g_mapFull, "Satellite picked in the window") == 1 && (s = Get(STYLE_REL)) &&
+          strstr(s, "\r\nmap satellite\r\nbar retro\r\nareas full\r\n");  /* (the map alone changed, as the window sends it) */
+    ok &= !ExploreAsked() && SatAreasChunk("full");
+    int fresh = SatAreasScreen(&t);
+    ok &= fresh == 0 && g_parchFullOn == 1;
+    if (!ok) printf("  (a fresh install: its satellite screen %d, the areas %s)\n", fresh, StyleAreasName(g_mapFull));
+    Check(ok, "the map's areas, his rule of 16 Oct (\"Show everything by default\"): a fresh install (no style.txt, no old switch files) has the full map, the window opening on Full map, and the parchment, the default map, paints every zone whole; Satellite picked in game keeps the full map (style.txt \"areas full\"), no explored bits read for it, and its screen hides nothing, the detail drawn as 0.4.0 drew it");
+
+    /* Discovered, saved in game (his fogtest's own style.txt): kept, and hidden as 0.4.1 hides it */
+    Put(STYLE_REL, kHisStyle);
+    g_mapFull = 1;
+    StyleLoad();
+    ok = g_mapFull == 0 && g_parchAsked == 0 && g_vbarAsked == 1 && Is(STYLE_REL, kHisStyle) && SatAreasChunk("discovered") && ExploreAsked() &&
+         LogSays("style: the map satellite, the bar retro, the map's areas discovered, from Data\\CinderLoad\\style.txt (chosen in game)");
+    int saved = SatAreasScreen(&t);
+    ok &= saved == 1 && g_parchFullOn == 0 && Is(STYLE_REL, kHisStyle) &&
+          LogSays("the satellite's areas, as discovered: ground not found hidden in 1 of the 1 zones round the arrival (Elwynn)");
+    if (!ok) printf("  (Discovered saved: its satellite screen %d, the areas %s)\n", saved, StyleAreasName(g_mapFull));
+    Check(ok, "the map's areas, his rule of 16 Oct: Discovered saved in game (his fogtest's style.txt as the window wrote it) is kept, never overridden by the default: read as discovered, the file untouched, the window opening on Discovered, the explored bits read, and the satellite hides the ground not found as 0.4.1 does");
+
+    /* a saved value that is not one of the words: the full map */
+    static const char *const kBroken[] = {
+        "map satellite\r\nbar retro\r\nareas discoverd\r\n",              /* misspelt */
+        "map satellite\r\nbar retro\r\nareas disco",                      /* the file cut short in the word */
+        "map satellite\r\nbar retro\r\nareas\r\n",                        /* no value */
+        "map satellite\r\nbar retro\r\nareas 0\r\nareas yes\r\nareas = hidden\r\n",   /* not a word of ours */
+        "map satellite\r\nbar retro\r\nareas undiscovered\r\n",           /* a longer word holding ours */
+        "map satellite\r\nbar retro\r\nareas \x01\x7f\xe9\xff\r\n",       /* bytes, not words */
+        "map satellite\r\nbar retro\r\n# areas discovered\r\n",           /* only in a note */
+    };
+    ok = 1;
+    for (int i = 0; i < (int)(sizeof kBroken / sizeof kBroken[0]); i++) {
+        Put(STYLE_REL, kBroken[i]);
+        g_mapFull = 0;
+        StyleLoad();
+        int one = g_mapFull == 1 && g_parchAsked == 0 && Is(STYLE_REL, kBroken[i]) && SatAreasChunk("full") && !ExploreAsked();
+        int screen = SatAreasScreen(&t);
+        one &= screen == 0 && g_parchFullOn == 1 && Is(STYLE_REL, kBroken[i]);
+        if (!one) printf("  (style.txt's broken areas %d: its satellite screen %d, the areas %s)\n", i, screen, StyleAreasName(g_mapFull));
+        ok &= one;
+    }
+    Put(STYLE_REL, "");                                                 /* (an empty file: the parchment, the full map) */
+    g_mapFull = 0;
+    StyleLoad();
+    g_viewPicked = 0; StylePick();
+    ok &= g_mapFull == 1 && g_parchAsked == 1 && g_parchFullOn == 1 && SatAreasChunk("full");
+    ok &= TsatLive() == 0 && shim_heap_live == heap;
+    Check(ok, "the map's areas, his rule of 16 Oct: a saved value that is not one of the words (misspelt, cut short, missing, another word, a longer word holding ours, stray bytes, only in a note, an empty file) is the full map: the window opening on Full map, no explored bits read for the satellite and nothing hidden on its screen, the file left as it was; the heap even");
+
+    g_parchAsked = keep[0]; g_vbarAsked = keep[1]; g_mapFull = keep[2]; g_nearYd = keep[3]; g_nearNamed = keep[4]; g_nearFade = keep[5];
+    g_nearFadeNamed = keep[6]; g_prepareOn = keep[7]; g_prepareNamed = keep[8]; g_parchFullOn = keep[9]; g_parchOn = keep[10];
+    g_barVanilla = keep[11]; g_barThick = keep[12]; g_barWidth = keep[13]; g_barWhole = keep[14]; g_barEffect = keep[15];
+    g_barEmber = keep[16]; g_parchNearOn = keep[17];
+    g_look = keepLook; g_saberStyle = keepSaber; g_viewPicked = keepPicked;
+    ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
+    g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
+    SatTestReset(); g_map.ok = 0;
+}
+
 /* 0.4.1 (his film of 13 Oct: the Moonglade teleport opened on the whole world for four frames, then leapt 2.9 times
  * closer in one frame to halfway in): a later screen whose arrival the game writes only after it began shows nothing
  * (black, the view's first list) until it is known, then opens halfway in; never past VIEW_ARRIVE_WAIT_MS (then the
@@ -13954,6 +14089,7 @@ static void TestSatellite(void)
     TestSatHideWorkerOnly();
     TestSatHideOrder();
     TestSatHideLand();
+    TestSatAreasDefault();
     TestSatGeometry();
     TestSatIndex();
     TestSatMissing();
