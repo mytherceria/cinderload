@@ -13891,6 +13891,58 @@ static void TestSatHideOrder(void)
     SatTestReset(); g_map.ok = 0;
 }
 
+/* The attack on 0.4.1's look (16 Oct): the list is built (ViewBuild), then SatWork, then drawn (ViewFrame). When the
+ * arrival moves within the screen, SatWant hands the tiles still wanted new slots and renames the list's tile batches to
+ * match; the blur's own batches (g_hb, SatHideBlurBuild) name tile slots too, and must follow, or the frame drawn puts
+ * other tiles' pictures, blurred and darkened, over the hidden ground. Each batch, of the list and of the blur, must
+ * draw the very picture it was built with, or none. */
+static void TestSatHideBlurMove(void)
+{
+    SatTestWorld("sat-hide-blurmove", 64, 25, 40, 45, 56, 1);
+    SatHideTables2();
+    SatWorkerStart();
+    int blurOn = g_shBlurOn;
+    g_shBlurOn = 1;
+    g_parchFullOn = 0; g_viewShown = 0.25f;
+    memset(g_scrBits, 0, EXPLORED_BYTES); g_scrBits[125 >> 3] |= 1 << (125 & 7); g_scrBits[600 >> 3] |= 1 << (600 & 7);
+    g_scrKnown = 2; InterlockedIncrement(&g_scrSeq);
+    SatNewScreen(); SatArrive(0, -10260, 0); SatView(0, -10260, 0, 3500);
+    DWORD t = 7000;
+    for (int f = 0; f < 16; f++, t += 7) { SatFrame(t, 5120, 2160); SatWorkerTurn(); }
+    int worst = 0, moved = 0, tiles = 0, same = 0;
+    for (int m = 0; m < 6; m++) {                                   /* (moves of 2 to 40 yards, each way) */
+        static const float kMove[6][2] = { { 20, 0 }, { -2, 3 }, { 0, -20 }, { 7, 7 }, { -40, 0 }, { 5, -11 } };
+        t += PARCH_FADE_MS + 20;
+        SatWork(t);                                                 /* (as ViewBuild, then SatWork, then ViewFrame) */
+        ViewListStart();
+        ViewRect(VT_MAP, 0, 0, 5120, 2160, g_bgUV[4], g_bgUV[5], g_bgUV[2], g_bgUV[3], 0xFFFFFFFFu);
+        SatBuild(5120, 2160, t);
+        SatHideBlurBuild(5120, 2160);
+        static unsigned hname[SAT_HIDE_QUADS], vname[VIEW_BATCHES + SAT_MAX + SAT_HIDE_ZONES];
+        int hN = g_hbN, vN = g_vbN;
+        for (int j = 0; j < hN; j++) { hname[j] = ViewTexName(g_hb[j].tex); tiles += g_hb[j].tex >= VT_COUNT; }
+        for (int b = 0; b < vN && b < (int)(sizeof vname / sizeof vname[0]); b++) vname[b] = ViewTexName(g_vb[b].tex);
+        SatArrive(0, g_destWX + kMove[m][0], g_destWY + kMove[m][1]);
+        SatWork(t + 7);                                             /* (the arrival moved: the set again, its tiles' slots anew) */
+        moved += g_satFor.x == g_destWX && g_satFor.y == g_destWY;
+        int bad = 0;
+        for (int j = 0; j < hN; j++) { unsigned n = ViewTexName(g_hb[j].tex); bad += n && n != hname[j]; same += n && n == hname[j]; }
+        for (int b = 0; b < vN && b < (int)(sizeof vname / sizeof vname[0]); b++) { unsigned n = ViewTexName(g_vb[b].tex); bad += n && n != vname[b]; }
+        if (bad > worst) worst = bad;
+        for (int k = 0; k < 3; k++) { SatFrame(t + 14 + 7 * k, 5120, 2160); SatWorkerTurn(); }
+    }
+    printf("  the blur's batches after the arrival moved: %d moves, %d tile batches built, %d drawn as built, at worst %d another picture\n",
+           moved, tiles, same, worst);
+    SatScreenEnd(); SatRelease();
+    for (int k = 0; k < 3; k++) SatWorkerTurn();
+    Check(moved == 6 && tiles > 0 && same > 0 && worst == 0 && TsatLive() == 0,
+          "the satellite's hidden ground, darkened and blurred (the attack on 0.4.1's look, 16 Oct): the arrival moved within the screen between the list's making and its drawing, every blurred copy of a tile still draws that tile's own picture (or none), as the list's own tile batches do");
+    g_shBlurOn = blurOn;
+    ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
+    g_scrKnown = 0; memset(g_scrBits, 0, EXPLORED_BYTES); InterlockedIncrement(&g_scrSeq); g_viewShown = 0;
+    SatTestReset(); g_map.ok = 0;
+}
+
 /* The second attack on 0.4.1 (14 Oct): a zone's piece not found runs past its border onto its neighbour's land (the
  * parchment's paper band), as Elwynn's GOLD does here 343 yards onto Duskwood's land (Elwynn's land north of x = -9433.3,
  * a chunk's edge, Duskwood's south of it, as their land files say), over Duskwood's own piece DUSKP; and DUSKP's art runs
@@ -14268,6 +14320,7 @@ static void TestSatellite(void)
     TestSatHideWorkerOnly();
     TestSatHideWorkerNone();
     TestSatHideOrder();
+    TestSatHideBlurMove();
     TestSatHideLand();
     TestSatHideSteps();
     TestSatAreasDefault();

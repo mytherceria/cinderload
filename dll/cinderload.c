@@ -14085,6 +14085,12 @@ static int SatWant(int c, float x, float y, LONG screen, DWORD now)
             int j = g_vb[b].tex - VT_COUNT;
             g_vb[b].tex = j < oldN && remap[j] >= 0 ? VT_COUNT + remap[j] : VT_COUNT + SAT_MAX;   /* (past the slots: no name) */
         }
+    for (int b = 0; b < g_hbN; b++)                              /* (and the ground hidden's blurred copies of them, its own list:
+                                                                  * the attack on 0.4.1's look, 16 Oct) */
+        if (g_hb[b].tex >= VT_COUNT && g_hb[b].tex < VT_COUNT + SAT_MAX) {
+            int j = g_hb[b].tex - VT_COUNT;
+            g_hb[b].tex = j < oldN && remap[j] >= 0 ? VT_COUNT + remap[j] : VT_COUNT + SAT_MAX;
+        }
     int g = 0;
     for (int j = 0; j < oldN; j++) if (oldTex[j]) gone[g++] = oldTex[j];
     if (g) SatTexGone(gone, g);
