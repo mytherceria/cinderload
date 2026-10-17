@@ -3717,7 +3717,10 @@ static void BadgeBuild(DWORD now)
  * and CinderLoad\\glow.bin ('CGLW', the number of maps, then each: map id, cell yards, the grid's corner x0, y0 in world
  * yards, its columns along y and rows along x, then a 16-bit cell each: 0 none, else the subzone's g line + 1). Once the
  * arrival is known, its subzone glows, coming up as the view closes in (from GLOW_FROM to GLOW_FULL); where no subzone
- * is (a city's middle, open ground), the marks' round glow, GLOW_YARDS across, in its place. */
+ * is (a city's middle, open ground), the marks' round glow, GLOW_YARDS across, in its place.
+ * (0.4.1, his ask, 16 Oct 2026, of the yellow line round the arrival's subzone on the satellite: "it's ugly", then of
+ * both maps, "gone on both".) The subzone's own glow is drawn no longer, on the view or on the game's own frames: the
+ * grid still says whether the arrival is in a subzone, and only where it is not does the round glow show, as before. */
 #define GLOW_PATH     "Interface\\Glues\\LoadingScreens\\CinderGlow.blp"
 #define GLOW_SHEET    2048.0f
 #define GLOW_SPRITES  1024
@@ -3818,19 +3821,8 @@ static void GlowBuild(DWORD now)
     }
     float h = (g_bgUV[2] - g_bgUV[0]) * 0.5f, k = FireClamp((GLOW_FROM - h) / (GLOW_FROM - GLOW_FULL), 0, 1);
     float a = k * k * (3 - 2 * k) * FireClamp((float)(now - g_destSince) / (RIPPLE_IN * 1000.0f), 0, 1);
-    if (a <= 0.004f) return;
-    if (g_glowPick >= 0) {
-        float u0 = g_bgUV[0], u1 = g_bgUV[2], vt = g_bgUV[5], vb = g_bgUV[1];
-        int it = g_glowPick, sp = g_glowItem[it].spr;
-        float x0 = (g_glowItem[it].u0 - u0) / (u1 - u0), x1 = (g_glowItem[it].u1 - u0) / (u1 - u0);
-        float yt = 1 - (g_glowItem[it].v0 - vt) / (vb - vt), yb2 = 1 - (g_glowItem[it].v1 - vt) / (vb - vt);
-        float x[4] = { x0, x1, x0, x1 }, y[4] = { yb2, yb2, yt, yt };
-        float tu0 = g_glowSpr[sp].x0 / GLOW_SHEET, tu1 = g_glowSpr[sp].x1 / GLOW_SHEET;
-        float tv0 = g_glowSpr[sp].y0 / GLOW_SHEET, tv1 = g_glowSpr[sp].y1 / GLOW_SHEET;
-        float tu[4] = { tu0, tu1, tu0, tu1 }, tv[4] = { tv1, tv1, tv0, tv0 };
-        QuadPut(g_glowPos, g_glowUV, g_glowCol, 0, x, y, tu, tv, (unsigned)(a * 255.0f + 0.5f) << 24 | 0xFFFFFFu);
-        g_glowQuads = 1;
-    } else if (g_mark[3].ok) {
+    if (a <= 0.004f || g_glowPick >= 0) return;                 /* (in a subzone: its yellow glow gone, 16 Oct; nothing in its place) */
+    if (g_mark[3].ok) {
         float sx, sy, bv = g_destMap >= 0 && g_destMap <= 1 && g_map.m[g_destMap].ok ? g_map.m[g_destMap].bv : 0;
         if (bv < 0) bv = -bv;
         if (bv <= 0) return;
@@ -5265,9 +5257,8 @@ static void OverlayDrawAll(void)
         if (g_mkQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
     }
     if (g_glowOn && !g_glowTex && !g_glowTried) { g_glowTried = 1; g_glowTex = OverlayLoad(GLOW_PATH); }
-    if (g_glowTex) {                                               /* the arrival's subzone lights up, under the names */
-        GlowBuild(now);
-        if (g_glowQuads) OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_glowTex, 1, 0), g_glowPos, g_glowUV, g_glowCol, 1);
+    if (g_glowTex) {                                               /* the round glow where no subzone is, under the names */
+        GlowBuild(now);                                            /* (the round glow alone: the subzone's is gone, 16 Oct) */
         if (g_mkQuads && g_marksTex)
             OverlayStrips(OV_FN(OvDevice, 0x44ACF0)(g_marksTex, 1, 0), g_mkPos, g_mkUV, g_mkCol, g_mkQuads);
     }
@@ -7067,9 +7058,8 @@ static void ViewOverlayBuild(float W, float H, DWORD now)
     if (g_skyOn && g_viewTex[VT_SKY]) SkyBuild(W, H, now);            /* the zeppelins over all */
     if (g_shipsOn && g_viewTex[VT_SHIPS]) ShipsBuild(W, H, now, 1);
     if (g_marksOn && g_viewTex[VT_MARKS]) { RippleBuild(t, now); ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H); }
-    if (g_glowOn && g_viewTex[VT_GLOW]) {                        /* the arrival's subzone, or the round glow in its place */
-        GlowBuild(now);
-        if (g_glowQuads) ViewStrips(VT_GLOW, g_glowPos, g_glowUV, g_glowCol, 1, W, H);
+    if (g_glowOn && g_viewTex[VT_GLOW]) {                        /* the round glow, where the arrival is in no subzone */
+        GlowBuild(now);                                          /* (the round glow alone: the subzone's is gone, 16 Oct) */
         if (g_mkQuads && g_marksOn && g_viewTex[VT_MARKS]) ViewStrips(VT_MARKS, g_mkPos, g_mkUV, g_mkCol, g_mkQuads, W, H);
     }
     if (g_lblOn && g_viewTex[VT_LABELS]) { LabelsBuild(); ViewStrips(VT_LABELS, g_lblPos, g_lblUV, g_lblCol, g_lblQuads, W, H); }

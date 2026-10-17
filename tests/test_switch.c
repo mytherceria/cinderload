@@ -2599,12 +2599,17 @@ static void LiveTests(void)
         gw &= g_glowPick == 0 && g_glowQuads == 0;
         g_bgUV[0] = g_bgUV[4] = 0.37f; g_bgUV[2] = g_bgUV[6] = 0.49f;  /* close in, h = 0.06: lit, over its own rectangle */
         g_bgUV[5] = g_bgUV[7] = 0.455f; g_bgUV[1] = g_bgUV[3] = 0.575f;
+        GlowBuild(201000);                                               /* (his ask, 16 Oct: the subzone's yellow glow gone on both
+                                                                         * maps: nothing drawn for it, not even the round glow) */
+        int sub = g_glowPick == 0 && g_glowQuads == 0 && g_mkQuads == 0;
+        g_mark[3].ok = 1; g_mark[3].x0 = 128; g_mark[3].y0 = 256; g_mark[3].x1 = 256; g_mark[3].y1 = 384;   /* (with a round glow to hand) */
+        g_map.ok = 1; g_map.m[0].ok = 1; g_map.m[0].bv = -2e-5f;
         GlowBuild(201000);
-        gw &= g_glowQuads == 1 && (g_glowCol[0] >> 24) == 255 && fabsf(g_glowPos[0] - (0.40f - 0.37f) / 0.12f) < 1e-4f &&
-              fabsf(g_glowPos[3] - (0.46f - 0.37f) / 0.12f) < 1e-4f && fabsf(g_glowPos[7] - (1 - (0.50f - 0.455f) / 0.12f)) < 1e-4f &&
-              fabsf(g_glowPos[1] - (1 - (0.53f - 0.455f) / 0.12f)) < 1e-4f && g_glowUV[0] == 0 && g_glowUV[2] == 64.0f / 2048;
-        GlowBuild(200100);                                               /* known a tenth of a second ago: faint yet */
-        gw &= g_glowQuads == 1 && (g_glowCol[0] >> 24) < 60;
+        sub &= g_glowQuads == 0 && g_mkQuads == 0;
+        GlowBuild(200100);
+        sub &= g_glowQuads == 0 && g_mkQuads == 0;
+        g_mark[3].ok = 0; g_map.ok = 0; g_map.m[0].ok = 0; g_map.m[0].bv = 0;
+        Check(sub, "the glow (0.4.1, his ask, 16 Oct: \"it's ugly\", \"gone on both\"): the arrival in a subzone, close in: the subzone's yellow glow is not drawn, nor anything in its place");
         /* nowhere a subzone is: the round glow, from the marks, its size in the world's */
         g_destWX = 1050; g_destSince = 300000;
         GlowBuild(301000);
@@ -2614,7 +2619,7 @@ static void LiveTests(void)
         GlowBuild(301000);
         gw &= g_glowQuads == 0 && g_mkQuads == 1 && fabsf((g_mkPos[7] - g_mkPos[1]) - GLOW_YARDS * 2e-5f / 0.12f) < 1e-4f;
         g_destOk = 0;
-        Check(gw, "the glow: on with its files (a short grid: off); the arrival's subzone from its world place; lit closing in, faint at first; the round glow elsewhere");
+        Check(gw, "the glow: on with its files (a short grid: off); the arrival's subzone from its world place; the round glow where no subzone is");
     }
 
     /* sea.bin: anything but a whole table is left out; between the cells' middles, how open the sea is */
