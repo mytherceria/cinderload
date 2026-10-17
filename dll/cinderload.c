@@ -5834,6 +5834,47 @@ static unsigned g_satTex[SAT_MAX];
 #define SAT_HIDE_ZONES 16             /* zones round the arrival at the most */
 #define SAT_HIDE_TEX0  (VT_COUNT + SAT_MAX + 1)
 static unsigned g_shTex[SAT_HIDE_ZONES];
+/* (0.4.1, his pick of the look mockups, 16 Oct 2026, option 1: "slightly darkened and slightly blurred" in place of the
+ * slate) The ground not found is the satellite's own, darkened SAT_HIDE_DARK and blurred SAT_HIDE_BLUR pixels at 1080p
+ * (a gaussian's sigma, as mocked; the screen's height scales it). The blur is the pictures' own smaller copies: the
+ * overview and the detail tiles drawn again over each zone's ground hidden with a texture LOD bias (OpenGL 1.4, or
+ * GL_EXT_texture_lod_bias), so a texel of the copy drawn is 2 x SAT_HIDE_BLUR pixels at 1080p whatever the zoom
+ * (SatHideBias), its mask on a second texture unit (OpenGL 1.3, or GL_ARB_multitexture) as their alpha, their colour
+ * darkened (SatHideBlurBuild, SatHideDraw). One more textured pass over the ground hidden, no new files, no memory but
+ * the list's. An OpenGL without either: the ground darkened alone, the mask's quad black at SAT_HIDE_DARK. */
+#define SAT_HIDE_DARK  0.15f
+#define SAT_HIDE_BLUR  1.5f
+#define SAT_HIDE_PAD   8             /* the blur drawn this many of a mask's texels round its ground hidden (its smaller copies' reach) */
+/* ---- the ground hidden, darkened and blurred (his pick, 16 Oct: SAT_HIDE_DARK, SAT_HIDE_BLUR above) ----
+ * Each zone's mask batch (SatHideBuild: its quad over its page's box, its alpha how far it is up) stands in the list as
+ * before; SatHideBlurBuild then lays, for each, the overview's and every detail tile's quads under it (the list's own,
+ * after the time of day's grading) again, cut to that box and to its texels hidden (SAT_HIDE_PAD round them), their
+ * colour darkened, their alpha times the mask's, the mask's own place on each corner beside the picture's (mu, mv: its
+ * second texture unit's). SatHideDraw draws them in its batch's place. */
+typedef struct { float x, y, u, v; unsigned char c[4]; float mu, mv; } HideVert;
+#define SAT_HIDE_QUADS (SAT_HIDE_ZONES * (SAT_MAX + 1))   /* (each zone: the overview and every tile, at the most once) */
+static HideVert g_hv[SAT_HIDE_QUADS * 4];
+static struct { int tex, first, count; } g_hb[SAT_HIDE_QUADS];
+static struct { int first, n; } g_hz[SAT_HIDE_ZONES];   /* (zone k's batches in g_hb) */
+static int g_hbN, g_hvN;
+static int g_shBlurOn;                                   /* (the view's OpenGL can: ViewGlCaps; the tests set it) */
+/* log2 of x > 0, to a ten-thousandth (no C library here). */
+static float SatLog2(float x)
+{
+    union { float f; unsigned u; } c;
+    c.f = x;
+    int e = (int)((c.u >> 23) & 255u) - 127;
+    c.u = (c.u & 0x7FFFFFu) | 0x3F800000u;
+    float m = c.f;                                       /* (1 to 2) */
+    return (float)e + 1.4426950f * (-1.7417939f + (2.8212026f + (-1.4699568f + (0.44717955f - 0.056570851f * m) * m) * m) * m);   /* (ln m) */
+}
+/* The LOD bias for a window H pixels tall: a texel of the copy drawn 2 x SAT_HIDE_BLUR pixels at 1080p (a box's and the
+ * smooth sampling's spread together, about half a texel's width each way: SAT_HIDE_BLUR), scaled with H; at most most. */
+static float SatHideBias(float H, float most)
+{
+    float b = H > 0 ? SatLog2(2 * SAT_HIDE_BLUR * H / 1080) : 0;
+    return b < 0 ? 0 : b > most ? most : b;
+}
 static unsigned ViewTexName(int t)
 {
     return t < 0 ? 0 : t < VT_COUNT ? g_viewTex[t] : t - VT_COUNT < SAT_MAX ? g_satTex[t - VT_COUNT]
@@ -12504,6 +12545,7 @@ static void ParchRead(void)
  * top left, [2], [3] its bottom right), the satellite's detail tiles straight over it (SatBuild), the overlay over them,
  * and the blade, its tip the bar as shown. */
 static void SatBuild(float W, float H, DWORD now);
+static void SatHideBlurBuild(float W, float H);
 static void SatRead(void);                                      /* (the satellite's detail, below: the view's thread's calls) */
 static void SatWorkerStart(void);
 static void SatWork(DWORD now);
@@ -12523,6 +12565,7 @@ static void ViewBuild(float W, float H, float shown, DWORD now)
     SatBuild(W, H, now);                                        /* the detail round the arrival, fading in by the zoom */
     ViewOverlayBuild(W, H, now);
     TodGrade(W, 0, g_vvN);                                      /* the world, lit by it */
+    SatHideBlurBuild(W, H);                                     /* (the ground hidden, darkened and blurred: as graded) */
     TodDiscBuild(W, H);                                         /* its sun or moon */
     if (g_barVanilla) VBarBuild(W, H, shown, now);               /* vanilla's own bar (retro), */
     else SaberBuild(W, H, shown, now);                          /* or the blade */
@@ -12687,6 +12730,13 @@ static void ViewOpenFirst(float w, float h, DWORD now)
 #define GL_SRC_ALPHA_            0x0302
 #define GL_ONE_MINUS_SRC_ALPHA_  0x0303
 #define GL_ONE_                  1
+#define GL_VERSION_              0x1F02
+#define GL_TEXTURE0_             0x84C0
+#define GL_TEXTURE1_             0x84C1
+#define GL_MAX_TEXTURE_UNITS_    0x84E2
+#define GL_TEXTURE_FILTER_CONTROL_ 0x8500
+#define GL_TEXTURE_LOD_BIAS_     0x8501
+#define GL_MAX_TEXTURE_LOD_BIAS_ 0x84FD
 #ifdef __i386__
 #include <d3d9.h>
 /* ITS DRAWING IS OPENGL, NOT DIRECT3D (4 Oct 2026, 22:23, his first launch of the proof: a critical error). Mods such as
@@ -12726,6 +12776,12 @@ static struct {
     void (WINAPI *CompressedTexImage2D)(unsigned, int, unsigned, int, int, int, int, const void *);   /* 1.3: by name */
     void (WINAPI *DeleteTextures)(int, const unsigned *);       /* (1.1's own, but not asked for by GlLoad: only the
                                                                  * satellite's detail needs it, and goes without it) */
+    void (WINAPI *TexEnvf)(unsigned, unsigned, float);          /* (1.1's own too, not asked for: the ground hidden's */
+    void (WINAPI *GetFloatv)(unsigned, float *);                /* blur and darkening, SatHideDraw, go without them) */
+    void (WINAPI *Color4f)(float, float, float, float);
+    void (WINAPI *DisableClientState)(unsigned);
+    void (WINAPI *ActiveTexture)(unsigned);                     /* 1.3 (or GL_ARB_multitexture): by name */
+    void (WINAPI *ClientActiveTexture)(unsigned);
     int (WINAPI *ChoosePF)(HDC, const PIXELFORMATDESCRIPTOR *);
     BOOL (WINAPI *SetPF)(HDC, int, const PIXELFORMATDESCRIPTOR *);
     BOOL (WINAPI *Swap)(HDC);
@@ -12733,6 +12789,7 @@ static struct {
 static HINSTANCE g_inst;
 static struct {
     HWND win; HDC dc; HGLRC rc; int w, h, vsync, s3tc, maxTex, fast;   /* fast: frames in a row quicker than any screen */
+    float maxBias;                                              /* (GL_MAX_TEXTURE_LOD_BIAS: the ground hidden's blur) */
     unsigned char *blp[VT_COUNT]; unsigned len[VT_COUNT];      /* each picture's file, read as the game starts, until
                                                                  * OpenGL has it */
     DWORD since, last, gap, frames;
@@ -12764,6 +12821,8 @@ static int GlLoad(void)
         !GLP(Swap, gl.gdi, "SwapBuffers"))
         return gl.Swap = NULL, 0;
     GLP(DeleteTextures, gl.lib, "glDeleteTextures");
+    GLP(TexEnvf, gl.lib, "glTexEnvf"); GLP(GetFloatv, gl.lib, "glGetFloatv");
+    GLP(Color4f, gl.lib, "glColor4f"); GLP(DisableClientState, gl.lib, "glDisableClientState");
 #undef GLP
     return 1;
 }
@@ -12787,6 +12846,26 @@ static void ViewGlCaps(void)
         if (!gl.CompressedTexImage2D) *(PROC *)&gl.CompressedTexImage2D = GlExt("glCompressedTexImage2DARB");
         g_view.s3tc = gl.CompressedTexImage2D != NULL;
     }
+    /* the ground hidden's blur (SatHideDraw): a second texture unit and a texture LOD bias */
+    const char *ver = (const char *)gl.GetString(GL_VERSION_);
+    int major = ver && ver[0] >= '1' && ver[0] <= '9' ? ver[0] - '0' : 0, minor = ver && major && ver[1] == '.' && ver[2] >= '0' && ver[2] <= '9' ? ver[2] - '0' : 0;
+    int v13 = major > 1 || (major == 1 && minor >= 3), v14 = major > 1 || (major == 1 && minor >= 4);
+    if (v13) { *(PROC *)&gl.ActiveTexture = GlExt("glActiveTexture"); *(PROC *)&gl.ClientActiveTexture = GlExt("glClientActiveTexture"); }
+    if ((!gl.ActiveTexture || !gl.ClientActiveTexture) && ext && TextHas(ext, "GL_ARB_multitexture")) {
+        *(PROC *)&gl.ActiveTexture = GlExt("glActiveTextureARB"); *(PROC *)&gl.ClientActiveTexture = GlExt("glClientActiveTextureARB");
+    }
+    int units = 0;
+    float most = 0;
+    if (gl.ActiveTexture && gl.ClientActiveTexture) gl.GetIntegerv(GL_MAX_TEXTURE_UNITS_, &units);
+    if (gl.GetFloatv && (v14 || (ext && TextHas(ext, "GL_EXT_texture_lod_bias")))) gl.GetFloatv(GL_MAX_TEXTURE_LOD_BIAS_, &most);
+    while (gl.GetError()) {}
+    g_view.maxBias = most > 0 && most < 64 ? most : 0;
+    g_shBlurOn = gl.ActiveTexture && gl.ClientActiveTexture && gl.TexEnvf && gl.DisableClientState && units >= 2 && g_view.maxBias >= 1;
+    char m[320];                                                 /* (its longest, every number at its widest: 202) */
+    wsprintfA(m, "  the satellite's ground hidden (Map areas Discovered): darkened %d%%, %s (OpenGL %c.%c, %d texture units, its LOD bias to %d)",
+              (int)(SAT_HIDE_DARK * 100 + 0.5f), g_shBlurOn ? "blurred by its pictures' smaller copies" : "NOT blurred: this OpenGL has no second texture unit or LOD bias",
+              major ? '0' + major : '?', major ? '0' + minor : '?', units, (int)g_view.maxBias);
+    Log(m);
 }
 /* Picture slot's file, given to OpenGL: 1 when it took it (g_viewTex[slot]); the file's memory goes either way. why:
  * what failed, for the log. */
@@ -13082,6 +13161,7 @@ static DWORD ViewNow(void);
 /* The list (g_vb, g_vv), drawn and shown: 0 when it could not be (the view then goes). drawn and gpu, when given: when
  * the drawing was handed over, and when the GPU had finished it (glFinish), before the swap (the slow frames' parts,
  * below). */
+static void SatHideDraw(int b, int k);
 static int ViewFrame(DWORD *drawn, DWORD *gpu)
 {
     gl.Viewport(0, 0, g_view.w, g_view.h);
@@ -13100,6 +13180,11 @@ static int ViewFrame(DWORD *drawn, DWORD *gpu)
     int added = 0;
     for (int i = 0; i < g_vbN; i++) {
         int t = g_vb[i].tex;
+        if (t >= SAT_HIDE_TEX0) {                            /* (the ground hidden: darkened and blurred, its own way) */
+            if (added) { added = 0; gl.BlendFunc(GL_SRC_ALPHA_, GL_ONE_MINUS_SRC_ALPHA_); }
+            SatHideDraw(i, t - SAT_HIDE_TEX0);
+            continue;
+        }
         if (t < 0) gl.Disable(GL_TEXTURE_2D_);
         else if (!ViewTexName(t)) continue;                  /* (a slot's sheet, or a detail tile's: VT_COUNT and past) */
         else { gl.Enable(GL_TEXTURE_2D_); gl.BindTexture(GL_TEXTURE_2D_, ViewTexName(t)); }
@@ -14066,12 +14151,13 @@ static DWORD SatArgb(float a);
 #define SAT_HIDE_SOFT  2             /* and its edge softened by this many passes of a three-wide box */
 #define SAT_HIDE_SEA0  0.3f          /* never over the open sea: hidden less from where the overview's sea (sea.bin) is this open, */
 #define SAT_HIDE_SEA1  0.7f          /* and not at all from this */
-#define SAT_HIDE_RGB   0x2B2F33u     /* PLACEHOLDER (his call): the hidden ground's one colour, a dark slate */
+#define SAT_HIDE_RGB   0xFFFFFFu     /* the mask's colour: white, its alpha the ground hidden (0.4.1's dark slate, 0x2B2F33, gone:
+                                      * his pick, 16 Oct, below) */
 #define SAT_HIDE_BYTES ((SIZE_T)SAT_HIDE_PX * SAT_HIDE_PX * 4 * 4 / 3 + 64)   /* a mask and its smaller copies, RGBA */
 /* the worker's job (the detail's pattern, its own state): 0 none, 1 posted, 2 done, 3 stale (the worker frees it) */
 static struct {
     volatile LONG state;
-    int n, z[SAT_HIDE_ZONES], hidden[SAT_HIDE_ZONES];
+    int n, z[SAT_HIDE_ZONES], hidden[SAT_HIDE_ZONES], box[SAT_HIDE_ZONES][4];   /* (box: its texels hidden, x from, to, y from, to) */
     unsigned char *px[SAT_HIDE_ZONES];
     unsigned char bits[EXPLORED_BYTES];
     unsigned landless;                       /* (bit k: zone k's mask not cut to its land, its land not kept: SatHideCut) */
@@ -14086,6 +14172,7 @@ static struct {
     LONG screen;
     float x, y;
     int z[SAT_HIDE_ZONES], zs[SAT_HIDE_ZONES];   /* (zs, nz: the zones round the arrival, those with ground hidden or not) */
+    int box[SAT_HIDE_ZONES][4];                  /* (each mask's texels hidden: g_shj's) */
     unsigned char *px[SAT_HIDE_ZONES];
     DWORD readyAt, barAt, ms;
 } g_sh;
@@ -14188,10 +14275,10 @@ static int SatHideLay(int z, const unsigned char *bits, unsigned char *u, unsign
 }
 /* u (S x S: the ground not found, softened) into out's alpha in SAT_HIDE_RGB, with its smaller copies. The texels
  * hidden (over a 32nd). */
-static int SatHideOut(const unsigned char *u, unsigned char *out)
+static int SatHideOut(const unsigned char *u, unsigned char *out, int *box)
 {
     const int S = SAT_HIDE_PX;
-    int hidden = 0;
+    int hidden = 0, bx[4] = { S, 0, S, 0 };
     SIZE_T at = 0;
     for (int w = S; w >= 1; w /= 2) {                               /* (its smaller copies, each a box of the one before) */
         unsigned char *o = out + at;
@@ -14207,9 +14294,16 @@ static int SatHideOut(const unsigned char *u, unsigned char *out)
                 o[4 * (y * w + x)] = (unsigned char)(SAT_HIDE_RGB >> 16); o[4 * (y * w + x) + 1] = (unsigned char)(SAT_HIDE_RGB >> 8);
                 o[4 * (y * w + x) + 2] = (unsigned char)SAT_HIDE_RGB; o[4 * (y * w + x) + 3] = (unsigned char)a;
                 if (w == S && a > 8) hidden++;
+                if (w == S && a) {                                  /* (the box of its texels hidden at all) */
+                    if (x < bx[0]) bx[0] = x;
+                    if (x + 1 > bx[1]) bx[1] = x + 1;
+                    if (y < bx[2]) bx[2] = y;
+                    if (y + 1 > bx[3]) bx[3] = y + 1;
+                }
             }
         at += (SIZE_T)w * w * 4;
     }
+    if (box) for (int i = 0; i < 4; i++) box[i] = bx[i];
     return hidden;
 }
 /* Zone z's mask whole, as laid (SatHideLay, then SatHideOut): f, u, t: S x S of scratch. The texels hidden. (The tests'
@@ -14218,7 +14312,7 @@ __attribute__((unused)) static int SatHideMake(int z, const unsigned char *bits,
 {
     if (!SatHideLay(z, bits, u, f, t, NULL)) return 0;
     SatHideGrow(u, t, SAT_HIDE_PX, SAT_HIDE_SOFT, 1);
-    return SatHideOut(u, out);
+    return SatHideOut(u, out, NULL);
 }
 /* ---- each zone's mask cut to its land (the second attack on 0.4.1, 14 Oct: a zone's piece not found runs 100 to 250
  * yards past its border, as the parchment's paper band does, and its mask hid the neighbour's ground there even where
@@ -14392,7 +14486,7 @@ static void SatHideRun(void)
             SatHideGrow(w, t, SAT_HIDE_PX, SAT_HIDE_SOFT, 1);
             for (SIZE_T i = 0; i < S2; i++) if (!cut[i]) u[i] = w[i];
         }
-        g_shj.hidden[k] = SatHideOut(u, o);
+        g_shj.hidden[k] = SatHideOut(u, o, g_shj.box[k]);
         if (g_shj.hidden[k]) g_shj.px[k] = o; else HeapFree(GetProcessHeap(), 0, o);
         if (g_shj.hidden[k] && cuts < 0) g_shj.landless |= 1u << k;
     }
@@ -14546,6 +14640,7 @@ static void SatHideWork(int known, int c, float x, float y, LONG screen, DWORD n
         for (int k = 0; k < g_shj.n; k++)
             if (g_shj.px[k]) {
                 if (g_shj.landless & (1u << k)) g_sh.landless |= 1u << g_sh.n;
+                for (int i = 0; i < 4; i++) g_sh.box[g_sh.n][i] = g_shj.box[k][i];
                 g_sh.z[g_sh.n] = g_shj.z[k]; g_sh.px[g_sh.n++] = g_shj.px[k]; g_shj.px[k] = NULL;
             }
         g_sh.ms = g_shj.ran;
@@ -14592,6 +14687,103 @@ static void SatHideBuild(float W, float H, float a)
         ViewVertSet(q + 2, x1, y1, 1, 1, col); ViewVertSet(q + 3, x0, y1, 0, 1, col);
     }
 }
+static void SatHideBlurBuild(float W, float H)
+{
+    g_hbN = g_hvN = 0;
+    for (int k = 0; k < SAT_HIDE_ZONES; k++) g_hz[k].first = g_hz[k].n = 0;
+    if (!g_shBlurOn || !g_sh.on || g_sh.stage < 3) return;
+    for (int b = 0; b < g_vbN; b++) {
+        int t = g_vb[b].tex, k = t - SAT_HIDE_TEX0;
+        if (k < 0 || k >= SAT_HIDE_ZONES || k >= g_sh.up || g_vb[b].count != 4) continue;
+        const ViewVert *M = &g_vv[g_vb[b].first];
+        float bx0 = M[0].x, by0 = M[0].y, bw = M[2].x - M[0].x, bh = M[2].y - M[0].y, a = M[0].c[3] / 255.0f;
+        if (!(bw > 0 || bw < 0) || !(bh > 0 || bh < 0) || !(a > 0)) continue;
+        const int *bx = g_sh.box[k];
+        if (bx[1] <= bx[0] || bx[3] <= bx[2]) continue;
+        float ua = (float)(bx[0] - SAT_HIDE_PAD) / SAT_HIDE_PX, ub = (float)(bx[1] + SAT_HIDE_PAD) / SAT_HIDE_PX;
+        float va = (float)(bx[2] - SAT_HIDE_PAD) / SAT_HIDE_PX, vb = (float)(bx[3] + SAT_HIDE_PAD) / SAT_HIDE_PX;
+        ua = ua < 0 ? 0 : ua; va = va < 0 ? 0 : va; ub = ub > 1 ? 1 : ub; vb = vb > 1 ? 1 : vb;
+        float rx0 = bx0 + bw * ua, rx1 = bx0 + bw * ub, ry0 = by0 + bh * va, ry1 = by0 + bh * vb;
+        if (rx1 < rx0) { float s = rx0; rx0 = rx1; rx1 = s; }
+        if (ry1 < ry0) { float s = ry0; ry0 = ry1; ry1 = s; }
+        rx0 = rx0 < 0 ? 0 : rx0; ry0 = ry0 < 0 ? 0 : ry0; rx1 = rx1 > W ? W : rx1; ry1 = ry1 > H ? H : ry1;
+        if (!(rx1 > rx0) || !(ry1 > ry0)) continue;
+        g_hz[k].first = g_hbN;
+        for (int s = 0; s < b; s++) {                            /* (the pictures under it, in their order) */
+            int st = g_vb[s].tex;
+            if (st != VT_MAP && !(st >= VT_COUNT && st < VT_COUNT + SAT_MAX)) continue;
+            int first = g_hvN;
+            for (int q = g_vb[s].first; q + 3 < g_vb[s].first + g_vb[s].count && g_hvN + 4 <= SAT_HIDE_QUADS * 4; q += 4) {
+                const ViewVert *Q = &g_vv[q];                   /* (a rectangle: its corners round from one) */
+                float qw = Q[2].x - Q[0].x, qh = Q[2].y - Q[0].y;
+                if (!(qw > 0 || qw < 0) || !(qh > 0 || qh < 0)) continue;
+                float qx0 = qw > 0 ? Q[0].x : Q[2].x, qx1 = qw > 0 ? Q[2].x : Q[0].x, qy0 = qh > 0 ? Q[0].y : Q[2].y, qy1 = qh > 0 ? Q[2].y : Q[0].y;
+                float cx0 = qx0 > rx0 ? qx0 : rx0, cx1 = qx1 < rx1 ? qx1 : rx1;
+                float cy0 = qy0 > ry0 ? qy0 : ry0, cy1 = qy1 < ry1 ? qy1 : ry1;
+                if (!(cx1 > cx0) || !(cy1 > cy0)) continue;
+                const float cx[4] = { cx0, cx1, cx1, cx0 }, cy[4] = { cy0, cy0, cy1, cy1 };
+                for (int c = 0; c < 4; c++) {
+                    HideVert *v = &g_hv[g_hvN++];
+                    float fx = (cx[c] - Q[0].x) / qw, fy = (cy[c] - Q[0].y) / qh;
+                    v->x = cx[c]; v->y = cy[c];
+                    v->u = Q[0].u + (Q[2].u - Q[0].u) * fx; v->v = Q[0].v + (Q[2].v - Q[0].v) * fy;
+                    v->mu = (cx[c] - bx0) / bw; v->mv = (cy[c] - by0) / bh;
+                    for (int ch = 0; ch < 4; ch++) {
+                        float top = Q[0].c[ch] + (Q[1].c[ch] - Q[0].c[ch]) * fx, bot = Q[3].c[ch] + (Q[2].c[ch] - Q[3].c[ch]) * fx;
+                        float val = (top + (bot - top) * fy) * (ch < 3 ? 1 - SAT_HIDE_DARK : st == VT_MAP ? a : 1);   /* (a tile's
+                                                                    * alpha has the mask's coming up in it already: SatBuild) */
+                        v->c[ch] = (unsigned char)(int)(val > 255 ? 255 : val < 0 ? 0 : val + 0.5f);
+                    }
+                }
+            }
+            if (g_hvN > first && g_hbN < SAT_HIDE_QUADS) {
+                g_hb[g_hbN].tex = st; g_hb[g_hbN].first = first; g_hb[g_hbN].count = g_hvN - first; g_hbN++;
+            } else g_hvN = first;
+        }
+        g_hz[k].n = g_hbN - g_hz[k].first;
+    }
+}
+#if defined(__i386__)
+/* Zone k's ground hidden, in its mask batch b's place (ViewFrame): with the blur, the pictures under it again from their
+ * smaller copies (the LOD bias), darkened, through its mask on the second texture unit (SatHideBlurBuild's quads); else
+ * its mask's quad black at SAT_HIDE_DARK (the colour array off for it); its name gone, nothing. */
+static void SatHideDraw(int b, int k)
+{
+    unsigned mask = k >= 0 && k < SAT_HIDE_ZONES ? g_shTex[k] : 0;
+    if (!mask) return;
+    if (g_shBlurOn && g_hz[k].n > 0) {
+        gl.ActiveTexture(GL_TEXTURE1_); gl.Enable(GL_TEXTURE_2D_); gl.BindTexture(GL_TEXTURE_2D_, mask);
+        gl.ClientActiveTexture(GL_TEXTURE1_); gl.EnableClientState(GL_TEXTURE_COORD_ARRAY_);
+        gl.TexCoordPointer(2, GL_FLOAT_, (int)sizeof(HideVert), &g_hv[0].mu);
+        gl.ClientActiveTexture(GL_TEXTURE0_);
+        gl.VertexPointer(2, GL_FLOAT_, (int)sizeof(HideVert), &g_hv[0].x);
+        gl.TexCoordPointer(2, GL_FLOAT_, (int)sizeof(HideVert), &g_hv[0].u);
+        gl.ColorPointer(4, GL_UNSIGNED_BYTE_, (int)sizeof(HideVert), g_hv[0].c);
+        gl.ActiveTexture(GL_TEXTURE0_); gl.Enable(GL_TEXTURE_2D_);
+        gl.TexEnvf(GL_TEXTURE_FILTER_CONTROL_, GL_TEXTURE_LOD_BIAS_, SatHideBias((float)g_view.h, g_view.maxBias));
+        for (int j = g_hz[k].first; j < g_hz[k].first + g_hz[k].n; j++) {
+            unsigned name = ViewTexName(g_hb[j].tex);
+            if (!name) continue;
+            gl.BindTexture(GL_TEXTURE_2D_, name);
+            gl.DrawArrays(GL_QUADS_, g_hb[j].first, g_hb[j].count);
+        }
+        gl.TexEnvf(GL_TEXTURE_FILTER_CONTROL_, GL_TEXTURE_LOD_BIAS_, 0);
+        gl.ActiveTexture(GL_TEXTURE1_); gl.Disable(GL_TEXTURE_2D_); gl.ActiveTexture(GL_TEXTURE0_);
+        gl.ClientActiveTexture(GL_TEXTURE1_); gl.DisableClientState(GL_TEXTURE_COORD_ARRAY_); gl.ClientActiveTexture(GL_TEXTURE0_);
+        gl.VertexPointer(2, GL_FLOAT_, (int)sizeof(ViewVert), &g_vv[0].x);
+        gl.TexCoordPointer(2, GL_FLOAT_, (int)sizeof(ViewVert), &g_vv[0].u);
+        gl.ColorPointer(4, GL_UNSIGNED_BYTE_, (int)sizeof(ViewVert), g_vv[0].c);
+        return;
+    }
+    if (!gl.Color4f || !gl.DisableClientState) return;
+    gl.Enable(GL_TEXTURE_2D_); gl.BindTexture(GL_TEXTURE_2D_, mask);
+    gl.DisableClientState(GL_COLOR_ARRAY_);
+    gl.Color4f(0, 0, 0, SAT_HIDE_DARK * g_vv[g_vb[b].first].c[3] / 255.0f);
+    gl.DrawArrays(GL_QUADS_, g_vb[b].first, g_vb[b].count);
+    gl.EnableClientState(GL_COLOR_ARRAY_);
+    gl.Color4f(1, 1, 1, 1);
+}
+#endif
 /* The bytes a frame given to OpenGL, by the time since the last frame (the parchment's rule, ParchUpBudget, with its own
  * numbers): SAT_UP_RATE a ms, never less than SAT_UP_BYTES nor more than SAT_UP_MOST. */
 static SIZE_T SatUpBudget(DWORD dt)

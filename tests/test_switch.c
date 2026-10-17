@@ -13637,6 +13637,53 @@ static void TestSatHide(void)
     }
     ok &= g_vb[0].tex == VT_MAP;
     Check(ok, "the satellite's hidden ground (0.4.1): with the areas as discovered and the character's bits known, its zones' masks made by the worker's turn and given to OpenGL (RGBA, every level, smooth), drawn over the zone's box on the world map straight over the detail; up with the parchment's zones at a fifth of the bar, the detail not drawn before");
+    /* his pick of the look mockups, 16 Oct (option 1, "slightly darkened and slightly blurred", in place of the slate): the
+     * ground not found is the satellite's own, darkened 15% and blurred 1.5 pixels at 1080p, by the pictures' own smaller
+     * copies (a texture LOD bias) through the mask on a second texture unit */
+    {
+#ifdef SAT_HIDE_DARK
+        int lk = SAT_HIDE_DARK == 0.15f && SAT_HIDE_BLUR == 1.5f && g_shTex[0] && g_tsat[g_shTex[0]].px0[0] == 255 &&
+                 g_tsat[g_shTex[0]].px0[1] == 255 && g_tsat[g_shTex[0]].px0[2] == 255;   /* (the mask white: no slate) */
+        lk &= fabsf(SatHideBias(1080, 16) - 1.585f) < 0.01f && fabsf(SatHideBias(2160, 16) - 2.585f) < 0.01f &&
+              fabsf(SatHideBias(1440, 16) - 2.0f) < 0.01f && SatHideBias(2160, 2) == 2 && SatHideBias(100, 16) == 0;
+        int blurOn = g_shBlurOn;
+        g_shBlurOn = 1;
+        SatFrame(t, 5120, 2160); SatHideBlurBuild(5120, 2160);
+        int lb = SatHideBatch(), tiles = 0, inBox = 1, uvOk = 1, dark = 1;
+        lk &= lb >= 0 && g_hz[0].n >= 2 && g_hb[g_hz[0].first].tex == VT_MAP;
+        if (lb >= 0 && g_hz[0].n >= 2) {
+            const ViewVert *M = &g_vv[g_vb[lb].first];
+            float bx0 = M[0].x < M[2].x ? M[0].x : M[2].x, bx1 = M[0].x < M[2].x ? M[2].x : M[0].x;
+            float by0 = M[0].y < M[2].y ? M[0].y : M[2].y, by1 = M[0].y < M[2].y ? M[2].y : M[0].y;
+            for (int j = g_hz[0].first; j < g_hz[0].first + g_hz[0].n; j++) {
+                tiles += g_hb[j].tex >= VT_COUNT && g_hb[j].tex < VT_COUNT + SAT_MAX;
+                for (int v = g_hb[j].first; v < g_hb[j].first + g_hb[j].count; v++) {
+                    const HideVert *h = &g_hv[v];
+                    inBox &= h->x >= bx0 - 0.01f && h->x <= bx1 + 0.01f && h->y >= by0 - 0.01f && h->y <= by1 + 0.01f &&
+                             h->x >= -0.01f && h->x <= 5120.01f && h->y >= -0.01f && h->y <= 2160.01f;
+                    uvOk &= fabsf(h->mu - (h->x - M[0].x) / (M[2].x - M[0].x)) < 1e-4f && fabsf(h->mv - (h->y - M[0].y) / (M[2].y - M[0].y)) < 1e-4f &&
+                            h->mu >= -1e-4f && h->mu <= 1.0001f && h->mv >= -1e-4f && h->mv <= 1.0001f;
+                    if (g_hb[j].tex == VT_MAP) {                     /* (the overview: its place on its picture as the view's) */
+                        uvOk &= fabsf(h->u - (g_bgUV[4] + h->x / 5120 * (g_bgUV[2] - g_bgUV[4]))) < 1e-4f &&
+                                fabsf(h->v - (g_bgUV[5] + h->y / 2160 * (g_bgUV[3] - g_bgUV[5]))) < 1e-4f;
+                        dark &= h->c[0] == 217 && h->c[1] == 217 && h->c[2] == 217 && h->c[3] == 255;   /* (white, 15% darker) */
+                    } else dark &= h->c[0] <= 217 && h->c[1] <= 217 && h->c[2] <= 217;
+                }
+            }
+        }
+        lk &= tiles >= 1 && inBox && uvOk && dark && g_vv[g_vb[lb].first].c[3] == 255;
+        g_shBlurOn = 0;                                                   /* (an OpenGL without: the darkening alone, the list as before) */
+        SatFrame(t, 5120, 2160); SatHideBlurBuild(5120, 2160);
+        lk &= g_hbN == 0 && g_hvN == 0 && SatHideBatch() >= 0;
+        g_shBlurOn = blurOn;
+        SatFrame(t, 5120, 2160);
+        if (!lk) printf("  (the look: bias %.3f %.3f, zone batches %d, tiles %d, in box %d, uv %d, dark %d)\n", (double)SatHideBias(1080, 16),
+                        (double)SatHideBias(2160, 16), g_hz[0].n, tiles, inBox, uvOk, dark);
+#else
+        int lk = 0;                                                       /* (no such look: the dark slate) */
+#endif
+        Check(lk, "the satellite's hidden ground (0.4.1, his pick, 16 Oct: option 1 of the look mockups): darkened 15% and blurred 1.5 pixels at 1080p in place of the dark slate: the mask white (its alpha alone), the overview and the detail under it drawn again for each zone, cut to its box, their corners on the mask's second texture unit, 15% darker, from their smaller copies by a LOD bias of log2(3 x height / 1080) (1.58 at 1080p, 2.58 at 2160p, at most the OpenGL's); without the blur, the darkening alone, the list as before");
+    }
     /* the arrival taken again a little way off within the screen (a login: the game's own place after the list's), the
      * list standing: the masks stand, drawn that very frame with their own textures, and every frame after */
     hb = SatHideBatch();
