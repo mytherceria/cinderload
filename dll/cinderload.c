@@ -14239,6 +14239,15 @@ __attribute__((unused)) static int SatHideMake(int z, const unsigned char *bits,
  * hidden down by 87 to 100 in 100 everywhere it was (1,651 to 166 round Goldshire, 7,914 to 579 round Theramore, 812 to
  * 0 round Goldshire for another), the ground not found shown up by 7 cells at most of a zone round the arrival. */
 #define SAT_HIDE_MORE  16            /* zones not round the arrival laid for the cut alone (their land under these masks), at most */
+/* (0.4.1, 16 Oct: his find, the steps along the Elwynn/Duskwood river) The land is kept a chunk at a time (33 1/3 yards),
+ * so a zone's border on it is a staircase of whole chunks, and the cut followed it: the edge's softening (SAT_HIDE_SOFT,
+ * about 20 yards) is narrower than a step, so each chunk's corner showed as a block, 25 to 60 pixels at the landing. Not
+ * the mask's resolution (a texel is 9 to 14 yards, finer than a chunk) and not its sampling (smooth, every level). Now
+ * each texel cut is hidden no less than the zone's own ground not found round it: the share of a box SAT_HIDE_BAND
+ * yards each way that is the zone's own and hidden, doubled (SatHideBand), so the edge runs smooth past the staircase,
+ * whole at the border and gone SAT_HIDE_BAND yards out, before the softening as before. The zone's own ground stays
+ * whole to its border, and a neighbour's ground found shows from SAT_HIDE_BAND yards past it. */
+#define SAT_HIDE_BAND  33.0f         /* yards: a chunk */
 /* The page whose land (LAND_THEIRS on L's grid) world x, y lies on, or -1. */
 static int SatHidePage(const ParchLand *L, float wx, float wy)
 {
@@ -14250,11 +14259,11 @@ static int SatHidePage(const ParchLand *L, float wx, float wy)
 /* Zone k's ground not found (u, as laid) cut on the land of zones zz[0..m) (all laid but k: the job's, then neighbours
  * laid for the cut), its texels cut marked in cut: how many, or -1 when its land is not kept (L none: nothing cut). */
 static int SatHideCut(int k, const ParchLand *L, const int *zz, int m, unsigned char *const *raw, const int *laid, unsigned char *u,
-                      unsigned char *cut)
+                      unsigned char *cut, unsigned char *theirs)
 {
     const int S = SAT_HIDE_PX;
     const ParchZone *Z = &g_pz[zz[k]];
-    for (int i = 0; i < S * S; i++) cut[i] = 0;
+    for (int i = 0; i < S * S; i++) cut[i] = theirs[i] = 0;
     if (!L->m) return -1;
     int n = 0;
     float dy = (Z->r - Z->l) / S, dx = (Z->b - Z->t) / S;
@@ -14269,6 +14278,7 @@ static int SatHideCut(int k, const ParchLand *L, const int *zz, int m, unsigned 
                 SatHidePage(L, wx + 0.5f * dx, wy - 0.5f * dy) != pg || SatHidePage(L, wx + 0.5f * dx, wy + 0.5f * dy) != pg) continue;
             for (int q = 0; q < m && j < 0; q++) if (q != k && zz[q] == pg) j = q;
             if (j < 0 || !laid[j]) continue;                        /* (that zone's rule not known: as before) */
+            theirs[i] = 1;                                          /* (wholly that zone's land, its rule known) */
             const ParchZone *N = &g_pz[pg];
             int nx = (int)((wy - N->l) / (N->r - N->l) * S), ny = (int)((wx - N->t) / (N->b - N->t) * S);
             nx = nx < 0 ? 0 : nx >= S ? S - 1 : nx;                 /* (a chunk's middle in its box: the nearest of its texels) */
@@ -14276,6 +14286,33 @@ static int SatHideCut(int k, const ParchLand *L, const int *zz, int m, unsigned 
             if (raw[j][ny * S + nx] < u[i]) { u[i] = raw[j][ny * S + nx]; cut[i] = 1; n++; }
         }
     return n;
+}
+/* The cut texels of zone z's mask u (cut: SatHideCut's) raised to the band round its own ground not found: the share of
+ * the box rx, ry texels each way round each that is its own land (not theirs) and hidden as laid (raw), doubled, so
+ * whole at its border and none SAT_HIDE_BAND yards past it, smooth over the land's chunks. sum: (S + 1) x (S + 1). */
+static void SatHideBand(const unsigned char *raw, const unsigned char *cut, const unsigned char *theirs, unsigned char *u,
+                        unsigned *sum, int rx, int ry)
+{
+    const int S = SAT_HIDE_PX, S1 = SAT_HIDE_PX + 1;
+    for (int x = 0; x < S1; x++) sum[x] = 0;
+    for (int y = 0; y < S; y++) {                                   /* (the box sums: its own hidden ground's, by texel) */
+        unsigned row = 0;
+        sum[(y + 1) * S1] = 0;
+        for (int x = 0; x < S; x++) {
+            row += theirs[y * S + x] ? 0u : raw[y * S + x];
+            sum[(y + 1) * S1 + x + 1] = sum[y * S1 + x + 1] + row;
+        }
+    }
+    for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+            int i = y * S + x;
+            if (!cut[i]) continue;
+            int x0 = x - rx < 0 ? 0 : x - rx, x1 = x + rx + 1 > S ? S : x + rx + 1, y0 = y - ry < 0 ? 0 : y - ry, y1 = y + ry + 1 > S ? S : y + ry + 1;
+            unsigned all = sum[y1 * S1 + x1] - sum[y0 * S1 + x1] - sum[y1 * S1 + x0] + sum[y0 * S1 + x0];
+            unsigned n = (unsigned)((x1 - x0) * (y1 - y0)), b = (2 * all + n / 2) / n;
+            if (b > 255) b = 255;
+            if (b > u[i]) u[i] = (unsigned char)b;
+        }
 }
 /* The job posted, run (the worker's thread, never the view's): each zone's ground not found laid; its land as kept; the
  * zones not round the arrival whose land lies under that ground laid too (SAT_HIDE_MORE at most: their rule for the cut,
@@ -14290,14 +14327,16 @@ static void SatHideRun(void)
     unsigned char *raw[SAT_HIDE_ZONES + SAT_HIDE_MORE], *more = NULL;
     float box[SAT_HIDE_ZONES + SAT_HIDE_MORE][4];                   /* (each neighbour's: the world under these masks, x, y) */
     static ParchLand land[SAT_HIDE_ZONES];                           /* (the worker's alone) */
-    unsigned char *scratch = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(5 + n) * S2);   /* (f, t, the one cut, it
-                                                                    * uncut, its texels cut; then each zone's as laid) */
+    unsigned char *scratch = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(6 + n) * S2);   /* (f, t, the one cut, it
+                                                                    * uncut, its texels cut, those on a neighbour's land; then each
+                                                                    * zone's as laid) */
+    unsigned *band = (unsigned *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(S + 1) * (S + 1) * sizeof(unsigned));   /* (SatHideBand's) */
     g_shj.landless = 0;
     for (int k = 0; k < n; k++) zz[k] = g_shj.z[k];                 /* (all of them before any is looked at: a zone round the
                                                                     * arrival later in the list is never taken for one beyond) */
     for (int k = 0; k < n; k++) {
         g_shj.hidden[k] = 0; g_shj.px[k] = NULL; laid[k] = 0;
-        raw[k] = scratch ? scratch + (SIZE_T)(5 + k) * S2 : NULL;
+        raw[k] = scratch ? scratch + (SIZE_T)(6 + k) * S2 : NULL;
         if (!scratch || SatHideState() == 3) continue;
         laid[k] = SatHideLay(zz[k], g_shj.bits, raw[k], scratch, scratch + S2, NULL);
         const char *why = "";
@@ -14332,10 +14371,18 @@ static void SatHideRun(void)
     for (int k = 0; k < n; k++) {
         if (!laid[k] || SatHideState() == 3) continue;
         unsigned char *o = (unsigned char *)HeapAlloc(GetProcessHeap(), 0, SAT_HIDE_BYTES), *t = scratch + S2, *u = scratch + 2 * S2;
-        unsigned char *w = scratch + 3 * S2, *cut = scratch + 4 * S2;
+        unsigned char *w = scratch + 3 * S2, *cut = scratch + 4 * S2, *theirs = scratch + 5 * S2;
         if (!o) continue;
         for (SIZE_T i = 0; i < S2; i++) u[i] = raw[k][i];
-        int cuts = SatHideCut(k, &land[k], zz, m, raw, laid, u, cut);
+        int cuts = SatHideCut(k, &land[k], zz, m, raw, laid, u, cut, theirs);
+        if (cuts > 0 && band) {                                     /* (smooth past the land's chunks: SAT_HIDE_BAND) */
+            const ParchZone *Z = &g_pz[zz[k]];
+            float ty = (Z->l - Z->r) / S, tx = (Z->t - Z->b) / S;   /* (a texel, yards: across, down) */
+            ty = ty < 0 ? -ty : ty; tx = tx < 0 ? -tx : tx;
+            int rx = ty > 0 ? (int)(SAT_HIDE_BAND / ty + 0.5f) : 1, ry = tx > 0 ? (int)(SAT_HIDE_BAND / tx + 0.5f) : 1;
+            rx = rx < 1 ? 1 : rx > S / 8 ? S / 8 : rx; ry = ry < 1 ? 1 : ry > S / 8 ? S / 8 : ry;
+            SatHideBand(raw[k], cut, theirs, u, band, rx, ry);
+        }
         SatHideGrow(u, t, SAT_HIDE_PX, SAT_HIDE_SOFT, 1);
         if (cuts > 0) {                                             /* (softened outward only: a texel not cut as it was uncut, so
                                                                     * the zone's own ground stays whole to its border and the edge
@@ -14352,6 +14399,7 @@ static void SatHideRun(void)
     g_shj.beyond = m - n;
     for (int k = 0; k < n; k++) ParchLandFree(&land[k]);
     if (more) HeapFree(GetProcessHeap(), 0, more);
+    if (band) HeapFree(GetProcessHeap(), 0, band);
     if (scratch) HeapFree(GetProcessHeap(), 0, scratch);
     g_shj.ran = GetTickCount() - t0;
 }

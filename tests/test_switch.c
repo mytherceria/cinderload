@@ -13911,6 +13911,92 @@ static void TestSatHideLand(void)
     SatTestReset(); g_map.ok = 0;
 }
 
+/* His find of 16 Oct (the look mockups' edge crops, option 0 at the landing): the hidden ground's edge comes in blocks along
+ * the Elwynn/Duskwood river, a whole chunk at a time. Here Elwynn's land and Duskwood's meet in a staircase of one chunk
+ * (33 1/3 yards): Elwynn's border at x = -9433.3 west of y = ystep and a chunk further south, -9466.7, east of it, both
+ * land files saying so. Elwynn's GOLD not found runs over it onto Duskwood's land, Duskwood's DUSKP found there. Down each
+ * column of Elwynn's mask, where its edge falls to half (yards, between texels as OpenGL's smooth sampling has it); the
+ * steps it takes from one column to the next. */
+static void TestSatLandFileStep(int z, int other, float ystep, int north)
+{
+    float ax, ay, bx, by;
+    LandChunkAt(g_pz[z].t, g_pz[z].l, &ax, &ay);
+    LandChunkAt(g_pz[z].b, g_pz[z].r, &bx, &by);
+    int gx0 = (int)ax - 1, gy0 = (int)ay - 1, w = (int)bx + 1 - gx0 + 1, h = (int)by + 1 - gy0 + 1, bytes = (w * h + 3) / 4 + w * h;
+    unsigned char *f = calloc((size_t)(LAND_HEAD + bytes), 1);
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) {
+            int k = j * w + i, gx = gx0 + i, gy = gy0 + j;
+            float x = (32 - ((float)gy + 0.5f) / 16) * PARCH_TILE_YD, y = (32 - ((float)gx + 0.5f) / 16) * PARCH_TILE_YD;
+            float split = y < ystep ? -9453.3f : -9420;                 /* (east of the step: Elwynn a chunk further south) */
+            int mark = (north ? x > split : x < split) ? 1 : LandInBox(other, gx, gy) ? LAND_THEIRS : 0;
+            f[LAND_HEAD + k / 4] |= (unsigned char)(mark << (2 * (k % 4)));
+            if (mark == LAND_THEIRS) f[LAND_HEAD + bytes - w * h + k] = (unsigned char)other;
+        }
+    unsigned head[10] = { LAND_MAGIC, LAND_VERSION, LandPrint(), (unsigned)g_pz[z].id, (unsigned)g_pz[z].area, (unsigned)gx0, (unsigned)gy0,
+                          (unsigned)w, (unsigned)h, LandSum(f + LAND_HEAD, bytes) };
+    for (int k = 0; k < 10; k++) memcpy(f + 4 * k, &head[k], 4);
+    char rel[96];
+    snprintf(rel, sizeof rel, "Data/CinderLoad/land-%s.bin", g_pz[z].name);
+    TestBytesPut(rel, f, LAND_HEAD + bytes);
+    free(f);
+}
+static void TestSatHideSteps(void)
+{
+    SatTestWorld("sat-hide-steps", 64, 25, 40, 45, 56, 1);
+    SatHideTables2();
+    static const char mstr[] = "\0Azeroth\0";
+    unsigned mv[3] = { 0, 1, 0 };
+    static unsigned char mpd[64];
+    ParchMaps(mpd, TestWdbc(mpd, 1, 3, mv, mstr, sizeof mstr));
+    g_landPrint = 0;
+    int el = SatHideRow("Elwynn"), dw = SatHideRow("Duskwood");
+    const float ystep = (32 - 510.0f / 16) * PARCH_TILE_YD;             /* (a chunk's edge in y, inside GOLD: 66 2/3 yards) */
+    TestSatLandFileStep(el, dw, ystep, 1);
+    TestSatLandFileStep(dw, el, ystep, 0);
+    SatWorkerStart();
+    long heap = shim_heap_live;
+    unsigned char found[EXPLORED_BYTES];                                /* (Northshire and DUSKP found, Goldshire not) */
+    memset(found, 0, sizeof found); found[125 >> 3] |= 1 << (125 & 7); found[600 >> 3] |= 1 << (600 & 7);
+    g_shj.n = 2; g_shj.z[0] = el; g_shj.z[1] = dw;
+    memcpy(g_shj.bits, found, EXPLORED_BYTES);
+    InterlockedExchange(&g_shj.state, 1);
+    SatHideTurn();
+    const ParchZone *Z = &g_pz[el];
+    const unsigned char *px = g_shj.px[0];
+    float most = 0, west = 0, east = 0, inside = 255, past = 0;
+    int cols = 0;
+    for (int mx = 0; px && mx < SAT_HIDE_PX; mx++) {
+        float y = Z->l + (Z->r - Z->l) * ((float)mx + 0.5f) / SAT_HIDE_PX;
+        if (y > ystep + 200 || y < ystep - 200) continue;               /* (within GOLD, 200 yards each side of the step) */
+        float at = 0;
+        for (int my = 1; my < SAT_HIDE_PX && !at; my++) {               /* (north to south: Elwynn's own, then past its border) */
+            float x0 = Z->t + (Z->b - Z->t) * ((float)my - 0.5f) / SAT_HIDE_PX, x1 = Z->t + (Z->b - Z->t) * ((float)my + 0.5f) / SAT_HIDE_PX;
+            int a0 = px[4 * ((my - 1) * SAT_HIDE_PX + mx) + 3], a1 = px[4 * (my * SAT_HIDE_PX + mx) + 3];
+            if (x0 > -9380 || x1 < -9600 || a0 < 128 || a1 >= 128) continue;
+            at = x0 + (x1 - x0) * (float)(a0 - 128) / (float)(a0 - a1);
+        }
+        int ownAt = (int)(((y < ystep ? -9465.0f : -9432.0f) - Z->t) / (Z->b - Z->t) * SAT_HIDE_PX);   /* (a yard and a half inside) */
+        int pastAt = (int)(((y < ystep ? -9466.7f : -9433.3f) - 47 - Z->t) / (Z->b - Z->t) * SAT_HIDE_PX);   /* (47 yards past) */
+        if (px[4 * (ownAt * SAT_HIDE_PX + mx) + 3] < inside) inside = px[4 * (ownAt * SAT_HIDE_PX + mx) + 3];
+        if ((y > ystep + 60 || y < ystep - 60) && px[4 * (pastAt * SAT_HIDE_PX + mx) + 3] > past)   /* (away from the step's corner) */
+            past = px[4 * (pastAt * SAT_HIDE_PX + mx) + 3];
+        if (cols && at && west && fabsf(at - west) > most) most = fabsf(at - west);
+        if (y > ystep + 100 && !east) east = at;
+        west = at;
+        cols++;
+    }
+    SatHideJobFree(); InterlockedExchange(&g_shj.state, 0);
+    printf("  the hidden ground's edge across a chunk's step: %d columns, its largest step between columns %.1f yards; own %.0f, 47 yards past %.0f\n",
+           cols, (double)most, (double)inside, (double)past);
+    Check(px && cols >= 25 && most < 12 && inside >= 240 && past < 64,
+          "the satellite's hidden ground (0.4.1, his find, 16 Oct: the blocky steps along the Elwynn/Duskwood river): where a zone's land meets its neighbour's in a staircase of whole chunks, its hidden ground's edge runs smooth past it (under 12 yards between one texel's column and the next, where a chunk is 33), still whole to its border and, away from the step's corner, gone 47 yards past it");
+    Check(shim_heap_live == heap, "the satellite's hidden ground's smooth edge (0.4.1): the heap even");
+    ParchMaps(NULL, 0); g_landPrint = 0;
+    ParchTables(NULL, 0, NULL, 0); ParchAreas(NULL, 0); g_parchTablesOk = 0;
+    SatTestReset(); g_map.ok = 0;
+}
+
 /* His rule of 16 Oct, on fogtest after his look at 0.4.1 there (its style.txt says "areas discovered", picked in the
  * /cinderload window on 12 and 13 Oct, so its satellite hid the ground not found under the dark slate): "Show everything
  * by default." The map's areas have been the full map by default since 11 Oct (StyleLoad, g_mapFull, the window's
@@ -14094,6 +14180,7 @@ static void TestSatellite(void)
     TestSatHideWorkerOnly();
     TestSatHideOrder();
     TestSatHideLand();
+    TestSatHideSteps();
     TestSatAreasDefault();
     TestSatGeometry();
     TestSatIndex();
